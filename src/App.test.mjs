@@ -1,5 +1,9 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { strict as assert } from "node:assert";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createRequire } from "node:module";
+import ts from "typescript";
 
 const [main, app, host, frames, client, protocol, entities, uiNodes, actions, terminal, pluginSurfaces, architecture, readme] = await Promise.all([
   readFile(new URL("./main.tsx", import.meta.url), "utf8"),
@@ -29,12 +33,16 @@ assert.match(host, /data-testid="ui-frame-host"/);
 assert.match(frames, /ui_tree_snapshot/);
 assert.match(frames, /entity_snapshot \/ upsert \/ patch \/ remove/);
 assert.match(client, /export const botsterWebClientContract/);
+assert.match(client, /createBotsterWebClient/);
 assert.match(client, /"terminal_view bridge"/);
 assert.match(protocol, /type HubControlFrameKind/);
+assert.match(protocol, /"action_request"/);
 assert.match(protocol, /"ui_tree_snapshot"/);
 assert.match(protocol, /"entity_snapshot"/);
+assert.match(entities, /class InMemoryEntityFrameStore/);
 assert.match(entities, /replayActivePulls/);
 assert.match(uiNodes, /render\(snapshot: UiTreeSnapshot, entities: EntityFrameStore\)/);
+assert.match(actions, /class CorrelatedActionDispatcher/);
 assert.match(actions, /botster\.session\.select/);
 assert.doesNotMatch(actions, /click|submit|change/);
 assert.match(terminal, /renderer: "restty"/);
@@ -44,4 +52,180 @@ assert.match(architecture, /Terminal data-plane/);
 assert.match(architecture, /external botster-core/);
 assert.match(readme, /Future Rails or cloud hosting/);
 
-console.log("Renderer seam wiring assertions passed.");
+const compiledRoot = join(tmpdir(), "botster-web-runtime-test");
+await rm(compiledRoot, { recursive: true, force: true });
+await mkdir(join(compiledRoot, "botster"), { recursive: true });
+
+await Promise.all([
+  compileTsModule("botster/actions.ts", join(compiledRoot, "botster/actions.js")),
+  compileTsModule("botster/capabilities.ts", join(compiledRoot, "botster/capabilities.js")),
+  compileTsModule("botster/client.ts", join(compiledRoot, "botster/client.js")),
+  compileTsModule("botster/entities.ts", join(compiledRoot, "botster/entities.js")),
+  compileTsModule("botster/protocol.ts", join(compiledRoot, "botster/protocol.js"))
+]);
+
+const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
+const { createBotsterWebClient } = requireRuntime("./botster/client.js");
+
+const transport = {
+  sent: [],
+  ingress: undefined,
+  async connect(_capabilities, ingress) {
+    this.ingress = ingress;
+  },
+  async disconnect() {
+    this.ingress = undefined;
+  },
+  async send(frame) {
+    this.sent.push(frame);
+  },
+  inject(frame) {
+    this.ingress?.(frame);
+  }
+};
+const runtime = createBotsterWebClient({
+  transport,
+  actionIdGenerator: deterministicIds("ui-action"),
+  actionTimeoutMs: 10
+});
+
+await runtime.hub.connect({ client: "botster-web", capabilities: [] });
+await runtime.hub.subscribe();
+assert.equal(runtime.entities.list("session").length, 0);
+assert.equal(transport.sent.filter((frame) => frame.kind === "entity_pull").length, 0);
+
+transport.inject({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: "session",
+    sequence: 5,
+    records: [
+      { id: "session-1", title: "One" },
+      { id: "session-2", title: "Two" }
+    ]
+  }
+});
+assert.deepEqual(runtime.entities.list("session").map((record) => record.id), [
+  "session-1",
+  "session-2"
+]);
+
+transport.inject({
+  kind: "entity_upsert",
+  payload: {
+    operation: "entity_upsert",
+    key: { family: "session", id: "session-3" },
+    sequence: 6,
+    record: { id: "ignored", title: "Three", active: false }
+  }
+});
+assert.equal(runtime.entities.get("session", "session-3").title, "Three");
+
+transport.inject({
+  kind: "entity_patch",
+  payload: {
+    operation: "entity_patch",
+    key: { family: "session", id: "session-3" },
+    sequence: 7,
+    record: { active: true }
+  }
+});
+assert.deepEqual(runtime.entities.get("session", "session-3"), {
+  id: "session-3",
+  title: "Three",
+  active: true
+});
+
+transport.inject({
+  kind: "entity_remove",
+  payload: {
+    operation: "entity_remove",
+    key: { family: "session", id: "session-2" },
+    sequence: 8
+  }
+});
+assert.equal(runtime.entities.get("session", "session-2"), undefined);
+
+transport.inject({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: "session",
+    sequence: 1,
+    records: [{ id: "session-reset", title: "Reconnect baseline" }]
+  }
+});
+assert.deepEqual(runtime.entities.list("session").map((record) => record.id), ["session-reset"]);
+
+transport.inject({
+  kind: "entity_patch",
+  payload: {
+    operation: "entity_patch",
+    key: { family: "session", id: "session-reset" },
+    sequence: 0,
+    record: { title: "stale" }
+  }
+});
+assert.equal(runtime.entities.get("session", "session-reset").title, "Reconnect baseline");
+
+const actionResult = runtime.actions.dispatch({
+  origin: "ui_node",
+  action: { id: "botster.session.select", target: "session-reset" }
+});
+const actionFrame = transport.sent.find((frame) => frame.kind === "action_request");
+assert.equal(actionFrame.payload.request_id, "ui-action-1");
+assert.equal(actionFrame.payload.action.id, "botster.session.select");
+assert.equal(runtime.actions.pendingCount(), 1);
+
+transport.inject({
+  kind: "action_result",
+  payload: {
+    request_id: "unknown-request",
+    accepted: true
+  }
+});
+assert.equal(runtime.actions.pendingCount(), 1);
+
+transport.inject({
+  kind: "action_result",
+  payload: {
+    request_id: "ui-action-1",
+    accepted: true,
+    result: { selected: "session-reset" }
+  }
+});
+assert.deepEqual(await actionResult, {
+  accepted: true,
+  request_id: "ui-action-1",
+  result: { selected: "session-reset" },
+  reason: undefined
+});
+assert.equal(runtime.actions.pendingCount(), 0);
+
+await runtime.entities.pull({ family: "session" });
+await runtime.hub.subscribeSurface({ surface: "workspace", path: "/sessions" });
+transport.sent.length = 0;
+await runtime.entities.replayActivePulls();
+await runtime.hub.replaySurfaceSubscriptions();
+assert.deepEqual(transport.sent.map((frame) => frame.kind), ["entity_pull", "surface_subscribe"]);
+
+console.log("Renderer seam and runtime behavior assertions passed.");
+
+async function compileTsModule(sourcePath, outputPath) {
+  const source = await readFile(new URL(sourcePath, import.meta.url), "utf8");
+  const result = ts.transpileModule(source, {
+    compilerOptions: {
+      esModuleInterop: true,
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022
+    }
+  });
+
+  await writeFile(outputPath, result.outputText);
+}
+
+function deterministicIds(prefix) {
+  let next = 1;
+  return () => `${prefix}-${next++}`;
+}

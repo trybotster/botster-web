@@ -6,7 +6,8 @@
 
 - Ionic React is the renderer shell and layout layer for this standalone client.
 - Hub/core contracts enter through the lightweight adapter seams under `src/botster/`.
-- UiNode, action, and entity frames are the product contract for dynamic Botster UI. The scaffold names canonical frame families such as `ui_tree_snapshot`, `entity_snapshot`, `entity_upsert`, `entity_patch`, and `entity_remove` without implementing a live transport.
+- UiNode, action, and entity frames are the product contract for dynamic Botster UI. The scaffold handles canonical frame families such as `ui_tree_snapshot`, `entity_snapshot`, `entity_upsert`, `entity_patch`, `entity_remove`, `action_request`, and `action_result` through an injected transport, without implementing a live transport.
+- Hub subscribe establishes the control channel only. Routes and surfaces explicitly pull entity state, and active pulls plus surface subscriptions can be replayed after reconnect.
 - Restty is the terminal renderer selected for future terminal integration, but this scaffold does not import, instantiate, or manage Restty.
 - Hub/core remain authoritative for runtime, session, plugin, and terminal state.
 - Browser-owned state in this scaffold is presentation-only placeholder data.
