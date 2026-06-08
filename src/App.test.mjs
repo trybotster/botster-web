@@ -1,5 +1,10 @@
 import { readFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { strict as assert } from "node:assert";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import ts from "typescript";
 
 const [
   main,
@@ -94,5 +99,39 @@ assert.match(css, /overflow: hidden/);
 assert.match(vendorReadme, /e9742252312ee616d8f186b697d70349cf329250/);
 assert.doesNotMatch(uiNodes, /terminal_view/);
 assert.doesNotMatch(protocol, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
+
+const testCompileDir = await mkdtemp(join(tmpdir(), "botster-terminal-smoke-"));
+const terminalJs = ts.transpileModule(terminal, {
+  compilerOptions: {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2022
+  }
+}).outputText;
+const terminalSmokeFixtureJs = ts
+  .transpileModule(terminalSmokeFixture, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022
+    }
+  })
+  .outputText.replace('from "./terminal";', 'from "./terminal.mjs";');
+
+await Promise.all([
+  writeFile(join(testCompileDir, "terminal.mjs"), terminalJs),
+  writeFile(join(testCompileDir, "terminalSmokeFixture.mjs"), terminalSmokeFixtureJs)
+]);
+
+const { runTerminalViewBridgeSmokeFixture } = await import(
+  pathToFileURL(join(testCompileDir, "terminalSmokeFixture.mjs"))
+);
+const smoke = await runTerminalViewBridgeSmokeFixture();
+
+assert.deepEqual(smoke.dataPlane.inputs, ["ls\n"]);
+assert.deepEqual(smoke.firstRenderer.writes, ["ready\r\n", "ok\r\n"]);
+assert.deepEqual(smoke.firstRenderer.resizes, [{ rows: 24, columns: 80 }]);
+assert.ok(smoke.secondRenderer);
+assert.ok(smoke.lifecycle.indexOf("destroy") < smoke.lifecycle.lastIndexOf("create"));
+assert.doesNotMatch(smoke.firstRenderer.writes.join(""), /stale/);
+assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /stale/);
 
 console.log("Renderer seam wiring assertions passed.");

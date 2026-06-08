@@ -67,7 +67,7 @@ export async function runTerminalViewBridgeSmokeFixture() {
     return renderer;
   });
   const dataPlane = new MockTerminalDataPlane(descriptor.sessionId, ["ready\r\n"]);
-  const container = document.createElement("div");
+  const container = {} as HTMLElement;
 
   await bridge.mount(container, descriptor);
   await bridge.attach(descriptor, dataPlane);

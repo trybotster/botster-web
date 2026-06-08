@@ -14,6 +14,10 @@ const defaultDescriptor: TerminalViewDescriptor = {
   sessionId: "terminal_view_smoke_session",
   renderer: "restty"
 };
+const placeholderCellSize = {
+  height: 18,
+  width: 9
+};
 
 export interface TerminalViewHostProps {
   bridge?: TerminalViewBridge;
@@ -44,9 +48,14 @@ export function TerminalViewHost({
     let cancelled = false;
     let observer: ResizeObserver | undefined;
     const resize = () => {
-      const rows = Math.max(4, Math.floor(container.clientHeight / 18));
-      const columns = Math.max(20, Math.floor(container.clientWidth / 9));
-      void bridge.resize(descriptor, rows, columns);
+      // Placeholder metrics until the Restty adapter exposes measured cell dimensions.
+      const rows = Math.max(4, Math.floor(container.clientHeight / placeholderCellSize.height));
+      const columns = Math.max(20, Math.floor(container.clientWidth / placeholderCellSize.width));
+      void bridge.resize(descriptor, rows, columns).catch(() => {
+        if (!cancelled) {
+          container.dataset.terminalResize = "failed";
+        }
+      });
     };
 
     void bridge
