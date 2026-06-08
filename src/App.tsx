@@ -27,6 +27,7 @@ import {
 } from "ionicons/icons";
 
 import { UiFrameHost } from "./botster/UiFrameHost";
+import { botsterWebClientContract } from "./botster/client";
 import { placeholderFrameSet } from "./botster/frames";
 
 setupIonicReact({
@@ -79,7 +80,7 @@ export default function App() {
               <IonButtons slot="end" className="toolbar-status">
                 <IonChip color="medium" outline>
                   <IonIcon icon={gitBranchOutline} aria-hidden="true" />
-                  <IonLabel>renderer shell</IonLabel>
+                  <IonLabel>{botsterWebClientContract.label}</IonLabel>
                 </IonChip>
                 <IonButton fill="solid" color="primary">
                   <IonIcon slot="start" icon={codeSlashOutline} aria-hidden="true" />
@@ -114,6 +115,14 @@ export default function App() {
                     deferred
                   </span>
                 </div>
+              </section>
+
+              <section className="contract-strip" aria-label="Botster client contract">
+                {botsterWebClientContract.seams.map((seam) => (
+                  <IonChip key={seam} color="light">
+                    <IonLabel>{seam}</IonLabel>
+                  </IonChip>
+                ))}
               </section>
 
               <section className="workspace-grid" aria-label="Renderer workbench">

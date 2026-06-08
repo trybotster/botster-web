@@ -120,6 +120,18 @@ body {
   font-size: 13px;
 }
 
+.contract-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 0 18px;
+}
+
+.contract-strip ion-chip {
+  margin: 0;
+  max-width: 100%;
+}
+
 .workspace-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
