@@ -12,6 +12,8 @@ export interface ActionBinding {
   id: SemanticActionId;
   target?: string;
   params?: Record<string, unknown>;
+  label?: string;
+  disabled?: boolean;
 }
 
 export interface ActionDispatchRequest {

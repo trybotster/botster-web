@@ -161,6 +161,16 @@ export function createEntityFrameStore(options: EntityFrameStoreOptions = {}): E
   return new InMemoryEntityFrameStore(options);
 }
 
+export function createInMemoryEntityFrameStore(frames: EntityFrame[] = []): EntityFrameStore {
+  const store = createEntityFrameStore();
+
+  for (const frame of frames) {
+    store.apply(frame);
+  }
+
+  return store;
+}
+
 function mergeEntityRecord(existing: EntityRecord | undefined, patch: EntityRecord): EntityRecord {
   if (isPlainRecord(existing) && isPlainRecord(patch)) {
     return { ...existing, ...patch };

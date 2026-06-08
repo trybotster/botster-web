@@ -16,6 +16,8 @@ export interface NegotiatedCapabilities {
   unavailable: BotsterClientCapability[];
 }
 
+export type UiCapabilitySet = Partial<Record<BotsterClientCapability | (string & {}), boolean>>;
+
 export const botsterWebCapabilities: ClientCapabilityDeclaration = {
   client: "botster-web",
   capabilities: [
@@ -27,3 +29,7 @@ export const botsterWebCapabilities: ClientCapabilityDeclaration = {
     "plugin_surface_sandbox"
   ]
 };
+
+export const defaultUiCapabilitySet: UiCapabilitySet = Object.fromEntries(
+  botsterWebCapabilities.capabilities.map((capability) => [capability, true])
+);

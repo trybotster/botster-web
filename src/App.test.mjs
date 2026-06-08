@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import ts from "typescript";
+import { createServer } from "vite";
+import { renderToStaticMarkup } from "react-dom/server";
 
-const [main, app, host, frames, client, protocol, entities, uiNodes, actions, terminal, pluginSurfaces, architecture, readme] = await Promise.all([
+const [main, app, client, protocol, entities, uiNodes, actions, terminal, pluginSurfaces, architecture, readme] = await Promise.all([
   readFile(new URL("./main.tsx", import.meta.url), "utf8"),
   readFile(new URL("./App.tsx", import.meta.url), "utf8"),
-  readFile(new URL("./botster/UiFrameHost.tsx", import.meta.url), "utf8"),
-  readFile(new URL("./botster/frames.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/client.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/protocol.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/entities.ts", import.meta.url), "utf8"),
@@ -23,15 +23,13 @@ const [main, app, host, frames, client, protocol, entities, uiNodes, actions, te
 
 assert.match(main, /import App from "\.\/App"/);
 assert.match(main, /<App \/>/);
-assert.match(app, /import \{ UiFrameHost \} from "\.\/botster\/UiFrameHost"/);
+assert.match(app, /import \{ UiNodeSurface \} from "\.\/botster\/UiNodeSurface"/);
 assert.match(app, /import \{ botsterWebClientContract \} from "\.\/botster\/client"/);
-assert.match(app, /import \{ placeholderFrameSet \} from "\.\/botster\/frames"/);
+assert.match(app, /import \{ uiNodeConformanceSnapshot, fixtureEntityFrames \} from "\.\/botster\/__fixtures__\/uiNodeConformance"/);
+assert.match(app, /createInMemoryEntityFrameStore\(fixtureEntityFrames\)/);
 assert.match(app, /botsterWebClientContract\.label/);
 assert.match(app, /botsterWebClientContract\.seams\.map/);
-assert.match(app, /<UiFrameHost frameSet=\{placeholderFrameSet\} \/>/);
-assert.match(host, /data-testid="ui-frame-host"/);
-assert.match(frames, /ui_tree_snapshot/);
-assert.match(frames, /entity_snapshot \/ upsert \/ patch \/ remove/);
+assert.match(app, /<UiNodeSurface/);
 assert.match(client, /export const botsterWebClientContract/);
 assert.match(client, /createBotsterWebClient/);
 assert.match(client, /"terminal_view bridge"/);
@@ -40,8 +38,9 @@ assert.match(protocol, /"action_request"/);
 assert.match(protocol, /"ui_tree_snapshot"/);
 assert.match(protocol, /"entity_snapshot"/);
 assert.match(entities, /class InMemoryEntityFrameStore/);
+assert.match(entities, /createInMemoryEntityFrameStore/);
 assert.match(entities, /replayActivePulls/);
-assert.match(uiNodes, /render\(snapshot: UiTreeSnapshot, entities: EntityFrameStore\)/);
+assert.match(uiNodes, /render\(snapshot: UiTreeSnapshot, entities: EntityFrameStore, options\?: UiNodeRenderOptions\)/);
 assert.match(actions, /class CorrelatedActionDispatcher/);
 assert.match(actions, /botster\.session\.select/);
 assert.doesNotMatch(actions, /click|submit|change/);
@@ -210,7 +209,66 @@ await runtime.entities.replayActivePulls();
 await runtime.hub.replaySurfaceSubscriptions();
 assert.deepEqual(transport.sent.map((frame) => frame.kind), ["entity_pull", "surface_subscribe"]);
 
-console.log("Renderer seam and runtime behavior assertions passed.");
+const vite = await createServer({
+  configFile: false,
+  resolve: {
+    alias: {
+      "@ionic/react": new URL("./botster/__fixtures__/IonicReactSsrMock.tsx", import.meta.url).pathname
+    }
+  },
+  optimizeDeps: {
+    noDiscovery: true
+  },
+  server: { middlewareMode: true },
+  appType: "custom",
+  logLevel: "error"
+});
+
+try {
+  const [{ ionicUiNodeRendererRegistry }, { uiNodeConformanceSnapshot, fixtureEntityFrames, fixtureProvenance }, { createInMemoryEntityFrameStore }] = await Promise.all([
+    vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
+    vite.ssrLoadModule("/src/botster/__fixtures__/uiNodeConformance.ts"),
+    vite.ssrLoadModule("/src/botster/entities.ts")
+  ]);
+
+  const collectedActions = [];
+  const markup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      uiNodeConformanceSnapshot,
+      createInMemoryEntityFrameStore(fixtureEntityFrames),
+      {
+        capabilities: {
+          ionic_shell: true,
+          ui_tree_snapshot: true,
+          entity_frame_store: true,
+          semantic_actions: true,
+          terminal_view_bridge: true,
+          plugin_surface_sandbox: true,
+          isolated_plugin_asset: false
+        },
+        collectAction(action, node) {
+          collectedActions.push({ action, nodeId: node.id });
+        }
+      }
+    )
+  );
+
+  assert.equal(ionicUiNodeRendererRegistry.supports("stack"), true);
+  assert.equal(ionicUiNodeRendererRegistry.supports("timeline"), false);
+  assert.match(markup, /Universal primitives/);
+  assert.match(markup, /Renderer registry/);
+  assert.match(markup, /Capability fallback/);
+  assert.match(markup, /Title already exists/);
+  assert.match(markup, /data-action-id="botster\.session\.select"/);
+  assert.match(markup, /Unsupported capability: isolated_plugin_asset/);
+  assert.match(markup, /data-unsupported-primitive="timeline"/);
+  assert.equal(collectedActions.some(({ action }) => action.id === "botster.session.select"), true);
+  assert.equal(fixtureProvenance.mirroredFor, "ticket_1780941197_299829");
+} finally {
+  await vite.close();
+}
+
+console.log("Renderer seam, runtime behavior, and registry fixture assertions passed.");
 
 async function compileTsModule(sourcePath, outputPath) {
   const source = await readFile(new URL(sourcePath, import.meta.url), "utf8");
