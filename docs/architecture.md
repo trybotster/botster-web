@@ -9,7 +9,7 @@
 - `src/botster/entities.ts` names the entity frame store seam. It is pull-hydrated by view demand, with active pulls replayed after reconnect.
 - `src/botster/uiNodes.ts` names the `ui_tree_snapshot` renderer registry seam. Renderers receive structural UI snapshots plus live entity stores.
 - `src/botster/actions.ts` names semantic action dispatch. Action ids are Botster intents, not DOM events.
-- `src/botster/terminal.ts` names the future Restty bridge. Restty is a renderer only.
+- `src/botster/terminal.ts` names the Restty-backed `terminal_view` bridge. Restty is a renderer only.
 - `src/botster/pluginSurfaces.ts` names the host-owned sandbox seam for plugin surfaces.
 
 ## Protocol Boundaries
@@ -18,7 +18,9 @@ Control-plane hub frames enter through `protocol.ts`. This scaffold names the ca
 
 Entity stores are the canonical read-model channel. Subscribe establishes the transport only; opened routes and surface bindings request the route registry, UI tree snapshots, and entity families they need. Reconnect handling must replay the mounted view's active pulls instead of assuming subscribe globally hydrates state.
 
-Terminal data-plane traffic stays out of the hub control-plane envelope. PTY bytes, scrollback, snapshots, and terminal egress belong to session/client actor data-plane adapters in Botster core. The web seam only declares a `terminal_view` bridge for a future Restty-backed renderer.
+Terminal data-plane traffic stays out of the hub control-plane envelope. PTY bytes, scrollback, snapshots, and terminal egress belong to session/client actor data-plane adapters in Botster core. The web seam declares a Restty-backed `terminal_view` bridge plus a mock subscription-style data-plane adapter for this scaffold; it does not add terminal byte frames to `HubControlFrame`.
+
+The Restty bridge is mounted by the production app path through `src/botster/TerminalViewHost.tsx`. The host measures its bounded Ionic panel with `ResizeObserver`, forwards rows/columns through the bridge, and unmounts by detaching subscriptions before destroying the renderer instance. The vendored Restty bundle lives under `src/vendor/restty/` and is built from the `trybotster/restty` fork.
 
 ## Renderer Boundaries
 
@@ -27,6 +29,8 @@ Ionic owns the app shell, navigation, toolbar, and layout containers. Botster UI
 `ui_tree_snapshot` carries structure. Plugin-owned dynamic model state remains in entity frames and can be referenced by `ui.bind` or `ui.bind_list`-style bindings. The renderer must thread entity stores into composite rendering rather than treating UI snapshots as data payloads.
 
 Actions are semantic Botster events such as `botster.session.select` and `botster.session.stop`. React clicks or keyboard handlers can trigger those actions, but DOM event names are not the shared action contract.
+
+`terminal_view` remains separate from the `UiNodeRendererRegistry`. Restty renders terminal panes only; UiNode/action/entity frames remain the dynamic product UI contract.
 
 ## Plugin Surface Sandboxing
 

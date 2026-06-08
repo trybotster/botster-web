@@ -1,0 +1,33 @@
+import type { BindCanvasEventsOptions, RuntimeCell, RuntimeDesktopSelectionState, RuntimeGridState, RuntimeLinkState, RuntimeSelectionState, RuntimeTouchSelectionState } from "./types";
+export type BindPointerEventsOptions = {
+    canvas: HTMLCanvasElement;
+    bindOptions: BindCanvasEventsOptions;
+    touchSelectionMode: "off" | "drag" | "long-press";
+    touchSelectionLongPressMs: number;
+    touchSelectionMoveThresholdPx: number;
+    selectionState: RuntimeSelectionState;
+    touchSelectionState: RuntimeTouchSelectionState;
+    desktopSelectionState: RuntimeDesktopSelectionState;
+    linkState: RuntimeLinkState;
+    cleanupCanvasFns: Array<() => void>;
+    isTouchPointer: (event: PointerEvent) => boolean;
+    clearPendingTouchSelection: () => void;
+    clearPendingDesktopSelection: () => void;
+    tryActivatePendingTouchSelection: (pointerId: number) => boolean;
+    beginSelectionDrag: (cell: RuntimeCell, pointerId: number) => void;
+    scrollViewportByWheel?: (event: WheelEvent) => void;
+    normalizeSelectionCell: (cell: RuntimeCell) => RuntimeCell;
+    positionToCell: (event: {
+        clientX: number;
+        clientY: number;
+    }) => RuntimeCell;
+    scrollViewportByLines: (lines: number) => void;
+    clearSelection: () => void;
+    updateCanvasCursor: () => void;
+    markNeedsRender: () => void;
+    updateLinkHover: (cell: RuntimeCell | null) => void;
+    getGridState: () => RuntimeGridState;
+    getWasmReady: () => boolean;
+    getWasmHandle: () => number;
+};
+export declare function bindPointerEvents(options: BindPointerEventsOptions): void;

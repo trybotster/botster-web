@@ -140,7 +140,7 @@ body {
 }
 
 .renderer-surface,
-.terminal-placeholder {
+.terminal-panel {
   border: 1px solid #d8dee7;
   border-radius: 8px;
   background: #ffffff;
@@ -151,14 +151,15 @@ body {
   padding: 18px;
 }
 
-.terminal-placeholder {
-  padding: 18px;
-}
-
-.terminal-placeholder p {
-  margin: 12px 0 0;
-  color: #5b6575;
-  line-height: 1.5;
+.terminal-panel {
+  min-width: 0;
+  min-height: 420px;
+  max-height: calc(100vh - 210px);
+  display: grid;
+  grid-template-rows: auto minmax(260px, 1fr);
+  gap: 12px;
+  overflow: hidden;
+  padding: 14px;
 }
 
 .panel-heading {
@@ -178,6 +179,15 @@ body {
   font-size: 18px;
   line-height: 1.25;
   letter-spacing: 0;
+}
+
+.terminal-view-container {
+  min-width: 0;
+  min-height: 260px;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 6px;
+  background: #111318;
 }
 
 .frame-list {
@@ -252,5 +262,10 @@ body {
 
   .workspace-grid {
     grid-template-columns: 1fr;
+  }
+
+  .terminal-panel {
+    min-height: 340px;
+    max-height: none;
   }
 }

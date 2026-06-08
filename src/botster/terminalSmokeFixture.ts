@@ -1,0 +1,90 @@
+import {
+  DefaultTerminalViewBridge,
+  MockTerminalDataPlane,
+  type TerminalInput,
+  type TerminalRendererAdapter,
+  type TerminalSubscription,
+  type TerminalViewDescriptor
+} from "./terminal";
+
+class FakeTerminalRenderer implements TerminalRendererAdapter {
+  readonly writes: string[] = [];
+  readonly resizes: Array<{ rows: number; columns: number }> = [];
+  readonly lifecycle: string[];
+  private inputListener?: (data: TerminalInput) => void;
+
+  constructor(lifecycle: string[]) {
+    this.lifecycle = lifecycle;
+    this.lifecycle.push("create");
+  }
+
+  mount(): void {
+    this.lifecycle.push("mount");
+  }
+
+  onInput(listener: (data: TerminalInput) => void): TerminalSubscription {
+    this.inputListener = listener;
+
+    return {
+      unsubscribe: () => {
+        this.inputListener = undefined;
+        this.lifecycle.push("input:unsubscribe");
+      }
+    };
+  }
+
+  emitInput(data: TerminalInput): void {
+    this.inputListener?.(data);
+  }
+
+  write(data: string): void {
+    this.writes.push(data);
+  }
+
+  resize(rows: number, columns: number): void {
+    this.resizes.push({ rows, columns });
+  }
+
+  focus(): void {
+    this.lifecycle.push("focus");
+  }
+
+  destroy(): void {
+    this.lifecycle.push("destroy");
+  }
+}
+
+export async function runTerminalViewBridgeSmokeFixture() {
+  const descriptor: TerminalViewDescriptor = {
+    sessionId: "terminal_view_smoke_fixture",
+    renderer: "restty"
+  };
+  const lifecycle: string[] = [];
+  const renderers: FakeTerminalRenderer[] = [];
+  const bridge = new DefaultTerminalViewBridge(() => {
+    const renderer = new FakeTerminalRenderer(lifecycle);
+    renderers.push(renderer);
+    return renderer;
+  });
+  const dataPlane = new MockTerminalDataPlane(descriptor.sessionId, ["ready\r\n"]);
+  const container = document.createElement("div");
+
+  await bridge.mount(container, descriptor);
+  await bridge.attach(descriptor, dataPlane);
+  renderers[0].emitInput("ls\n");
+  dataPlane.emitOutput("ok\r\n");
+  await bridge.resize(descriptor, 24, 80);
+  await bridge.focus(descriptor);
+  await bridge.unmount(descriptor);
+  dataPlane.emitOutput("stale\r\n");
+  renderers[0].emitInput("stale\n");
+
+  await bridge.mount(container, descriptor);
+
+  return {
+    dataPlane,
+    firstRenderer: renderers[0],
+    secondRenderer: renderers[1],
+    lifecycle
+  };
+}
