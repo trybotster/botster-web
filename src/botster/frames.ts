@@ -21,22 +21,22 @@ export const placeholderFrameSet: UiFrameSet = {
     {
       id: "uinode-workspace-root",
       kind: "uinode",
-      title: "UiNode root",
+      title: "ui_tree_snapshot",
       summary: "Structural UI tree entry point supplied by hub/plugin surfaces.",
       source: "placeholder"
     },
     {
       id: "action-inspect-frame",
       kind: "action",
-      title: "Action binding",
-      summary: "Semantic action intent placeholder for renderer-dispatched commands.",
+      title: "semantic action binding",
+      summary: "Renderer-dispatched command intent, not a DOM event name.",
       source: "placeholder"
     },
     {
       id: "entity-session-read-model",
       kind: "entity",
-      title: "Entity frame",
-      summary: "Entity-backed read model placeholder for hub-owned state.",
+      title: "entity_snapshot / upsert / patch / remove",
+      summary: "Pull-hydrated read model placeholder for hub-owned state.",
       source: "placeholder"
     }
   ]
