@@ -3,6 +3,11 @@ export interface TerminalViewDescriptor {
   renderer: "restty";
 }
 
+export interface TerminalViewMount {
+  sessionId: string;
+  mountId: number;
+}
+
 export type TerminalInput = string;
 export type TerminalOutput = string;
 
@@ -37,8 +42,8 @@ export interface TerminalViewBridge {
     dataPlane: TerminalDataPlaneAttachment
   ): Promise<void>;
   detach(descriptor: TerminalViewDescriptor): Promise<void>;
-  mount(container: HTMLElement, descriptor: TerminalViewDescriptor): Promise<void>;
-  unmount(descriptor: TerminalViewDescriptor): Promise<void>;
+  mount(container: HTMLElement, descriptor: TerminalViewDescriptor): Promise<TerminalViewMount>;
+  unmount(descriptor: TerminalViewDescriptor, mount?: TerminalViewMount): Promise<void>;
   resize(descriptor: TerminalViewDescriptor, rows: number, columns: number): Promise<void>;
   focus(descriptor: TerminalViewDescriptor): Promise<void>;
   writeInput(descriptor: TerminalViewDescriptor, data: TerminalInput): Promise<void>;
@@ -46,6 +51,7 @@ export interface TerminalViewBridge {
 
 interface TerminalMountState {
   descriptor: TerminalViewDescriptor;
+  mountId: number;
   renderer: TerminalRendererAdapter;
   dataPlane?: TerminalDataPlaneAttachment;
   inputSubscription?: TerminalSubscription;
@@ -54,15 +60,39 @@ interface TerminalMountState {
 
 export class DefaultTerminalViewBridge implements TerminalViewBridge {
   private readonly mounts = new Map<string, TerminalMountState>();
+  private readonly mountOperations = new Map<string, Promise<unknown>>();
+  private nextMountId = 1;
 
   constructor(private readonly createRenderer: TerminalRendererFactory) {}
 
-  async mount(container: HTMLElement, descriptor: TerminalViewDescriptor): Promise<void> {
-    await this.unmount(descriptor);
+  async mount(
+    container: HTMLElement,
+    descriptor: TerminalViewDescriptor
+  ): Promise<TerminalViewMount> {
+    const sessionId = descriptor.sessionId;
+    const mountId = this.nextMountId;
+    this.nextMountId += 1;
+    const previousOperation = this.mountOperations.get(sessionId) ?? Promise.resolve();
+    const operation = previousOperation.then(async () => {
+      await this.unmount(descriptor);
 
-    const renderer = this.createRenderer(descriptor);
-    await renderer.mount(container);
-    this.mounts.set(descriptor.sessionId, { descriptor, renderer });
+      const renderer = this.createRenderer(descriptor);
+      await renderer.mount(container);
+      const mount: TerminalViewMount = { sessionId, mountId };
+      this.mounts.set(sessionId, { descriptor, mountId, renderer });
+      return mount;
+    });
+
+    const trackedOperation: Promise<unknown> = operation
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.mountOperations.get(sessionId) === trackedOperation) {
+          this.mountOperations.delete(sessionId);
+        }
+      });
+    this.mountOperations.set(sessionId, trackedOperation);
+
+    return operation;
   }
 
   async attach(
@@ -96,9 +126,12 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     state.dataPlane = undefined;
   }
 
-  async unmount(descriptor: TerminalViewDescriptor): Promise<void> {
+  async unmount(descriptor: TerminalViewDescriptor, mount?: TerminalViewMount): Promise<void> {
     const state = this.mounts.get(descriptor.sessionId);
     if (!state) return;
+    if (mount && (mount.sessionId !== descriptor.sessionId || mount.mountId !== state.mountId)) {
+      return;
+    }
 
     await this.detach(descriptor);
     await state.renderer.destroy();

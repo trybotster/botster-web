@@ -5,7 +5,8 @@ import {
   MockTerminalDataPlane,
   type TerminalDataPlaneAttachment,
   type TerminalViewBridge,
-  type TerminalViewDescriptor
+  type TerminalViewDescriptor,
+  type TerminalViewMount
 } from "./terminal";
 import { createResttyTerminalRenderer } from "./resttyRenderer";
 
@@ -46,6 +47,7 @@ export function TerminalViewHost({
     if (!container) return;
 
     let cancelled = false;
+    let mount: TerminalViewMount | undefined;
     let observer: ResizeObserver | undefined;
     const resize = () => {
       // Placeholder metrics until the Restty adapter exposes measured cell dimensions.
@@ -60,25 +62,31 @@ export function TerminalViewHost({
 
     void bridge
       .mount(container, descriptor)
-      .then(async () => {
+      .then(async (nextMount) => {
+        mount = nextMount;
         if (cancelled) {
-          await bridge.unmount(descriptor);
+          await bridge.unmount(descriptor, mount);
           return;
         }
 
         await bridge.attach(descriptor, terminalDataPlane);
+        container.dataset.terminalMount = "mounted";
         resize();
         observer = new ResizeObserver(resize);
         observer.observe(container);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         container.dataset.terminalMount = "failed";
+        container.dataset.terminalMountError =
+          error instanceof Error ? error.message : String(error);
       });
 
     return () => {
       cancelled = true;
       observer?.disconnect();
-      void bridge.unmount(descriptor);
+      if (mount) {
+        void bridge.unmount(descriptor, mount);
+      }
     };
   }, [bridge, descriptor, terminalDataPlane]);
 
