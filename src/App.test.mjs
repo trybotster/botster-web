@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
 import { createServer } from "vite";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const [
@@ -17,6 +18,8 @@ const [
   realHubDaemonDto,
   realHubDogfoodTransport,
   realHubTerminalDataPlane,
+  connectionDiagnostics,
+  connectionDiagnosticsPanel,
   protocol,
   entities,
   uiNodes,
@@ -40,6 +43,8 @@ const [
   readFile(new URL("./botster/realHubDaemonDto.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/realHubDogfoodTransport.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/realHubTerminalDataPlane.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/connectionDiagnostics.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/ConnectionDiagnosticsPanel.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/protocol.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/entities.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/uiNodes.ts", import.meta.url), "utf8"),
@@ -60,10 +65,14 @@ assert.match(main, /import App from "\.\/App"/);
 assert.match(main, /<App \/>/);
 assert.match(app, /import \{ UiNodeSurface \} from "\.\/botster\/UiNodeSurface"/);
 assert.match(app, /import \{ TerminalViewHost \} from "\.\/botster\/TerminalViewHost"/);
+assert.match(app, /import \{ ConnectionDiagnosticsPanel \} from "\.\/botster\/ConnectionDiagnosticsPanel"/);
 assert.match(app, /createBotsterWebClient/);
 assert.match(app, /createDogfoodRuntimeConfig/);
 assert.match(app, /runtimeClient\.hub\.subscribeSurface/);
 assert.match(app, /runtimeClient\.entities\.pull/);
+assert.match(app, /schemaVersionDiagnosticFromFrame/);
+assert.match(app, /operatorErrorDiagnostic/);
+assert.match(app, /terminalUnavailableDiagnostic/);
 assert.match(app, /surfaceSnapshot \?\? loadingSnapshot/);
 assert.doesNotMatch(app, /fixtureEntityFrames/);
 assert.doesNotMatch(app, /uiNodeConformanceSnapshot/);
@@ -71,9 +80,11 @@ assert.doesNotMatch(app, /createInMemoryEntityFrameStore\(fixtureEntityFrames\)/
 assert.match(app, /botsterWebClientContract\.label/);
 assert.match(app, /botsterWebClientContract\.seams\.map/);
 assert.match(app, /<UiNodeSurface/);
+assert.match(app, /<ConnectionDiagnosticsPanel/);
 assert.match(app, /onAction=\{dispatchAction\}/);
 assert.match(app, /dataPlane=\{dogfoodRuntime\.terminalDataPlane\}/);
 assert.match(app, /descriptor=\{dogfoodRuntime\.terminalDescriptor\}/);
+assert.match(app, /onDiagnostic=\{recordTerminalDiagnostic\}/);
 assert.doesNotMatch(app, /terminal-placeholder/);
 assert.match(client, /export const botsterWebClientContract/);
 assert.match(client, /createBotsterWebClient/);
@@ -100,6 +111,11 @@ assert.match(realHubDogfoodTransport, /realHubDogfoodUiTreeSnapshot/);
 assert.match(realHubTerminalDataPlane, /streamTerminal/);
 assert.match(realHubTerminalDataPlane, /type: "send_input"/);
 assert.match(realHubTerminalDataPlane, /type: "detach"/);
+assert.match(connectionDiagnostics, /expectedDaemonSchemaVersion = 1/);
+assert.match(connectionDiagnostics, /schemaVersionDiagnosticFromFrame/);
+assert.match(connectionDiagnostics, /operatorErrorDiagnostic/);
+assert.match(connectionDiagnostics, /terminalUnavailableDiagnostic/);
+assert.match(connectionDiagnosticsPanel, /data-diagnostic-id/);
 assert.match(dogfoodBridgeScript, /protocol = "botster-hub-daemon-v1"/);
 assert.match(dogfoodBridgeScript, /BOTSTER_HUB_BIN/);
 assert.match(dogfoodBridgeScript, /kind: "daemon_response"/);
@@ -164,6 +180,12 @@ const terminalPanelRule = extractTopLevelCssRule(desktopCss, ".terminal-panel");
 assert.match(terminalPanelRule, /max-height:\s*calc\(100vh\s*-\s*210px\)/);
 assert.match(terminalPanelRule, /overflow:\s*hidden/);
 
+const dogfoodMainRule = extractTopLevelCssRule(desktopCss, ".dogfood-main");
+assert.match(dogfoodMainRule, /display:\s*grid/);
+
+const diagnosticPanelRule = extractTopLevelCssRule(desktopCss, ".diagnostic-panel");
+assert.match(diagnosticPanelRule, /padding:\s*14px/);
+
 const mobileCss = extractCssAtRule(css, "@media (max-width: 860px)");
 assert.match(extractTopLevelCssRule(mobileCss, ".workspace-grid"), /grid-template-columns:\s*1fr\s*;/);
 assert.match(extractTopLevelCssRule(mobileCss, ".terminal-panel"), /max-height:\s*none/);
@@ -210,6 +232,7 @@ await Promise.all([
   compileTsModule("botster/actions.ts", join(compiledRoot, "botster/actions.js")),
   compileTsModule("botster/capabilities.ts", join(compiledRoot, "botster/capabilities.js")),
   compileTsModule("botster/client.ts", join(compiledRoot, "botster/client.js")),
+  compileTsModule("botster/connectionDiagnostics.ts", join(compiledRoot, "botster/connectionDiagnostics.js")),
   compileTsModule("botster/dogfoodMode.ts", join(compiledRoot, "botster/dogfoodMode.js")),
   compileTsModule("botster/entities.ts", join(compiledRoot, "botster/entities.js")),
   compileTsModule("botster/localDogfoodTransport.ts", join(compiledRoot, "botster/localDogfoodTransport.js")),
@@ -231,6 +254,16 @@ const {
   realHubDogfoodSessionId
 } = requireRuntime("./botster/realHubDogfoodTransport.js");
 const { createRealHubTerminalDataPlane } = requireRuntime("./botster/realHubTerminalDataPlane.js");
+const {
+  actionFailureDiagnostic,
+  bridgeUnavailableDiagnostic,
+  connectionFailureDiagnostic,
+  hubStatusFamily,
+  operatorErrorDiagnostic,
+  schemaVersionDiagnosticFromFrame,
+  streamDisconnectedDiagnostic,
+  terminalUnavailableDiagnostic
+} = requireRuntime("./botster/connectionDiagnostics.js");
 
 const transport = {
   sent: [],
@@ -573,6 +606,41 @@ const mappedFrames = daemonResponseFrames({
   }
 }, 10);
 assert.equal(mappedFrames.some((frame) => frame.kind === "operator_error"), true);
+assert.equal(operatorErrorDiagnostic(mappedFrames.find((frame) => frame.kind === "operator_error")).title, "Hub operator error");
+
+const mismatchedSchemaDiagnostic = schemaVersionDiagnosticFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [{ id: "local-hub", schema_version: 2 }]
+  }
+});
+assert.equal(mismatchedSchemaDiagnostic.title, "Daemon schema mismatch");
+assert.match(mismatchedSchemaDiagnostic.detail, /expected schema 1/);
+
+const matchingSchemaDiagnostic = schemaVersionDiagnosticFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [{ id: "local-hub", schema_version: 1 }]
+  }
+});
+assert.equal(matchingSchemaDiagnostic.title, "Daemon schema compatible");
+
+assert.equal(bridgeUnavailableDiagnostic(new Error("connect ECONNREFUSED")).title, "Local hub bridge unavailable");
+assert.equal(streamDisconnectedDiagnostic(new Error("SSE closed")).title, "Control stream disconnected");
+assert.equal(connectionFailureDiagnostic(false, new Error("connect ECONNREFUSED")).id, "bridge-unavailable");
+assert.notEqual(connectionFailureDiagnostic(false, new Error("connect ECONNREFUSED")).id, "stream-disconnected");
+assert.equal(connectionFailureDiagnostic(true, new Error("SSE closed")).id, "stream-disconnected");
+assert.equal(
+  actionFailureDiagnostic(
+    { id: "botster.session.rename", target: "missing-real-hub-session" },
+    { accepted: false, reason: "Session not found" }
+  ).detail,
+  "Session not found"
+);
 
 const terminalDataPlane = createRealHubTerminalDataPlane({
   bridge
@@ -596,6 +664,22 @@ assert.equal(bridgeRequests.some((request) => request.type === "resize" && reque
 assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
+
+const terminalWithoutStream = createRealHubTerminalDataPlane({
+  bridge: {
+    async request() {
+      return { kind: "events", events: [] };
+    }
+  }
+});
+let terminalAttachError;
+try {
+  terminalWithoutStream.subscribeOutput(() => undefined);
+} catch (error) {
+  terminalAttachError = error;
+}
+assert.match(terminalAttachError.message, /streaming terminal attach/);
+assert.equal(terminalUnavailableDiagnostic(terminalAttachError).title, "Terminal stream unavailable");
 
 const localRuntime = createBotsterWebClient({
   transport: createLocalDogfoodTransport(),
@@ -661,11 +745,13 @@ try {
     { ionicUiNodeRendererRegistry },
     { uiNodeConformanceSnapshot, fixtureEntityFrames, fixtureProvenance },
     { dogfoodUiTreeSnapshot },
+    { ConnectionDiagnosticsPanel },
     { createInMemoryEntityFrameStore }
   ] = await Promise.all([
     vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
     vite.ssrLoadModule("/src/botster/__fixtures__/uiNodeConformance.ts"),
     vite.ssrLoadModule("/src/botster/localDogfoodTransport.ts"),
+    vite.ssrLoadModule("/src/botster/ConnectionDiagnosticsPanel.tsx"),
     vite.ssrLoadModule("/src/botster/entities.ts")
   ]);
 
@@ -766,6 +852,28 @@ try {
   assert.match(dogfoodMarkup, /Session name is required/);
   assert.match(dogfoodMarkup, /data-action-id="botster\.session\.select"/);
   assert.match(dogfoodMarkup, /data-action-id="botster\.session\.rename"/);
+
+  const diagnosticsMarkup = renderToStaticMarkup(
+    createElement(ConnectionDiagnosticsPanel, {
+      diagnostics: [
+        bridgeUnavailableDiagnostic(new Error("connect ECONNREFUSED")),
+        mismatchedSchemaDiagnostic,
+        streamDisconnectedDiagnostic(new Error("SSE closed")),
+        actionFailureDiagnostic(
+          { id: "botster.session.rename", target: "missing-real-hub-session" },
+          { accepted: false, reason: "Session not found" }
+        ),
+        terminalUnavailableDiagnostic(terminalAttachError)
+      ]
+    })
+  );
+  assert.match(diagnosticsMarkup, /Connection diagnostics/);
+  assert.match(diagnosticsMarkup, /Local hub bridge unavailable/);
+  assert.match(diagnosticsMarkup, /Daemon schema mismatch/);
+  assert.match(diagnosticsMarkup, /Control stream disconnected/);
+  assert.match(diagnosticsMarkup, /Action failed/);
+  assert.match(diagnosticsMarkup, /Terminal stream unavailable/);
+  assert.match(diagnosticsMarkup, /data-diagnostic-id="terminal-unavailable"/);
 } finally {
   await vite.close();
 }
