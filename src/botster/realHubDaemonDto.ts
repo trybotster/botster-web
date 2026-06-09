@@ -24,6 +24,7 @@ export interface DaemonResponse {
 
 export interface DaemonStatus {
   lifecycle_state: string;
+  compatibility?: DaemonCompatibility | null;
   host_id: string;
   host_display_name: string;
   schema_version: number;
@@ -37,6 +38,13 @@ export interface DaemonStatus {
   session_count: number;
   recovered_sessions: string[];
   stale_sessions: string[];
+}
+
+export interface DaemonCompatibility {
+  protocol: string;
+  protocol_version: number;
+  features: string[];
+  conformance_fixture_revision: number;
 }
 
 export interface DaemonSession {

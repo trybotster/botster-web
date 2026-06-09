@@ -3,6 +3,16 @@ import type { HubControlFrame } from "./protocol";
 
 export const expectedDaemonSchemaVersion = 1;
 export const hubStatusFamily = "botster-web.hub_status";
+export const expectedDaemonProtocol = "botster-hub-daemon-v1";
+export const minimumDaemonProtocolVersion = 1;
+export const minimumConformanceFixtureRevision = 1;
+export const requiredDaemonFeatures = [
+  "sessions",
+  "terminal_streaming",
+  "resize",
+  "plugin_surface_render",
+  "plugin_surface_action"
+] as const;
 
 export type ConnectionDiagnosticSeverity = "info" | "success" | "warning" | "danger";
 
@@ -89,16 +99,8 @@ export function operatorErrorDiagnostic(frame: HubControlFrame): ConnectionDiagn
 }
 
 export function schemaVersionDiagnosticFromFrame(frame: HubControlFrame): ConnectionDiagnostic | undefined {
-  if (frame.kind !== "entity_snapshot" || !isRecord(frame.payload)) {
-    return undefined;
-  }
-
-  if (frame.payload.family !== hubStatusFamily || !Array.isArray(frame.payload.records)) {
-    return undefined;
-  }
-
-  const status = frame.payload.records.find((record) => isRecord(record) && record.id === "local-hub");
-  if (!isRecord(status) || typeof status.schema_version !== "number") {
+  const status = hubStatusRecordFromFrame(frame);
+  if (!status || typeof status.schema_version !== "number") {
     return undefined;
   }
 
@@ -119,6 +121,107 @@ export function schemaVersionDiagnosticFromFrame(frame: HubControlFrame): Connec
     severity: "danger",
     source: "compatibility"
   };
+}
+
+export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): ConnectionDiagnostic[] {
+  const status = hubStatusRecordFromFrame(frame);
+  if (!status) {
+    return [];
+  }
+
+  const compatibility = status.compatibility;
+  if (!isRecord(compatibility)) {
+    return [
+      {
+        id: "compatibility-descriptor-unavailable",
+        title: "Hub compatibility descriptor unavailable",
+        detail: "DaemonStatus.compatibility was not returned by the local hub status response.",
+        severity: "warning",
+        source: "compatibility"
+      }
+    ];
+  }
+
+  if (compatibility.protocol !== expectedDaemonProtocol) {
+    return [
+      {
+        id: "hub-protocol-mismatch",
+        title: "Hub protocol mismatch",
+        detail: `Running hub protocol ${String(compatibility.protocol)} does not match ${expectedDaemonProtocol}.`,
+        severity: "danger",
+        source: "compatibility"
+      }
+    ];
+  }
+
+  if (
+    typeof compatibility.protocol_version !== "number" ||
+    compatibility.protocol_version < minimumDaemonProtocolVersion
+  ) {
+    return [
+      {
+        id: "hub-protocol-version-mismatch",
+        title: "Hub protocol version mismatch",
+        detail: `Running hub protocol version ${String(compatibility.protocol_version)} is below required version ${minimumDaemonProtocolVersion}.`,
+        severity: "danger",
+        source: "compatibility"
+      }
+    ];
+  }
+
+  if (
+    typeof compatibility.conformance_fixture_revision !== "number" ||
+    compatibility.conformance_fixture_revision < minimumConformanceFixtureRevision
+  ) {
+    return [
+      {
+        id: "hub-conformance-fixture-mismatch",
+        title: "Hub conformance fixture mismatch",
+        detail: `Running hub conformance fixture revision ${String(compatibility.conformance_fixture_revision)} is below required revision ${minimumConformanceFixtureRevision}.`,
+        severity: "danger",
+        source: "compatibility"
+      }
+    ];
+  }
+
+  const features = Array.isArray(compatibility.features)
+    ? compatibility.features.filter((feature): feature is string => typeof feature === "string")
+    : [];
+  const missingFeatures = requiredDaemonFeatures.filter((feature) => !features.includes(feature));
+  if (missingFeatures.length > 0) {
+    return [
+      {
+        id: "hub-missing-required-capability",
+        title: "Hub capability missing",
+        detail: `Running hub does not advertise required feature(s): ${missingFeatures.join(", ")}.`,
+        severity: "danger",
+        source: "compatibility"
+      }
+    ];
+  }
+
+  return [
+    {
+      id: "hub-compatibility-descriptor",
+      title: "Hub compatibility descriptor compatible",
+      detail: `Protocol ${compatibility.protocol} v${compatibility.protocol_version} advertises required features.`,
+      severity: "success",
+      source: "compatibility"
+    }
+  ];
+}
+
+function hubStatusRecordFromFrame(frame: HubControlFrame): Record<string, unknown> | undefined {
+  if (frame.kind !== "entity_snapshot" || !isRecord(frame.payload)) {
+    return undefined;
+  }
+
+  if (frame.payload.family !== hubStatusFamily || !Array.isArray(frame.payload.records)) {
+    return undefined;
+  }
+
+  const status = frame.payload.records.find((record) => isRecord(record) && record.id === "local-hub");
+  return isRecord(status) ? status : undefined;
 }
 
 export function upsertDiagnostic(

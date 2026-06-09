@@ -100,8 +100,10 @@ Expected proof markers:
 
 - The toolbar mode chip reads `real-hub`.
 - The status list shows the isolated daemon host returned by `DaemonRequest::Status`.
-- The connection diagnostics panel starts with the selected bridge mode and adds targeted rows when the bridge is unavailable, the control stream fails, the daemon schema is incompatible, an operator/action error is returned, or terminal streaming cannot attach.
+- The connection diagnostics panel starts with the selected bridge mode and adds targeted rows when the bridge is unavailable, the control stream fails, the daemon schema or compatibility descriptor is incompatible, an operator/action error is returned, or terminal streaming cannot attach.
 - `Daemon schema mismatch` means the bridge returned `DaemonStatus.schema_version` that does not match the schema expected by this web build. Use a matching botster-hub binary before treating UI behavior as a product bug.
+- `Hub protocol mismatch` or `Hub capability missing` means the bridge returned `DaemonStatus.compatibility` and the descriptor does not satisfy this web build's public hub-client requirements.
+- `Hub compatibility descriptor unavailable` means the status response predates or omits `DaemonStatus.compatibility`; botster-web does not infer protocol or capability problems from that missing field.
 - `Local hub bridge unavailable` or `Control stream disconnected` means the browser could not complete a bridge request or the bridge stopped while the dogfood surface was loading. Check that `npm run dogfood:hub` is still running and that Vite was opened with `?dogfood=real-hub`.
 - `Terminal stream unavailable` is scoped to the terminal data-plane seam. The control-plane surface can still render status, sessions, and action errors when the held terminal SSE stream is missing or rejected.
 - `Spawn isolated session` sends `DaemonRequest::Spawn` and updates entity-backed session rows.

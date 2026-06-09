@@ -239,6 +239,7 @@ function statusRecord(status: NonNullable<DaemonResponse["status"]>) {
     status: status.lifecycle_state,
     host_id: status.host_id,
     schema_version: status.schema_version,
+    compatibility: status.compatibility,
     sessions: status.session_count,
     packages: status.package_count,
     state_source: status.state_source
