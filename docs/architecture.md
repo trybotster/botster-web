@@ -4,19 +4,21 @@
 
 ## Client Layers
 
-- `src/botster/client.ts` composes the browser-side contract and exports `botsterWebClientContract`, a runtime descriptor consumed by `src/App.tsx` so the scaffold is part of the production entry path.
-- `src/botster/protocol.ts` names control-plane hub frames and lifecycle ingress. These are adapter placeholders, not a replacement for the external botster-core wire contract.
-- `src/botster/entities.ts` names the entity frame store seam. It is pull-hydrated by view demand, with active pulls replayed after reconnect.
+- `src/botster/client.ts` composes the browser-side contract, exports `botsterWebClientContract`, and provides `createBotsterWebClient()` for injected transport tests and future route-owned hub connection wiring.
+- `src/botster/protocol.ts` names control-plane hub frames, lifecycle ingress, injected transport, and replayable surface subscription placeholders. These are adapter placeholders, not a replacement for the external botster-core wire contract.
+- `src/botster/entities.ts` implements the in-memory entity frame store seam. It is pull-hydrated by view demand, with active pulls replayed after reconnect.
 - `src/botster/uiNodes.ts` names the `ui_tree_snapshot` renderer registry seam. Renderers receive structural UI snapshots plus live entity stores.
-- `src/botster/actions.ts` names semantic action dispatch. Action ids are Botster intents, not DOM events.
+- `src/botster/actions.ts` implements semantic action dispatch with `action_request` / `action_result` correlation. Action ids are Botster intents, not DOM events.
 - `src/botster/terminal.ts` names the Restty-backed `terminal_view` bridge. Restty is a renderer only.
 - `src/botster/pluginSurfaces.ts` names the host-owned sandbox seam for plugin surfaces.
 
 ## Protocol Boundaries
 
-Control-plane hub frames enter through `protocol.ts`. This scaffold names the canonical frame families the web client must handle, including `ui_tree_snapshot`, `entity_snapshot`, `entity_upsert`, `entity_patch`, and `entity_remove`, while keeping payload internals `unknown` until an integration ticket reconciles them against external botster-core and wire-v2 sources.
+Control-plane hub frames enter through `protocol.ts`. This scaffold names the canonical frame families the web client must handle, including `ui_tree_snapshot`, `entity_snapshot`, `entity_upsert`, `entity_patch`, `entity_remove`, `action_request`, and `action_result`, while keeping adapter payloads narrow until an integration ticket reconciles them against external botster-core and wire-v2 sources.
 
-Entity stores are the canonical read-model channel. Subscribe establishes the transport only; opened routes and surface bindings request the route registry, UI tree snapshots, and entity families they need. Reconnect handling must replay the mounted view's active pulls instead of assuming subscribe globally hydrates state.
+Entity stores are the canonical read-model channel. Subscribe establishes the transport only; opened routes and surface bindings request the route registry, UI tree snapshots, and entity families they need. Reconnect handling replays the mounted view's active pulls and surface subscriptions instead of assuming subscribe globally hydrates state. Full `entity_snapshot` frames reset the family baseline even when their sequence is lower than a prior delta; delta frames obey the family sequence gate.
+
+The current client factory still requires an injected transport. Live WebRTC, WebSocket, ActionCable, cloud, Rails, and local daemon socket implementations are intentionally deferred.
 
 Terminal data-plane traffic stays out of the hub control-plane envelope. PTY bytes, scrollback, snapshots, and terminal egress belong to session/client actor data-plane adapters in Botster core. The web seam declares a Restty-backed `terminal_view` bridge plus a mock subscription-style data-plane adapter for this scaffold; it does not add terminal byte frames to `HubControlFrame`.
 
@@ -42,6 +44,6 @@ The client can be served as a static web app by local Botster tooling. Future Ra
 
 ## Assumptions
 
-- This ticket is intentionally scaffold-only.
+- This ticket is intentionally scaffold-only for live transport, but the runtime skeleton is executable through an injected transport.
 - The exact botster-core exported schema is external to this repo, so payload fields remain opaque here.
 - Future integration work must reconcile these TypeScript seams against the canonical botster-core and wire-v2 contracts before adding live transport behavior.

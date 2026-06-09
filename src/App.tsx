@@ -26,10 +26,15 @@ import {
   terminalOutline
 } from "ionicons/icons";
 
-import { UiFrameHost } from "./botster/UiFrameHost";
 import { TerminalViewHost } from "./botster/TerminalViewHost";
+import { UiNodeSurface } from "./botster/UiNodeSurface";
 import { botsterWebClientContract } from "./botster/client";
-import { placeholderFrameSet } from "./botster/frames";
+import { defaultUiCapabilitySet } from "./botster/capabilities";
+import {
+  fixtureEntityFrames,
+  uiNodeConformanceSnapshot
+} from "./botster/__fixtures__/uiNodeConformance";
+import { createInMemoryEntityFrameStore } from "./botster/entities";
 
 setupIonicReact({
   mode: "md"
@@ -41,6 +46,8 @@ const navigationItems = [
   { label: "Actions", icon: radioButtonOnOutline, active: false },
   { label: "Terminal", icon: terminalOutline, active: false }
 ];
+
+const fixtureEntityStore = createInMemoryEntityFrameStore(fixtureEntityFrames);
 
 export default function App() {
   return (
@@ -127,7 +134,14 @@ export default function App() {
               </section>
 
               <section className="workspace-grid" aria-label="Renderer workbench">
-                <UiFrameHost frameSet={placeholderFrameSet} />
+                <UiNodeSurface
+                  snapshot={uiNodeConformanceSnapshot}
+                  entities={fixtureEntityStore}
+                  capabilities={{
+                    ...defaultUiCapabilitySet,
+                    isolated_plugin_asset: false
+                  }}
+                />
                 <TerminalViewHost />
               </section>
             </main>

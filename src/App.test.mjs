@@ -1,16 +1,16 @@
-import { readFile } from "node:fs/promises";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { strict as assert } from "node:assert";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
+import { createServer } from "vite";
+import { renderToStaticMarkup } from "react-dom/server";
 
 const [
   main,
   app,
-  host,
-  frames,
   client,
   protocol,
   entities,
@@ -28,8 +28,6 @@ const [
 ] = await Promise.all([
   readFile(new URL("./main.tsx", import.meta.url), "utf8"),
   readFile(new URL("./App.tsx", import.meta.url), "utf8"),
-  readFile(new URL("./botster/UiFrameHost.tsx", import.meta.url), "utf8"),
-  readFile(new URL("./botster/frames.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/client.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/protocol.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/entities.ts", import.meta.url), "utf8"),
@@ -48,25 +46,32 @@ const [
 
 assert.match(main, /import App from "\.\/App"/);
 assert.match(main, /<App \/>/);
-assert.match(app, /import \{ UiFrameHost \} from "\.\/botster\/UiFrameHost"/);
+assert.match(app, /import \{ UiNodeSurface \} from "\.\/botster\/UiNodeSurface"/);
 assert.match(app, /import \{ TerminalViewHost \} from "\.\/botster\/TerminalViewHost"/);
 assert.match(app, /import \{ botsterWebClientContract \} from "\.\/botster\/client"/);
-assert.match(app, /import \{ placeholderFrameSet \} from "\.\/botster\/frames"/);
+assert.match(app, /fixtureEntityFrames/);
+assert.match(app, /uiNodeConformanceSnapshot/);
+assert.match(app, /createInMemoryEntityFrameStore\(fixtureEntityFrames\)/);
 assert.match(app, /botsterWebClientContract\.label/);
 assert.match(app, /botsterWebClientContract\.seams\.map/);
-assert.match(app, /<UiFrameHost frameSet=\{placeholderFrameSet\} \/>/);
+assert.match(app, /<UiNodeSurface/);
 assert.match(app, /<TerminalViewHost \/>/);
 assert.doesNotMatch(app, /terminal-placeholder/);
-assert.match(host, /data-testid="ui-frame-host"/);
-assert.match(frames, /ui_tree_snapshot/);
-assert.match(frames, /entity_snapshot \/ upsert \/ patch \/ remove/);
 assert.match(client, /export const botsterWebClientContract/);
+assert.match(client, /createBotsterWebClient/);
 assert.match(client, /"terminal_view bridge"/);
 assert.match(protocol, /type HubControlFrameKind/);
+assert.match(protocol, /"action_request"/);
 assert.match(protocol, /"ui_tree_snapshot"/);
 assert.match(protocol, /"entity_snapshot"/);
+assert.match(entities, /class InMemoryEntityFrameStore/);
+assert.match(entities, /createInMemoryEntityFrameStore/);
 assert.match(entities, /replayActivePulls/);
-assert.match(uiNodes, /render\(snapshot: UiTreeSnapshot, entities: EntityFrameStore\)/);
+assert.match(
+  uiNodes,
+  /render\(snapshot: UiTreeSnapshot, entities: EntityFrameStore, options\?: UiNodeRenderOptions\)/
+);
+assert.match(actions, /class CorrelatedActionDispatcher/);
 assert.match(actions, /botster\.session\.select/);
 assert.doesNotMatch(actions, /click|submit|change/);
 assert.match(terminal, /renderer: "restty"/);
@@ -136,4 +141,244 @@ assert.ok(smoke.lifecycle.indexOf("destroy") < smoke.lifecycle.lastIndexOf("crea
 assert.doesNotMatch(smoke.firstRenderer.writes.join(""), /stale/);
 assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /stale/);
 
-console.log("Renderer seam wiring assertions passed.");
+const compiledRoot = join(tmpdir(), "botster-web-runtime-test");
+await rm(compiledRoot, { recursive: true, force: true });
+await mkdir(join(compiledRoot, "botster"), { recursive: true });
+
+await Promise.all([
+  compileTsModule("botster/actions.ts", join(compiledRoot, "botster/actions.js")),
+  compileTsModule("botster/capabilities.ts", join(compiledRoot, "botster/capabilities.js")),
+  compileTsModule("botster/client.ts", join(compiledRoot, "botster/client.js")),
+  compileTsModule("botster/entities.ts", join(compiledRoot, "botster/entities.js")),
+  compileTsModule("botster/protocol.ts", join(compiledRoot, "botster/protocol.js"))
+]);
+
+const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
+const { createBotsterWebClient } = requireRuntime("./botster/client.js");
+
+const transport = {
+  sent: [],
+  ingress: undefined,
+  async connect(_capabilities, ingress) {
+    this.ingress = ingress;
+  },
+  async disconnect() {
+    this.ingress = undefined;
+  },
+  async send(frame) {
+    this.sent.push(frame);
+  },
+  inject(frame) {
+    this.ingress?.(frame);
+  }
+};
+const runtime = createBotsterWebClient({
+  transport,
+  actionIdGenerator: deterministicIds("ui-action"),
+  actionTimeoutMs: 10
+});
+
+await runtime.hub.connect({ client: "botster-web", capabilities: [] });
+await runtime.hub.subscribe();
+assert.equal(runtime.entities.list("session").length, 0);
+assert.equal(transport.sent.filter((frame) => frame.kind === "entity_pull").length, 0);
+
+transport.inject({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: "session",
+    sequence: 5,
+    records: [
+      { id: "session-1", title: "One" },
+      { id: "session-2", title: "Two" }
+    ]
+  }
+});
+assert.deepEqual(runtime.entities.list("session").map((record) => record.id), [
+  "session-1",
+  "session-2"
+]);
+
+transport.inject({
+  kind: "entity_upsert",
+  payload: {
+    operation: "entity_upsert",
+    key: { family: "session", id: "session-3" },
+    sequence: 6,
+    record: { id: "ignored", title: "Three", active: false }
+  }
+});
+assert.equal(runtime.entities.get("session", "session-3").title, "Three");
+
+transport.inject({
+  kind: "entity_patch",
+  payload: {
+    operation: "entity_patch",
+    key: { family: "session", id: "session-3" },
+    sequence: 7,
+    record: { active: true }
+  }
+});
+assert.deepEqual(runtime.entities.get("session", "session-3"), {
+  id: "session-3",
+  title: "Three",
+  active: true
+});
+
+transport.inject({
+  kind: "entity_remove",
+  payload: {
+    operation: "entity_remove",
+    key: { family: "session", id: "session-2" },
+    sequence: 8
+  }
+});
+assert.equal(runtime.entities.get("session", "session-2"), undefined);
+
+transport.inject({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: "session",
+    sequence: 1,
+    records: [{ id: "session-reset", title: "Reconnect baseline" }]
+  }
+});
+assert.deepEqual(runtime.entities.list("session").map((record) => record.id), ["session-reset"]);
+
+transport.inject({
+  kind: "entity_patch",
+  payload: {
+    operation: "entity_patch",
+    key: { family: "session", id: "session-reset" },
+    sequence: 0,
+    record: { title: "stale" }
+  }
+});
+assert.equal(runtime.entities.get("session", "session-reset").title, "Reconnect baseline");
+
+const actionResult = runtime.actions.dispatch({
+  origin: "ui_node",
+  action: { id: "botster.session.select", target: "session-reset" }
+});
+const actionFrame = transport.sent.find((frame) => frame.kind === "action_request");
+assert.equal(actionFrame.payload.request_id, "ui-action-1");
+assert.equal(actionFrame.payload.action.id, "botster.session.select");
+assert.equal(runtime.actions.pendingCount(), 1);
+
+transport.inject({
+  kind: "action_result",
+  payload: {
+    request_id: "unknown-request",
+    accepted: true
+  }
+});
+assert.equal(runtime.actions.pendingCount(), 1);
+
+transport.inject({
+  kind: "action_result",
+  payload: {
+    request_id: "ui-action-1",
+    accepted: true,
+    result: { selected: "session-reset" }
+  }
+});
+assert.deepEqual(await actionResult, {
+  accepted: true,
+  request_id: "ui-action-1",
+  result: { selected: "session-reset" },
+  reason: undefined
+});
+assert.equal(runtime.actions.pendingCount(), 0);
+
+await runtime.entities.pull({ family: "session" });
+await runtime.hub.subscribeSurface({ surface: "workspace", path: "/sessions" });
+transport.sent.length = 0;
+await runtime.entities.replayActivePulls();
+await runtime.hub.replaySurfaceSubscriptions();
+assert.deepEqual(transport.sent.map((frame) => frame.kind), ["entity_pull", "surface_subscribe"]);
+
+const vite = await createServer({
+  configFile: false,
+  resolve: {
+    alias: {
+      "@ionic/react": new URL("./botster/__fixtures__/IonicReactSsrMock.tsx", import.meta.url)
+        .pathname
+    }
+  },
+  optimizeDeps: {
+    noDiscovery: true
+  },
+  server: { middlewareMode: true },
+  appType: "custom",
+  logLevel: "error"
+});
+
+try {
+  const [
+    { ionicUiNodeRendererRegistry },
+    { uiNodeConformanceSnapshot, fixtureEntityFrames, fixtureProvenance },
+    { createInMemoryEntityFrameStore }
+  ] = await Promise.all([
+    vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
+    vite.ssrLoadModule("/src/botster/__fixtures__/uiNodeConformance.ts"),
+    vite.ssrLoadModule("/src/botster/entities.ts")
+  ]);
+
+  const collectedActions = [];
+  const markup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      uiNodeConformanceSnapshot,
+      createInMemoryEntityFrameStore(fixtureEntityFrames),
+      {
+        capabilities: {
+          ionic_shell: true,
+          ui_tree_snapshot: true,
+          entity_frame_store: true,
+          semantic_actions: true,
+          terminal_view_bridge: true,
+          plugin_surface_sandbox: true,
+          isolated_plugin_asset: false
+        },
+        collectAction(action, node) {
+          collectedActions.push({ action, nodeId: node.id });
+        }
+      }
+    )
+  );
+
+  assert.equal(ionicUiNodeRendererRegistry.supports("stack"), true);
+  assert.equal(ionicUiNodeRendererRegistry.supports("timeline"), false);
+  assert.match(markup, /Universal primitives/);
+  assert.match(markup, /Renderer registry/);
+  assert.match(markup, /Capability fallback/);
+  assert.match(markup, /Title already exists/);
+  assert.match(markup, /data-action-id="botster\.session\.select"/);
+  assert.match(markup, /Unsupported capability: isolated_plugin_asset/);
+  assert.match(markup, /data-unsupported-primitive="timeline"/);
+  assert.equal(collectedActions.some(({ action }) => action.id === "botster.session.select"), true);
+  assert.equal(fixtureProvenance.mirroredFor, "ticket_1780941197_299829");
+} finally {
+  await vite.close();
+}
+
+console.log("Renderer seam, runtime behavior, and registry fixture assertions passed.");
+
+async function compileTsModule(sourcePath, outputPath) {
+  const source = await readFile(new URL(sourcePath, import.meta.url), "utf8");
+  const result = ts.transpileModule(source, {
+    compilerOptions: {
+      esModuleInterop: true,
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022
+    }
+  });
+
+  await writeFile(outputPath, result.outputText);
+}
+
+function deterministicIds(prefix) {
+  let next = 1;
+  return () => `${prefix}-${next++}`;
+}
