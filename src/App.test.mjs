@@ -12,7 +12,11 @@ const [
   main,
   app,
   client,
+  dogfoodMode,
   localDogfoodTransport,
+  realHubDaemonDto,
+  realHubDogfoodTransport,
+  realHubTerminalDataPlane,
   protocol,
   entities,
   uiNodes,
@@ -22,6 +26,7 @@ const [
   terminalHost,
   terminalSmokeFixture,
   pluginSurfaces,
+  dogfoodBridgeScript,
   architecture,
   readme,
   css,
@@ -30,7 +35,11 @@ const [
   readFile(new URL("./main.tsx", import.meta.url), "utf8"),
   readFile(new URL("./App.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/client.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/dogfoodMode.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/localDogfoodTransport.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/realHubDaemonDto.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/realHubDogfoodTransport.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/realHubTerminalDataPlane.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/protocol.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/entities.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/uiNodes.ts", import.meta.url), "utf8"),
@@ -40,6 +49,7 @@ const [
   readFile(new URL("./botster/TerminalViewHost.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/terminalSmokeFixture.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/pluginSurfaces.ts", import.meta.url), "utf8"),
+  readFile(new URL("../scripts/real-hub-dogfood-bridge.mjs", import.meta.url), "utf8"),
   readFile(new URL("../docs/architecture.md", import.meta.url), "utf8"),
   readFile(new URL("../README.md", import.meta.url), "utf8"),
   readFile(new URL("./theme/app.css", import.meta.url), "utf8"),
@@ -51,7 +61,7 @@ assert.match(main, /<App \/>/);
 assert.match(app, /import \{ UiNodeSurface \} from "\.\/botster\/UiNodeSurface"/);
 assert.match(app, /import \{ TerminalViewHost \} from "\.\/botster\/TerminalViewHost"/);
 assert.match(app, /createBotsterWebClient/);
-assert.match(app, /createLocalDogfoodTransport/);
+assert.match(app, /createDogfoodRuntimeConfig/);
 assert.match(app, /runtimeClient\.hub\.subscribeSurface/);
 assert.match(app, /runtimeClient\.entities\.pull/);
 assert.match(app, /surfaceSnapshot \?\? loadingSnapshot/);
@@ -62,7 +72,8 @@ assert.match(app, /botsterWebClientContract\.label/);
 assert.match(app, /botsterWebClientContract\.seams\.map/);
 assert.match(app, /<UiNodeSurface/);
 assert.match(app, /onAction=\{dispatchAction\}/);
-assert.match(app, /<TerminalViewHost \/>/);
+assert.match(app, /dataPlane=\{dogfoodRuntime\.terminalDataPlane\}/);
+assert.match(app, /descriptor=\{dogfoodRuntime\.terminalDescriptor\}/);
 assert.doesNotMatch(app, /terminal-placeholder/);
 assert.match(client, /export const botsterWebClientContract/);
 assert.match(client, /createBotsterWebClient/);
@@ -73,6 +84,25 @@ assert.match(localDogfoodTransport, /createLocalDogfoodTransport/);
 assert.match(localDogfoodTransport, /dogfoodUiTreeSnapshot/);
 assert.match(localDogfoodTransport, /"botster\.session\.select"/);
 assert.match(localDogfoodTransport, /"botster\.session\.rename"/);
+assert.match(dogfoodMode, /VITE_BOTSTER_REAL_HUB_DOGFOOD/);
+assert.match(dogfoodMode, /dogfood"\) === realModeQueryValue/);
+assert.match(dogfoodMode, /createRealHubDogfoodTransport/);
+assert.match(dogfoodMode, /createRealHubTerminalDataPlane/);
+assert.match(realHubDaemonDto, /export type DaemonRequest/);
+assert.match(realHubDaemonDto, /type: "status"/);
+assert.match(realHubDaemonDto, /type: "spawn"/);
+assert.match(realHubDaemonDto, /export interface DaemonResponse/);
+assert.match(realHubDaemonDto, /export type DaemonEvent/);
+assert.match(realHubDogfoodTransport, /kind: "daemon_request"/);
+assert.match(realHubDogfoodTransport, /reply\.kind !== "daemon_response"/);
+assert.match(realHubDogfoodTransport, /daemonResponseFrames/);
+assert.match(realHubDogfoodTransport, /realHubDogfoodUiTreeSnapshot/);
+assert.match(realHubTerminalDataPlane, /type: "attach"/);
+assert.match(realHubTerminalDataPlane, /type: "drain"/);
+assert.match(realHubTerminalDataPlane, /type: "send_input"/);
+assert.match(dogfoodBridgeScript, /protocol = "botster-hub-daemon-v1"/);
+assert.match(dogfoodBridgeScript, /BOTSTER_HUB_BIN/);
+assert.match(dogfoodBridgeScript, /kind: "daemon_response"/);
 assert.match(protocol, /type HubControlFrameKind/);
 assert.match(protocol, /"action_request"/);
 assert.match(protocol, /"ui_tree_snapshot"/);
@@ -112,8 +142,10 @@ assert.match(pluginSurfaces, /sandbox: "host_rendered" \| "isolated_asset"/);
 assert.match(architecture, /Control-plane hub frames/);
 assert.match(architecture, /Terminal data-plane/);
 assert.match(architecture, /Restty-backed `terminal_view`/);
-assert.match(architecture, /external botster-core/);
+assert.match(architecture, /botster-hub-client/);
 assert.match(readme, /vendored build from the trybotster\/restty fork/);
+assert.match(readme, /VITE_BOTSTER_REAL_HUB_DOGFOOD=1/);
+assert.match(readme, /BOTSTER_HUB_BIN/);
 assert.match(css, /\.workspace-grid/);
 assert.match(css, /\.terminal-panel/);
 assert.match(css, /overflow: hidden/);
@@ -121,6 +153,7 @@ assert.match(vendorReadme, /e9742252312ee616d8f186b697d70349cf329250/);
 assert.doesNotMatch(uiNodes, /terminal_view/);
 assert.doesNotMatch(protocol, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
 assert.doesNotMatch(localDogfoodTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
+assert.doesNotMatch(realHubDogfoodTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
 
 const testCompileDir = await mkdtemp(join(tmpdir(), "botster-terminal-smoke-"));
 const terminalJs = ts.transpileModule(terminal, {
@@ -164,14 +197,27 @@ await Promise.all([
   compileTsModule("botster/actions.ts", join(compiledRoot, "botster/actions.js")),
   compileTsModule("botster/capabilities.ts", join(compiledRoot, "botster/capabilities.js")),
   compileTsModule("botster/client.ts", join(compiledRoot, "botster/client.js")),
+  compileTsModule("botster/dogfoodMode.ts", join(compiledRoot, "botster/dogfoodMode.js")),
   compileTsModule("botster/entities.ts", join(compiledRoot, "botster/entities.js")),
   compileTsModule("botster/localDogfoodTransport.ts", join(compiledRoot, "botster/localDogfoodTransport.js")),
-  compileTsModule("botster/protocol.ts", join(compiledRoot, "botster/protocol.js"))
+  compileTsModule("botster/protocol.ts", join(compiledRoot, "botster/protocol.js")),
+  compileTsModule("botster/realHubDaemonDto.ts", join(compiledRoot, "botster/realHubDaemonDto.js")),
+  compileTsModule("botster/realHubDogfoodTransport.ts", join(compiledRoot, "botster/realHubDogfoodTransport.js")),
+  compileTsModule("botster/realHubTerminalDataPlane.ts", join(compiledRoot, "botster/realHubTerminalDataPlane.js")),
+  compileTsModule("botster/terminal.ts", join(compiledRoot, "botster/terminal.js"))
 ]);
 
 const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
 const { createBotsterWebClient } = requireRuntime("./botster/client.js");
 const { createLocalDogfoodTransport } = requireRuntime("./botster/localDogfoodTransport.js");
+const { createDogfoodRuntimeConfig } = requireRuntime("./botster/dogfoodMode.js");
+const {
+  createHttpDaemonBridgeClient,
+  createRealHubDogfoodTransport,
+  daemonResponseFrames,
+  realHubDogfoodSessionId
+} = requireRuntime("./botster/realHubDogfoodTransport.js");
+const { createRealHubTerminalDataPlane } = requireRuntime("./botster/realHubTerminalDataPlane.js");
 
 const transport = {
   sent: [],
@@ -327,6 +373,177 @@ transport.sent.length = 0;
 await runtime.entities.replayActivePulls();
 await runtime.hub.replaySurfaceSubscriptions();
 assert.deepEqual(transport.sent.map((frame) => frame.kind), ["entity_pull", "surface_subscribe"]);
+
+const bridgeRequests = [];
+const bridge = {
+  async request(request) {
+    bridgeRequests.push(request);
+    if (request.type === "status") {
+      return {
+        kind: "status",
+        status: {
+          lifecycle_state: "running",
+          host_id: "dogfood-host",
+          host_display_name: "Dogfood Hub",
+          schema_version: 1,
+          data_dir_configured: true,
+          core_initialized: true,
+          state_source: "explicit",
+          package_count: 0,
+          enabled_package_count: 0,
+          provider_count: 0,
+          enabled_provider_count: 0,
+          session_count: 1,
+          recovered_sessions: [],
+          stale_sessions: []
+        },
+        sessions: [],
+        events: []
+      };
+    }
+
+    if (request.type === "list_sessions") {
+      return {
+        kind: "sessions",
+        sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }],
+        events: []
+      };
+    }
+
+    if (request.type === "spawn") {
+      return {
+        kind: "spawned",
+        sessions: [{ session_id: request.session_id, lifecycle: "running" }],
+        events: [{ type: "session_lifecycle", session_id: request.session_id, state: "running" }]
+      };
+    }
+
+    if (request.type === "shutdown_session") {
+      return {
+        kind: "operator_error",
+        sessions: [],
+        events: [],
+        error: {
+          code: "session_not_found",
+          request_id: "operator-error-1",
+          operation: "shutdown_session",
+          message: "Session not found"
+        }
+      };
+    }
+
+    if (request.type === "attach" || request.type === "drain") {
+      return {
+        kind: "events",
+        events: [
+          {
+            type: "terminal_output",
+            session_id: request.session_id,
+            subscription_id: "botster-web-dogfood-terminal",
+            data: request.type === "attach" ? "botster-web-dogfood-ready\r\n" : "botster-web-dogfood-echo:ping\r\n"
+          }
+        ]
+      };
+    }
+
+    return { kind: "events", events: [] };
+  }
+};
+
+const fixtureMode = createDogfoodRuntimeConfig({
+  env: {},
+  locationHref: "http://127.0.0.1:5173/?dogfood=real-hub",
+  bridge
+});
+assert.equal(fixtureMode.mode, "fixture");
+assert.equal(fixtureMode.terminalDataPlaneKind, "mock");
+
+const realMode = createDogfoodRuntimeConfig({
+  env: { VITE_BOTSTER_REAL_HUB_DOGFOOD: "1" },
+  locationHref: "http://127.0.0.1:5173/?dogfood=real-hub",
+  bridge
+});
+assert.equal(realMode.mode, "real-hub");
+assert.equal(realMode.terminalDataPlaneKind, "real-hub");
+assert.equal(realMode.terminalDescriptor.sessionId, realHubDogfoodSessionId);
+
+const httpFetchCalls = [];
+const httpBridge = createHttpDaemonBridgeClient({
+  url: "http://127.0.0.1:41739/request",
+  fetchImpl: async (_url, init) => {
+    const envelope = JSON.parse(init.body);
+    httpFetchCalls.push(envelope);
+    return {
+      ok: true,
+      json: async () => ({
+        kind: "daemon_response",
+        request_id: envelope.request_id,
+        payload: { kind: "status", events: [] }
+      })
+    };
+  },
+  requestIdGenerator: deterministicIds("daemon-request")
+});
+await httpBridge.request({ type: "status" });
+assert.deepEqual(httpFetchCalls[0], {
+  kind: "daemon_request",
+  request_id: "daemon-request-1",
+  payload: { type: "status" }
+});
+
+const realTransport = createRealHubDogfoodTransport({ bridge });
+const realFrames = [];
+await realTransport.connect({ client: "botster-web", capabilities: [] }, (frame) => realFrames.push(frame));
+await flushMicrotasks();
+await realTransport.send({ kind: "surface_subscribe", payload: { surface: "botster-web.dogfood.session" } });
+await flushMicrotasks();
+await realTransport.send({
+  kind: "action_request",
+  payload: {
+    request_id: "real-action-1",
+    origin: "ui_node",
+    action: { id: "botster.session.select", target: realHubDogfoodSessionId }
+  }
+});
+await flushMicrotasks();
+assert.equal(bridgeRequests.some((request) => request.type === "status"), true);
+assert.equal(bridgeRequests.some((request) => request.type === "list_sessions"), true);
+assert.equal(bridgeRequests.some((request) => request.type === "spawn" && request.session_id === realHubDogfoodSessionId), true);
+assert.equal(realFrames.some((frame) => frame.kind === "ui_tree_snapshot"), true);
+assert.equal(realFrames.some((frame) => frame.kind === "entity_snapshot"), true);
+assert.equal(realFrames.some((frame) => frame.kind === "entity_patch"), true);
+assert.equal(realFrames.some((frame) => frame.kind === "action_result"), true);
+
+const mappedFrames = daemonResponseFrames({
+  kind: "operator_error",
+  events: [],
+  error: {
+    code: "invalid",
+    request_id: "operator-error-2",
+    operation: "test",
+    message: "Invalid request"
+  }
+}, 10);
+assert.equal(mappedFrames.some((frame) => frame.kind === "operator_error"), true);
+
+const terminalDataPlane = createRealHubTerminalDataPlane({
+  bridge,
+  drainIntervalMs: 10
+});
+const terminalOutput = [];
+const terminalSubscription = terminalDataPlane.subscribeOutput((data) => terminalOutput.push(data));
+await flushMicrotasks();
+await terminalDataPlane.writeInput("ping\n");
+await terminalDataPlane.resize(24, 80);
+await new Promise((resolve) => setTimeout(resolve, 25));
+terminalSubscription.unsubscribe();
+await terminalDataPlane.detach();
+assert.equal(bridgeRequests.some((request) => request.type === "attach"), true);
+assert.equal(bridgeRequests.some((request) => request.type === "send_input" && request.data === "ping\n"), true);
+assert.equal(bridgeRequests.some((request) => request.type === "resize" && request.rows === 24 && request.cols === 80), true);
+assert.equal(bridgeRequests.some((request) => request.type === "drain"), true);
+assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
+assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
 
 const localRuntime = createBotsterWebClient({
   transport: createLocalDogfoodTransport(),
