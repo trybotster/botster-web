@@ -7,6 +7,8 @@ const dogfoodSurface = "botster-web.dogfood.session";
 const sessionFamily = "botster-web.session";
 const draftFamily = "botster-web.session_draft";
 
+// Local dogfood surface grammar mirrors the same temporary core-import gap as
+// uiNodeConformance.ts; replace both with canonical core fixtures when exposed.
 const initialEntityFrames: EntityFrame[] = [
   {
     operation: "entity_snapshot",
@@ -164,7 +166,11 @@ export function createLocalDogfoodTransport(options: LocalDogfoodTransportOption
 
   const emitDogfoodSurface = () => {
     emit({ kind: "ui_tree_snapshot", payload: dogfoodUiTreeSnapshot });
-    for (const frame of initialEntityFrames) {
+  };
+
+  const emitEntitySnapshot = (family: string) => {
+    const frame = initialEntityFrames.find((entityFrame) => entityFrame.operation === "entity_snapshot" && entityFrame.family === family);
+    if (frame) {
       emit({ kind: frame.operation, payload: frame });
     }
   };
@@ -180,6 +186,14 @@ export function createLocalDogfoodTransport(options: LocalDogfoodTransportOption
     async send(frame) {
       if (frame.kind === "surface_subscribe") {
         emitDogfoodSurface();
+        return;
+      }
+
+      if (frame.kind === "entity_pull") {
+        const request = frame.payload as { family?: unknown };
+        if (typeof request.family === "string") {
+          emitEntitySnapshot(request.family);
+        }
         return;
       }
 

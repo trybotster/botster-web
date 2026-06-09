@@ -337,6 +337,8 @@ const localRuntime = createBotsterWebClient({
 await localRuntime.hub.connect({ client: "botster-web", capabilities: [] });
 await localRuntime.hub.subscribe();
 await localRuntime.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/local" });
+await localRuntime.entities.pull({ family: "botster-web.session" });
+await localRuntime.entities.pull({ family: "botster-web.session_draft", id: "draft-1" });
 await flushMicrotasks();
 assert.equal(localRuntime.uiTree.current().surface, "botster-web.dogfood.session");
 assert.deepEqual(localRuntime.entities.list("botster-web.session").map((record) => record.id), ["session-local-1"]);
@@ -389,10 +391,12 @@ try {
   const [
     { ionicUiNodeRendererRegistry },
     { uiNodeConformanceSnapshot, fixtureEntityFrames, fixtureProvenance },
+    { dogfoodUiTreeSnapshot },
     { createInMemoryEntityFrameStore }
   ] = await Promise.all([
     vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
     vite.ssrLoadModule("/src/botster/__fixtures__/uiNodeConformance.ts"),
+    vite.ssrLoadModule("/src/botster/localDogfoodTransport.ts"),
     vite.ssrLoadModule("/src/botster/entities.ts")
   ]);
 
@@ -429,6 +433,70 @@ try {
   assert.match(markup, /data-unsupported-primitive="timeline"/);
   assert.equal(collectedActions.some(({ action }) => action.id === "botster.session.select"), true);
   assert.equal(fixtureProvenance.mirroredFor, "ticket_1780941197_299829");
+
+  const dogfoodStore = createInMemoryEntityFrameStore();
+  dogfoodStore.apply({
+    operation: "entity_snapshot",
+    family: "botster-web.session",
+    records: [
+      {
+        id: "session-local-1",
+        title: "Local dogfood session",
+        status: "running",
+        last_result: "action_request accepted by local dogfood adapter"
+      }
+    ]
+  });
+  dogfoodStore.apply({
+    operation: "entity_snapshot",
+    family: "botster-web.session_draft",
+    records: [
+      {
+        id: "draft-1",
+        fields: [
+          {
+            id: "session_name",
+            label: "Session name",
+            kind: "text_input",
+            value: "",
+            errors: ["Session name is required"]
+          },
+          {
+            id: "target",
+            label: "Target",
+            kind: "text_input",
+            value: "botster-web",
+            errors: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const dogfoodMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(dogfoodUiTreeSnapshot, dogfoodStore, {
+      capabilities: {
+        ionic_shell: true,
+        ui_tree_snapshot: true,
+        entity_frame_store: true,
+        semantic_actions: true,
+        terminal_view_bridge: true,
+        plugin_surface_sandbox: true
+      },
+      localState: {
+        "dogfood.action_status": "Accepted botster.session.select"
+      }
+    })
+  );
+
+  assert.match(dogfoodMarkup, /Session spawn\/attach dogfood/);
+  assert.match(dogfoodMarkup, /Accepted botster\.session\.select/);
+  assert.match(dogfoodMarkup, /Local dogfood session/);
+  assert.match(dogfoodMarkup, /running/);
+  assert.match(dogfoodMarkup, /action_request accepted by local dogfood adapter/);
+  assert.match(dogfoodMarkup, /Session name is required/);
+  assert.match(dogfoodMarkup, /data-action-id="botster\.session\.select"/);
+  assert.match(dogfoodMarkup, /data-action-id="botster\.session\.rename"/);
 } finally {
   await vite.close();
 }
