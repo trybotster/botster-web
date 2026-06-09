@@ -292,6 +292,12 @@ function renderNode(
           data-action-target={readString(action.target, undefined)}
           disabled={readBoolean(action.disabled)}
           key={node.id}
+          onClick={() => {
+            options.dispatchAction?.(
+              { id, target: readString(action.target, undefined), params: readRecord(action.params), label, disabled: readBoolean(action.disabled) },
+              node
+            );
+          }}
         >
           {label}
         </IonButton>
@@ -346,13 +352,29 @@ function renderNode(
     }
     case "form": {
       const submit = readRecord(props.submit);
+      const submitAction = {
+        id: readString(submit.id),
+        target: readString(submit.target, undefined),
+        params: readRecord(submit.params),
+        label: readString(submit.label, "Submit"),
+        disabled: readBoolean(submit.disabled)
+      };
+      options.collectAction?.(submitAction, node);
 
       return (
         <form className="uinode-form" data-ui-node-id={node.id} key={node.id}>
           <h3>{readString(props.title, "Form")}</h3>
           <IonList>{readRecords(props.fields).map((field) => renderField(field))}</IonList>
-          <IonButton data-action-id={readString(submit.id)} data-action-target={readString(submit.target, undefined)} type="button">
-            {readString(submit.label, "Submit")}
+          <IonButton
+            data-action-id={submitAction.id}
+            data-action-target={submitAction.target}
+            disabled={submitAction.disabled}
+            type="button"
+            onClick={() => {
+              options.dispatchAction?.(submitAction, node);
+            }}
+          >
+            {submitAction.label}
           </IonButton>
         </form>
       );
