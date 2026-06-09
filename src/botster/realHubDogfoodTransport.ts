@@ -1,4 +1,5 @@
 import type { ActionBinding, UiActionRequest } from "./actions";
+import { hubStatusFamily } from "./connectionDiagnostics";
 import type { EntityFrame } from "./entities";
 import type { HubControlFrame, HubControlFrameHandler, HubControlTransport } from "./protocol";
 import type {
@@ -18,7 +19,7 @@ export const realHubDogfoodSubscriptionId = "botster-web-dogfood-terminal";
 const dogfoodSurface = "botster-web.dogfood.session";
 const sessionFamily = "botster-web.session";
 const draftFamily = "botster-web.session_draft";
-const statusFamily = "botster-web.hub_status";
+const statusFamily = hubStatusFamily;
 
 export interface DaemonBridgeClient {
   request(request: DaemonRequest): Promise<DaemonResponse>;
@@ -237,6 +238,7 @@ function statusRecord(status: NonNullable<DaemonResponse["status"]>) {
     title: status.host_display_name,
     status: status.lifecycle_state,
     host_id: status.host_id,
+    schema_version: status.schema_version,
     sessions: status.session_count,
     packages: status.package_count,
     state_source: status.state_source

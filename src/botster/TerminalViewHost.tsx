@@ -24,14 +24,17 @@ export interface TerminalViewHostProps {
   bridge?: TerminalViewBridge;
   dataPlane?: TerminalDataPlaneAttachment;
   descriptor?: TerminalViewDescriptor;
+  onDiagnostic?: (error: unknown) => void;
 }
 
 export function TerminalViewHost({
   bridge = defaultBridge,
   dataPlane,
-  descriptor = defaultDescriptor
+  descriptor = defaultDescriptor,
+  onDiagnostic
 }: TerminalViewHostProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
+  const onDiagnosticRef = useRef(onDiagnostic);
   const terminalDataPlane = useMemo(
     () =>
       dataPlane ??
@@ -41,6 +44,10 @@ export function TerminalViewHost({
       ]),
     [dataPlane, descriptor.sessionId]
   );
+
+  useEffect(() => {
+    onDiagnosticRef.current = onDiagnostic;
+  }, [onDiagnostic]);
 
   useEffect(() => {
     const container = terminalRef.current;
@@ -79,6 +86,10 @@ export function TerminalViewHost({
         container.dataset.terminalMount = "failed";
         container.dataset.terminalMountError =
           error instanceof Error ? error.message : String(error);
+        onDiagnosticRef.current?.(error);
+        if (mount) {
+          void bridge.unmount(descriptor, mount);
+        }
       });
 
     return () => {
@@ -95,6 +106,7 @@ export function TerminalViewHost({
       <div className="panel-heading">
         <h2 id="terminal-heading">Terminal renderer</h2>
       </div>
+      <p className="terminal-status">Restty owns terminal rendering; Botster data-plane attachments own terminal bytes.</p>
       <div
         ref={terminalRef}
         className="terminal-view-container"

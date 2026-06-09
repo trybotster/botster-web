@@ -28,9 +28,20 @@ import {
 } from "ionicons/icons";
 
 import { TerminalViewHost } from "./botster/TerminalViewHost";
+import { ConnectionDiagnosticsPanel } from "./botster/ConnectionDiagnosticsPanel";
 import { UiNodeSurface } from "./botster/UiNodeSurface";
 import { botsterWebCapabilities, defaultUiCapabilitySet } from "./botster/capabilities";
 import { botsterWebClientContract, createBotsterWebClient } from "./botster/client";
+import {
+  actionFailureDiagnostic,
+  connectionFailureDiagnostic,
+  initialConnectionDiagnostics,
+  operatorErrorDiagnostic,
+  schemaVersionDiagnosticFromFrame,
+  terminalUnavailableDiagnostic,
+  upsertDiagnostic,
+  type ConnectionDiagnostic
+} from "./botster/connectionDiagnostics";
 import { createDogfoodRuntimeConfig } from "./botster/dogfoodMode";
 import type { ActionBinding } from "./botster/actions";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
@@ -90,10 +101,17 @@ export default function App() {
   const [localState, setLocalState] = useState<Record<string, unknown>>({
     "dogfood.action_status": dogfoodRuntime.statusText
   });
+  const [diagnostics, setDiagnostics] = useState<ConnectionDiagnostic[]>(() =>
+    initialConnectionDiagnostics(dogfoodRuntime.mode, dogfoodRuntime.statusText)
+  );
   const [, setFrameVersion] = useState(0);
+  const recordDiagnostic = useCallback((diagnostic: ConnectionDiagnostic | undefined) => {
+    setDiagnostics((current) => upsertDiagnostic(current, diagnostic));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
+    let controlStreamEstablished = false;
     const unsubscribeTree = runtimeClient.uiTree.subscribe((snapshot) => {
       if (!cancelled) {
         setSurfaceSnapshot(snapshot);
@@ -104,9 +122,18 @@ export default function App() {
         setFrameVersion((version) => version + 1);
       }
     });
+    const unsubscribeDiagnostics = runtimeClient.hub.onFrame((frame) => {
+      if (!cancelled) {
+        recordDiagnostic(operatorErrorDiagnostic(frame));
+        recordDiagnostic(schemaVersionDiagnosticFromFrame(frame));
+      }
+    });
 
     void runtimeClient.hub
       .connect(botsterWebCapabilities)
+      .then(() => {
+        controlStreamEstablished = true;
+      })
       .then(() => runtimeClient.hub.subscribe())
       .then(() => runtimeClient.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/local" }))
       .then(() => runtimeClient.entities.pull({ family: "botster-web.session" }))
@@ -116,6 +143,7 @@ export default function App() {
           setLocalState({
             "dogfood.action_status": error instanceof Error ? error.message : "Local dogfood connection failed"
           });
+          recordDiagnostic(connectionFailureDiagnostic(controlStreamEstablished, error));
         }
       });
 
@@ -123,10 +151,11 @@ export default function App() {
       cancelled = true;
       unsubscribeTree();
       unsubscribeFrames();
+      unsubscribeDiagnostics();
       runtimeClient.actions.rejectPending("botster-web unmounted");
       void runtimeClient.hub.disconnect();
     };
-  }, [runtimeClient]);
+  }, [recordDiagnostic, runtimeClient]);
 
   const dispatchAction = useCallback(
     (action: ActionBinding) => {
@@ -137,9 +166,16 @@ export default function App() {
             ? `Accepted ${action.id}`
             : result.reason ?? `Rejected ${action.id}`
         });
+        recordDiagnostic(actionFailureDiagnostic(action, result));
       });
     },
-    [runtimeClient]
+    [recordDiagnostic, runtimeClient]
+  );
+  const recordTerminalDiagnostic = useCallback(
+    (error: unknown) => {
+      recordDiagnostic(terminalUnavailableDiagnostic(error));
+    },
+    [recordDiagnostic]
   );
 
   return (
@@ -229,19 +265,23 @@ export default function App() {
               </section>
 
               <section className="workspace-grid" aria-label="Renderer workbench">
-                <UiNodeSurface
-                  snapshot={surfaceSnapshot ?? loadingSnapshot}
-                  entities={runtimeClient.entities}
-                  capabilities={{
-                    ...defaultUiCapabilitySet,
-                    isolated_plugin_asset: false
-                  }}
-                  localState={localState}
-                  onAction={dispatchAction}
-                />
+                <div className="dogfood-main">
+                  <ConnectionDiagnosticsPanel diagnostics={diagnostics} />
+                  <UiNodeSurface
+                    snapshot={surfaceSnapshot ?? loadingSnapshot}
+                    entities={runtimeClient.entities}
+                    capabilities={{
+                      ...defaultUiCapabilitySet,
+                      isolated_plugin_asset: false
+                    }}
+                    localState={localState}
+                    onAction={dispatchAction}
+                  />
+                </div>
                 <TerminalViewHost
                   dataPlane={dogfoodRuntime.terminalDataPlane}
                   descriptor={dogfoodRuntime.terminalDescriptor}
+                  onDiagnostic={recordTerminalDiagnostic}
                 />
               </section>
             </main>

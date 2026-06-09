@@ -1,0 +1,157 @@
+import type { ActionBinding, ActionDispatchResult } from "./actions";
+import type { HubControlFrame } from "./protocol";
+
+export const expectedDaemonSchemaVersion = 1;
+export const hubStatusFamily = "botster-web.hub_status";
+
+export type ConnectionDiagnosticSeverity = "info" | "success" | "warning" | "danger";
+
+export interface ConnectionDiagnostic {
+  id: string;
+  title: string;
+  detail: string;
+  severity: ConnectionDiagnosticSeverity;
+  source: "bridge" | "compatibility" | "stream" | "action" | "terminal";
+}
+
+export function initialConnectionDiagnostics(mode: string, statusText: string): ConnectionDiagnostic[] {
+  return [
+    {
+      id: "bridge-mode",
+      title: mode === "real-hub" ? "Real hub bridge selected" : "Fixture transport selected",
+      detail: statusText,
+      severity: mode === "real-hub" ? "info" : "success",
+      source: "bridge"
+    }
+  ];
+}
+
+export function bridgeUnavailableDiagnostic(error: unknown): ConnectionDiagnostic {
+  return {
+    id: "bridge-unavailable",
+    title: "Local hub bridge unavailable",
+    detail: errorMessage(error, "The local dogfood bridge did not answer the control request."),
+    severity: "danger",
+    source: "bridge"
+  };
+}
+
+export function streamDisconnectedDiagnostic(error: unknown): ConnectionDiagnostic {
+  return {
+    id: "stream-disconnected",
+    title: "Control stream disconnected",
+    detail: errorMessage(error, "The local hub stream stopped before the dogfood surface finished loading."),
+    severity: "warning",
+    source: "stream"
+  };
+}
+
+export function connectionFailureDiagnostic(controlStreamEstablished: boolean, error: unknown): ConnectionDiagnostic {
+  return controlStreamEstablished ? streamDisconnectedDiagnostic(error) : bridgeUnavailableDiagnostic(error);
+}
+
+export function terminalUnavailableDiagnostic(error: unknown): ConnectionDiagnostic {
+  return {
+    id: "terminal-unavailable",
+    title: "Terminal stream unavailable",
+    detail: errorMessage(error, "The terminal data plane could not attach to the selected session."),
+    severity: "danger",
+    source: "terminal"
+  };
+}
+
+export function actionFailureDiagnostic(action: ActionBinding, result: ActionDispatchResult): ConnectionDiagnostic | undefined {
+  if (result.accepted) {
+    return undefined;
+  }
+
+  return {
+    id: `action-failure-${action.id}`,
+    title: "Action failed",
+    detail: result.reason ?? `The hub rejected ${action.id}.`,
+    severity: "warning",
+    source: "action"
+  };
+}
+
+export function operatorErrorDiagnostic(frame: HubControlFrame): ConnectionDiagnostic | undefined {
+  if (frame.kind !== "operator_error" || !isRecord(frame.payload)) {
+    return undefined;
+  }
+
+  return {
+    id: `operator-error-${String(frame.payload.operation ?? frame.payload.code ?? "hub")}`,
+    title: "Hub operator error",
+    detail: String(frame.payload.message ?? "The hub returned an operator error."),
+    severity: "danger",
+    source: "action"
+  };
+}
+
+export function schemaVersionDiagnosticFromFrame(frame: HubControlFrame): ConnectionDiagnostic | undefined {
+  if (frame.kind !== "entity_snapshot" || !isRecord(frame.payload)) {
+    return undefined;
+  }
+
+  if (frame.payload.family !== hubStatusFamily || !Array.isArray(frame.payload.records)) {
+    return undefined;
+  }
+
+  const status = frame.payload.records.find((record) => isRecord(record) && record.id === "local-hub");
+  if (!isRecord(status) || typeof status.schema_version !== "number") {
+    return undefined;
+  }
+
+  if (status.schema_version === expectedDaemonSchemaVersion) {
+    return {
+      id: "schema-version",
+      title: "Daemon schema compatible",
+      detail: `Daemon schema ${status.schema_version} matches botster-web.`,
+      severity: "success",
+      source: "compatibility"
+    };
+  }
+
+  return {
+    id: "schema-version",
+    title: "Daemon schema mismatch",
+    detail: `Daemon schema ${status.schema_version} does not match botster-web expected schema ${expectedDaemonSchemaVersion}.`,
+    severity: "danger",
+    source: "compatibility"
+  };
+}
+
+export function upsertDiagnostic(
+  diagnostics: ConnectionDiagnostic[],
+  diagnostic: ConnectionDiagnostic | undefined
+): ConnectionDiagnostic[] {
+  if (!diagnostic) {
+    return diagnostics;
+  }
+
+  // This panel is a running diagnostic log for the current dogfood session.
+  // Retry/recovery flows should add explicit recovery rows instead of silently
+  // deleting the failure evidence that explains the current session history.
+  const existing = diagnostics.findIndex((entry) => entry.id === diagnostic.id);
+  if (existing === -1) {
+    return [...diagnostics, diagnostic];
+  }
+
+  return diagnostics.map((entry, index) => (index === existing ? diagnostic : entry));
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (typeof error === "string" && error) {
+    return error;
+  }
+
+  return fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
