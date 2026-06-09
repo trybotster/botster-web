@@ -31,7 +31,7 @@ import { TerminalViewHost } from "./botster/TerminalViewHost";
 import { UiNodeSurface } from "./botster/UiNodeSurface";
 import { botsterWebCapabilities, defaultUiCapabilitySet } from "./botster/capabilities";
 import { botsterWebClientContract, createBotsterWebClient } from "./botster/client";
-import { createLocalDogfoodTransport } from "./botster/localDogfoodTransport";
+import { createDogfoodRuntimeConfig } from "./botster/dogfoodMode";
 import type { ActionBinding } from "./botster/actions";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
 
@@ -71,16 +71,24 @@ const loadingSnapshot: UiTreeSnapshot = {
 };
 
 export default function App() {
-  const runtimeClient = useMemo(
+  const dogfoodRuntime = useMemo(
     () =>
-      createBotsterWebClient({
-        transport: createLocalDogfoodTransport()
+      createDogfoodRuntimeConfig({
+        env: import.meta.env,
+        locationHref: window.location.href
       }),
     []
   );
+  const runtimeClient = useMemo(
+    () =>
+      createBotsterWebClient({
+        transport: dogfoodRuntime.transport
+      }),
+    [dogfoodRuntime]
+  );
   const [surfaceSnapshot, setSurfaceSnapshot] = useState<UiTreeSnapshot | undefined>(() => runtimeClient.uiTree.current());
   const [localState, setLocalState] = useState<Record<string, unknown>>({
-    "dogfood.action_status": "Waiting for local hub fixture frames"
+    "dogfood.action_status": dogfoodRuntime.statusText
   });
   const [, setFrameVersion] = useState(0);
 
@@ -170,10 +178,13 @@ export default function App() {
               </IonButtons>
               <IonTitle>botster-web</IonTitle>
               <IonButtons slot="end" className="toolbar-status">
-                <IonChip color="medium" outline>
-                  <IonIcon icon={gitBranchOutline} aria-hidden="true" />
-                  <IonLabel>{botsterWebClientContract.label}</IonLabel>
-                </IonChip>
+                  <IonChip color="medium" outline>
+                    <IonIcon icon={gitBranchOutline} aria-hidden="true" />
+                    <IonLabel>{botsterWebClientContract.label}</IonLabel>
+                  </IonChip>
+                  <IonChip color={dogfoodRuntime.mode === "real-hub" ? "success" : "medium"} outline>
+                    <IonLabel>{dogfoodRuntime.mode}</IonLabel>
+                  </IonChip>
                 <IonButton fill="solid" color="primary">
                   <IonIcon slot="start" icon={codeSlashOutline} aria-hidden="true" />
                   Inspect frames
@@ -228,7 +239,10 @@ export default function App() {
                   localState={localState}
                   onAction={dispatchAction}
                 />
-                <TerminalViewHost />
+                <TerminalViewHost
+                  dataPlane={dogfoodRuntime.terminalDataPlane}
+                  descriptor={dogfoodRuntime.terminalDescriptor}
+                />
               </section>
             </main>
           </IonContent>
