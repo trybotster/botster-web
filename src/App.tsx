@@ -26,10 +26,14 @@ import {
   terminalOutline
 } from "ionicons/icons";
 
+import { TerminalViewHost } from "./botster/TerminalViewHost";
 import { UiNodeSurface } from "./botster/UiNodeSurface";
 import { botsterWebClientContract } from "./botster/client";
 import { defaultUiCapabilitySet } from "./botster/capabilities";
-import { uiNodeConformanceSnapshot, fixtureEntityFrames } from "./botster/__fixtures__/uiNodeConformance";
+import {
+  fixtureEntityFrames,
+  uiNodeConformanceSnapshot
+} from "./botster/__fixtures__/uiNodeConformance";
 import { createInMemoryEntityFrameStore } from "./botster/entities";
 
 setupIonicReact({
@@ -116,7 +120,7 @@ export default function App() {
                   </span>
                   <span>
                     <IonBadge color="medium">Restty</IonBadge>
-                    deferred
+                    terminal_view
                   </span>
                 </div>
               </section>
@@ -138,17 +142,7 @@ export default function App() {
                     isolated_plugin_asset: false
                   }}
                 />
-
-                <aside className="terminal-placeholder" aria-labelledby="terminal-heading">
-                  <div className="panel-heading">
-                    <IonIcon icon={terminalOutline} aria-hidden="true" />
-                    <h2 id="terminal-heading">Terminal renderer placeholder</h2>
-                  </div>
-                  <p>
-                    Restty integration is intentionally not mounted in this scaffold.
-                    Future terminal tickets own the renderer lifecycle and destroy path.
-                  </p>
-                </aside>
+                <TerminalViewHost />
               </section>
             </main>
           </IonContent>

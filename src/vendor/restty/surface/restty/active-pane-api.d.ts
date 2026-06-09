@@ -1,0 +1,32 @@
+import type { InputHandler, MouseMode } from "../../input";
+import type { GhosttyTheme } from "../../theme";
+import type { ResttyPaneHandle } from "../restty-pane-handle";
+import type { ResttyPaneSearchUiCloseOptions, ResttyPaneSearchUiOpenOptions } from "../pane-search-ui";
+import type { ResttyManagedPaneSearchUiStyleOptions } from "../pane-app-manager";
+export declare abstract class ResttyActivePaneApi {
+    protected abstract requireActivePaneHandle(): ResttyPaneHandle;
+    isPtyConnected(): boolean;
+    setRenderer(value: "auto" | "webgpu" | "webgl2"): void;
+    setPaused(value: boolean): void;
+    togglePause(): void;
+    setFontSize(value: number): void;
+    applyTheme(theme: GhosttyTheme, sourceLabel?: string): void;
+    resetTheme(): void;
+    sendInput(text: string, source?: string): void;
+    sendKeyInput(text: string, source?: string): void;
+    clearScreen(): void;
+    loadBinarySnapshot(data: Uint8Array): boolean;
+    setMouseMode(value: MouseMode): void;
+    getMouseStatus(): ReturnType<InputHandler["getMouseStatus"]>;
+    copySelectionToClipboard(): Promise<boolean>;
+    pasteFromClipboard(): Promise<boolean>;
+    openSearch(options?: ResttyPaneSearchUiOpenOptions): void;
+    closeSearch(options?: ResttyPaneSearchUiCloseOptions): void;
+    toggleSearch(options?: ResttyPaneSearchUiOpenOptions & ResttyPaneSearchUiCloseOptions): void;
+    isSearchOpen(): boolean;
+    getSearchUiStyleOptions(): Readonly<Required<ResttyManagedPaneSearchUiStyleOptions>>;
+    setSearchUiStyleOptions(options: ResttyManagedPaneSearchUiStyleOptions): void;
+    dumpAtlasForCodepoint(cp: number): void;
+    updateSize(force?: boolean): void;
+    getBackend(): string;
+}

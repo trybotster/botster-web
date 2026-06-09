@@ -1,13 +1,31 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { strict as assert } from "node:assert";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import ts from "typescript";
 import { createServer } from "vite";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const [main, app, client, protocol, entities, uiNodes, actions, terminal, pluginSurfaces, architecture, readme] = await Promise.all([
+const [
+  main,
+  app,
+  client,
+  protocol,
+  entities,
+  uiNodes,
+  actions,
+  terminal,
+  resttyRenderer,
+  terminalHost,
+  terminalSmokeFixture,
+  pluginSurfaces,
+  architecture,
+  readme,
+  css,
+  vendorReadme
+] = await Promise.all([
   readFile(new URL("./main.tsx", import.meta.url), "utf8"),
   readFile(new URL("./App.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/client.ts", import.meta.url), "utf8"),
@@ -16,20 +34,29 @@ const [main, app, client, protocol, entities, uiNodes, actions, terminal, plugin
   readFile(new URL("./botster/uiNodes.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/actions.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/terminal.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/resttyRenderer.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/TerminalViewHost.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./botster/terminalSmokeFixture.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/pluginSurfaces.ts", import.meta.url), "utf8"),
   readFile(new URL("../docs/architecture.md", import.meta.url), "utf8"),
-  readFile(new URL("../README.md", import.meta.url), "utf8")
+  readFile(new URL("../README.md", import.meta.url), "utf8"),
+  readFile(new URL("./theme/app.css", import.meta.url), "utf8"),
+  readFile(new URL("./vendor/restty/README.md", import.meta.url), "utf8")
 ]);
 
 assert.match(main, /import App from "\.\/App"/);
 assert.match(main, /<App \/>/);
 assert.match(app, /import \{ UiNodeSurface \} from "\.\/botster\/UiNodeSurface"/);
+assert.match(app, /import \{ TerminalViewHost \} from "\.\/botster\/TerminalViewHost"/);
 assert.match(app, /import \{ botsterWebClientContract \} from "\.\/botster\/client"/);
-assert.match(app, /import \{ uiNodeConformanceSnapshot, fixtureEntityFrames \} from "\.\/botster\/__fixtures__\/uiNodeConformance"/);
+assert.match(app, /fixtureEntityFrames/);
+assert.match(app, /uiNodeConformanceSnapshot/);
 assert.match(app, /createInMemoryEntityFrameStore\(fixtureEntityFrames\)/);
 assert.match(app, /botsterWebClientContract\.label/);
 assert.match(app, /botsterWebClientContract\.seams\.map/);
 assert.match(app, /<UiNodeSurface/);
+assert.match(app, /<TerminalViewHost \/>/);
+assert.doesNotMatch(app, /terminal-placeholder/);
 assert.match(client, /export const botsterWebClientContract/);
 assert.match(client, /createBotsterWebClient/);
 assert.match(client, /"terminal_view bridge"/);
@@ -40,16 +67,79 @@ assert.match(protocol, /"entity_snapshot"/);
 assert.match(entities, /class InMemoryEntityFrameStore/);
 assert.match(entities, /createInMemoryEntityFrameStore/);
 assert.match(entities, /replayActivePulls/);
-assert.match(uiNodes, /render\(snapshot: UiTreeSnapshot, entities: EntityFrameStore, options\?: UiNodeRenderOptions\)/);
+assert.match(
+  uiNodes,
+  /render\(snapshot: UiTreeSnapshot, entities: EntityFrameStore, options\?: UiNodeRenderOptions\)/
+);
 assert.match(actions, /class CorrelatedActionDispatcher/);
 assert.match(actions, /botster\.session\.select/);
 assert.doesNotMatch(actions, /click|submit|change/);
 assert.match(terminal, /renderer: "restty"/);
+assert.match(terminal, /class DefaultTerminalViewBridge/);
+assert.match(terminal, /TerminalViewMount/);
+assert.match(terminal, /attach\(/);
+assert.match(terminal, /detach\(/);
+assert.match(terminal, /writeInput\(/);
+assert.match(terminal, /subscribeOutput/);
+assert.match(terminal, /renderer\.destroy\(\)/);
+assert.match(resttyRenderer, /from "\.\.\/vendor\/restty\/xterm\.js"/);
+assert.match(resttyRenderer, /new ResttyTerminal/);
+assert.match(resttyRenderer, /this\.terminal\.dispose\(\)/);
+assert.match(terminalHost, /ResizeObserver/);
+assert.match(terminalHost, /bridge\.attach/);
+assert.match(terminalHost, /bridge\.unmount/);
+assert.match(terminalHost, /terminalMount/);
+assert.match(terminalSmokeFixture, /runTerminalViewBridgeSmokeFixture/);
+assert.match(terminalSmokeFixture, /emitInput\("ls\\n"\)/);
+assert.match(terminalSmokeFixture, /dataPlane\.emitOutput\("ok\\r\\n"\)/);
+assert.match(terminalSmokeFixture, /bridge\.resize\(descriptor, 24, 80\)/);
+assert.match(terminalSmokeFixture, /bridge\.unmount\(descriptor\)/);
 assert.match(pluginSurfaces, /sandbox: "host_rendered" \| "isolated_asset"/);
 assert.match(architecture, /Control-plane hub frames/);
 assert.match(architecture, /Terminal data-plane/);
+assert.match(architecture, /Restty-backed `terminal_view`/);
 assert.match(architecture, /external botster-core/);
-assert.match(readme, /Future Rails or cloud hosting/);
+assert.match(readme, /vendored build from the trybotster\/restty fork/);
+assert.match(css, /\.workspace-grid/);
+assert.match(css, /\.terminal-panel/);
+assert.match(css, /overflow: hidden/);
+assert.match(vendorReadme, /e9742252312ee616d8f186b697d70349cf329250/);
+assert.doesNotMatch(uiNodes, /terminal_view/);
+assert.doesNotMatch(protocol, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
+
+const testCompileDir = await mkdtemp(join(tmpdir(), "botster-terminal-smoke-"));
+const terminalJs = ts.transpileModule(terminal, {
+  compilerOptions: {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2022
+  }
+}).outputText;
+const terminalSmokeFixtureJs = ts
+  .transpileModule(terminalSmokeFixture, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022
+    }
+  })
+  .outputText.replace('from "./terminal";', 'from "./terminal.mjs";');
+
+await Promise.all([
+  writeFile(join(testCompileDir, "terminal.mjs"), terminalJs),
+  writeFile(join(testCompileDir, "terminalSmokeFixture.mjs"), terminalSmokeFixtureJs)
+]);
+
+const { runTerminalViewBridgeSmokeFixture } = await import(
+  pathToFileURL(join(testCompileDir, "terminalSmokeFixture.mjs"))
+);
+const smoke = await runTerminalViewBridgeSmokeFixture();
+
+assert.deepEqual(smoke.dataPlane.inputs, ["ls\n"]);
+assert.deepEqual(smoke.firstRenderer.writes, ["ready\r\n", "ok\r\n"]);
+assert.deepEqual(smoke.firstRenderer.resizes, [{ rows: 24, columns: 80 }]);
+assert.ok(smoke.secondRenderer);
+assert.ok(smoke.lifecycle.indexOf("destroy") < smoke.lifecycle.lastIndexOf("create"));
+assert.doesNotMatch(smoke.firstRenderer.writes.join(""), /stale/);
+assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /stale/);
 
 const compiledRoot = join(tmpdir(), "botster-web-runtime-test");
 await rm(compiledRoot, { recursive: true, force: true });
@@ -213,7 +303,8 @@ const vite = await createServer({
   configFile: false,
   resolve: {
     alias: {
-      "@ionic/react": new URL("./botster/__fixtures__/IonicReactSsrMock.tsx", import.meta.url).pathname
+      "@ionic/react": new URL("./botster/__fixtures__/IonicReactSsrMock.tsx", import.meta.url)
+        .pathname
     }
   },
   optimizeDeps: {
@@ -225,7 +316,11 @@ const vite = await createServer({
 });
 
 try {
-  const [{ ionicUiNodeRendererRegistry }, { uiNodeConformanceSnapshot, fixtureEntityFrames, fixtureProvenance }, { createInMemoryEntityFrameStore }] = await Promise.all([
+  const [
+    { ionicUiNodeRendererRegistry },
+    { uiNodeConformanceSnapshot, fixtureEntityFrames, fixtureProvenance },
+    { createInMemoryEntityFrameStore }
+  ] = await Promise.all([
     vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
     vite.ssrLoadModule("/src/botster/__fixtures__/uiNodeConformance.ts"),
     vite.ssrLoadModule("/src/botster/entities.ts")
