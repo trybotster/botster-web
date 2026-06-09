@@ -74,7 +74,7 @@ Fixture mode is the default because it is deterministic and cannot touch a real 
 
 ## Real Hub Dogfood Bridge
 
-Real-hub mode is opt-in and uses an isolated same-device bridge. The browser sends verbatim `botster-hub-client` daemon DTO payloads (`DaemonRequest`) to the bridge, and the bridge returns verbatim daemon DTO payloads (`DaemonResponse`). The HTTP envelope only carries transport metadata; Botster semantics stay in the daemon DTO payload.
+Real-hub mode is opt-in and uses an isolated same-device bridge. The browser sends verbatim `botster-hub-client` daemon DTO payloads (`DaemonRequest`) to the bridge, and the bridge returns verbatim daemon DTO payloads (`DaemonResponse`). The HTTP envelope only carries transport metadata; Botster semantics stay in the daemon DTO payload. Terminal output uses a held `/terminal` SSE stream so daemon attach and drain run on one persistent daemon socket until the browser disconnects.
 
 Start the local bridge in one terminal:
 
@@ -100,10 +100,12 @@ Expected proof markers:
 
 - The toolbar mode chip reads `real-hub`.
 - The status list shows the isolated daemon host returned by `DaemonRequest::Status`.
-- `Spawn isolated session` sends `DaemonRequest::Spawn`, updates entity-backed session rows, and the terminal drains `botster-web-dogfood-ready`.
-- Typing into the terminal sends `DaemonRequest::SendInput`; the sample shell echoes `botster-web-dogfood-echo:<input>`.
+- `Spawn isolated session` sends `DaemonRequest::Spawn` and updates entity-backed session rows.
+- A compatible current hub build should stream `botster-web-dogfood-ready` through the terminal SSE path; typing in the terminal sends `DaemonRequest::SendInput` while the held stream receives live terminal output.
 - `Trigger invalid action` sends a deliberately invalid daemon request and surfaces an operator error through action/error state.
 - Closing the bridge sends `DaemonRequest::DaemonShutdown` and removes the temporary data directory unless `BOTSTER_WEB_DOGFOOD_KEEP_DATA=1` is set.
+
+Known limitation: the control-plane round trip (status/list/spawn/input/resize/operator-error/teardown) has been verified end-to-end through this bridge. Terminal output depends on the hub's streaming attach path; older local hub binaries may not emit the ready marker even though control-plane daemon DTOs succeed.
 
 The bridge is a dev/test harness, not the production browser transport. Production browser parity over WebRTC remains outside this repo. The harness uses an explicit temporary data directory and neutral ids; it must not use or mutate the user's real Botster home state.
 

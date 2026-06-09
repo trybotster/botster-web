@@ -97,12 +97,14 @@ assert.match(realHubDogfoodTransport, /kind: "daemon_request"/);
 assert.match(realHubDogfoodTransport, /reply\.kind !== "daemon_response"/);
 assert.match(realHubDogfoodTransport, /daemonResponseFrames/);
 assert.match(realHubDogfoodTransport, /realHubDogfoodUiTreeSnapshot/);
-assert.match(realHubTerminalDataPlane, /type: "attach"/);
-assert.match(realHubTerminalDataPlane, /type: "drain"/);
+assert.match(realHubTerminalDataPlane, /streamTerminal/);
 assert.match(realHubTerminalDataPlane, /type: "send_input"/);
+assert.match(realHubTerminalDataPlane, /type: "detach"/);
 assert.match(dogfoodBridgeScript, /protocol = "botster-hub-daemon-v1"/);
 assert.match(dogfoodBridgeScript, /BOTSTER_HUB_BIN/);
 assert.match(dogfoodBridgeScript, /kind: "daemon_response"/);
+assert.match(dogfoodBridgeScript, /text\/event-stream/);
+assert.match(dogfoodBridgeScript, /sendSseEvent\(response, "daemon_event"/);
 assert.match(protocol, /type HubControlFrameKind/);
 assert.match(protocol, /"action_request"/);
 assert.match(protocol, /"ui_tree_snapshot"/);
@@ -375,6 +377,7 @@ await runtime.hub.replaySurfaceSubscriptions();
 assert.deepEqual(transport.sent.map((frame) => frame.kind), ["entity_pull", "surface_subscribe"]);
 
 const bridgeRequests = [];
+const bridgeTerminalStreams = [];
 const bridge = {
   async request(request) {
     bridgeRequests.push(request);
@@ -447,6 +450,20 @@ const bridge = {
     }
 
     return { kind: "events", events: [] };
+  },
+  streamTerminal(sessionId, subscriptionId, onEvent) {
+    bridgeTerminalStreams.push({ sessionId, subscriptionId });
+    onEvent({
+      type: "terminal_output",
+      session_id: sessionId,
+      subscription_id: subscriptionId,
+      data: "botster-web-dogfood-ready\r\n"
+    });
+    return {
+      unsubscribe() {
+        bridgeTerminalStreams.push({ sessionId, subscriptionId, unsubscribed: true });
+      }
+    };
   }
 };
 
@@ -527,22 +544,20 @@ const mappedFrames = daemonResponseFrames({
 assert.equal(mappedFrames.some((frame) => frame.kind === "operator_error"), true);
 
 const terminalDataPlane = createRealHubTerminalDataPlane({
-  bridge,
-  drainIntervalMs: 10
+  bridge
 });
 const terminalOutput = [];
 const terminalSubscription = terminalDataPlane.subscribeOutput((data) => terminalOutput.push(data));
 await flushMicrotasks();
 await terminalDataPlane.writeInput("ping\n");
 await terminalDataPlane.resize(24, 80);
-await new Promise((resolve) => setTimeout(resolve, 25));
 terminalSubscription.unsubscribe();
 await terminalDataPlane.detach();
-assert.equal(bridgeRequests.some((request) => request.type === "attach"), true);
+assert.equal(bridgeTerminalStreams.some((stream) => stream.sessionId === realHubDogfoodSessionId), true);
 assert.equal(bridgeRequests.some((request) => request.type === "send_input" && request.data === "ping\n"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "resize" && request.rows === 24 && request.cols === 80), true);
-assert.equal(bridgeRequests.some((request) => request.type === "drain"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
+assert.equal(bridgeTerminalStreams.some((stream) => stream.unsubscribed === true), true);
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
 
 const localRuntime = createBotsterWebClient({

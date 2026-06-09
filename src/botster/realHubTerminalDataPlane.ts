@@ -1,29 +1,25 @@
 import type { TerminalDataPlaneAttachment, TerminalOutput, TerminalSubscription } from "./terminal";
 import type { DaemonBridgeClient } from "./realHubDogfoodTransport";
 import { realHubDogfoodSessionId, realHubDogfoodSubscriptionId } from "./realHubDogfoodTransport";
-import type { DaemonEvent, DaemonResponse } from "./realHubDaemonDto";
+import type { DaemonEvent } from "./realHubDaemonDto";
 
 export interface RealHubTerminalDataPlaneOptions {
   bridge: DaemonBridgeClient;
   sessionId?: string;
   subscriptionId?: string;
-  drainIntervalMs?: number;
 }
 
 export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   readonly sessionId: string;
 
   private readonly subscriptionId: string;
-  private readonly drainIntervalMs: number;
   private readonly listeners = new Set<(data: TerminalOutput) => void>();
-  private poller: ReturnType<typeof setInterval> | undefined;
-  private attached = false;
+  private streamSubscription: { unsubscribe(): void } | undefined;
   private detached = false;
 
   constructor(private readonly options: RealHubTerminalDataPlaneOptions) {
     this.sessionId = options.sessionId ?? realHubDogfoodSessionId;
     this.subscriptionId = options.subscriptionId ?? realHubDogfoodSubscriptionId;
-    this.drainIntervalMs = options.drainIntervalMs ?? 250;
   }
 
   async writeInput(data: string): Promise<void> {
@@ -56,56 +52,31 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   async detach(): Promise<void> {
     this.detached = true;
-    if (this.poller) {
-      clearInterval(this.poller);
-      this.poller = undefined;
-    }
+    this.streamSubscription?.unsubscribe();
+    this.streamSubscription = undefined;
     this.listeners.clear();
 
-    if (this.attached) {
-      await this.options.bridge.request({
-        type: "detach",
-        session_id: this.sessionId,
-        subscription_id: this.subscriptionId
-      });
-    }
+    await this.options.bridge.request({
+      type: "detach",
+      session_id: this.sessionId,
+      subscription_id: this.subscriptionId
+    });
   }
 
-  private async ensureAttached(): Promise<void> {
-    if (this.attached || this.detached) {
+  private ensureAttached(): void {
+    if (this.streamSubscription || this.detached) {
       return;
     }
 
-    this.attached = true;
-    this.emitTerminalEvents(
-      await this.options.bridge.request({
-        type: "attach",
-        session_id: this.sessionId,
-        subscription_id: this.subscriptionId
-      })
-    );
-    this.poller = setInterval(() => {
-      void this.drain();
-    }, this.drainIntervalMs);
-  }
-
-  private async drain(): Promise<void> {
-    if (this.detached || this.listeners.size === 0) {
-      return;
+    if (!this.options.bridge.streamTerminal) {
+      throw new Error("real hub bridge does not expose a streaming terminal attach");
     }
 
-    this.emitTerminalEvents(
-      await this.options.bridge.request({
-        type: "drain",
-        session_id: this.sessionId
-      })
+    this.streamSubscription = this.options.bridge.streamTerminal(
+      this.sessionId,
+      this.subscriptionId,
+      (event) => this.emitTerminalEvent(event)
     );
-  }
-
-  private emitTerminalEvents(response: DaemonResponse): void {
-    for (const event of response.events ?? []) {
-      this.emitTerminalEvent(event);
-    }
   }
 
   private emitTerminalEvent(event: DaemonEvent): void {

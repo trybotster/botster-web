@@ -22,16 +22,23 @@ const statusFamily = "botster-web.hub_status";
 
 export interface DaemonBridgeClient {
   request(request: DaemonRequest): Promise<DaemonResponse>;
+  streamTerminal?(
+    sessionId: string,
+    subscriptionId: string,
+    onEvent: (event: DaemonEvent) => void
+  ): { unsubscribe(): void };
 }
 
 export interface HttpDaemonBridgeClientOptions {
   url: string;
+  terminalUrl?: string;
   fetchImpl?: typeof fetch;
   requestIdGenerator?: () => string;
 }
 
 export function createHttpDaemonBridgeClient({
   url,
+  terminalUrl = url.replace(/\/request$/, "/terminal"),
   fetchImpl = fetch,
   requestIdGenerator = createRequestIdGenerator("daemon-request")
 }: HttpDaemonBridgeClientOptions): DaemonBridgeClient {
@@ -58,6 +65,21 @@ export function createHttpDaemonBridgeClient({
       }
 
       return reply.payload;
+    },
+    streamTerminal(sessionId, subscriptionId, onEvent) {
+      const terminalStreamUrl = new URL(terminalUrl, window.location.href);
+      terminalStreamUrl.searchParams.set("session_id", sessionId);
+      terminalStreamUrl.searchParams.set("subscription_id", subscriptionId);
+      const source = new EventSource(terminalStreamUrl.toString());
+      source.addEventListener("daemon_event", (event) => {
+        onEvent(JSON.parse(event.data) as DaemonEvent);
+      });
+
+      return {
+        unsubscribe: () => {
+          source.close();
+        }
+      };
     }
   };
 }

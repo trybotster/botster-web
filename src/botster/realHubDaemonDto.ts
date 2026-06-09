@@ -1,3 +1,6 @@
+// Source of truth: botster-hub-client/src/lib.rs DaemonRequest,
+// DaemonResponse, and DaemonEvent serde JSON shapes.
+// Keep this browser-side structural subset aligned with that crate.
 export type DaemonRequest =
   | { type: "status" }
   | { type: "list_sessions" }

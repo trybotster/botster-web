@@ -61,6 +61,11 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "GET" && request.url?.startsWith("/terminal")) {
+    await streamTerminal(request, response);
+    return;
+  }
+
   if (request.method !== "POST" || request.url !== "/request") {
     writeJson(response, 404, { error: "not_found" });
     return;
@@ -128,6 +133,92 @@ process.once("SIGTERM", () => {
 });
 
 async function sendDaemonRequest(path, daemonRequest) {
+  const socket = await openDaemonSocket(path);
+  socket.write(`${JSON.stringify(daemonRequest)}\n`);
+  const reply = JSON.parse(await readSocketLine(socket));
+  socket.end();
+  return reply;
+}
+
+async function streamTerminal(request, response) {
+  const url = new URL(request.url, `http://${host}:${port}`);
+  const sessionId = url.searchParams.get("session_id");
+  const subscriptionId = url.searchParams.get("subscription_id");
+
+  if (!sessionId || !subscriptionId) {
+    writeJson(response, 400, { error: "missing terminal stream identifiers" });
+    return;
+  }
+
+  response.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-store",
+    connection: "keep-alive"
+  });
+
+  let socket;
+  let closed = false;
+  let draining = false;
+
+  const cleanup = async () => {
+    if (closed) return;
+    closed = true;
+    if (socket) {
+      try {
+        socket.write(`${JSON.stringify({ type: "detach", session_id: sessionId, subscription_id: subscriptionId })}\n`);
+        await readSocketLine(socket);
+      } catch {
+        // Best effort cleanup; daemon also detaches subscriptions on socket disconnect.
+      }
+      socket.end();
+    }
+  };
+
+  request.on("close", () => {
+    void cleanup();
+  });
+
+  try {
+    socket = await openDaemonSocket(socketPath);
+    socket.write(`${JSON.stringify({ type: "attach", session_id: sessionId, subscription_id: subscriptionId })}\n`);
+    emitDaemonEvents(response, JSON.parse(await readSocketLine(socket)).events ?? []);
+
+    const drain = async () => {
+      if (closed || draining) return;
+      draining = true;
+      try {
+        socket.write(`${JSON.stringify({ type: "drain", session_id: sessionId })}\n`);
+        const reply = JSON.parse(await readSocketLine(socket));
+        emitDaemonEvents(response, reply.events ?? []);
+        if ((reply.events ?? []).some((event) => event.type === "process_exit")) {
+          await cleanup();
+          response.end();
+        }
+      } catch (error) {
+        sendSseEvent(response, "daemon_error", {
+          message: error instanceof Error ? error.message : "terminal stream drain failed"
+        });
+        await cleanup();
+        response.end();
+      } finally {
+        draining = false;
+        if (!closed) {
+          setTimeout(drain, 25);
+        }
+      }
+    };
+
+    void drain();
+  } catch (error) {
+    sendSseEvent(response, "daemon_error", {
+      message: error instanceof Error ? error.message : "terminal stream attach failed"
+    });
+    await cleanup();
+    response.end();
+  }
+}
+
+async function openDaemonSocket(path) {
   const socket = connect(path);
   await once(socket, "connect");
   socket.setEncoding("utf8");
@@ -135,13 +226,22 @@ async function sendDaemonRequest(path, daemonRequest) {
   socket.write(`${JSON.stringify({ protocol })}\n`);
   const hello = JSON.parse(await readSocketLine(socket));
   if (hello.protocol !== protocol) {
+    socket.end();
     throw new Error("daemon hello protocol mismatch");
   }
 
-  socket.write(`${JSON.stringify(daemonRequest)}\n`);
-  const reply = JSON.parse(await readSocketLine(socket));
-  socket.end();
-  return reply;
+  return socket;
+}
+
+function emitDaemonEvents(response, events) {
+  for (const event of events) {
+    sendSseEvent(response, "daemon_event", event);
+  }
+}
+
+function sendSseEvent(response, event, data) {
+  response.write(`event: ${event}\n`);
+  response.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 async function readSocketLine(socket) {
