@@ -17,6 +17,7 @@ import {
   IonToolbar,
   setupIonicReact
 } from "@ionic/react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   codeSlashOutline,
   cubeOutline,
@@ -28,13 +29,11 @@ import {
 
 import { TerminalViewHost } from "./botster/TerminalViewHost";
 import { UiNodeSurface } from "./botster/UiNodeSurface";
-import { botsterWebClientContract } from "./botster/client";
-import { defaultUiCapabilitySet } from "./botster/capabilities";
-import {
-  fixtureEntityFrames,
-  uiNodeConformanceSnapshot
-} from "./botster/__fixtures__/uiNodeConformance";
-import { createInMemoryEntityFrameStore } from "./botster/entities";
+import { botsterWebCapabilities, defaultUiCapabilitySet } from "./botster/capabilities";
+import { botsterWebClientContract, createBotsterWebClient } from "./botster/client";
+import { createLocalDogfoodTransport } from "./botster/localDogfoodTransport";
+import type { ActionBinding } from "./botster/actions";
+import type { UiTreeSnapshot } from "./botster/uiNodes";
 
 setupIonicReact({
   mode: "md"
@@ -47,9 +46,94 @@ const navigationItems = [
   { label: "Terminal", icon: terminalOutline, active: false }
 ];
 
-const fixtureEntityStore = createInMemoryEntityFrameStore(fixtureEntityFrames);
+const loadingSnapshot: UiTreeSnapshot = {
+  kind: "ui_tree_snapshot",
+  surface: "botster-web.dogfood.loading",
+  version: "local-loading-v1",
+  root: {
+    id: "dogfood-loading-root",
+    primitive: "section",
+    slots: {
+      children: [
+        {
+          id: "dogfood-loading-heading",
+          primitive: "heading",
+          props: { level: 2, text: "Waiting for local surface" }
+        },
+        {
+          id: "dogfood-loading-copy",
+          primitive: "text",
+          props: { text: "The local session surface is loading." }
+        }
+      ]
+    }
+  }
+};
 
 export default function App() {
+  const runtimeClient = useMemo(
+    () =>
+      createBotsterWebClient({
+        transport: createLocalDogfoodTransport()
+      }),
+    []
+  );
+  const [surfaceSnapshot, setSurfaceSnapshot] = useState<UiTreeSnapshot | undefined>(() => runtimeClient.uiTree.current());
+  const [localState, setLocalState] = useState<Record<string, unknown>>({
+    "dogfood.action_status": "Waiting for local hub fixture frames"
+  });
+  const [, setFrameVersion] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const unsubscribeTree = runtimeClient.uiTree.subscribe((snapshot) => {
+      if (!cancelled) {
+        setSurfaceSnapshot(snapshot);
+      }
+    });
+    const unsubscribeFrames = runtimeClient.hub.onFrame(() => {
+      if (!cancelled) {
+        setFrameVersion((version) => version + 1);
+      }
+    });
+
+    void runtimeClient.hub
+      .connect(botsterWebCapabilities)
+      .then(() => runtimeClient.hub.subscribe())
+      .then(() => runtimeClient.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/local" }))
+      .then(() => runtimeClient.entities.pull({ family: "botster-web.session" }))
+      .then(() => runtimeClient.entities.pull({ family: "botster-web.session_draft", id: "draft-1" }))
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setLocalState({
+            "dogfood.action_status": error instanceof Error ? error.message : "Local dogfood connection failed"
+          });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      unsubscribeTree();
+      unsubscribeFrames();
+      runtimeClient.actions.rejectPending("botster-web unmounted");
+      void runtimeClient.hub.disconnect();
+    };
+  }, [runtimeClient]);
+
+  const dispatchAction = useCallback(
+    (action: ActionBinding) => {
+      setLocalState({ "dogfood.action_status": `Dispatching ${action.id}` });
+      void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
+        setLocalState({
+          "dogfood.action_status": result.accepted
+            ? `Accepted ${action.id}`
+            : result.reason ?? `Rejected ${action.id}`
+        });
+      });
+    },
+    [runtimeClient]
+  );
+
   return (
     <IonApp>
       <IonSplitPane contentId="main-content" when="lg">
@@ -105,8 +189,8 @@ export default function App() {
                   <p className="eyebrow">First-party client</p>
                   <h1 id="overview-heading">Ionic React renderer shell</h1>
                   <p>
-                    Botster hub/core own runtime truth. This client renders structured
-                    UiNode, action, and entity frames.
+                    Open the local session surface, run a session action, and inspect
+                    the terminal bridge from one workbench.
                   </p>
                 </div>
                 <div className="status-strip" aria-label="Shell contract status">
@@ -135,12 +219,14 @@ export default function App() {
 
               <section className="workspace-grid" aria-label="Renderer workbench">
                 <UiNodeSurface
-                  snapshot={uiNodeConformanceSnapshot}
-                  entities={fixtureEntityStore}
+                  snapshot={surfaceSnapshot ?? loadingSnapshot}
+                  entities={runtimeClient.entities}
                   capabilities={{
                     ...defaultUiCapabilitySet,
                     isolated_plugin_asset: false
                   }}
+                  localState={localState}
+                  onAction={dispatchAction}
                 />
                 <TerminalViewHost />
               </section>

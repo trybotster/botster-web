@@ -12,6 +12,7 @@ const [
   main,
   app,
   client,
+  localDogfoodTransport,
   protocol,
   entities,
   uiNodes,
@@ -29,6 +30,7 @@ const [
   readFile(new URL("./main.tsx", import.meta.url), "utf8"),
   readFile(new URL("./App.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/client.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/localDogfoodTransport.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/protocol.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/entities.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/uiNodes.ts", import.meta.url), "utf8"),
@@ -48,18 +50,29 @@ assert.match(main, /import App from "\.\/App"/);
 assert.match(main, /<App \/>/);
 assert.match(app, /import \{ UiNodeSurface \} from "\.\/botster\/UiNodeSurface"/);
 assert.match(app, /import \{ TerminalViewHost \} from "\.\/botster\/TerminalViewHost"/);
-assert.match(app, /import \{ botsterWebClientContract \} from "\.\/botster\/client"/);
-assert.match(app, /fixtureEntityFrames/);
-assert.match(app, /uiNodeConformanceSnapshot/);
-assert.match(app, /createInMemoryEntityFrameStore\(fixtureEntityFrames\)/);
+assert.match(app, /createBotsterWebClient/);
+assert.match(app, /createLocalDogfoodTransport/);
+assert.match(app, /runtimeClient\.hub\.subscribeSurface/);
+assert.match(app, /runtimeClient\.entities\.pull/);
+assert.match(app, /surfaceSnapshot \?\? loadingSnapshot/);
+assert.doesNotMatch(app, /fixtureEntityFrames/);
+assert.doesNotMatch(app, /uiNodeConformanceSnapshot/);
+assert.doesNotMatch(app, /createInMemoryEntityFrameStore\(fixtureEntityFrames\)/);
 assert.match(app, /botsterWebClientContract\.label/);
 assert.match(app, /botsterWebClientContract\.seams\.map/);
 assert.match(app, /<UiNodeSurface/);
+assert.match(app, /onAction=\{dispatchAction\}/);
 assert.match(app, /<TerminalViewHost \/>/);
 assert.doesNotMatch(app, /terminal-placeholder/);
 assert.match(client, /export const botsterWebClientContract/);
 assert.match(client, /createBotsterWebClient/);
+assert.match(client, /InMemoryUiTreeSnapshotStore/);
+assert.match(client, /frame\.kind === "ui_tree_snapshot"/);
 assert.match(client, /"terminal_view bridge"/);
+assert.match(localDogfoodTransport, /createLocalDogfoodTransport/);
+assert.match(localDogfoodTransport, /dogfoodUiTreeSnapshot/);
+assert.match(localDogfoodTransport, /"botster\.session\.select"/);
+assert.match(localDogfoodTransport, /"botster\.session\.rename"/);
 assert.match(protocol, /type HubControlFrameKind/);
 assert.match(protocol, /"action_request"/);
 assert.match(protocol, /"ui_tree_snapshot"/);
@@ -74,6 +87,7 @@ assert.match(
 assert.match(actions, /class CorrelatedActionDispatcher/);
 assert.match(actions, /botster\.session\.select/);
 assert.doesNotMatch(actions, /click|submit|change/);
+assert.match(uiNodes, /dispatchAction\?: \(action: ActionBinding, node: UiNode\) => void/);
 assert.match(terminal, /renderer: "restty"/);
 assert.match(terminal, /class DefaultTerminalViewBridge/);
 assert.match(terminal, /TerminalViewMount/);
@@ -106,6 +120,7 @@ assert.match(css, /overflow: hidden/);
 assert.match(vendorReadme, /e9742252312ee616d8f186b697d70349cf329250/);
 assert.doesNotMatch(uiNodes, /terminal_view/);
 assert.doesNotMatch(protocol, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
+assert.doesNotMatch(localDogfoodTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
 
 const testCompileDir = await mkdtemp(join(tmpdir(), "botster-terminal-smoke-"));
 const terminalJs = ts.transpileModule(terminal, {
@@ -150,11 +165,13 @@ await Promise.all([
   compileTsModule("botster/capabilities.ts", join(compiledRoot, "botster/capabilities.js")),
   compileTsModule("botster/client.ts", join(compiledRoot, "botster/client.js")),
   compileTsModule("botster/entities.ts", join(compiledRoot, "botster/entities.js")),
+  compileTsModule("botster/localDogfoodTransport.ts", join(compiledRoot, "botster/localDogfoodTransport.js")),
   compileTsModule("botster/protocol.ts", join(compiledRoot, "botster/protocol.js"))
 ]);
 
 const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
 const { createBotsterWebClient } = requireRuntime("./botster/client.js");
+const { createLocalDogfoodTransport } = requireRuntime("./botster/localDogfoodTransport.js");
 
 const transport = {
   sent: [],
@@ -182,6 +199,18 @@ await runtime.hub.connect({ client: "botster-web", capabilities: [] });
 await runtime.hub.subscribe();
 assert.equal(runtime.entities.list("session").length, 0);
 assert.equal(transport.sent.filter((frame) => frame.kind === "entity_pull").length, 0);
+assert.equal(runtime.uiTree.current(), undefined);
+
+transport.inject({
+  kind: "ui_tree_snapshot",
+  payload: {
+    kind: "ui_tree_snapshot",
+    surface: "runtime-test",
+    version: "test-v1",
+    root: { id: "runtime-root", primitive: "text", props: { text: "Runtime snapshot" } }
+  }
+});
+assert.equal(runtime.uiTree.current().surface, "runtime-test");
 
 transport.inject({
   kind: "entity_snapshot",
@@ -299,6 +328,47 @@ await runtime.entities.replayActivePulls();
 await runtime.hub.replaySurfaceSubscriptions();
 assert.deepEqual(transport.sent.map((frame) => frame.kind), ["entity_pull", "surface_subscribe"]);
 
+const localRuntime = createBotsterWebClient({
+  transport: createLocalDogfoodTransport(),
+  actionIdGenerator: deterministicIds("dogfood-action"),
+  actionTimeoutMs: 50
+});
+
+await localRuntime.hub.connect({ client: "botster-web", capabilities: [] });
+await localRuntime.hub.subscribe();
+await localRuntime.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/local" });
+await flushMicrotasks();
+assert.equal(localRuntime.uiTree.current().surface, "botster-web.dogfood.session");
+assert.deepEqual(localRuntime.entities.list("botster-web.session").map((record) => record.id), ["session-local-1"]);
+
+const localSuccess = localRuntime.actions.dispatch({
+  origin: "ui_node",
+  action: { id: "botster.session.select", target: "session-local-1" }
+});
+await flushMicrotasks();
+assert.deepEqual(await localSuccess, {
+  accepted: true,
+  request_id: "dogfood-action-1",
+  result: { session_id: "session-local-1", state: "running" },
+  reason: undefined
+});
+assert.equal(localRuntime.entities.get("botster-web.session", "session-local-1").status, "running");
+
+const localValidation = localRuntime.actions.dispatch({
+  origin: "ui_node",
+  action: { id: "botster.session.rename", target: "session-local-1", params: { draft_id: "draft-1" } }
+});
+await flushMicrotasks();
+assert.deepEqual(await localValidation, {
+  accepted: false,
+  request_id: "dogfood-action-2",
+  result: undefined,
+  reason: "Session name is required"
+});
+assert.deepEqual(localRuntime.entities.get("botster-web.session_draft", "draft-1").fields[0].errors, [
+  "Session name is required"
+]);
+
 const vite = await createServer({
   configFile: false,
   resolve: {
@@ -381,4 +451,9 @@ async function compileTsModule(sourcePath, outputPath) {
 function deterministicIds(prefix) {
   let next = 1;
   return () => `${prefix}-${next++}`;
+}
+
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
 }

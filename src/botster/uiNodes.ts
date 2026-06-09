@@ -35,4 +35,5 @@ export interface UiNodeRenderOptions {
   capabilities?: UiCapabilitySet;
   localState?: Record<string, unknown>;
   collectAction?: (action: ActionBinding, node: UiNode) => void;
+  dispatchAction?: (action: ActionBinding, node: UiNode) => void;
 }

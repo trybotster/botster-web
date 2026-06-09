@@ -10,6 +10,7 @@ import {
   type HubProtocolIngress
 } from "./protocol";
 import type { TerminalViewBridge } from "./terminal";
+import type { UiTreeSnapshot } from "./uiNodes";
 import type { UiNodeRendererRegistry } from "./uiNodes";
 
 export interface BotsterWebClientAdapters {
@@ -30,7 +31,38 @@ export interface BotsterWebClientOptions {
 export interface BotsterWebRuntimeClient {
   hub: HubConnection;
   entities: EntityFrameStore;
+  uiTree: UiTreeSnapshotStore;
   actions: ActionDispatcher;
+}
+
+export interface UiTreeSnapshotStore {
+  apply(snapshot: UiTreeSnapshot): void;
+  current(): UiTreeSnapshot | undefined;
+  subscribe(listener: (snapshot: UiTreeSnapshot) => void): () => void;
+}
+
+export class InMemoryUiTreeSnapshotStore implements UiTreeSnapshotStore {
+  private snapshot: UiTreeSnapshot | undefined;
+  private readonly listeners = new Set<(snapshot: UiTreeSnapshot) => void>();
+
+  apply(snapshot: UiTreeSnapshot): void {
+    this.snapshot = snapshot;
+    for (const listener of this.listeners) {
+      listener(snapshot);
+    }
+  }
+
+  current(): UiTreeSnapshot | undefined {
+    return this.snapshot ? { ...this.snapshot } : undefined;
+  }
+
+  subscribe(listener: (snapshot: UiTreeSnapshot) => void): () => void {
+    this.listeners.add(listener);
+
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
 }
 
 export function createBotsterWebClient(options: BotsterWebClientOptions): BotsterWebRuntimeClient {
@@ -42,6 +74,7 @@ export function createBotsterWebClient(options: BotsterWebClientOptions): Botste
         payload: request
       })
   });
+  const uiTree = new InMemoryUiTreeSnapshotStore();
   const actions = createActionDispatcher({
     idGenerator: options.actionIdGenerator,
     timeoutMs: options.actionTimeoutMs,
@@ -55,6 +88,8 @@ export function createBotsterWebClient(options: BotsterWebClientOptions): Botste
   hub.onFrame((frame) => {
     if (isEntityFrame(frame)) {
       entities.apply(frame.payload as EntityFrame);
+    } else if (frame.kind === "ui_tree_snapshot") {
+      uiTree.apply(frame.payload as UiTreeSnapshot);
     } else if (frame.kind === "action_result") {
       actions.receiveResult(frame.payload as Parameters<ActionDispatcher["receiveResult"]>[0]);
     }
@@ -63,6 +98,7 @@ export function createBotsterWebClient(options: BotsterWebClientOptions): Botste
   return {
     hub,
     entities,
+    uiTree,
     actions
   };
 }

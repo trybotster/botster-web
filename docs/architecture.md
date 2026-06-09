@@ -4,7 +4,8 @@
 
 ## Client Layers
 
-- `src/botster/client.ts` composes the browser-side contract, exports `botsterWebClientContract`, and provides `createBotsterWebClient()` for injected transport tests and future route-owned hub connection wiring.
+- `src/botster/client.ts` composes the browser-side contract, exports `botsterWebClientContract`, and provides `createBotsterWebClient()` for runtime UiNode/entity/action ingestion through an injected hub transport.
+- `src/botster/localDogfoodTransport.ts` is the local-only dogfood adapter used by the production app while live browser-to-daemon transport remains external to this repo. It emits `ui_tree_snapshot` plus entity frames, accepts semantic `action_request` frames, and returns success or validation-error `action_result` frames.
 - `src/botster/protocol.ts` names control-plane hub frames, lifecycle ingress, injected transport, and replayable surface subscription placeholders. These are adapter placeholders, not a replacement for the external botster-core wire contract.
 - `src/botster/entities.ts` implements the in-memory entity frame store seam. It is pull-hydrated by view demand, with active pulls replayed after reconnect.
 - `src/botster/uiNodes.ts` names the `ui_tree_snapshot` renderer registry seam. Renderers receive structural UI snapshots plus live entity stores.
@@ -18,7 +19,7 @@ Control-plane hub frames enter through `protocol.ts`. This scaffold names the ca
 
 Entity stores are the canonical read-model channel. Subscribe establishes the transport only; opened routes and surface bindings request the route registry, UI tree snapshots, and entity families they need. Reconnect handling replays the mounted view's active pulls and surface subscriptions instead of assuming subscribe globally hydrates state. Full `entity_snapshot` frames reset the family baseline even when their sequence is lower than a prior delta; delta frames obey the family sequence gate.
 
-The current client factory still requires an injected transport. Live WebRTC, WebSocket, ActionCable, cloud, Rails, and local daemon socket implementations are intentionally deferred.
+The current client factory still requires an injected transport. The production app uses `createLocalDogfoodTransport()` to prove the runtime path without inventing a live daemon adapter. Live WebRTC, WebSocket, ActionCable, cloud, Rails, and local daemon socket implementations are intentionally deferred.
 
 Terminal data-plane traffic stays out of the hub control-plane envelope. PTY bytes, scrollback, snapshots, and terminal egress belong to session/client actor data-plane adapters in Botster core. The web seam declares a Restty-backed `terminal_view` bridge plus a mock subscription-style data-plane adapter for this scaffold; it does not add terminal byte frames to `HubControlFrame`.
 
@@ -28,7 +29,7 @@ The Restty bridge is mounted by the production app path through `src/botster/Ter
 
 Ionic owns the app shell, navigation, toolbar, and layout containers. Botster UI primitives remain cross-client semantic nodes rendered by browser-specific adapters, with TUI parity preserved by shared primitive and action vocabulary.
 
-`ui_tree_snapshot` carries structure. Plugin-owned dynamic model state remains in entity frames and can be referenced by `ui.bind` or `ui.bind_list`-style bindings. The renderer must thread entity stores into composite rendering rather than treating UI snapshots as data payloads.
+`ui_tree_snapshot` carries structure. Plugin-owned dynamic model state remains in entity frames and can be referenced by `ui.bind` or `ui.bind_list`-style bindings. The renderer threads entity stores into composite rendering rather than treating UI snapshots as data payloads. `src/App.tsx` now constructs the runtime client, subscribes to `botster-web.dogfood.session`, renders the received snapshot with `UiNodeSurface`, and dispatches semantic UiNode actions back through the client.
 
 Actions are semantic Botster events such as `botster.session.select` and `botster.session.stop`. React clicks or keyboard handlers can trigger those actions, but DOM event names are not the shared action contract.
 
@@ -44,6 +45,6 @@ The client can be served as a static web app by local Botster tooling. Future Ra
 
 ## Assumptions
 
-- This ticket is intentionally scaffold-only for live transport, but the runtime skeleton is executable through an injected transport.
+- This ticket is intentionally scaffold-only for live transport, but the production runtime path is executable through the local injected dogfood transport.
 - The exact botster-core exported schema is external to this repo, so payload fields remain opaque here.
 - Future integration work must reconcile these TypeScript seams against the canonical botster-core and wire-v2 contracts before adding live transport behavior.
