@@ -257,12 +257,14 @@ const { createRealHubTerminalDataPlane } = requireRuntime("./botster/realHubTerm
 const {
   actionFailureDiagnostic,
   bridgeUnavailableDiagnostic,
+  compatibilityDiagnosticsFromFrame,
   connectionFailureDiagnostic,
   hubStatusFamily,
   operatorErrorDiagnostic,
   schemaVersionDiagnosticFromFrame,
   streamDisconnectedDiagnostic,
-  terminalUnavailableDiagnostic
+  terminalUnavailableDiagnostic,
+  upsertDiagnostic
 } = requireRuntime("./botster/connectionDiagnostics.js");
 
 const transport = {
@@ -430,6 +432,18 @@ const bridge = {
         kind: "status",
         status: {
           lifecycle_state: "running",
+          compatibility: {
+            protocol: "botster-hub-daemon-v1",
+            protocol_version: 1,
+            features: [
+              "sessions",
+              "terminal_streaming",
+              "resize",
+              "plugin_surface_render",
+              "plugin_surface_action"
+            ],
+            conformance_fixture_revision: 1
+          },
           host_id: "dogfood-host",
           host_display_name: "Dogfood Hub",
           schema_version: 1,
@@ -593,7 +607,30 @@ assert.deepEqual(realRuntime.entities.list("botster-web.session").map((record) =
 ]);
 assert.equal(realRuntime.entities.get("botster-web.session", "session-local-1"), undefined);
 assert.equal(realRuntime.entities.get("botster-web.hub_status", "local-hub").host_id, "dogfood-host");
+assert.deepEqual(realRuntime.entities.get("botster-web.hub_status", "local-hub").compatibility.features, [
+  "sessions",
+  "terminal_streaming",
+  "resize",
+  "plugin_surface_render",
+  "plugin_surface_action"
+]);
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).target, "isolated-local-hub");
+
+const runtimeDiagnostics = [];
+const diagnosticRuntime = createBotsterWebClient({
+  transport: realMode.transport,
+  actionIdGenerator: deterministicIds("diagnostic-runtime-action"),
+  actionTimeoutMs: 50
+});
+diagnosticRuntime.hub.onFrame((frame) => {
+  const schemaDiagnostic = schemaVersionDiagnosticFromFrame(frame);
+  if (schemaDiagnostic) runtimeDiagnostics.push(schemaDiagnostic);
+  runtimeDiagnostics.push(...compatibilityDiagnosticsFromFrame(frame));
+});
+await diagnosticRuntime.hub.connect({ client: "botster-web", capabilities: [] });
+await flushMicrotasks();
+assert.equal(runtimeDiagnostics.some((diagnostic) => diagnostic.id === "schema-version"), true);
+assert.equal(runtimeDiagnostics.some((diagnostic) => diagnostic.id === "hub-compatibility"), true);
 
 const mappedFrames = daemonResponseFrames({
   kind: "operator_error",
@@ -628,6 +665,103 @@ const matchingSchemaDiagnostic = schemaVersionDiagnosticFromFrame({
   }
 });
 assert.equal(matchingSchemaDiagnostic.title, "Daemon schema compatible");
+
+const descriptorUnavailableDiagnostic = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [{ id: "local-hub", schema_version: 1 }]
+  }
+})[0];
+assert.equal(descriptorUnavailableDiagnostic.title, "Hub compatibility descriptor unavailable");
+assert.equal(descriptorUnavailableDiagnostic.id, "hub-compatibility");
+
+const protocolMismatchDiagnostic = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [
+      {
+        id: "local-hub",
+        schema_version: 1,
+        compatibility: {
+          protocol: "other-protocol",
+          protocol_version: 1,
+          features: [
+            "sessions",
+            "terminal_streaming",
+            "resize",
+            "plugin_surface_render",
+            "plugin_surface_action"
+          ],
+          conformance_fixture_revision: 1
+        }
+      }
+    ]
+  }
+})[0];
+assert.equal(protocolMismatchDiagnostic.title, "Hub protocol mismatch");
+
+const missingCapabilityDiagnostic = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [
+      {
+        id: "local-hub",
+        schema_version: 1,
+        compatibility: {
+          protocol: "botster-hub-daemon-v1",
+          protocol_version: 1,
+          features: ["sessions"],
+          conformance_fixture_revision: 1
+        }
+      }
+    ]
+  }
+})[0];
+assert.equal(missingCapabilityDiagnostic.title, "Hub capability missing");
+assert.match(missingCapabilityDiagnostic.detail, /terminal_streaming/);
+assert.equal(missingCapabilityDiagnostic.id, "hub-compatibility");
+
+const compatibleDescriptorDiagnostic = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [
+      {
+        id: "local-hub",
+        schema_version: 1,
+        compatibility: {
+          protocol: "botster-hub-daemon-v1",
+          protocol_version: 1,
+          features: [
+            "sessions",
+            "terminal_streaming",
+            "resize",
+            "plugin_surface_render",
+            "plugin_surface_action"
+          ],
+          conformance_fixture_revision: 1
+        }
+      }
+    ]
+  }
+})[0];
+const transitionedCompatibilityDiagnostics = [
+  descriptorUnavailableDiagnostic,
+  compatibleDescriptorDiagnostic
+].reduce((diagnostics, diagnostic) => upsertDiagnostic(diagnostics, diagnostic), []);
+assert.equal(transitionedCompatibilityDiagnostics.length, 1);
+assert.equal(transitionedCompatibilityDiagnostics[0].title, "Hub compatibility descriptor compatible");
+
+const absentHubDiagnosticIds = [bridgeUnavailableDiagnostic(new Error("connect ECONNREFUSED"))].map(({ id }) => id);
+assert.deepEqual(absentHubDiagnosticIds, ["bridge-unavailable"]);
+assert.equal(absentHubDiagnosticIds.includes("hub-compatibility"), false);
 
 assert.equal(bridgeUnavailableDiagnostic(new Error("connect ECONNREFUSED")).title, "Local hub bridge unavailable");
 assert.equal(streamDisconnectedDiagnostic(new Error("SSE closed")).title, "Control stream disconnected");
@@ -858,6 +992,10 @@ try {
       diagnostics: [
         bridgeUnavailableDiagnostic(new Error("connect ECONNREFUSED")),
         mismatchedSchemaDiagnostic,
+        ...runtimeDiagnostics,
+        descriptorUnavailableDiagnostic,
+        protocolMismatchDiagnostic,
+        missingCapabilityDiagnostic,
         streamDisconnectedDiagnostic(new Error("SSE closed")),
         actionFailureDiagnostic(
           { id: "botster.session.rename", target: "missing-real-hub-session" },
@@ -870,10 +1008,23 @@ try {
   assert.match(diagnosticsMarkup, /Connection diagnostics/);
   assert.match(diagnosticsMarkup, /Local hub bridge unavailable/);
   assert.match(diagnosticsMarkup, /Daemon schema mismatch/);
+  assert.match(diagnosticsMarkup, /Hub compatibility descriptor compatible/);
+  assert.match(diagnosticsMarkup, /Hub compatibility descriptor unavailable/);
+  assert.match(diagnosticsMarkup, /Hub protocol mismatch/);
+  assert.match(diagnosticsMarkup, /Hub capability missing/);
   assert.match(diagnosticsMarkup, /Control stream disconnected/);
   assert.match(diagnosticsMarkup, /Action failed/);
   assert.match(diagnosticsMarkup, /Terminal stream unavailable/);
   assert.match(diagnosticsMarkup, /data-diagnostic-id="terminal-unavailable"/);
+
+  const transitionedDiagnosticsMarkup = renderToStaticMarkup(
+    createElement(ConnectionDiagnosticsPanel, {
+      diagnostics: transitionedCompatibilityDiagnostics
+    })
+  );
+  assert.match(transitionedDiagnosticsMarkup, /Hub compatibility descriptor compatible/);
+  assert.doesNotMatch(transitionedDiagnosticsMarkup, /Hub compatibility descriptor unavailable/);
+  assert.equal((transitionedDiagnosticsMarkup.match(/data-diagnostic-id="hub-compatibility"/g) ?? []).length, 1);
 } finally {
   await vite.close();
 }

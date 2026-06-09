@@ -34,6 +34,7 @@ import { botsterWebCapabilities, defaultUiCapabilitySet } from "./botster/capabi
 import { botsterWebClientContract, createBotsterWebClient } from "./botster/client";
 import {
   actionFailureDiagnostic,
+  compatibilityDiagnosticsFromFrame,
   connectionFailureDiagnostic,
   initialConnectionDiagnostics,
   operatorErrorDiagnostic,
@@ -108,6 +109,9 @@ export default function App() {
   const recordDiagnostic = useCallback((diagnostic: ConnectionDiagnostic | undefined) => {
     setDiagnostics((current) => upsertDiagnostic(current, diagnostic));
   }, []);
+  const recordDiagnostics = useCallback((nextDiagnostics: ConnectionDiagnostic[]) => {
+    setDiagnostics((current) => nextDiagnostics.reduce(upsertDiagnostic, current));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -126,6 +130,7 @@ export default function App() {
       if (!cancelled) {
         recordDiagnostic(operatorErrorDiagnostic(frame));
         recordDiagnostic(schemaVersionDiagnosticFromFrame(frame));
+        recordDiagnostics(compatibilityDiagnosticsFromFrame(frame));
       }
     });
 
@@ -155,7 +160,7 @@ export default function App() {
       runtimeClient.actions.rejectPending("botster-web unmounted");
       void runtimeClient.hub.disconnect();
     };
-  }, [recordDiagnostic, runtimeClient]);
+  }, [recordDiagnostic, recordDiagnostics, runtimeClient]);
 
   const dispatchAction = useCallback(
     (action: ActionBinding) => {
