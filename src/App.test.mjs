@@ -148,14 +148,25 @@ assert.match(architecture, /botster-hub-client/);
 assert.match(readme, /vendored build from the trybotster\/restty fork/);
 assert.match(readme, /VITE_BOTSTER_REAL_HUB_DOGFOOD=1/);
 assert.match(readme, /BOTSTER_HUB_BIN/);
-assert.match(css, /\.workspace-grid/);
-assert.match(css, /\.terminal-panel/);
-assert.match(css, /overflow: hidden/);
 assert.match(vendorReadme, /e9742252312ee616d8f186b697d70349cf329250/);
 assert.doesNotMatch(uiNodes, /terminal_view/);
 assert.doesNotMatch(protocol, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
 assert.doesNotMatch(localDogfoodTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
 assert.doesNotMatch(realHubDogfoodTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
+
+const desktopCss = removeCssAtRules(css);
+const baseWorkspaceGridRule = extractTopLevelCssRule(desktopCss, ".workspace-grid");
+assert.match(baseWorkspaceGridRule, /display:\s*grid/);
+assert.match(baseWorkspaceGridRule, /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+340px/);
+assert.doesNotMatch(baseWorkspaceGridRule, /grid-template-columns:\s*1fr\s*;/);
+
+const terminalPanelRule = extractTopLevelCssRule(desktopCss, ".terminal-panel");
+assert.match(terminalPanelRule, /max-height:\s*calc\(100vh\s*-\s*210px\)/);
+assert.match(terminalPanelRule, /overflow:\s*hidden/);
+
+const mobileCss = extractCssAtRule(css, "@media (max-width: 860px)");
+assert.match(extractTopLevelCssRule(mobileCss, ".workspace-grid"), /grid-template-columns:\s*1fr\s*;/);
+assert.match(extractTopLevelCssRule(mobileCss, ".terminal-panel"), /max-height:\s*none/);
 
 const testCompileDir = await mkdtemp(join(tmpdir(), "botster-terminal-smoke-"));
 const terminalJs = ts.transpileModule(terminal, {
@@ -483,6 +494,8 @@ const realMode = createDogfoodRuntimeConfig({
 assert.equal(realMode.mode, "real-hub");
 assert.equal(realMode.terminalDataPlaneKind, "real-hub");
 assert.equal(realMode.terminalDescriptor.sessionId, realHubDogfoodSessionId);
+assert.notEqual(realMode.terminalDescriptor.sessionId, "terminal_view_smoke_session");
+assert.notEqual(realMode.terminalDataPlane.constructor.name, "MockTerminalDataPlane");
 
 const httpFetchCalls = [];
 const httpBridge = createHttpDaemonBridgeClient({
@@ -531,6 +544,24 @@ assert.equal(realFrames.some((frame) => frame.kind === "entity_snapshot"), true)
 assert.equal(realFrames.some((frame) => frame.kind === "entity_patch"), true);
 assert.equal(realFrames.some((frame) => frame.kind === "action_result"), true);
 
+const realRuntime = createBotsterWebClient({
+  transport: realMode.transport,
+  actionIdGenerator: deterministicIds("real-runtime-action"),
+  actionTimeoutMs: 50
+});
+await realRuntime.hub.connect({ client: "botster-web", capabilities: [] });
+await realRuntime.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/real-hub" });
+await realRuntime.entities.pull({ family: "botster-web.hub_status" });
+await realRuntime.entities.pull({ family: "botster-web.session" });
+await flushMicrotasks();
+assert.equal(realRuntime.uiTree.current().surface, "botster-web.dogfood.session");
+assert.deepEqual(realRuntime.entities.list("botster-web.session").map((record) => record.id), [
+  realHubDogfoodSessionId
+]);
+assert.equal(realRuntime.entities.get("botster-web.session", "session-local-1"), undefined);
+assert.equal(realRuntime.entities.get("botster-web.hub_status", "local-hub").host_id, "dogfood-host");
+assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).target, "isolated-local-hub");
+
 const mappedFrames = daemonResponseFrames({
   kind: "operator_error",
   events: [],
@@ -551,13 +582,19 @@ const terminalSubscription = terminalDataPlane.subscribeOutput((data) => termina
 await flushMicrotasks();
 await terminalDataPlane.writeInput("ping\n");
 await terminalDataPlane.resize(24, 80);
+const detachRequestsBeforeListenerClose = bridgeRequests.filter((request) => request.type === "detach").length;
 terminalSubscription.unsubscribe();
+assert.equal(
+  bridgeRequests.filter((request) => request.type === "detach").length,
+  detachRequestsBeforeListenerClose
+);
+assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
 await terminalDataPlane.detach();
 assert.equal(bridgeTerminalStreams.some((stream) => stream.sessionId === realHubDogfoodSessionId), true);
 assert.equal(bridgeRequests.some((request) => request.type === "send_input" && request.data === "ping\n"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "resize" && request.rows === 24 && request.cols === 80), true);
 assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
-assert.equal(bridgeTerminalStreams.some((stream) => stream.unsubscribed === true), true);
+assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
 
 const localRuntime = createBotsterWebClient({
@@ -756,4 +793,73 @@ function deterministicIds(prefix) {
 async function flushMicrotasks() {
   await Promise.resolve();
   await Promise.resolve();
+}
+
+function extractTopLevelCssRule(source, selector) {
+  const ruleBodies = [];
+  const rulePattern = /([^{}@]+)\{([^{}]*)\}/g;
+  let match;
+  while ((match = rulePattern.exec(source)) !== null) {
+    const selectors = match[1]
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    if (selectors.includes(selector)) {
+      ruleBodies.push(match[2]);
+    }
+  }
+
+  assert.ok(ruleBodies.length > 0, `expected CSS rule for ${selector}`);
+  return ruleBodies.join("\n");
+}
+
+function extractCssAtRule(source, atRule) {
+  const atRuleStart = source.indexOf(atRule);
+  assert.notEqual(atRuleStart, -1, `expected CSS at-rule ${atRule}`);
+  const blockStart = source.indexOf("{", atRuleStart);
+  assert.notEqual(blockStart, -1, `expected CSS block for ${atRule}`);
+
+  let depth = 0;
+  for (let index = blockStart; index < source.length; index += 1) {
+    if (source[index] === "{") {
+      depth += 1;
+    } else if (source[index] === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(blockStart + 1, index);
+      }
+    }
+  }
+
+  assert.fail(`expected closing brace for ${atRule}`);
+}
+
+function removeCssAtRules(source) {
+  let remaining = source;
+  let atRuleStart = remaining.indexOf("@");
+
+  while (atRuleStart !== -1) {
+    const blockStart = remaining.indexOf("{", atRuleStart);
+    assert.notEqual(blockStart, -1, "expected CSS at-rule block");
+
+    let depth = 0;
+    let blockEnd = -1;
+    for (let index = blockStart; index < remaining.length; index += 1) {
+      if (remaining[index] === "{") {
+        depth += 1;
+      } else if (remaining[index] === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          blockEnd = index + 1;
+          break;
+        }
+      }
+    }
+
+    assert.notEqual(blockEnd, -1, "expected closing brace for CSS at-rule");
+    remaining = `${remaining.slice(0, atRuleStart)}${remaining.slice(blockEnd)}`;
+    atRuleStart = remaining.indexOf("@");
+  }
+
+  return remaining;
 }

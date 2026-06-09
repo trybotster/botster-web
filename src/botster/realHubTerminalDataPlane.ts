@@ -37,6 +37,9 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return {
       unsubscribe: () => {
         this.listeners.delete(listener);
+        if (this.listeners.size === 0) {
+          this.closeStream();
+        }
       }
     };
   }
@@ -52,8 +55,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   async detach(): Promise<void> {
     this.detached = true;
-    this.streamSubscription?.unsubscribe();
-    this.streamSubscription = undefined;
+    this.closeStream();
     this.listeners.clear();
 
     await this.options.bridge.request({
@@ -77,6 +79,11 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
       this.subscriptionId,
       (event) => this.emitTerminalEvent(event)
     );
+  }
+
+  private closeStream(): void {
+    this.streamSubscription?.unsubscribe();
+    this.streamSubscription = undefined;
   }
 
   private emitTerminalEvent(event: DaemonEvent): void {
