@@ -3,6 +3,7 @@ import type { HubControlFrame } from "./protocol";
 
 export const expectedDaemonSchemaVersion = 1;
 export const hubStatusFamily = "botster-web.hub_status";
+export const hubCompatibilityDiagnosticId = "hub-compatibility";
 export const expectedDaemonProtocol = "botster-hub-daemon-v1";
 export const minimumDaemonProtocolVersion = 1;
 export const minimumConformanceFixtureRevision = 1;
@@ -133,7 +134,7 @@ export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): Conne
   if (!isRecord(compatibility)) {
     return [
       {
-        id: "compatibility-descriptor-unavailable",
+        id: hubCompatibilityDiagnosticId,
         title: "Hub compatibility descriptor unavailable",
         detail: "DaemonStatus.compatibility was not returned by the local hub status response.",
         severity: "warning",
@@ -145,7 +146,7 @@ export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): Conne
   if (compatibility.protocol !== expectedDaemonProtocol) {
     return [
       {
-        id: "hub-protocol-mismatch",
+        id: hubCompatibilityDiagnosticId,
         title: "Hub protocol mismatch",
         detail: `Running hub protocol ${String(compatibility.protocol)} does not match ${expectedDaemonProtocol}.`,
         severity: "danger",
@@ -160,7 +161,7 @@ export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): Conne
   ) {
     return [
       {
-        id: "hub-protocol-version-mismatch",
+        id: hubCompatibilityDiagnosticId,
         title: "Hub protocol version mismatch",
         detail: `Running hub protocol version ${String(compatibility.protocol_version)} is below required version ${minimumDaemonProtocolVersion}.`,
         severity: "danger",
@@ -175,7 +176,7 @@ export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): Conne
   ) {
     return [
       {
-        id: "hub-conformance-fixture-mismatch",
+        id: hubCompatibilityDiagnosticId,
         title: "Hub conformance fixture mismatch",
         detail: `Running hub conformance fixture revision ${String(compatibility.conformance_fixture_revision)} is below required revision ${minimumConformanceFixtureRevision}.`,
         severity: "danger",
@@ -191,7 +192,7 @@ export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): Conne
   if (missingFeatures.length > 0) {
     return [
       {
-        id: "hub-missing-required-capability",
+        id: hubCompatibilityDiagnosticId,
         title: "Hub capability missing",
         detail: `Running hub does not advertise required feature(s): ${missingFeatures.join(", ")}.`,
         severity: "danger",
@@ -202,7 +203,7 @@ export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): Conne
 
   return [
     {
-      id: "hub-compatibility-descriptor",
+      id: hubCompatibilityDiagnosticId,
       title: "Hub compatibility descriptor compatible",
       detail: `Protocol ${compatibility.protocol} v${compatibility.protocol_version} advertises required features.`,
       severity: "success",
