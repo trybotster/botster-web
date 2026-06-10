@@ -287,6 +287,7 @@ function sessionRecord(session: DaemonSession) {
 
 function packageRecord(packageRecord: DaemonPackage) {
   const capabilities = packageRecord.requested_capabilities ?? [];
+  const runnableEntrypoints = packageRecord.runnable_entrypoints ?? [];
   const capabilitySummary =
     capabilities.length === 0
       ? "No requested capabilities"
@@ -294,6 +295,9 @@ function packageRecord(packageRecord: DaemonPackage) {
   const providerProfile = packageRecord.provider_profile_admitted
     ? "Provider profile admitted"
     : "No provider profile admission";
+  const entrypointSummary = entrypointListSummary(runnableEntrypoints);
+  const entrypointProcessSummary = entrypointProcessListSummary(runnableEntrypoints);
+  const entrypointDiagnosticsSummary = entrypointDiagnosticsListSummary(runnableEntrypoints);
 
   return {
     id: packageRecord.package_name,
@@ -303,12 +307,55 @@ function packageRecord(packageRecord: DaemonPackage) {
     classification: packageRecord.classification,
     capability_summary: capabilitySummary,
     compatibility_summary: providerProfile,
+    runnable_entrypoints: runnableEntrypoints,
+    entrypoint_count: runnableEntrypoints.length,
+    entrypoint_summary: entrypointSummary,
+    entrypoint_process_summary: entrypointProcessSummary,
+    entrypoint_diagnostics_summary: entrypointDiagnosticsSummary,
     diagnostics_summary: `${packageRecord.classification} package is ${packageRecord.state}`
   };
 }
 
 function capabilityLabel(capability: { surface: string; scope?: string | null }) {
   return capability.scope ? `${capability.surface}:${capability.scope}` : capability.surface;
+}
+
+function entrypointListSummary(entrypoints: DaemonPackage["runnable_entrypoints"]) {
+  if (entrypoints.length === 0) {
+    return "No runnable entrypoints";
+  }
+
+  return entrypoints
+    .map((entrypoint) => `${entrypoint.id} (${entrypoint.kind})`)
+    .join("; ");
+}
+
+function entrypointProcessListSummary(entrypoints: DaemonPackage["runnable_entrypoints"]) {
+  if (entrypoints.length === 0) {
+    return "No entrypoint process state";
+  }
+
+  return entrypoints
+    .map((entrypoint) => {
+      const process = entrypoint.process;
+      const details = [
+        process.pid ? `pid ${process.pid}` : undefined,
+        process.started_at ? `started_at ${process.started_at}` : undefined,
+        process.exited_at ? `exited_at ${process.exited_at}` : undefined,
+        process.exit_status ? `exit_status ${process.exit_status}` : undefined
+      ].filter((detail): detail is string => typeof detail === "string");
+
+      return `${entrypoint.id} ${process.state}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
+    })
+    .join("; ");
+}
+
+function entrypointDiagnosticsListSummary(entrypoints: DaemonPackage["runnable_entrypoints"]) {
+  const diagnostics = entrypoints.flatMap((entrypoint) =>
+    (entrypoint.process.diagnostics ?? []).map((diagnostic) => `${entrypoint.id} ${diagnostic.kind}: ${diagnostic.message}`)
+  );
+
+  return diagnostics.length === 0 ? "No entrypoint diagnostics" : diagnostics.join("; ");
 }
 
 function draftSnapshot(sequence: number): EntityFrame {
@@ -514,6 +561,9 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                     { id: "real-hub-package-classification", primitive: "text", bindings: [{ source: "entity", path: "@/classification", prop: "text" }] },
                     { id: "real-hub-package-capabilities", primitive: "text", bindings: [{ source: "entity", path: "@/capability_summary", prop: "text" }] },
                     { id: "real-hub-package-compatibility", primitive: "text", bindings: [{ source: "entity", path: "@/compatibility_summary", prop: "text" }] },
+                    { id: "real-hub-package-entrypoints", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_summary", prop: "text" }] },
+                    { id: "real-hub-package-entrypoint-processes", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_process_summary", prop: "text" }] },
+                    { id: "real-hub-package-entrypoint-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_diagnostics_summary", prop: "text" }] },
                     { id: "real-hub-package-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/diagnostics_summary", prop: "text" }] }
                   ]
                 }
