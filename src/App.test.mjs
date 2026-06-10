@@ -9,6 +9,10 @@ import { createServer } from "vite";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+const { dogfoodBridgeShutdownPlan, resolveDogfoodBridgeMode } = await import(
+  new URL("../scripts/dogfoodBridgeMode.mjs", import.meta.url)
+);
+
 const [
   main,
   app,
@@ -29,6 +33,7 @@ const [
   terminalHost,
   terminalSmokeFixture,
   pluginSurfaces,
+  dogfoodBridgeModeScript,
   dogfoodBridgeScript,
   architecture,
   readme,
@@ -54,6 +59,7 @@ const [
   readFile(new URL("./botster/TerminalViewHost.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/terminalSmokeFixture.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/pluginSurfaces.ts", import.meta.url), "utf8"),
+  readFile(new URL("../scripts/dogfoodBridgeMode.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/real-hub-dogfood-bridge.mjs", import.meta.url), "utf8"),
   readFile(new URL("../docs/architecture.md", import.meta.url), "utf8"),
   readFile(new URL("../README.md", import.meta.url), "utf8"),
@@ -127,8 +133,12 @@ assert.match(connectionDiagnostics, /operatorErrorDiagnostic/);
 assert.match(connectionDiagnostics, /terminalUnavailableDiagnostic/);
 assert.match(connectionDiagnosticsPanel, /data-diagnostic-id/);
 assert.match(dogfoodBridgeScript, /protocol = "botster-hub-daemon-v1"/);
-assert.match(dogfoodBridgeScript, /BOTSTER_HUB_BIN/);
+assert.match(dogfoodBridgeScript, /resolveDogfoodBridgeMode/);
+assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_BIN/);
+assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_SOCKET/);
+assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_DATA_DIR/);
 assert.match(dogfoodBridgeScript, /kind: "daemon_response"/);
+assert.match(dogfoodBridgeScript, /existing_hub_shutdown_ignored/);
 assert.match(dogfoodBridgeScript, /text\/event-stream/);
 assert.match(dogfoodBridgeScript, /sendSseEvent\(response, "daemon_event"/);
 assert.match(protocol, /type HubControlFrameKind/);
@@ -174,11 +184,94 @@ assert.match(architecture, /botster-hub-client/);
 assert.match(readme, /vendored build from the trybotster\/restty fork/);
 assert.match(readme, /VITE_BOTSTER_REAL_HUB_DOGFOOD=1/);
 assert.match(readme, /BOTSTER_HUB_BIN/);
+assert.match(readme, /BOTSTER_HUB_SOCKET/);
+assert.match(readme, /BOTSTER_HUB_DATA_DIR/);
 assert.match(vendorReadme, /e9742252312ee616d8f186b697d70349cf329250/);
 assert.doesNotMatch(uiNodes, /terminal_view/);
 assert.doesNotMatch(protocol, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
 assert.doesNotMatch(localDogfoodTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
 assert.doesNotMatch(realHubDogfoodTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
+
+const spawnedBridgeMode = resolveDogfoodBridgeMode(
+  { BOTSTER_HUB_BIN: "./target/debug/botster-hub", BOTSTER_SESSION_WORKER_BIN: "./target/debug/botster-session-worker" },
+  { cwd: "/workspace", generatedDataDir: "/tmp/botster-web-dogfood-test" }
+);
+assert.equal(spawnedBridgeMode.ok, true);
+assert.equal(spawnedBridgeMode.mode, "spawned_hub");
+assert.equal(spawnedBridgeMode.diagnosticLabel, "spawned isolated hub");
+assert.equal(spawnedBridgeMode.socketPath, "/tmp/botster-web-dogfood-test/botster-hub.sock");
+assert.equal(spawnedBridgeMode.hubBin, "/workspace/target/debug/botster-hub");
+assert.deepEqual(spawnedBridgeMode.hubArgs, [
+  "start",
+  "--data-dir",
+  "/tmp/botster-web-dogfood-test",
+  "--session-worker-bin",
+  "/workspace/target/debug/botster-session-worker"
+]);
+assert.deepEqual(dogfoodBridgeShutdownPlan(spawnedBridgeMode), {
+  sendDaemonShutdown: true,
+  terminateHubProcess: true,
+  removeDataDir: true
+});
+
+const spawnedBridgeModeWithoutHubBin = resolveDogfoodBridgeMode({}, { generatedDataDir: "/tmp/unused" });
+assert.equal(spawnedBridgeModeWithoutHubBin.ok, false);
+assert.match(spawnedBridgeModeWithoutHubBin.error, /BOTSTER_HUB_BIN/);
+
+const existingSocketBridgeMode = resolveDogfoodBridgeMode(
+  { BOTSTER_HUB_SOCKET: "./dogfood/botster-hub.sock" },
+  { cwd: "/workspace" }
+);
+assert.equal(existingSocketBridgeMode.ok, true);
+assert.equal(existingSocketBridgeMode.mode, "existing_hub");
+assert.equal(existingSocketBridgeMode.source, "socket");
+assert.equal(existingSocketBridgeMode.diagnosticLabel, "existing hub socket");
+assert.equal(existingSocketBridgeMode.socketPath, "/workspace/dogfood/botster-hub.sock");
+assert.equal(existingSocketBridgeMode.hubBin, undefined);
+assert.equal(existingSocketBridgeMode.hubArgs, undefined);
+assert.deepEqual(existingSocketBridgeMode.health, {
+  ok: true,
+  mode: "existing_hub",
+  source: "socket",
+  socket: "configured"
+});
+assert.deepEqual(dogfoodBridgeShutdownPlan(existingSocketBridgeMode), {
+  sendDaemonShutdown: false,
+  terminateHubProcess: false,
+  removeDataDir: false
+});
+
+const existingDataDirBridgeMode = resolveDogfoodBridgeMode(
+  { BOTSTER_HUB_DATA_DIR: "./dogfood-data" },
+  { cwd: "/workspace" }
+);
+assert.equal(existingDataDirBridgeMode.ok, true);
+assert.equal(existingDataDirBridgeMode.mode, "existing_hub");
+assert.equal(existingDataDirBridgeMode.source, "data_dir");
+assert.equal(existingDataDirBridgeMode.diagnosticLabel, "existing hub data dir");
+assert.equal(existingDataDirBridgeMode.socketPath, "/workspace/dogfood-data/botster-hub.sock");
+assert.equal(existingDataDirBridgeMode.hubBin, undefined);
+assert.equal(existingDataDirBridgeMode.hubArgs, undefined);
+assert.deepEqual(dogfoodBridgeShutdownPlan(existingDataDirBridgeMode), {
+  sendDaemonShutdown: false,
+  terminateHubProcess: false,
+  removeDataDir: false
+});
+
+const socketWinsBridgeMode = resolveDogfoodBridgeMode(
+  { BOTSTER_HUB_SOCKET: "/tmp/socket.sock", BOTSTER_HUB_DATA_DIR: "/tmp/data-dir" },
+  { cwd: "/workspace" }
+);
+assert.equal(socketWinsBridgeMode.ok, true);
+assert.equal(socketWinsBridgeMode.source, "socket");
+assert.equal(socketWinsBridgeMode.socketPath, "/tmp/socket.sock");
+
+const mixedOwnershipBridgeMode = resolveDogfoodBridgeMode({
+  BOTSTER_HUB_SOCKET: "/tmp/socket.sock",
+  BOTSTER_WEB_DOGFOOD_DATA_DIR: "/tmp/spawned-data-dir"
+});
+assert.equal(mixedOwnershipBridgeMode.ok, false);
+assert.match(mixedOwnershipBridgeMode.error, /cannot be combined/);
 
 const desktopCss = removeCssAtRules(css);
 const baseWorkspaceGridRule = extractTopLevelCssRule(desktopCss, ".workspace-grid");

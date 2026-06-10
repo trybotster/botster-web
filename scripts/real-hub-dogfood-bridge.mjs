@@ -2,48 +2,50 @@ import { createServer } from "node:http";
 import { connect } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { dogfoodBridgeShutdownPlan, resolveDogfoodBridgeMode } from "./dogfoodBridgeMode.mjs";
 
 const protocol = "botster-hub-daemon-v1";
 const port = Number.parseInt(process.env.BOTSTER_WEB_DOGFOOD_BRIDGE_PORT ?? "41739", 10);
 const host = "127.0.0.1";
-const hubBin = resolvePath(process.env.BOTSTER_HUB_BIN);
-const sessionWorkerBin = resolvePath(process.env.BOTSTER_SESSION_WORKER_BIN);
-const keepData = process.env.BOTSTER_WEB_DOGFOOD_KEEP_DATA === "1";
+const existingHubConfigured = Boolean(process.env.BOTSTER_HUB_SOCKET || process.env.BOTSTER_HUB_DATA_DIR);
+const generatedDataDir = existingHubConfigured || process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR
+  ? undefined
+  : await mkdtemp(join(tmpdir(), "botster-web-dogfood-"));
+const bridgeMode = resolveDogfoodBridgeMode(process.env, { generatedDataDir });
 
-if (!hubBin) {
-  console.error("BOTSTER_HUB_BIN must point to a botster-hub binary.");
+if (!bridgeMode.ok) {
+  if (generatedDataDir) {
+    await rm(generatedDataDir, { recursive: true, force: true });
+  }
+  console.error(bridgeMode.error);
   process.exit(1);
 }
 
-const dataDir = process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR ?? (await mkdtemp(join(tmpdir(), "botster-web-dogfood-")));
-const socketPath = join(dataDir, "botster-hub.sock");
-const hubArgs = ["start", "--data-dir", dataDir];
-
-if (sessionWorkerBin) {
-  hubArgs.push("--session-worker-bin", sessionWorkerBin);
-}
-
-const hub = spawn(hubBin, hubArgs, {
-  stdio: ["ignore", "pipe", "pipe"]
-});
 let hubExit;
+let hub;
 
-hub.stdout.setEncoding("utf8");
-hub.stderr.setEncoding("utf8");
-hub.stdout.on("data", (chunk) => process.stdout.write(`[botster-hub] ${chunk}`));
-hub.stderr.on("data", (chunk) => process.stderr.write(`[botster-hub] ${chunk}`));
-hub.on("error", (error) => {
-  console.error(`botster-hub spawn failed: ${error.message}`);
-  process.exit(1);
-});
-hub.on("exit", (code, signal) => {
-  hubExit = { code, signal };
-});
+if (bridgeMode.ownsHub) {
+  hub = spawn(bridgeMode.hubBin, bridgeMode.hubArgs, {
+    stdio: ["ignore", "pipe", "pipe"]
+  });
 
-await waitForSocket(socketPath, () => hubExit);
+  hub.stdout.setEncoding("utf8");
+  hub.stderr.setEncoding("utf8");
+  hub.stdout.on("data", (chunk) => process.stdout.write(`[botster-hub] ${chunk}`));
+  hub.stderr.on("data", (chunk) => process.stderr.write(`[botster-hub] ${chunk}`));
+  hub.on("error", (error) => {
+    console.error(`botster-hub spawn failed: ${error.message}`);
+    process.exit(1);
+  });
+  hub.on("exit", (code, signal) => {
+    hubExit = { code, signal };
+  });
+}
+
+await waitForSocket(bridgeMode.socketPath, () => hubExit, bridgeMode.diagnosticLabel);
 
 const server = createServer(async (request, response) => {
   response.setHeader("access-control-allow-origin", "http://127.0.0.1:5173");
@@ -57,7 +59,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && request.url === "/health") {
-    writeJson(response, 200, { ok: true, data_dir: "<isolated-temp-dir>" });
+    writeJson(response, 200, bridgeMode.health);
     return;
   }
 
@@ -82,7 +84,21 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    const payload = await sendDaemonRequest(socketPath, envelope.payload);
+    if (envelope.payload.type === "daemon_shutdown" && !bridgeMode.ownsHub) {
+      server.close();
+      writeJson(response, 200, {
+        kind: "daemon_response",
+        request_id: envelope.request_id,
+        payload: operatorError(
+          "existing_hub_shutdown_ignored",
+          "daemon_shutdown",
+          "Existing-hub bridge mode does not shut down the attached hub"
+        )
+      });
+      return;
+    }
+
+    const payload = await sendDaemonRequest(bridgeMode.socketPath, envelope.payload);
     writeJson(response, 200, {
       kind: "daemon_response",
       request_id: envelope.request_id,
@@ -90,8 +106,9 @@ const server = createServer(async (request, response) => {
     });
     if (envelope.payload.type === "daemon_shutdown") {
       server.close();
-      if (!keepData && !process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR) {
-        await rm(dataDir, { recursive: true, force: true });
+      const shutdownPlan = dogfoodBridgeShutdownPlan(bridgeMode);
+      if (shutdownPlan.removeDataDir) {
+        await rm(bridgeMode.dataDir, { recursive: true, force: true });
       }
     }
   } catch (error) {
@@ -109,19 +126,29 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, host, () => {
   console.log(`botster-web real hub dogfood bridge listening at http://${host}:${port}/request`);
-  console.log(`isolated data dir: ${dataDir}`);
+  console.log(`mode: ${bridgeMode.diagnosticLabel}`);
+  if (bridgeMode.mode === "spawned_hub") {
+    console.log(`isolated data dir: ${bridgeMode.dataDir}`);
+  } else {
+    console.log(`attached socket: configured ${bridgeMode.source}`);
+  }
 });
 
 const shutdown = async () => {
   server.close();
-  try {
-    await sendDaemonRequest(socketPath, { type: "daemon_shutdown" });
-  } catch {
-    hub.kill("SIGTERM");
+  const shutdownPlan = dogfoodBridgeShutdownPlan(bridgeMode);
+  if (shutdownPlan.sendDaemonShutdown) {
+    try {
+      await sendDaemonRequest(bridgeMode.socketPath, { type: "daemon_shutdown" });
+    } catch {
+      if (shutdownPlan.terminateHubProcess) {
+        hub?.kill("SIGTERM");
+      }
+    }
   }
 
-  if (!keepData && !process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR) {
-    await rm(dataDir, { recursive: true, force: true });
+  if (shutdownPlan.removeDataDir) {
+    await rm(bridgeMode.dataDir, { recursive: true, force: true });
   }
 };
 
@@ -179,7 +206,7 @@ async function streamTerminal(request, response) {
   });
 
   try {
-    socket = await openDaemonSocket(socketPath);
+    socket = await openDaemonSocket(bridgeMode.socketPath);
     socket.write(`${JSON.stringify({ type: "attach", session_id: sessionId, subscription_id: subscriptionId })}\n`);
     emitDaemonEvents(response, JSON.parse(await readSocketLine(socket)).events ?? []);
 
@@ -275,7 +302,7 @@ async function readSocketLine(socket) {
   });
 }
 
-async function waitForSocket(path, exitStatus) {
+async function waitForSocket(path, exitStatus, label = "botster-hub") {
   const deadline = Date.now() + 10_000;
   let lastError;
   while (Date.now() < deadline) {
@@ -294,7 +321,7 @@ async function waitForSocket(path, exitStatus) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-  throw lastError ?? new Error("timed out waiting for botster-hub socket");
+  throw lastError ?? new Error(`timed out waiting for ${label} socket`);
 }
 
 function writeJson(response, status, payload) {
@@ -334,9 +361,4 @@ function operatorError(code, operation, message) {
       message
     }
   };
-}
-
-function resolvePath(path) {
-  if (!path) return undefined;
-  return isAbsolute(path) ? path : resolve(process.cwd(), path);
 }

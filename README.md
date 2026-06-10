@@ -74,15 +74,35 @@ Fixture mode is the default because it is deterministic and cannot touch a real 
 
 ## Real Hub Dogfood Bridge
 
-Real-hub mode is opt-in and uses an isolated same-device bridge. The browser sends verbatim `botster-hub-client` daemon DTO payloads (`DaemonRequest`) to the bridge, and the bridge returns verbatim daemon DTO payloads (`DaemonResponse`). The HTTP envelope only carries transport metadata; Botster semantics stay in the daemon DTO payload. Terminal output uses a held `/terminal` SSE stream so daemon attach and drain run on one persistent daemon socket until the browser disconnects.
+Real-hub mode is opt-in and uses a same-device bridge. The browser sends verbatim `botster-hub-client` daemon DTO payloads (`DaemonRequest`) to the bridge, and the bridge returns verbatim daemon DTO payloads (`DaemonResponse`). The HTTP envelope only carries transport metadata; Botster semantics stay in the daemon DTO payload. Terminal output uses a held `/terminal` SSE stream so daemon attach and drain run on one persistent daemon socket until the browser disconnects.
 
-Start the local bridge in one terminal:
+### Spawned isolated hub
+
+Start the bridge with a hub owned by the bridge in one terminal:
 
 ```bash
 BOTSTER_HUB_BIN=/path/to/botster-hub \
 BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
 npm run dogfood:hub
 ```
+
+This mode prints `mode: spawned isolated hub`, starts `botster-hub start --data-dir`, sends `DaemonRequest::DaemonShutdown` when the bridge stops, and removes the temporary data directory unless `BOTSTER_WEB_DOGFOOD_KEEP_DATA=1` is set.
+
+### Existing hub attach
+
+If a hub/package entrypoint has already started a dogfood hub and printed its socket, attach the bridge to that socket:
+
+```bash
+BOTSTER_HUB_SOCKET=/printed/botster-hub.sock npm run dogfood:hub
+```
+
+If the entrypoint printed a data directory instead, attach by data dir and let the bridge derive `botster-hub.sock`:
+
+```bash
+BOTSTER_HUB_DATA_DIR=/printed/data-dir npm run dogfood:hub
+```
+
+This mode prints either `mode: existing hub socket` or `mode: existing hub data dir`. It does not require `BOTSTER_HUB_BIN`, does not spawn a hub, does not send `DaemonRequest::DaemonShutdown`, and does not remove the existing hub data directory. `BOTSTER_HUB_SOCKET` is the most explicit endpoint and wins when both existing-hub variables are set. Do not combine `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR` with `BOTSTER_WEB_DOGFOOD_DATA_DIR`; the bridge treats that mixed ownership configuration as an operator error.
 
 Start Vite in another terminal with the build-time opt-in:
 
@@ -111,7 +131,7 @@ Expected proof markers:
 - `Spawn isolated session` sends `DaemonRequest::Spawn` and updates entity-backed session rows. Package rows are read-only in this slice; botster-web does not expose install, enable, disable, or remove actions.
 - A compatible current hub build should stream `botster-web-dogfood-ready` through the terminal SSE path; typing in the terminal sends `DaemonRequest::SendInput` while the held stream receives live terminal output.
 - `Trigger invalid action` sends a deliberately invalid daemon request and surfaces an operator error through action/error state.
-- Closing the bridge sends `DaemonRequest::DaemonShutdown` and removes the temporary data directory unless `BOTSTER_WEB_DOGFOOD_KEEP_DATA=1` is set.
+- Closing the bridge sends `DaemonRequest::DaemonShutdown` only in spawned isolated hub mode. Existing hub attach mode leaves the already-running hub and its data directory alone.
 
 Known limitation: the control-plane round trip (status/list/spawn/input/resize/operator-error/teardown) has been verified end-to-end through this bridge. Terminal output depends on the hub's streaming attach path; older local hub binaries may not emit the ready marker even though control-plane daemon DTOs succeed.
 
