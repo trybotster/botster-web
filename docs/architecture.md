@@ -50,7 +50,7 @@ The client can be served as a static web app by local Botster tooling. Future Ra
 
 ## Assumptions
 
-- Real-hub dogfood requires a compatible `BOTSTER_HUB_BIN` and, where needed, `BOTSTER_SESSION_WORKER_BIN`.
-- The bridge uses an explicit temporary data directory and neutral ids, then shuts the daemon down on exit.
+- Real-hub dogfood can either spawn an isolated hub from a compatible `BOTSTER_HUB_BIN` and, where needed, `BOTSTER_SESSION_WORKER_BIN`, or attach to an already-running hub through `BOTSTER_HUB_SOCKET` / `BOTSTER_HUB_DATA_DIR`.
+- In spawned isolated mode, the bridge uses an explicit temporary data directory and neutral ids, then shuts the daemon down on exit. In existing-hub attach mode, the bridge only proxies to the configured socket and does not shut down or clean up the attached hub.
 - The exact botster-core exported schema remains external to this repo; daemon DTO typing is structural here and must stay aligned with `botster-hub-client`.
 - Future production browser integration must use the WebRTC browser data plane instead of promoting this same-device bridge into product transport.
