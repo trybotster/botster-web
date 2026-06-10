@@ -12,6 +12,7 @@ class FakeTerminalRenderer implements TerminalRendererAdapter {
   readonly resizes: Array<{ rows: number; columns: number }> = [];
   readonly lifecycle: string[];
   private inputListener?: (data: TerminalInput) => void;
+  onFocus?: () => void;
 
   constructor(lifecycle: string[]) {
     this.lifecycle = lifecycle;
@@ -47,6 +48,7 @@ class FakeTerminalRenderer implements TerminalRendererAdapter {
 
   focus(): void {
     this.lifecycle.push("focus");
+    this.onFocus?.();
   }
 
   destroy(): void {
@@ -69,11 +71,19 @@ export async function runTerminalViewBridgeSmokeFixture() {
   const dataPlane = new MockTerminalDataPlane(descriptor.sessionId, ["ready\r\n"]);
   const container = {} as HTMLElement;
 
+  await bridge.focus(descriptor);
+  await bridge.resize(descriptor, 1, 1);
+  await bridge.writeInput(descriptor, "premount\n");
+
   await bridge.mount(container, descriptor);
   await bridge.attach(descriptor, dataPlane);
+  renderers[0].onFocus = () => {
+    void bridge.focus(descriptor);
+  };
   renderers[0].emitInput("ls\n");
   dataPlane.emitOutput("ok\r\n");
   await bridge.resize(descriptor, 24, 80);
+  await bridge.focus(descriptor);
   await bridge.focus(descriptor);
   await bridge.unmount(descriptor);
   dataPlane.emitOutput("stale\r\n");

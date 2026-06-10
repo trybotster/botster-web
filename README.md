@@ -41,6 +41,14 @@ Test:
 npm test
 ```
 
+Packaged browser smoke:
+
+```bash
+npm run smoke:packaged-browser
+```
+
+The smoke command builds the app, serves the compiled package runtime through the dogfood bridge, opens `/?dogfood=real-hub` in Playwright Chromium, clicks the real-hub spawn action, and fails on unexpected browser console/page errors, unexpected 404s, fatal Restty font loading, missing mounted terminal errors, and focus stack overflows. If Chromium is not installed for Playwright, run `npx playwright install chromium` once.
+
 Lint:
 
 ```bash
@@ -75,6 +83,8 @@ Fixture mode is the default because it is deterministic and cannot touch a real 
 ## Real Hub Dogfood Bridge
 
 Real-hub mode is opt-in and uses a same-device bridge. The browser sends verbatim `botster-hub-client` daemon DTO payloads (`DaemonRequest`) to the bridge, and the bridge returns verbatim daemon DTO payloads (`DaemonResponse`). The HTTP envelope only carries transport metadata; Botster semantics stay in the daemon DTO payload. Terminal output uses a held `/terminal` SSE stream so daemon attach and drain run on one persistent daemon socket until the browser disconnects.
+
+`npm run smoke:packaged-browser` uses a fake daemon socket to prove the compiled browser/package path and console hygiene without requiring a live hub binary. It does not prove live-hub compatibility; use `npm run dogfood:hub` against a spawned or existing hub for that evidence.
 
 ### Spawned isolated hub
 

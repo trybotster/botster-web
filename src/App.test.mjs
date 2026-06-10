@@ -193,15 +193,19 @@ assert.match(terminal, /subscribeOutput/);
 assert.match(terminal, /renderer\.destroy\(\)/);
 assert.match(resttyRenderer, /from "\.\.\/vendor\/restty\/xterm\.js"/);
 assert.match(resttyRenderer, /new ResttyTerminal/);
+assert.match(resttyRenderer, /fontSources: botsterResttyFontSources/);
+assert.doesNotMatch(resttyRenderer, /fontPreset:\s*"none"/);
 assert.match(resttyRenderer, /this\.terminal\.dispose\(\)/);
 assert.match(terminalHost, /ResizeObserver/);
 assert.match(terminalHost, /bridge\.attach/);
 assert.match(terminalHost, /bridge\.unmount/);
 assert.match(terminalHost, /terminalMount/);
+assert.match(terminalHost, /data-terminal-diagnostic="mount-failed"/);
 assert.match(terminalSmokeFixture, /runTerminalViewBridgeSmokeFixture/);
 assert.match(terminalSmokeFixture, /emitInput\("ls\\n"\)/);
 assert.match(terminalSmokeFixture, /dataPlane\.emitOutput\("ok\\r\\n"\)/);
 assert.match(terminalSmokeFixture, /bridge\.resize\(descriptor, 24, 80\)/);
+assert.match(terminalSmokeFixture, /bridge\.writeInput\(descriptor, "premount\\n"\)/);
 assert.match(terminalSmokeFixture, /bridge\.unmount\(descriptor\)/);
 assert.match(pluginSurfaces, /sandbox: "host_rendered" \| "isolated_asset"/);
 assert.match(architecture, /Control-plane hub frames/);
@@ -359,6 +363,9 @@ try {
   assert.equal(realHubResponse.status, 200);
   assert.match(await realHubResponse.text(), /window\.__BOTSTER_PACKAGE_RUNTIME__ = true/);
 
+  const faviconResponse = await fetch(`${packageBridgeRuntime.origin}/favicon.ico`);
+  assert.equal(faviconResponse.status, 204);
+
   const fallbackResponse = await fetch(`${packageBridgeRuntime.origin}/sessions/local-dogfood`);
   assert.equal(fallbackResponse.status, 200);
   assert.match(await fallbackResponse.text(), /botster package runtime/);
@@ -455,8 +462,10 @@ assert.deepEqual(smoke.firstRenderer.writes, ["ready\r\n", "ok\r\n"]);
 assert.deepEqual(smoke.firstRenderer.resizes, [{ rows: 24, columns: 80 }]);
 assert.ok(smoke.secondRenderer);
 assert.ok(smoke.lifecycle.indexOf("destroy") < smoke.lifecycle.lastIndexOf("create"));
+assert.equal(smoke.lifecycle.filter((event) => event === "focus").length, 2);
 assert.doesNotMatch(smoke.firstRenderer.writes.join(""), /stale/);
 assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /stale/);
+assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /premount/);
 
 const compiledRoot = join(tmpdir(), "botster-web-runtime-test");
 await rm(compiledRoot, { recursive: true, force: true });
