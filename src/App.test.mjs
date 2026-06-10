@@ -102,14 +102,22 @@ assert.match(dogfoodMode, /createRealHubDogfoodTransport/);
 assert.match(dogfoodMode, /createRealHubTerminalDataPlane/);
 assert.match(realHubDaemonDto, /export type DaemonRequest/);
 assert.match(realHubDaemonDto, /type: "status"/);
+assert.match(realHubDaemonDto, /type: "list_packages"/);
 assert.match(realHubDaemonDto, /type: "spawn"/);
 assert.match(realHubDaemonDto, /export interface DaemonResponse/);
+assert.match(realHubDaemonDto, /packages\?: DaemonPackage\[\]/);
+assert.match(realHubDaemonDto, /package_name: string/);
+assert.match(realHubDaemonDto, /requested_capabilities: DaemonCapability\[\]/);
 assert.match(realHubDaemonDto, /diagnostics\?: DaemonDiagnostic\[\]/);
 assert.match(realHubDaemonDto, /export type DaemonEvent/);
 assert.match(realHubDogfoodTransport, /kind: "daemon_request"/);
 assert.match(realHubDogfoodTransport, /reply\.kind !== "daemon_response"/);
 assert.match(realHubDogfoodTransport, /daemonResponseFrames/);
 assert.match(realHubDogfoodTransport, /realHubDogfoodUiTreeSnapshot/);
+assert.match(realHubDogfoodTransport, /const packageFamily = "botster-web\.package"/);
+assert.match(realHubDogfoodTransport, /bridge\.request\(\{ type: "list_packages" \}\)/);
+assert.match(realHubDogfoodTransport, /family: packageFamily/);
+assert.doesNotMatch(realHubDogfoodTransport, /install_package|enable_package|disable_package|remove_package/);
 assert.match(realHubTerminalDataPlane, /streamTerminal/);
 assert.match(realHubTerminalDataPlane, /type: "send_input"/);
 assert.match(realHubTerminalDataPlane, /type: "detach"/);
@@ -453,8 +461,8 @@ const bridge = {
           data_dir_configured: true,
           core_initialized: true,
           state_source: "explicit",
-          package_count: 0,
-          enabled_package_count: 0,
+          package_count: 3,
+          enabled_package_count: 1,
           provider_count: 0,
           enabled_provider_count: 0,
           session_count: 1,
@@ -473,6 +481,49 @@ const bridge = {
           {
             kind: "unsupported_feature",
             feature: "terminal_streaming"
+          }
+        ]
+      };
+    }
+
+    if (request.type === "list_packages") {
+      return {
+        kind: "packages",
+        packages: [
+          {
+            package_name: "project-pipelines",
+            version: "0.8.0",
+            classification: "plugin",
+            state: "enabled",
+            requested_capabilities: [
+              { surface: "SessionActions", scope: "project-pipelines" },
+              { surface: "McpTools", scope: null }
+            ],
+            provider_profile_admitted: false
+          },
+          {
+            package_name: "github-provider",
+            version: "1.2.3",
+            classification: "provider",
+            state: "disabled",
+            requested_capabilities: [{ surface: "ClientAdmission", scope: "github" }],
+            provider_profile_admitted: false
+          },
+          {
+            package_name: "local-diagnostics",
+            version: "0.1.0",
+            classification: "plugin",
+            state: "installed",
+            requested_capabilities: [],
+            provider_profile_admitted: false
+          }
+        ],
+        events: [],
+        diagnostics: [
+          {
+            kind: "connected",
+            operation: "list_packages",
+            message: "Package registry listed"
           }
         ]
       };
@@ -589,6 +640,8 @@ await realTransport.connect({ client: "botster-web", capabilities: [] }, (frame)
 await flushMicrotasks();
 await realTransport.send({ kind: "surface_subscribe", payload: { surface: "botster-web.dogfood.session" } });
 await flushMicrotasks();
+await realTransport.send({ kind: "entity_pull", payload: { family: "botster-web.package" } });
+await flushMicrotasks();
 await realTransport.send({
   kind: "action_request",
   payload: {
@@ -600,9 +653,14 @@ await realTransport.send({
 await flushMicrotasks();
 assert.equal(bridgeRequests.some((request) => request.type === "status"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "list_sessions"), true);
+assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "spawn" && request.session_id === realHubDogfoodSessionId), true);
 assert.equal(realFrames.some((frame) => frame.kind === "ui_tree_snapshot"), true);
 assert.equal(realFrames.some((frame) => frame.kind === "entity_snapshot"), true);
+assert.equal(
+  realFrames.some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.package"),
+  true
+);
 assert.equal(realFrames.some((frame) => frame.kind === "entity_patch"), true);
 assert.equal(realFrames.some((frame) => frame.kind === "action_result"), true);
 
@@ -614,6 +672,7 @@ const realRuntime = createBotsterWebClient({
 await realRuntime.hub.connect({ client: "botster-web", capabilities: [] });
 await realRuntime.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/real-hub" });
 await realRuntime.entities.pull({ family: "botster-web.hub_status" });
+await realRuntime.entities.pull({ family: "botster-web.package" });
 await realRuntime.entities.pull({ family: "botster-web.session" });
 await flushMicrotasks();
 assert.equal(realRuntime.uiTree.current().surface, "botster-web.dogfood.session");
@@ -622,6 +681,16 @@ assert.deepEqual(realRuntime.entities.list("botster-web.session").map((record) =
 ]);
 assert.equal(realRuntime.entities.get("botster-web.session", "session-local-1"), undefined);
 assert.equal(realRuntime.entities.get("botster-web.hub_status", "local-hub").host_id, "dogfood-host");
+assert.deepEqual(realRuntime.entities.list("botster-web.package").map((record) => record.id), [
+  "project-pipelines",
+  "github-provider",
+  "local-diagnostics"
+]);
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").status, "enabled");
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").capability_summary, /SessionActions:project-pipelines/);
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").capability_summary, /McpTools/);
+assert.equal(realRuntime.entities.get("botster-web.package", "github-provider").status, "disabled");
+assert.equal(realRuntime.entities.get("botster-web.package", "local-diagnostics").capability_summary, "No requested capabilities");
 assert.deepEqual(realRuntime.entities.get("botster-web.hub_status", "local-hub").compatibility.features, [
   "sessions",
   "terminal_streaming",
@@ -982,12 +1051,14 @@ try {
     { ionicUiNodeRendererRegistry },
     { uiNodeConformanceSnapshot, fixtureEntityFrames, fixtureProvenance },
     { dogfoodUiTreeSnapshot },
+    { realHubDogfoodUiTreeSnapshot },
     { ConnectionDiagnosticsPanel },
     { createInMemoryEntityFrameStore }
   ] = await Promise.all([
     vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
     vite.ssrLoadModule("/src/botster/__fixtures__/uiNodeConformance.ts"),
     vite.ssrLoadModule("/src/botster/localDogfoodTransport.ts"),
+    vite.ssrLoadModule("/src/botster/realHubDogfoodTransport.ts"),
     vite.ssrLoadModule("/src/botster/ConnectionDiagnosticsPanel.tsx"),
     vite.ssrLoadModule("/src/botster/entities.ts")
   ]);
@@ -1089,6 +1160,65 @@ try {
   assert.match(dogfoodMarkup, /Session name is required/);
   assert.match(dogfoodMarkup, /data-action-id="botster\.session\.select"/);
   assert.match(dogfoodMarkup, /data-action-id="botster\.session\.rename"/);
+
+  const realHubStore = createInMemoryEntityFrameStore();
+  for (const frame of daemonResponseFrames({
+    kind: "packages",
+    packages: [
+      {
+        package_name: "project-pipelines",
+        version: "0.8.0",
+        classification: "plugin",
+        state: "enabled",
+        requested_capabilities: [{ surface: "SessionActions", scope: "project-pipelines" }],
+        provider_profile_admitted: false
+      },
+      {
+        package_name: "github-provider",
+        version: "1.2.3",
+        classification: "provider",
+        state: "disabled",
+        requested_capabilities: [{ surface: "ClientAdmission", scope: "github" }],
+        provider_profile_admitted: false
+      },
+      {
+        package_name: "local-diagnostics",
+        version: "0.1.0",
+        classification: "plugin",
+        state: "installed",
+        requested_capabilities: [],
+        provider_profile_admitted: false
+      }
+    ]
+  }, 13)) {
+    if (frame.kind === "entity_snapshot") {
+      realHubStore.apply(frame.payload);
+    }
+  }
+
+  const realHubMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(realHubDogfoodUiTreeSnapshot, realHubStore, {
+      capabilities: {
+        ionic_shell: true,
+        ui_tree_snapshot: true,
+        entity_frame_store: true,
+        semantic_actions: true,
+        terminal_view_bridge: true,
+        plugin_surface_sandbox: true
+      }
+    })
+  );
+  assert.match(realHubMarkup, /Installed packages/);
+  assert.match(realHubMarkup, /project-pipelines/);
+  assert.match(realHubMarkup, /enabled/);
+  assert.match(realHubMarkup, /github-provider/);
+  assert.match(realHubMarkup, /disabled/);
+  assert.match(realHubMarkup, /local-diagnostics/);
+  assert.match(realHubMarkup, /installed/);
+  assert.match(realHubMarkup, /SessionActions:project-pipelines/);
+  assert.match(realHubMarkup, /No requested capabilities/);
+  assert.match(realHubMarkup, /No provider profile admission/);
+  assert.doesNotMatch(realHubMarkup, /install_package|enable_package|disable_package|remove_package/);
 
   const diagnosticsMarkup = renderToStaticMarkup(
     createElement(ConnectionDiagnosticsPanel, {

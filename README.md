@@ -100,6 +100,7 @@ Expected proof markers:
 
 - The toolbar mode chip reads `real-hub`.
 - The status list shows the isolated daemon host returned by `DaemonRequest::Status`.
+- The installed packages list is populated by `DaemonRequest::ListPackages` and shows the package name, version, enabled/disabled/installed state, classification, requested capability summary, and provider-profile admission status when the current hub exposes package registry records.
 - The connection diagnostics panel starts with the selected bridge mode and adds targeted rows when the bridge is unavailable, the control stream fails, the daemon schema or compatibility descriptor is incompatible, an operator/action error is returned, or terminal streaming cannot attach.
 - Hub-provided `DaemonDiagnostic` rows from the public hub-client response/status path render as connection diagnostics with the daemon's `kind`, optional `message`, optional `feature`, and optional `operation` detail. Hub-provided compatibility or feature diagnostics suppress the matching web-inferred compatibility row for the same status response.
 - `Daemon schema mismatch` means the bridge returned `DaemonStatus.schema_version` that does not match the schema expected by this web build. Use a matching botster-hub binary before treating UI behavior as a product bug.
@@ -107,7 +108,7 @@ Expected proof markers:
 - `Hub compatibility descriptor unavailable` means the status response predates or omits `DaemonStatus.compatibility`; botster-web does not infer protocol or capability problems from that missing field.
 - `Local hub bridge unavailable` or `Control stream disconnected` means the browser could not complete a bridge request or the bridge stopped while the dogfood surface was loading. Check that `npm run dogfood:hub` is still running and that Vite was opened with `?dogfood=real-hub`.
 - `Terminal stream unavailable` is scoped to the terminal data-plane seam. The control-plane surface can still render status, sessions, and action errors when the held terminal SSE stream is missing or rejected.
-- `Spawn isolated session` sends `DaemonRequest::Spawn` and updates entity-backed session rows.
+- `Spawn isolated session` sends `DaemonRequest::Spawn` and updates entity-backed session rows. Package rows are read-only in this slice; botster-web does not expose install, enable, disable, or remove actions.
 - A compatible current hub build should stream `botster-web-dogfood-ready` through the terminal SSE path; typing in the terminal sends `DaemonRequest::SendInput` while the held stream receives live terminal output.
 - `Trigger invalid action` sends a deliberately invalid daemon request and surfaces an operator error through action/error state.
 - Closing the bridge sends `DaemonRequest::DaemonShutdown` and removes the temporary data directory unless `BOTSTER_WEB_DOGFOOD_KEEP_DATA=1` is set.

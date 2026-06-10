@@ -8,6 +8,7 @@ import type {
   DaemonDiagnostic,
   DaemonEvent,
   DaemonOperatorError,
+  DaemonPackage,
   DaemonRequest,
   DaemonResponse,
   DaemonSession
@@ -20,6 +21,7 @@ export const realHubDogfoodSubscriptionId = "botster-web-dogfood-terminal";
 const dogfoodSurface = "botster-web.dogfood.session";
 const sessionFamily = "botster-web.session";
 const draftFamily = "botster-web.session_draft";
+const packageFamily = "botster-web.package";
 const statusFamily = hubStatusFamily;
 
 export interface DaemonBridgeClient {
@@ -137,6 +139,8 @@ export function createRealHubDogfoodTransport({
           emitResponse(await bridge.request({ type: "status" }));
         } else if (request.family === sessionFamily) {
           emitResponse(await bridge.request({ type: "list_sessions" }));
+        } else if (request.family === packageFamily) {
+          emitResponse(await bridge.request({ type: "list_packages" }));
         } else if (request.family === draftFamily) {
           emit({
             kind: "entity_snapshot",
@@ -177,6 +181,18 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
         family: sessionFamily,
         sequence,
         records: response.sessions.map(sessionRecord)
+      } satisfies EntityFrame
+    });
+  }
+
+  if (Array.isArray(response.packages)) {
+    frames.push({
+      kind: "entity_snapshot",
+      payload: {
+        operation: "entity_snapshot",
+        family: packageFamily,
+        sequence,
+        records: response.packages.map(packageRecord)
       } satisfies EntityFrame
     });
   }
@@ -267,6 +283,32 @@ function sessionRecord(session: DaemonSession) {
     target: "isolated-local-hub",
     last_result: `daemon session ${session.lifecycle}`
   };
+}
+
+function packageRecord(packageRecord: DaemonPackage) {
+  const capabilities = packageRecord.requested_capabilities ?? [];
+  const capabilitySummary =
+    capabilities.length === 0
+      ? "No requested capabilities"
+      : capabilities.map(capabilityLabel).join(", ");
+  const providerProfile = packageRecord.provider_profile_admitted
+    ? "Provider profile admitted"
+    : "No provider profile admission";
+
+  return {
+    id: packageRecord.package_name,
+    title: packageRecord.package_name,
+    version: packageRecord.version,
+    status: packageRecord.state,
+    classification: packageRecord.classification,
+    capability_summary: capabilitySummary,
+    compatibility_summary: providerProfile,
+    diagnostics_summary: `${packageRecord.classification} package is ${packageRecord.state}`
+  };
+}
+
+function capabilityLabel(capability: { surface: string; scope?: string | null }) {
+  return capability.scope ? `${capability.surface}:${capability.scope}` : capability.surface;
 }
 
 function draftSnapshot(sequence: number): EntityFrame {
@@ -450,6 +492,38 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                     { id: "hub-source", primitive: "text", bindings: [{ source: "entity", path: "@/state_source", prop: "text" }] }
                   ]
                 }
+              }
+            ]
+          }
+        },
+        {
+          id: "real-hub-package-list",
+          primitive: "list",
+          props: { label: "Installed packages" },
+          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items" }],
+          slots: {
+            item: [
+              {
+                id: "real-hub-package-row",
+                primitive: "row",
+                slots: {
+                  children: [
+                    { id: "real-hub-package-title", primitive: "text", bindings: [{ source: "entity", path: "@/title", prop: "text" }] },
+                    { id: "real-hub-package-state", primitive: "badge", bindings: [{ source: "entity", path: "@/status", prop: "text" }] },
+                    { id: "real-hub-package-version", primitive: "text", bindings: [{ source: "entity", path: "@/version", prop: "text" }] },
+                    { id: "real-hub-package-classification", primitive: "text", bindings: [{ source: "entity", path: "@/classification", prop: "text" }] },
+                    { id: "real-hub-package-capabilities", primitive: "text", bindings: [{ source: "entity", path: "@/capability_summary", prop: "text" }] },
+                    { id: "real-hub-package-compatibility", primitive: "text", bindings: [{ source: "entity", path: "@/compatibility_summary", prop: "text" }] },
+                    { id: "real-hub-package-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/diagnostics_summary", prop: "text" }] }
+                  ]
+                }
+              }
+            ],
+            empty: [
+              {
+                id: "real-hub-packages-empty",
+                primitive: "empty_state",
+                props: { title: "No installed packages", body: "This daemon returned an empty package registry." }
               }
             ]
           }

@@ -143,6 +143,7 @@ export default function App() {
       })
       .then(() => runtimeClient.hub.subscribe())
       .then(() => runtimeClient.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/local" }))
+      .then(() => runtimeClient.entities.pull({ family: "botster-web.package" }))
       .then(() => runtimeClient.entities.pull({ family: "botster-web.session" }))
       .then(() => runtimeClient.entities.pull({ family: "botster-web.session_draft", id: "draft-1" }))
       .catch((error: unknown) => {

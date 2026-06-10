@@ -4,6 +4,7 @@
 export type DaemonRequest =
   | { type: "status" }
   | { type: "list_sessions" }
+  | { type: "list_packages" }
   | { type: "spawn"; session_id: string; command: string }
   | { type: "attach"; session_id: string; subscription_id: string }
   | { type: "detach"; session_id: string; subscription_id: string }
@@ -17,6 +18,7 @@ export interface DaemonResponse {
   kind: string;
   status?: DaemonStatus | null;
   sessions?: DaemonSession[];
+  packages?: DaemonPackage[];
   events?: DaemonEvent[];
   cleanup?: { session_id: string; outcome: string } | null;
   error?: DaemonOperatorError | null;
@@ -52,6 +54,20 @@ export interface DaemonCompatibility {
 export interface DaemonSession {
   session_id: string;
   lifecycle: string;
+}
+
+export interface DaemonPackage {
+  package_name: string;
+  version: string;
+  classification: string;
+  state: string;
+  requested_capabilities: DaemonCapability[];
+  provider_profile_admitted: boolean;
+}
+
+export interface DaemonCapability {
+  surface: string;
+  scope?: string | null;
 }
 
 export type DaemonEvent =
