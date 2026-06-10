@@ -85,7 +85,7 @@ assert.match(app, /import \{ TerminalViewHost \} from "\.\/botster\/TerminalView
 assert.match(app, /import \{ ConnectionDiagnosticsPanel \} from "\.\/botster\/ConnectionDiagnosticsPanel"/);
 assert.match(app, /createBotsterWebClient/);
 assert.match(app, /createDogfoodRuntimeConfig/);
-assert.match(app, /bridgeUrl: `\$\{window\.location\.origin\}\/request`/);
+assert.match(app, /packageRuntime \? \{ bridgeUrl: `\$\{window\.location\.origin\}\/request` \} : \{\}/);
 assert.match(app, /__BOTSTER_PACKAGE_RUNTIME__/);
 assert.match(app, /runtimeClient\.hub\.subscribeSurface/);
 assert.match(app, /runtimeClient\.entities\.pull/);
@@ -159,6 +159,8 @@ assert.match(dogfoodBridgeScript, /protocol = "botster-hub-daemon-v1"/);
 assert.match(dogfoodBridgeScript, /resolveDogfoodBridgeMode/);
 assert.match(dogfoodBridgeScript, /serveStaticUi/);
 assert.match(dogfoodBridgeScript, /__BOTSTER_PACKAGE_RUNTIME__/);
+assert.match(dogfoodBridgeScript, /case "\.mjs":/);
+assert.match(dogfoodBridgeScript, /case "\.map":/);
 assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_BIN/);
 assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_SOCKET/);
 assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_DATA_DIR/);
@@ -899,6 +901,76 @@ const packageRuntimeMode = createDogfoodRuntimeConfig({
 });
 assert.equal(packageRuntimeMode.mode, "real-hub");
 assert.equal(packageRuntimeMode.terminalDataPlaneKind, "real-hub");
+
+const bridgeResolutionFetchUrls = [];
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async (url, init) => {
+  bridgeResolutionFetchUrls.push(String(url));
+  const envelope = JSON.parse(init.body);
+  return {
+    ok: true,
+    json: async () => ({
+      kind: "daemon_response",
+      request_id: envelope.request_id,
+      payload: {
+        kind: "status",
+        status: {
+          lifecycle_state: "running",
+          compatibility: {
+            protocol: "botster-hub-daemon-v1",
+            protocol_version: 1,
+            features: [
+              "sessions",
+              "terminal_streaming",
+              "resize",
+              "plugin_surface_render",
+              "plugin_surface_action"
+            ],
+            conformance_fixture_revision: 1
+          },
+          host_id: "dogfood-host",
+          host_display_name: "Dogfood Hub",
+          schema_version: 1,
+          data_dir_configured: true,
+          core_initialized: true,
+          state_source: "explicit",
+          package_count: 0,
+          enabled_package_count: 0,
+          provider_count: 0,
+          enabled_provider_count: 0,
+          session_count: 0,
+          recovered_sessions: [],
+          stale_sessions: [],
+          diagnostics: []
+        },
+        sessions: [],
+        events: [],
+        diagnostics: []
+      }
+    })
+  };
+};
+try {
+  const viteDevRealMode = createDogfoodRuntimeConfig({
+    env: { VITE_BOTSTER_REAL_HUB_DOGFOOD: "1" },
+    locationHref: "http://127.0.0.1:5173/?dogfood=real-hub"
+  });
+  await viteDevRealMode.transport.connect({ client: "botster-web", capabilities: [] }, () => undefined);
+
+  const packageOriginRealMode = createDogfoodRuntimeConfig({
+    env: {},
+    locationHref: "http://127.0.0.1:41888/",
+    bridgeUrl: "http://127.0.0.1:41888/request",
+    packageRuntime: true
+  });
+  await packageOriginRealMode.transport.connect({ client: "botster-web", capabilities: [] }, () => undefined);
+} finally {
+  globalThis.fetch = originalFetch;
+}
+assert.deepEqual(bridgeResolutionFetchUrls, [
+  "http://127.0.0.1:41739/request",
+  "http://127.0.0.1:41888/request"
+]);
 
 const httpFetchCalls = [];
 const httpBridge = createHttpDaemonBridgeClient({
