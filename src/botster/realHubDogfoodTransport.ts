@@ -5,6 +5,7 @@ import type { HubControlFrame, HubControlFrameHandler, HubControlTransport } fro
 import type {
   DaemonBridgeRequestEnvelope,
   DaemonBridgeResponseEnvelope,
+  DaemonDiagnostic,
   DaemonEvent,
   DaemonOperatorError,
   DaemonRequest,
@@ -163,7 +164,7 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
         operation: "entity_snapshot",
         family: statusFamily,
         sequence,
-        records: [statusRecord(response.status)]
+        records: [statusRecord(response.status, response.diagnostics)]
       } satisfies EntityFrame
     });
   }
@@ -191,6 +192,10 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
 
   if (response.error) {
     frames.push(operatorErrorFrame(response.error));
+  }
+
+  for (const diagnostic of responseDiagnostics(response)) {
+    frames.push(connectionDiagnosticFrame(diagnostic));
   }
 
   return frames;
@@ -229,10 +234,17 @@ export function daemonEventFrame(event: DaemonEvent, sequence: number): HubContr
     };
   }
 
+  if (event.type === "runtime_observation") {
+    return connectionDiagnosticFrame({
+      kind: event.kind,
+      message: `Runtime observation: ${event.kind}`
+    });
+  }
+
   return undefined;
 }
 
-function statusRecord(status: NonNullable<DaemonResponse["status"]>) {
+function statusRecord(status: NonNullable<DaemonResponse["status"]>, responseDiagnostics: DaemonDiagnostic[] = []) {
   return {
     id: "local-hub",
     title: status.host_display_name,
@@ -242,7 +254,8 @@ function statusRecord(status: NonNullable<DaemonResponse["status"]>) {
     compatibility: status.compatibility,
     sessions: status.session_count,
     packages: status.package_count,
-    state_source: status.state_source
+    state_source: status.state_source,
+    diagnostics: [...(status.diagnostics ?? []), ...responseDiagnostics]
   };
 }
 
@@ -341,6 +354,27 @@ function operatorErrorFrame(error: DaemonOperatorError): HubControlFrame {
     kind: "operator_error",
     payload: error
   };
+}
+
+function connectionDiagnosticFrame(diagnostic: DaemonDiagnostic): HubControlFrame {
+  return {
+    kind: "connection_diagnostic",
+    payload: diagnostic
+  };
+}
+
+function responseDiagnostics(response: DaemonResponse): DaemonDiagnostic[] {
+  const diagnostics: DaemonDiagnostic[] = [];
+
+  if (Array.isArray(response.status?.diagnostics)) {
+    diagnostics.push(...response.status.diagnostics);
+  }
+
+  if (Array.isArray(response.diagnostics)) {
+    diagnostics.push(...response.diagnostics);
+  }
+
+  return diagnostics;
 }
 
 function defaultSpawnCommand(): string {

@@ -20,6 +20,7 @@ export interface DaemonResponse {
   events?: DaemonEvent[];
   cleanup?: { session_id: string; outcome: string } | null;
   error?: DaemonOperatorError | null;
+  diagnostics?: DaemonDiagnostic[];
 }
 
 export interface DaemonStatus {
@@ -38,6 +39,7 @@ export interface DaemonStatus {
   session_count: number;
   recovered_sessions: string[];
   stale_sessions: string[];
+  diagnostics?: DaemonDiagnostic[];
 }
 
 export interface DaemonCompatibility {
@@ -92,6 +94,13 @@ export interface DaemonOperatorError {
   request_id: string;
   operation: string;
   message: string;
+}
+
+export interface DaemonDiagnostic {
+  kind: string;
+  operation?: string | null;
+  feature?: string | null;
+  message?: string | null;
 }
 
 export interface DaemonBridgeRequestEnvelope {
