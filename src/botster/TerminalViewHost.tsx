@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   DefaultTerminalViewBridge,
@@ -35,6 +35,7 @@ export function TerminalViewHost({
 }: TerminalViewHostProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const onDiagnosticRef = useRef(onDiagnostic);
+  const [mountDiagnostic, setMountDiagnostic] = useState<string | undefined>();
   const terminalDataPlane = useMemo(
     () =>
       dataPlane ??
@@ -77,6 +78,7 @@ export function TerminalViewHost({
         }
 
         await bridge.attach(descriptor, terminalDataPlane);
+        setMountDiagnostic(undefined);
         container.dataset.terminalMount = "mounted";
         resize();
         observer = new ResizeObserver(resize);
@@ -86,6 +88,7 @@ export function TerminalViewHost({
         container.dataset.terminalMount = "failed";
         container.dataset.terminalMountError =
           error instanceof Error ? error.message : String(error);
+        setMountDiagnostic(error instanceof Error ? error.message : String(error));
         onDiagnosticRef.current?.(error);
         if (mount) {
           void bridge.unmount(descriptor, mount);
@@ -115,9 +118,21 @@ export function TerminalViewHost({
         role="region"
         tabIndex={0}
         onFocus={() => {
-          void bridge.focus(descriptor);
+          void bridge.focus(descriptor).catch((error: unknown) => {
+            const container = terminalRef.current;
+            if (container) {
+              container.dataset.terminalFocus = "failed";
+            }
+            onDiagnosticRef.current?.(error);
+          });
         }}
       />
+      {mountDiagnostic ? (
+        <div className="diagnostic-panel" data-terminal-diagnostic="mount-failed">
+          <strong>Terminal renderer unavailable</strong>
+          <span>{mountDiagnostic}</span>
+        </div>
+      ) : null}
     </aside>
   );
 }

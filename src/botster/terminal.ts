@@ -56,6 +56,7 @@ interface TerminalMountState {
   dataPlane?: TerminalDataPlaneAttachment;
   inputSubscription?: TerminalSubscription;
   outputSubscription?: TerminalSubscription;
+  focusing?: boolean;
 }
 
 export class DefaultTerminalViewBridge implements TerminalViewBridge {
@@ -143,7 +144,8 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     rows: number,
     columns: number
   ): Promise<void> {
-    const state = this.requireMount(descriptor);
+    const state = this.mounts.get(descriptor.sessionId);
+    if (!state) return;
 
     await state.renderer.resize(rows, columns);
     if (state.dataPlane?.resize) {
@@ -152,11 +154,20 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
   }
 
   async focus(descriptor: TerminalViewDescriptor): Promise<void> {
-    await this.requireMount(descriptor).renderer.focus();
+    const state = this.mounts.get(descriptor.sessionId);
+    if (!state || state.focusing) return;
+
+    state.focusing = true;
+    try {
+      await state.renderer.focus();
+    } finally {
+      state.focusing = false;
+    }
   }
 
   async writeInput(descriptor: TerminalViewDescriptor, data: TerminalInput): Promise<void> {
-    const state = this.requireMount(descriptor);
+    const state = this.mounts.get(descriptor.sessionId);
+    if (!state) return;
     await state.dataPlane?.writeInput(data);
   }
 

@@ -1,4 +1,5 @@
 import { Terminal as ResttyTerminal } from "../vendor/restty/xterm.js";
+import type { ResttyFontSource } from "../vendor/restty/runtime/types";
 import type {
   TerminalInput,
   TerminalRendererAdapter,
@@ -6,13 +7,19 @@ import type {
   TerminalViewDescriptor
 } from "./terminal";
 
+const botsterResttyFontSources: ResttyFontSource[] = [
+  {
+    type: "url",
+    url: "https://cdn.jsdelivr.net/gh/ryanoasis/nerd-fonts@v3.4.0/patched-fonts/JetBrainsMono/NoLigatures/Regular/JetBrainsMonoNLNerdFontMono-Regular.ttf",
+    label: "JetBrains Mono Nerd Font Regular"
+  }
+];
+
 export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   private readonly terminal = new ResttyTerminal({
     cols: 80,
     rows: 24,
-    appOptions: {
-      fontPreset: "none"
-    }
+    fontSources: botsterResttyFontSources
   });
 
   constructor(readonly descriptor: TerminalViewDescriptor) {}

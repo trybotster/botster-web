@@ -71,6 +71,14 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "GET" && request.url === "/favicon.ico") {
+    response.writeHead(204, {
+      "cache-control": "public, max-age=86400"
+    });
+    response.end();
+    return;
+  }
+
   if (request.method === "GET") {
     await serveStaticUi(request, response);
     return;
