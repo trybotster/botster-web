@@ -33,6 +33,9 @@ const [
   terminalHost,
   terminalSmokeFixture,
   pluginSurfaces,
+  packageManifestRaw,
+  packageJsonRaw,
+  pluginEntrypoint,
   dogfoodBridgeModeScript,
   dogfoodBridgeScript,
   architecture,
@@ -59,6 +62,9 @@ const [
   readFile(new URL("./botster/TerminalViewHost.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/terminalSmokeFixture.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/pluginSurfaces.ts", import.meta.url), "utf8"),
+  readFile(new URL("../botster-package.json", import.meta.url), "utf8"),
+  readFile(new URL("../package.json", import.meta.url), "utf8"),
+  readFile(new URL("../plugin.lua", import.meta.url), "utf8"),
   readFile(new URL("../scripts/dogfoodBridgeMode.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/real-hub-dogfood-bridge.mjs", import.meta.url), "utf8"),
   readFile(new URL("../docs/architecture.md", import.meta.url), "utf8"),
@@ -186,11 +192,57 @@ assert.match(readme, /VITE_BOTSTER_REAL_HUB_DOGFOOD=1/);
 assert.match(readme, /BOTSTER_HUB_BIN/);
 assert.match(readme, /BOTSTER_HUB_SOCKET/);
 assert.match(readme, /BOTSTER_HUB_DATA_DIR/);
+assert.match(readme, /botster-package\.json/);
+assert.match(readme, /packages install --data-dir[\s\S]*--path/);
+assert.match(readme, /packages show --data-dir .* botster-web/);
+assert.match(readme, /packages enable --data-dir .* botster-web/);
+assert.match(readme, /local_development/);
+assert.match(readme, /first-party-ready/);
 assert.match(vendorReadme, /e9742252312ee616d8f186b697d70349cf329250/);
 assert.doesNotMatch(uiNodes, /terminal_view/);
 assert.doesNotMatch(protocol, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
 assert.doesNotMatch(localDogfoodTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
 assert.doesNotMatch(realHubDogfoodTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
+
+const packageManifest = JSON.parse(packageManifestRaw);
+const packageJson = JSON.parse(packageJsonRaw);
+assert.equal(packageManifest.name, "botster-web");
+assert.equal(packageManifest.version, packageJson.version);
+assert.equal(packageManifest.kind, "plugin");
+assert.equal(packageManifest.botster, ">=0.1.0");
+assert.deepEqual(packageManifest.source, { type: "path", path: "." });
+assert.deepEqual(packageManifest.capabilities, []);
+assert.deepEqual(packageManifest.entrypoints, [
+  { runtime: "lua", path: "plugin.lua", bootstrap: false }
+]);
+assert.equal(packageManifest.runnable_entrypoints.length, 1);
+assert.match(pluginEntrypoint, /botster\.register\(\{\}\)/);
+assert.doesNotMatch(pluginEntrypoint, /tools|commands|surfaces|entities|mcp/);
+
+const [webClientEntrypoint] = packageManifest.runnable_entrypoints;
+assert.equal(webClientEntrypoint.id, "web-client");
+assert.equal(webClientEntrypoint.kind, "web");
+assert.equal(webClientEntrypoint.command, "node");
+assert.deepEqual(webClientEntrypoint.args, ["scripts/real-hub-dogfood-bridge.mjs"]);
+assert.deepEqual(webClientEntrypoint.working_directory, { policy: "package_root" });
+assert.equal(webClientEntrypoint.mode, "dev");
+assert.equal(webClientEntrypoint.may_supervise, true);
+assert.deepEqual(webClientEntrypoint.capabilities, [{ surface: "network", scope: "localhost" }]);
+assert.deepEqual(
+  webClientEntrypoint.environment.map(({ name, required }) => ({ name, required })),
+  [
+    { name: "BOTSTER_HUB_SOCKET", required: false },
+    { name: "BOTSTER_HUB_DATA_DIR", required: false }
+  ]
+);
+assert.equal(
+  webClientEntrypoint.environment.some(({ name }) => name === "BOTSTER_HUB_BIN"),
+  false
+);
+assert.equal(
+  webClientEntrypoint.environment.some(({ name }) => name === "BOTSTER_WEB_DOGFOOD_DATA_DIR"),
+  false
+);
 
 const spawnedBridgeMode = resolveDogfoodBridgeMode(
   { BOTSTER_HUB_BIN: "./target/debug/botster-hub", BOTSTER_SESSION_WORKER_BIN: "./target/debug/botster-session-worker" },

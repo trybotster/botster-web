@@ -137,6 +137,37 @@ Known limitation: the control-plane round trip (status/list/spawn/input/resize/o
 
 The bridge is a dev/test harness, not the production browser transport. Production browser parity over WebRTC remains outside this repo. The harness uses an explicit temporary data directory and neutral ids; it must not use or mutate the user's real Botster home state.
 
+## Local Botster Package
+
+This repo includes `botster-package.json` so the current local hub can install `botster-web` from a checked-out path. The manifest uses package `kind: "plugin"` because package classification is still plugin/provider. The root `plugin.lua` is an inert package entrypoint required by local package enable/prepare, while the web-client behavior is declared as a hub-owned `runnable_entrypoints` row named `web-client`.
+
+From the `botster-hub` checkout, install, inspect, and enable this package against a selected hub data directory:
+
+```bash
+cargo run -- packages install --data-dir target/botster-hub-dogfood-data \
+  --path /path/to/botster-web
+cargo run -- packages show --data-dir target/botster-hub-dogfood-data botster-web
+cargo run -- packages enable --data-dir target/botster-hub-dogfood-data botster-web
+```
+
+`packages enable --path` remains a compatibility shortcut, but the explicit install/show/enable flow is preferred when proving admission and registry state:
+
+```bash
+cargo run -- packages enable --data-dir target/botster-hub-dogfood-data \
+  --path /path/to/botster-web
+```
+
+Local path installs are recorded by the hub as `local_development` trust. The manifest is first-party-ready for future hub bundling, but a manifest cannot declare genuine `first_party` trust by itself.
+
+The runnable entrypoint launches the existing bridge with:
+
+```text
+command: node
+args: scripts/real-hub-dogfood-bridge.mjs
+```
+
+When the hub supervises this entrypoint, it should provide `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR`. Either value selects existing-hub attach mode, so the bridge does not require `BOTSTER_HUB_BIN`, does not spawn a second hub, does not shut down the attached hub, and does not remove the attached hub data directory.
+
 ## License
 
 botster-web is distributed under the [O'Saasy License Agreement](LICENSE).

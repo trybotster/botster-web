@@ -1,0 +1,37 @@
+{
+  "name": "botster-web",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "botster": ">=0.1.0",
+  "source": { "type": "path", "path": "." },
+  "capabilities": [],
+  "entrypoints": [
+    { "runtime": "lua", "path": "plugin.lua", "bootstrap": false }
+  ],
+  "runnable_entrypoints": [
+    {
+      "id": "web-client",
+      "kind": "web",
+      "command": "node",
+      "args": ["scripts/real-hub-dogfood-bridge.mjs"],
+      "working_directory": { "policy": "package_root" },
+      "environment": [
+        {
+          "name": "BOTSTER_HUB_SOCKET",
+          "required": false,
+          "description": "Existing hub daemon socket. Preferred when hub supervises botster-web."
+        },
+        {
+          "name": "BOTSTER_HUB_DATA_DIR",
+          "required": false,
+          "description": "Existing hub data directory. The bridge derives botster-hub.sock from this directory."
+        }
+      ],
+      "mode": "dev",
+      "capabilities": [
+        { "surface": "network", "scope": "localhost" }
+      ],
+      "may_supervise": true
+    }
+  ]
+}
