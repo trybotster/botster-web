@@ -36,6 +36,7 @@ import {
   actionFailureDiagnostic,
   compatibilityDiagnosticsFromFrame,
   connectionFailureDiagnostic,
+  hubConnectionDiagnosticFromFrame,
   initialConnectionDiagnostics,
   operatorErrorDiagnostic,
   schemaVersionDiagnosticFromFrame,
@@ -129,6 +130,7 @@ export default function App() {
     const unsubscribeDiagnostics = runtimeClient.hub.onFrame((frame) => {
       if (!cancelled) {
         recordDiagnostic(operatorErrorDiagnostic(frame));
+        recordDiagnostic(hubConnectionDiagnosticFromFrame(frame));
         recordDiagnostic(schemaVersionDiagnosticFromFrame(frame));
         recordDiagnostics(compatibilityDiagnosticsFromFrame(frame));
       }

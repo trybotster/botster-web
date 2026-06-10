@@ -25,6 +25,31 @@ export interface ConnectionDiagnostic {
   source: "bridge" | "compatibility" | "stream" | "action" | "terminal";
 }
 
+export function hubConnectionDiagnosticFromFrame(frame: HubControlFrame): ConnectionDiagnostic | undefined {
+  if (frame.kind !== "connection_diagnostic" || !isRecord(frame.payload)) {
+    return undefined;
+  }
+
+  const kind = typeof frame.payload.kind === "string" ? frame.payload.kind : "runtime_observation";
+  const message =
+    typeof frame.payload.message === "string" && frame.payload.message
+      ? frame.payload.message
+      : `Hub reported ${kind}.`;
+  const feature = typeof frame.payload.feature === "string" ? frame.payload.feature : undefined;
+  const operation = typeof frame.payload.operation === "string" ? frame.payload.operation : undefined;
+  const details = [message];
+  if (feature) details.push(`Capability: ${feature}.`);
+  if (operation) details.push(`Operation: ${operation}.`);
+
+  return {
+    id: `hub-diagnostic-${kind}${feature ? `-${feature}` : ""}`,
+    title: hubDiagnosticTitle(kind),
+    detail: details.join(" "),
+    severity: hubDiagnosticSeverity(kind),
+    source: hubDiagnosticSource(kind)
+  };
+}
+
 export function initialConnectionDiagnostics(mode: string, statusText: string): ConnectionDiagnostic[] {
   return [
     {
@@ -130,6 +155,10 @@ export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): Conne
     return [];
   }
 
+  if (hasHubCompatibilityDiagnostic(status)) {
+    return [];
+  }
+
   const compatibility = status.compatibility;
   if (!isRecord(compatibility)) {
     return [
@@ -225,6 +254,20 @@ function hubStatusRecordFromFrame(frame: HubControlFrame): Record<string, unknow
   return isRecord(status) ? status : undefined;
 }
 
+function hasHubCompatibilityDiagnostic(status: Record<string, unknown>): boolean {
+  if (!Array.isArray(status.diagnostics)) {
+    return false;
+  }
+
+  return status.diagnostics.some((diagnostic) => {
+    if (!isRecord(diagnostic)) {
+      return false;
+    }
+
+    return diagnostic.kind === "compatibility_mismatch" || diagnostic.kind === "unsupported_feature";
+  });
+}
+
 export function upsertDiagnostic(
   diagnostics: ConnectionDiagnostic[],
   diagnostic: ConnectionDiagnostic | undefined
@@ -258,4 +301,59 @@ function errorMessage(error: unknown, fallback: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hubDiagnosticTitle(kind: string): string {
+  switch (kind) {
+    case "connected":
+      return "Hub connection established";
+    case "disconnected":
+      return "Hub connection disconnected";
+    case "compatibility_mismatch":
+      return "Hub compatibility mismatch";
+    case "unsupported_feature":
+      return "Hub capability unsupported";
+    case "terminal_stream_unavailable":
+      return "Terminal stream unavailable";
+    case "action_failure":
+      return "Hub action failed";
+    case "daemon_startup_failure":
+      return "Hub daemon startup failed";
+    default:
+      return "Hub runtime observation";
+  }
+}
+
+function hubDiagnosticSeverity(kind: string): ConnectionDiagnosticSeverity {
+  switch (kind) {
+    case "connected":
+      return "success";
+    case "disconnected":
+    case "unsupported_feature":
+    case "action_failure":
+      return "warning";
+    case "compatibility_mismatch":
+    case "terminal_stream_unavailable":
+    case "daemon_startup_failure":
+      return "danger";
+    default:
+      return "info";
+  }
+}
+
+function hubDiagnosticSource(kind: string): ConnectionDiagnostic["source"] {
+  switch (kind) {
+    case "compatibility_mismatch":
+    case "unsupported_feature":
+      return "compatibility";
+    case "terminal_stream_unavailable":
+      return "terminal";
+    case "action_failure":
+      return "action";
+    case "connected":
+    case "disconnected":
+      return "stream";
+    default:
+      return "bridge";
+  }
 }

@@ -14,7 +14,8 @@ export type HubControlFrameKind =
   | "entity_remove"
   | "action_request"
   | "action_result"
-  | "operator_error";
+  | "operator_error"
+  | "connection_diagnostic";
 
 export interface HubControlFrame {
   kind: HubControlFrameKind;

@@ -72,6 +72,7 @@ assert.match(app, /runtimeClient\.hub\.subscribeSurface/);
 assert.match(app, /runtimeClient\.entities\.pull/);
 assert.match(app, /schemaVersionDiagnosticFromFrame/);
 assert.match(app, /operatorErrorDiagnostic/);
+assert.match(app, /hubConnectionDiagnosticFromFrame/);
 assert.match(app, /terminalUnavailableDiagnostic/);
 assert.match(app, /surfaceSnapshot \?\? loadingSnapshot/);
 assert.doesNotMatch(app, /fixtureEntityFrames/);
@@ -103,6 +104,7 @@ assert.match(realHubDaemonDto, /export type DaemonRequest/);
 assert.match(realHubDaemonDto, /type: "status"/);
 assert.match(realHubDaemonDto, /type: "spawn"/);
 assert.match(realHubDaemonDto, /export interface DaemonResponse/);
+assert.match(realHubDaemonDto, /diagnostics\?: DaemonDiagnostic\[\]/);
 assert.match(realHubDaemonDto, /export type DaemonEvent/);
 assert.match(realHubDogfoodTransport, /kind: "daemon_request"/);
 assert.match(realHubDogfoodTransport, /reply\.kind !== "daemon_response"/);
@@ -259,6 +261,7 @@ const {
   bridgeUnavailableDiagnostic,
   compatibilityDiagnosticsFromFrame,
   connectionFailureDiagnostic,
+  hubConnectionDiagnosticFromFrame,
   hubStatusFamily,
   operatorErrorDiagnostic,
   schemaVersionDiagnosticFromFrame,
@@ -456,10 +459,22 @@ const bridge = {
           enabled_provider_count: 0,
           session_count: 1,
           recovered_sessions: [],
-          stale_sessions: []
+          stale_sessions: [],
+          diagnostics: [
+            {
+              kind: "connected",
+              message: "Hub control channel is connected"
+            }
+          ]
         },
         sessions: [],
-        events: []
+        events: [],
+        diagnostics: [
+          {
+            kind: "unsupported_feature",
+            feature: "terminal_streaming"
+          }
+        ]
       };
     }
 
@@ -625,12 +640,100 @@ const diagnosticRuntime = createBotsterWebClient({
 diagnosticRuntime.hub.onFrame((frame) => {
   const schemaDiagnostic = schemaVersionDiagnosticFromFrame(frame);
   if (schemaDiagnostic) runtimeDiagnostics.push(schemaDiagnostic);
+  const hubDiagnostic = hubConnectionDiagnosticFromFrame(frame);
+  if (hubDiagnostic) runtimeDiagnostics.push(hubDiagnostic);
   runtimeDiagnostics.push(...compatibilityDiagnosticsFromFrame(frame));
 });
 await diagnosticRuntime.hub.connect({ client: "botster-web", capabilities: [] });
 await flushMicrotasks();
 assert.equal(runtimeDiagnostics.some((diagnostic) => diagnostic.id === "schema-version"), true);
-assert.equal(runtimeDiagnostics.some((diagnostic) => diagnostic.id === "hub-compatibility"), true);
+assert.equal(runtimeDiagnostics.some((diagnostic) => diagnostic.id === "hub-compatibility"), false);
+assert.equal(runtimeDiagnostics.some((diagnostic) => diagnostic.id === "hub-diagnostic-connected"), true);
+assert.equal(
+  runtimeDiagnostics.some(
+    (diagnostic) =>
+      diagnostic.id === "hub-diagnostic-unsupported_feature-terminal_streaming" &&
+      diagnostic.detail.includes("Capability: terminal_streaming")
+  ),
+  true
+);
+assert.equal(
+  runtimeDiagnostics.some((diagnostic) => diagnostic.title === "Hub compatibility descriptor compatible"),
+  false
+);
+
+const hubDiagnosticFrames = daemonResponseFrames({
+  kind: "status",
+  status: {
+    lifecycle_state: "running",
+    compatibility: {
+      protocol: "botster-hub-daemon-v1",
+      protocol_version: 1,
+      features: [
+        "sessions",
+        "terminal_streaming",
+        "resize",
+        "plugin_surface_render",
+        "plugin_surface_action"
+      ],
+      conformance_fixture_revision: 1
+    },
+    host_id: "dogfood-host",
+    host_display_name: "Dogfood Hub",
+    schema_version: 1,
+    data_dir_configured: true,
+    core_initialized: true,
+    state_source: "explicit",
+    package_count: 0,
+    enabled_package_count: 0,
+    provider_count: 0,
+    enabled_provider_count: 0,
+    session_count: 1,
+    recovered_sessions: [],
+    stale_sessions: [],
+    diagnostics: [
+      {
+        kind: "compatibility_mismatch",
+        message: "Hub protocol is not compatible",
+        operation: "status"
+      }
+    ]
+  },
+  events: [
+    {
+      type: "runtime_observation",
+      kind: "terminal_stream_unavailable"
+    }
+  ],
+  diagnostics: [
+    {
+      kind: "action_failure",
+      message: "Spawn action failed",
+      operation: "spawn"
+    }
+  ]
+}, 11).filter((frame) => frame.kind === "connection_diagnostic");
+assert.equal(hubDiagnosticFrames.length, 3);
+assert.equal(
+  hubConnectionDiagnosticFromFrame(hubDiagnosticFrames.find((frame) => frame.payload.kind === "compatibility_mismatch")).title,
+  "Hub compatibility mismatch"
+);
+assert.equal(
+  hubConnectionDiagnosticFromFrame(hubDiagnosticFrames.find((frame) => frame.payload.kind === "terminal_stream_unavailable")).title,
+  "Terminal stream unavailable"
+);
+assert.equal(
+  hubConnectionDiagnosticFromFrame(hubDiagnosticFrames.find((frame) => frame.payload.kind === "action_failure")).source,
+  "action"
+);
+assert.match(
+  hubConnectionDiagnosticFromFrame(hubDiagnosticFrames.find((frame) => frame.payload.kind === "action_failure")).detail,
+  /Operation: spawn/
+);
+assert.equal(
+  streamDisconnectedDiagnostic(new Error("SSE closed")).title,
+  "Control stream disconnected"
+);
 
 const mappedFrames = daemonResponseFrames({
   kind: "operator_error",
@@ -993,9 +1096,12 @@ try {
         bridgeUnavailableDiagnostic(new Error("connect ECONNREFUSED")),
         mismatchedSchemaDiagnostic,
         ...runtimeDiagnostics,
+        hubConnectionDiagnosticFromFrame(hubDiagnosticFrames.find((frame) => frame.payload.kind === "compatibility_mismatch")),
+        hubConnectionDiagnosticFromFrame(hubDiagnosticFrames.find((frame) => frame.payload.kind === "action_failure")),
         descriptorUnavailableDiagnostic,
         protocolMismatchDiagnostic,
         missingCapabilityDiagnostic,
+        compatibleDescriptorDiagnostic,
         streamDisconnectedDiagnostic(new Error("SSE closed")),
         actionFailureDiagnostic(
           { id: "botster.session.rename", target: "missing-real-hub-session" },
@@ -1008,6 +1114,12 @@ try {
   assert.match(diagnosticsMarkup, /Connection diagnostics/);
   assert.match(diagnosticsMarkup, /Local hub bridge unavailable/);
   assert.match(diagnosticsMarkup, /Daemon schema mismatch/);
+  assert.match(diagnosticsMarkup, /Hub connection established/);
+  assert.match(diagnosticsMarkup, /Hub capability unsupported/);
+  assert.match(diagnosticsMarkup, /Hub compatibility mismatch/);
+  assert.match(diagnosticsMarkup, /Hub action failed/);
+  assert.match(diagnosticsMarkup, /Capability: terminal_streaming/);
+  assert.match(diagnosticsMarkup, /Operation: spawn/);
   assert.match(diagnosticsMarkup, /Hub compatibility descriptor compatible/);
   assert.match(diagnosticsMarkup, /Hub compatibility descriptor unavailable/);
   assert.match(diagnosticsMarkup, /Hub protocol mismatch/);
