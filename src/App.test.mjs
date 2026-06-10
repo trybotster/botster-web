@@ -1199,6 +1199,42 @@ const mappedFrames = daemonResponseFrames({
 assert.equal(mappedFrames.some((frame) => frame.kind === "operator_error"), true);
 assert.equal(operatorErrorDiagnostic(mappedFrames.find((frame) => frame.kind === "operator_error")).title, "Hub operator error");
 
+const spawnFailureDiagnosticMessage = "Spawn failed before terminal attach; the requested session already exists.";
+const spawnFailureFrames = daemonResponseFrames({
+  kind: "operator_error",
+  sessions: [],
+  packages: [],
+  events: [],
+  error: {
+    code: "session_already_exists",
+    request_id: "spawn-failure-runtime",
+    operation: "spawn",
+    message: "runtime failed while handling Spawn: Runtime"
+  },
+  diagnostics: [
+    {
+      kind: "action_failure",
+      operation: "spawn",
+      feature: null,
+      message: spawnFailureDiagnosticMessage
+    }
+  ]
+}, 12);
+const spawnFailureOperatorDiagnostic = operatorErrorDiagnostic(spawnFailureFrames.find((frame) => frame.kind === "operator_error"));
+const spawnFailureHubDiagnostic = hubConnectionDiagnosticFromFrame(
+  spawnFailureFrames.find((frame) => frame.kind === "connection_diagnostic")
+);
+assert.equal(spawnFailureFrames.some((frame) => frame.kind === "operator_error"), true);
+assert.equal(spawnFailureFrames.some((frame) => frame.kind === "connection_diagnostic"), true);
+assert.equal(spawnFailureOperatorDiagnostic.title, "Hub operator error");
+assert.equal(spawnFailureOperatorDiagnostic.detail, "runtime failed while handling Spawn: Runtime");
+assert.equal(spawnFailureHubDiagnostic.title, "Hub action failed");
+assert.equal(spawnFailureHubDiagnostic.severity, "warning");
+assert.equal(spawnFailureHubDiagnostic.source, "action");
+assert.match(spawnFailureHubDiagnostic.detail, new RegExp(spawnFailureDiagnosticMessage));
+assert.match(spawnFailureHubDiagnostic.detail, /Operation: spawn/);
+assert.doesNotMatch(spawnFailureHubDiagnostic.detail, /Capability:/);
+
 const mismatchedSchemaDiagnostic = schemaVersionDiagnosticFromFrame({
   kind: "entity_snapshot",
   payload: {
@@ -1679,6 +1715,8 @@ try {
         ...runtimeDiagnostics,
         hubConnectionDiagnosticFromFrame(hubDiagnosticFrames.find((frame) => frame.payload.kind === "compatibility_mismatch")),
         hubConnectionDiagnosticFromFrame(hubDiagnosticFrames.find((frame) => frame.payload.kind === "action_failure")),
+        spawnFailureOperatorDiagnostic,
+        spawnFailureHubDiagnostic,
         descriptorUnavailableDiagnostic,
         protocolMismatchDiagnostic,
         missingCapabilityDiagnostic,
@@ -1699,6 +1737,8 @@ try {
   assert.match(diagnosticsMarkup, /Hub capability unsupported/);
   assert.match(diagnosticsMarkup, /Hub compatibility mismatch/);
   assert.match(diagnosticsMarkup, /Hub action failed/);
+  assert.match(diagnosticsMarkup, new RegExp(spawnFailureDiagnosticMessage));
+  assert.match(diagnosticsMarkup, /runtime failed while handling Spawn: Runtime/);
   assert.match(diagnosticsMarkup, /Capability: terminal_streaming/);
   assert.match(diagnosticsMarkup, /Operation: spawn/);
   assert.match(diagnosticsMarkup, /Hub compatibility descriptor compatible/);

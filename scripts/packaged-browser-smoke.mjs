@@ -9,93 +9,125 @@ import { chromium } from "playwright";
 const host = "127.0.0.1";
 const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
-const root = await mkdtemp(join(tmpdir(), "botster-web-browser-smoke-"));
-const socketPath = join(root, "hub.sock");
-const port = await findAvailablePort();
-const consoleEvents = [];
-const pageErrors = [];
-const responseErrors = [];
-const daemonRequests = [];
+const spawnFailureMessage = "Spawn failed before terminal attach; the requested session already exists.";
+const spawnRuntimeError = "runtime failed while handling Spawn: Runtime";
 
-await mkdir(root, { recursive: true });
-const daemon = createFakeDaemon(socketPath, daemonRequests);
-await listen(daemon, socketPath);
-
-const bridgeProcess = spawn(
-  process.execPath,
-  [new URL("./real-hub-dogfood-bridge.mjs", import.meta.url).pathname],
-  {
-    cwd: packageRoot,
-    env: {
-      ...process.env,
-      BOTSTER_HUB_SOCKET: socketPath,
-      BOTSTER_WEB_DOGFOOD_BRIDGE_PORT: String(port)
-    },
-    stdio: ["ignore", "pipe", "pipe"]
-  }
-);
-
-let bridgeStdout = "";
-let bridgeStderr = "";
-bridgeProcess.stdout.setEncoding("utf8");
-bridgeProcess.stderr.setEncoding("utf8");
-bridgeProcess.stdout.on("data", (chunk) => {
-  bridgeStdout += chunk;
+await runPackagedBrowserSmoke({
+  name: "successful spawn",
+  spawnFails: false
 });
-bridgeProcess.stderr.on("data", (chunk) => {
-  bridgeStderr += chunk;
+await runPackagedBrowserSmoke({
+  name: "spawn failure diagnostics",
+  spawnFails: true
 });
 
-let browser;
+console.log("packaged browser smoke passed");
 
-try {
-  await waitForHttpOk(`http://${host}:${port}/health`);
-  browser = await chromium.launch();
-  const page = await browser.newPage();
+async function runPackagedBrowserSmoke(scenario) {
+  const root = await mkdtemp(join(tmpdir(), "botster-web-browser-smoke-"));
+  const socketPath = join(root, "hub.sock");
+  const port = await findAvailablePort();
+  const consoleEvents = [];
+  const pageErrors = [];
+  const responseErrors = [];
+  const daemonRequests = [];
 
-  page.on("console", (message) => {
-    consoleEvents.push({ type: message.type(), text: message.text() });
-  });
-  page.on("pageerror", (error) => {
-    pageErrors.push(error.message);
-  });
-  page.on("response", (response) => {
-    if (response.status() === 404) {
-      responseErrors.push(`${response.status()} ${response.url()}`);
+  await mkdir(root, { recursive: true });
+  const daemon = createFakeDaemon(socketPath, daemonRequests, scenario);
+  await listen(daemon, socketPath);
+
+  const bridgeProcess = spawn(
+    process.execPath,
+    [new URL("./real-hub-dogfood-bridge.mjs", import.meta.url).pathname],
+    {
+      cwd: packageRoot,
+      env: {
+        ...process.env,
+        BOTSTER_HUB_SOCKET: socketPath,
+        BOTSTER_WEB_DOGFOOD_BRIDGE_PORT: String(port)
+      },
+      stdio: ["ignore", "pipe", "pipe"]
     }
+  );
+
+  let bridgeStdout = "";
+  let bridgeStderr = "";
+  bridgeProcess.stdout.setEncoding("utf8");
+  bridgeProcess.stderr.setEncoding("utf8");
+  bridgeProcess.stdout.on("data", (chunk) => {
+    bridgeStdout += chunk;
+  });
+  bridgeProcess.stderr.on("data", (chunk) => {
+    bridgeStderr += chunk;
   });
 
-  await page.goto(`http://${host}:${port}/?dogfood=real-hub`, {
-    waitUntil: "domcontentloaded"
-  });
-  await page.getByText("Isolated local hub dogfood").waitFor();
-  await page.getByRole("button", { name: "Spawn isolated session" }).click();
-  await page.locator("[data-terminal-renderer='restty']").waitFor({ state: "attached" });
-  await page.locator("[data-terminal-session-id='botster-web-dogfood-session']").waitFor({
-    state: "attached"
-  });
-  await page.waitForTimeout(500);
-  const mountFailureCount = await page.locator("[data-terminal-diagnostic='mount-failed']").count();
-  if (mountFailureCount > 0) {
-    throw new Error("terminal renderer rendered a mount-failed diagnostic in packaged browser smoke");
+  let browser;
+
+  try {
+    await waitForHttpOk(`http://${host}:${port}/health`, {
+      bridgeProcess,
+      bridgeStdout: () => bridgeStdout,
+      bridgeStderr: () => bridgeStderr
+    });
+    browser = await chromium.launch();
+    const page = await browser.newPage();
+
+    page.on("console", (message) => {
+      consoleEvents.push({ type: message.type(), text: message.text() });
+    });
+    page.on("pageerror", (error) => {
+      pageErrors.push(error.message);
+    });
+    page.on("response", (response) => {
+      if (response.status() === 404) {
+        responseErrors.push(`${response.status()} ${response.url()}`);
+      }
+    });
+
+    await page.goto(`http://${host}:${port}/?dogfood=real-hub`, {
+      waitUntil: "domcontentloaded"
+    });
+    await page.getByText("Isolated local hub dogfood").waitFor();
+    await page.getByRole("button", { name: "Spawn isolated session" }).click();
+
+    if (scenario.spawnFails) {
+      await page.getByText("Hub action failed").waitFor();
+      await page.getByText(spawnFailureMessage).waitFor();
+      await page.getByText("Operation: spawn").waitFor();
+      const genericRuntimeErrorCount = await page.getByText(spawnRuntimeError).count();
+      if (genericRuntimeErrorCount === 0) {
+        throw new Error("spawn failure smoke did not render the generic runtime error");
+      }
+    } else {
+      await page.locator("[data-terminal-renderer='restty']").waitFor({ state: "attached" });
+      await page.locator("[data-terminal-session-id='botster-web-dogfood-session']").waitFor({
+        state: "attached"
+      });
+      await page.waitForTimeout(500);
+      const mountFailureCount = await page.locator("[data-terminal-diagnostic='mount-failed']").count();
+      if (mountFailureCount > 0) {
+        throw new Error("terminal renderer rendered a mount-failed diagnostic in packaged browser smoke");
+      }
+    }
+
+    assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+    if (!daemonRequests.some((request) => request.type === "spawn")) {
+      throw new Error(`packaged browser smoke ${scenario.name} did not dispatch the spawn action through the bridge`);
+    }
+  } catch (error) {
+    error.message = `${scenario.name}: ${error.message}\nbridge stdout:\n${bridgeStdout}\nbridge stderr:\n${bridgeStderr}`;
+    throw error;
+  } finally {
+    await browser?.close();
+    bridgeProcess.kill("SIGTERM");
+    await Promise.race([
+      once(bridgeProcess, "exit"),
+      new Promise((resolve) => setTimeout(resolve, 1_000))
+    ]);
+    daemon.close();
+    await once(daemon, "close").catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
   }
-
-  assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
-  if (!daemonRequests.some((request) => request.type === "spawn")) {
-    throw new Error("packaged browser smoke did not dispatch the spawn action through the bridge");
-  }
-
-  console.log("packaged browser smoke passed");
-} finally {
-  await browser?.close();
-  bridgeProcess.kill("SIGTERM");
-  await Promise.race([
-    once(bridgeProcess, "exit"),
-    new Promise((resolve) => setTimeout(resolve, 1_000))
-  ]);
-  daemon.close();
-  await once(daemon, "close").catch(() => undefined);
-  await rm(root, { recursive: true, force: true });
 }
 
 function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) {
@@ -122,7 +154,7 @@ function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) 
   }
 }
 
-function createFakeDaemon(path, requests) {
+function createFakeDaemon(path, requests, scenario) {
   return createNetServer((socket) => {
     socket.setEncoding("utf8");
     let buffer = "";
@@ -132,14 +164,14 @@ function createFakeDaemon(path, requests) {
       while (newline >= 0) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
-        handleDaemonLine(socket, line, requests);
+        handleDaemonLine(socket, line, requests, scenario);
         newline = buffer.indexOf("\n");
       }
     });
   });
 }
 
-function handleDaemonLine(socket, line, requests) {
+function handleDaemonLine(socket, line, requests, scenario) {
   if (!line.trim()) return;
   const request = JSON.parse(line);
   if (request.protocol === protocol) {
@@ -148,10 +180,10 @@ function handleDaemonLine(socket, line, requests) {
   }
 
   requests.push(request);
-  socket.write(`${JSON.stringify(daemonResponse(request))}\n`);
+  socket.write(`${JSON.stringify(daemonResponse(request, scenario))}\n`);
 }
 
-function daemonResponse(request) {
+function daemonResponse(request, scenario) {
   if (request.type === "status") {
     return {
       kind: "status",
@@ -184,6 +216,29 @@ function daemonResponse(request) {
   }
 
   if (request.type === "spawn") {
+    if (scenario.spawnFails) {
+      return {
+        kind: "operator_error",
+        sessions: [],
+        packages: [],
+        events: [],
+        error: {
+          code: "session_already_exists",
+          request_id: "browser-smoke-spawn-failure",
+          operation: "spawn",
+          message: spawnRuntimeError
+        },
+        diagnostics: [
+          {
+            kind: "action_failure",
+            operation: "spawn",
+            feature: null,
+            message: spawnFailureMessage
+          }
+        ]
+      };
+    }
+
     return {
       kind: "spawned",
       sessions: [{ session_id: request.session_id, lifecycle: "running" }],
@@ -259,13 +314,13 @@ function listen(server, pathOrPort) {
   });
 }
 
-async function waitForHttpOk(url) {
+async function waitForHttpOk(url, bridge) {
   const deadline = Date.now() + 10_000;
   let lastError;
   while (Date.now() < deadline) {
-    if (bridgeProcess.exitCode !== null) {
+    if (bridge.bridgeProcess.exitCode !== null) {
       throw new Error(
-        `bridge exited before readiness: stdout=${bridgeStdout} stderr=${bridgeStderr}`
+        `bridge exited before readiness: stdout=${bridge.bridgeStdout()} stderr=${bridge.bridgeStderr()}`
       );
     }
 
