@@ -26,6 +26,7 @@ export interface DogfoodRuntimeConfigOptions {
   locationHref: string;
   bridge?: DaemonBridgeClient;
   bridgeUrl?: string;
+  packageRuntime?: boolean;
 }
 
 const realModeQueryValue = "real-hub";
@@ -65,8 +66,9 @@ export function createDogfoodRuntimeConfig(options: DogfoodRuntimeConfigOptions)
   };
 }
 
-export function isRealHubDogfoodEnabled(options: Pick<DogfoodRuntimeConfigOptions, "env" | "locationHref">): boolean {
+export function isRealHubDogfoodEnabled(options: Pick<DogfoodRuntimeConfigOptions, "env" | "locationHref" | "packageRuntime">): boolean {
   const envEnabled = options.env.VITE_BOTSTER_REAL_HUB_DOGFOOD === "1" || options.env.VITE_BOTSTER_REAL_HUB_DOGFOOD === true;
   const url = new URL(options.locationHref, "http://botster-web.local/");
-  return envEnabled && url.searchParams.get("dogfood") === realModeQueryValue;
+  const realModeRequested = url.searchParams.get("dogfood") === realModeQueryValue;
+  return Boolean(options.packageRuntime) || (envEnabled && realModeRequested);
 }

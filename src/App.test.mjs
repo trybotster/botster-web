@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import { createServer as createNetServer } from "node:net";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import ts from "typescript";
 import { createServer } from "vite";
 import { createElement } from "react";
@@ -12,6 +15,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 const { dogfoodBridgeShutdownPlan, resolveDogfoodBridgeMode } = await import(
   new URL("../scripts/dogfoodBridgeMode.mjs", import.meta.url)
 );
+
+const hostForTests = "127.0.0.1";
 
 const [
   main,
@@ -80,6 +85,8 @@ assert.match(app, /import \{ TerminalViewHost \} from "\.\/botster\/TerminalView
 assert.match(app, /import \{ ConnectionDiagnosticsPanel \} from "\.\/botster\/ConnectionDiagnosticsPanel"/);
 assert.match(app, /createBotsterWebClient/);
 assert.match(app, /createDogfoodRuntimeConfig/);
+assert.match(app, /packageRuntime \? \{ bridgeUrl: `\$\{window\.location\.origin\}\/request` \} : \{\}/);
+assert.match(app, /__BOTSTER_PACKAGE_RUNTIME__/);
 assert.match(app, /runtimeClient\.hub\.subscribeSurface/);
 assert.match(app, /runtimeClient\.entities\.pull/);
 assert.match(app, /schemaVersionDiagnosticFromFrame/);
@@ -110,6 +117,7 @@ assert.match(localDogfoodTransport, /"botster\.session\.select"/);
 assert.match(localDogfoodTransport, /"botster\.session\.rename"/);
 assert.match(dogfoodMode, /VITE_BOTSTER_REAL_HUB_DOGFOOD/);
 assert.match(dogfoodMode, /dogfood"\) === realModeQueryValue/);
+assert.match(dogfoodMode, /packageRuntime/);
 assert.match(dogfoodMode, /createRealHubDogfoodTransport/);
 assert.match(dogfoodMode, /createRealHubTerminalDataPlane/);
 assert.match(realHubDaemonDto, /export type DaemonRequest/);
@@ -149,6 +157,10 @@ assert.match(connectionDiagnostics, /terminalUnavailableDiagnostic/);
 assert.match(connectionDiagnosticsPanel, /data-diagnostic-id/);
 assert.match(dogfoodBridgeScript, /protocol = "botster-hub-daemon-v1"/);
 assert.match(dogfoodBridgeScript, /resolveDogfoodBridgeMode/);
+assert.match(dogfoodBridgeScript, /serveStaticUi/);
+assert.match(dogfoodBridgeScript, /__BOTSTER_PACKAGE_RUNTIME__/);
+assert.match(dogfoodBridgeScript, /case "\.mjs":/);
+assert.match(dogfoodBridgeScript, /case "\.map":/);
 assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_BIN/);
 assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_SOCKET/);
 assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_DATA_DIR/);
@@ -333,6 +345,64 @@ const mixedOwnershipBridgeMode = resolveDogfoodBridgeMode({
 });
 assert.equal(mixedOwnershipBridgeMode.ok, false);
 assert.match(mixedOwnershipBridgeMode.error, /cannot be combined/);
+
+const packageBridgeRuntime = await startPackageBridgeRuntime();
+try {
+  const rootResponse = await fetch(`${packageBridgeRuntime.origin}/`);
+  const rootHtml = await rootResponse.text();
+  assert.equal(rootResponse.status, 200, rootHtml);
+  assert.match(rootResponse.headers.get("content-type"), /text\/html/);
+  assert.match(rootHtml, /<div id="root"><\/div>/);
+  assert.match(rootHtml, /window\.__BOTSTER_PACKAGE_RUNTIME__ = true/);
+
+  const realHubResponse = await fetch(`${packageBridgeRuntime.origin}/?dogfood=real-hub`);
+  assert.equal(realHubResponse.status, 200);
+  assert.match(await realHubResponse.text(), /window\.__BOTSTER_PACKAGE_RUNTIME__ = true/);
+
+  const fallbackResponse = await fetch(`${packageBridgeRuntime.origin}/sessions/local-dogfood`);
+  assert.equal(fallbackResponse.status, 200);
+  assert.match(await fallbackResponse.text(), /botster package runtime/);
+
+  const assetResponse = await fetch(`${packageBridgeRuntime.origin}/assets/app.js`);
+  const assetBody = await assetResponse.text();
+  assert.equal(assetResponse.status, 200);
+  assert.match(assetResponse.headers.get("content-type"), /text\/javascript/);
+  assert.match(assetBody, /console\.log\("package asset"\)/);
+  assert.doesNotMatch(assetBody, /__BOTSTER_PACKAGE_RUNTIME__/);
+
+  const traversalResponse = await fetch(`${packageBridgeRuntime.origin}/%2e%2e/package.json`);
+  assert.equal(traversalResponse.status, 404);
+
+  const healthResponse = await fetch(`${packageBridgeRuntime.origin}/health`);
+  assert.deepEqual(await healthResponse.json(), {
+    ok: true,
+    mode: "existing_hub",
+    source: "socket",
+    socket: "configured"
+  });
+
+  const requestResponse = await fetch(`${packageBridgeRuntime.origin}/request`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      kind: "daemon_request",
+      request_id: "package-runtime-status",
+      payload: { type: "status" }
+    })
+  });
+  assert.deepEqual(await requestResponse.json(), {
+    kind: "daemon_response",
+    request_id: "package-runtime-status",
+    payload: {
+      kind: "status",
+      status: { lifecycle_state: "running", schema_version: 1 },
+      events: []
+    }
+  });
+  assert.deepEqual(packageBridgeRuntime.daemonRequests, [{ type: "status" }]);
+} finally {
+  await packageBridgeRuntime.stop();
+}
 
 const desktopCss = removeCssAtRules(css);
 const baseWorkspaceGridRule = extractTopLevelCssRule(desktopCss, ".workspace-grid");
@@ -821,6 +891,86 @@ assert.equal(realMode.terminalDataPlaneKind, "real-hub");
 assert.equal(realMode.terminalDescriptor.sessionId, realHubDogfoodSessionId);
 assert.notEqual(realMode.terminalDescriptor.sessionId, "terminal_view_smoke_session");
 assert.notEqual(realMode.terminalDataPlane.constructor.name, "MockTerminalDataPlane");
+
+const packageRuntimeMode = createDogfoodRuntimeConfig({
+  env: {},
+  locationHref: "http://127.0.0.1:41739/",
+  bridge,
+  bridgeUrl: "http://127.0.0.1:41739/request",
+  packageRuntime: true
+});
+assert.equal(packageRuntimeMode.mode, "real-hub");
+assert.equal(packageRuntimeMode.terminalDataPlaneKind, "real-hub");
+
+const bridgeResolutionFetchUrls = [];
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async (url, init) => {
+  bridgeResolutionFetchUrls.push(String(url));
+  const envelope = JSON.parse(init.body);
+  return {
+    ok: true,
+    json: async () => ({
+      kind: "daemon_response",
+      request_id: envelope.request_id,
+      payload: {
+        kind: "status",
+        status: {
+          lifecycle_state: "running",
+          compatibility: {
+            protocol: "botster-hub-daemon-v1",
+            protocol_version: 1,
+            features: [
+              "sessions",
+              "terminal_streaming",
+              "resize",
+              "plugin_surface_render",
+              "plugin_surface_action"
+            ],
+            conformance_fixture_revision: 1
+          },
+          host_id: "dogfood-host",
+          host_display_name: "Dogfood Hub",
+          schema_version: 1,
+          data_dir_configured: true,
+          core_initialized: true,
+          state_source: "explicit",
+          package_count: 0,
+          enabled_package_count: 0,
+          provider_count: 0,
+          enabled_provider_count: 0,
+          session_count: 0,
+          recovered_sessions: [],
+          stale_sessions: [],
+          diagnostics: []
+        },
+        sessions: [],
+        events: [],
+        diagnostics: []
+      }
+    })
+  };
+};
+try {
+  const viteDevRealMode = createDogfoodRuntimeConfig({
+    env: { VITE_BOTSTER_REAL_HUB_DOGFOOD: "1" },
+    locationHref: "http://127.0.0.1:5173/?dogfood=real-hub"
+  });
+  await viteDevRealMode.transport.connect({ client: "botster-web", capabilities: [] }, () => undefined);
+
+  const packageOriginRealMode = createDogfoodRuntimeConfig({
+    env: {},
+    locationHref: "http://127.0.0.1:41888/",
+    bridgeUrl: "http://127.0.0.1:41888/request",
+    packageRuntime: true
+  });
+  await packageOriginRealMode.transport.connect({ client: "botster-web", capabilities: [] }, () => undefined);
+} finally {
+  globalThis.fetch = originalFetch;
+}
+assert.deepEqual(bridgeResolutionFetchUrls, [
+  "http://127.0.0.1:41739/request",
+  "http://127.0.0.1:41888/request"
+]);
 
 const httpFetchCalls = [];
 const httpBridge = createHttpDaemonBridgeClient({
@@ -1564,6 +1714,147 @@ try {
 }
 
 console.log("Renderer seam, runtime behavior, and registry fixture assertions passed.");
+
+async function startPackageBridgeRuntime() {
+  const root = await mkdtemp(join(tmpdir(), "botster-web-package-runtime-"));
+  const socketPath = join(root, "botster-hub.sock");
+  const port = await findAvailablePort();
+  const daemonRequests = [];
+  await mkdir(join(root, "dist", "assets"), { recursive: true });
+  await Promise.all([
+    writeFile(
+      join(root, "dist", "index.html"),
+      '<!doctype html><html><head><title>botster package runtime</title></head><body><div id="root"></div><script type="module" src="/assets/app.js"></script></body></html>'
+    ),
+    writeFile(join(root, "dist", "assets", "app.js"), 'console.log("package asset");')
+  ]);
+
+  const daemon = createNetServer((socket) => {
+    socket.setEncoding("utf8");
+    let buffer = "";
+    let handshakeComplete = false;
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (line.trim()) {
+          const frame = JSON.parse(line);
+          if (!handshakeComplete) {
+            assert.deepEqual(frame, { protocol: "botster-hub-daemon-v1" });
+            handshakeComplete = true;
+            socket.write(`${JSON.stringify({ protocol: "botster-hub-daemon-v1" })}\n`);
+          } else {
+            daemonRequests.push(frame);
+            if (frame.type === "status") {
+              socket.write(
+                `${JSON.stringify({
+                  kind: "status",
+                  status: { lifecycle_state: "running", schema_version: 1 },
+                  events: []
+                })}\n`
+              );
+            } else {
+              socket.write(`${JSON.stringify({ kind: "events", events: [] })}\n`);
+            }
+          }
+        }
+        newline = buffer.indexOf("\n");
+      }
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    daemon.once("error", reject);
+    daemon.listen(socketPath, () => {
+      daemon.off("error", reject);
+      resolve();
+    });
+  });
+
+  const bridgeProcess = spawn(
+    process.execPath,
+    [new URL("../scripts/real-hub-dogfood-bridge.mjs", import.meta.url).pathname],
+    {
+      cwd: root,
+      env: {
+        ...process.env,
+        BOTSTER_HUB_SOCKET: socketPath,
+        BOTSTER_WEB_DOGFOOD_BRIDGE_PORT: String(port)
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    }
+  );
+
+  let stdout = "";
+  let stderr = "";
+  bridgeProcess.stdout.setEncoding("utf8");
+  bridgeProcess.stderr.setEncoding("utf8");
+  bridgeProcess.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  bridgeProcess.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+
+  await waitForHttpOk(`http://127.0.0.1:${port}/health`, () => {
+    if (bridgeProcess.exitCode !== null) {
+      throw new Error(`bridge exited before readiness: stdout=${stdout} stderr=${stderr}`);
+    }
+  });
+
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    daemonRequests,
+    async stop() {
+      bridgeProcess.kill("SIGTERM");
+      await Promise.race([
+        once(bridgeProcess, "exit"),
+        new Promise((resolve) => setTimeout(resolve, 1_000))
+      ]);
+      daemon.close();
+      await once(daemon, "close");
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+}
+
+async function findAvailablePort() {
+  const server = createNetServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, hostForTests, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  const port = address.port;
+  server.close();
+  await once(server, "close");
+  return port;
+}
+
+async function waitForHttpOk(url, assertStillRunning) {
+  const deadline = Date.now() + 5_000;
+  let lastError;
+  while (Date.now() < deadline) {
+    assertStillRunning();
+    try {
+      const response = await fetch(url);
+      if (response.ok) {
+        return;
+      }
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw lastError ?? new Error(`timed out waiting for ${url}`);
+}
 
 async function compileTsModule(sourcePath, outputPath) {
   const source = await readFile(new URL(sourcePath, import.meta.url), "utf8");

@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
 import { connect } from "node:net";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { extname, join, normalize, relative, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { dogfoodBridgeShutdownPlan, resolveDogfoodBridgeMode } from "./dogfoodBridgeMode.mjs";
@@ -10,6 +10,9 @@ import { dogfoodBridgeShutdownPlan, resolveDogfoodBridgeMode } from "./dogfoodBr
 const protocol = "botster-hub-daemon-v1";
 const port = Number.parseInt(process.env.BOTSTER_WEB_DOGFOOD_BRIDGE_PORT ?? "41739", 10);
 const host = "127.0.0.1";
+const packageRoot = process.cwd();
+const distRoot = join(packageRoot, "dist");
+const indexPath = join(distRoot, "index.html");
 const existingHubConfigured = Boolean(process.env.BOTSTER_HUB_SOCKET || process.env.BOTSTER_HUB_DATA_DIR);
 const generatedDataDir = existingHubConfigured || process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR
   ? undefined
@@ -65,6 +68,11 @@ const server = createServer(async (request, response) => {
 
   if (request.method === "GET" && request.url?.startsWith("/terminal")) {
     await streamTerminal(request, response);
+    return;
+  }
+
+  if (request.method === "GET") {
+    await serveStaticUi(request, response);
     return;
   }
 
@@ -126,6 +134,8 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, host, () => {
   console.log(`botster-web real hub dogfood bridge listening at http://${host}:${port}/request`);
+  console.log(`botster-web package UI available at http://${host}:${port}/`);
+  console.log(`botster-web package real-hub UI available at http://${host}:${port}/?dogfood=real-hub`);
   console.log(`mode: ${bridgeMode.diagnosticLabel}`);
   if (bridgeMode.mode === "spawned_hub") {
     console.log(`isolated data dir: ${bridgeMode.dataDir}`);
@@ -165,6 +175,133 @@ async function sendDaemonRequest(path, daemonRequest) {
   const reply = JSON.parse(await readSocketLine(socket));
   socket.end();
   return reply;
+}
+
+async function serveStaticUi(request, response) {
+  const url = new URL(request.url ?? "/", `http://${host}:${port}`);
+  const safePath = safeDistPath(url.pathname);
+
+  if (!safePath.ok) {
+    writeJson(response, 404, { error: "not_found" });
+    return;
+  }
+
+  const filePath = url.pathname === "/" ? indexPath : safePath.path;
+  const file = await readExistingFile(filePath);
+  if (file.ok && file.stats.isFile()) {
+    const isHtml = filePath === indexPath || extname(filePath) === ".html";
+    const body = isHtml ? injectPackageRuntimeMarker(await readFile(filePath, "utf8")) : await readFile(filePath);
+    response.writeHead(200, {
+      "content-type": contentTypeFor(filePath),
+      "cache-control": isHtml ? "no-store" : "public, max-age=31536000, immutable"
+    });
+    response.end(body);
+    return;
+  }
+
+  if (hasFileExtension(url.pathname)) {
+    writeJson(response, 404, { error: "not_found" });
+    return;
+  }
+
+  const index = await readExistingFile(indexPath);
+  if (!index.ok) {
+    writeJson(response, 503, {
+      error: "compiled_ui_missing",
+      message: "Run npm run build before starting the botster-web package entrypoint."
+    });
+    return;
+  }
+
+  response.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  response.end(injectPackageRuntimeMarker(await readFile(indexPath, "utf8")));
+}
+
+async function readExistingFile(filePath) {
+  try {
+    return { ok: true, stats: await stat(filePath) };
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return { ok: false };
+    }
+    throw error;
+  }
+}
+
+function safeDistPath(pathname) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return { ok: false };
+  }
+
+  const normalized = normalize(decoded).replace(/^(\.\.(?:\/|\\|$))+/, "");
+  const relativePath = normalized.replace(/^[/\\]+/, "");
+  const filePath = join(distRoot, relativePath);
+  const distRelative = relative(distRoot, filePath);
+
+  if (distRelative.startsWith("..") || distRelative.includes(`..${sep}`)) {
+    return { ok: false };
+  }
+
+  return { ok: true, path: filePath };
+}
+
+function hasFileExtension(pathname) {
+  return extname(new URL(pathname, `http://${host}:${port}`).pathname) !== "";
+}
+
+function injectPackageRuntimeMarker(html) {
+  const marker = '<script>window.__BOTSTER_PACKAGE_RUNTIME__ = true;</script>';
+  if (html.includes("__BOTSTER_PACKAGE_RUNTIME__")) {
+    return html;
+  }
+  if (html.includes("</head>")) {
+    return html.replace("</head>", `${marker}</head>`);
+  }
+  return `${marker}${html}`;
+}
+
+function contentTypeFor(filePath) {
+  switch (extname(filePath)) {
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".js":
+    case ".mjs":
+      return "text/javascript; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".json":
+    case ".map":
+      return "application/json; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml";
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    case ".ico":
+      return "image/x-icon";
+    case ".wasm":
+      return "application/wasm";
+    case ".woff":
+      return "font/woff";
+    case ".woff2":
+      return "font/woff2";
+    case ".ttf":
+      return "font/ttf";
+    default:
+      return "application/octet-stream";
+  }
 }
 
 async function streamTerminal(request, response) {

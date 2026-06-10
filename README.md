@@ -104,7 +104,7 @@ BOTSTER_HUB_DATA_DIR=/printed/data-dir npm run dogfood:hub
 
 This mode prints either `mode: existing hub socket` or `mode: existing hub data dir`. It does not require `BOTSTER_HUB_BIN`, does not spawn a hub, does not send `DaemonRequest::DaemonShutdown`, and does not remove the existing hub data directory. `BOTSTER_HUB_SOCKET` is the most explicit endpoint and wins when both existing-hub variables are set. Do not combine `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR` with `BOTSTER_WEB_DOGFOOD_DATA_DIR`; the bridge treats that mixed ownership configuration as an operator error.
 
-Start Vite in another terminal with the build-time opt-in:
+For local Vite development, start Vite in another terminal with the build-time opt-in:
 
 ```bash
 VITE_BOTSTER_REAL_HUB_DOGFOOD=1 npm run dev
@@ -115,6 +115,8 @@ Open:
 ```text
 http://127.0.0.1:5173/?dogfood=real-hub
 ```
+
+Vite remains a development server only. Without `VITE_BOTSTER_REAL_HUB_DOGFOOD=1`, Vite keeps fixture mode even when `?dogfood=real-hub` is present.
 
 Expected proof markers:
 
@@ -165,6 +167,34 @@ The runnable entrypoint launches the existing bridge with:
 command: node
 args: scripts/real-hub-dogfood-bridge.mjs
 ```
+
+Build before starting the package runtime:
+
+```bash
+npm run build
+```
+
+Then run the same package entrypoint against an existing hub:
+
+```bash
+BOTSTER_HUB_SOCKET=/printed/botster-hub.sock npm run dogfood:hub
+```
+
+or:
+
+```bash
+BOTSTER_HUB_DATA_DIR=/printed/data-dir npm run dogfood:hub
+```
+
+The package runtime serves the compiled Ionic UI and bridge APIs from one loopback server:
+
+```text
+web:    http://127.0.0.1:41739/
+bridge: http://127.0.0.1:41739/request
+health: http://127.0.0.1:41739/health
+```
+
+`GET /`, `GET /?dogfood=real-hub`, and SPA fallback routes return the built `dist/index.html`. The bridge injects a package-runtime marker into served HTML so the app uses real-hub mode from the package server without a Vite build-time flag, and `src/App.tsx` derives the bridge URL from the page origin so non-default package ports still post to the same server. Static assets are served from `dist` without marker injection.
 
 When the hub supervises this entrypoint, it should provide `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR`. Either value selects existing-hub attach mode, so the bridge does not require `BOTSTER_HUB_BIN`, does not spawn a second hub, does not shut down the attached hub, and does not remove the attached hub data directory.
 

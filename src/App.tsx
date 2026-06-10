@@ -85,11 +85,17 @@ const loadingSnapshot: UiTreeSnapshot = {
 
 export default function App() {
   const dogfoodRuntime = useMemo(
-    () =>
-      createDogfoodRuntimeConfig({
+    () => {
+      const packageRuntime = Boolean(
+        (window as typeof window & { __BOTSTER_PACKAGE_RUNTIME__?: boolean }).__BOTSTER_PACKAGE_RUNTIME__
+      );
+      return createDogfoodRuntimeConfig({
         env: import.meta.env,
-        locationHref: window.location.href
-      }),
+        locationHref: window.location.href,
+        ...(packageRuntime ? { bridgeUrl: `${window.location.origin}/request` } : {}),
+        packageRuntime
+      });
+    },
     []
   );
   const runtimeClient = useMemo(
