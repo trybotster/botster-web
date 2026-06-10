@@ -1,7 +1,5 @@
 import {
   IonApp,
-  IonBadge,
-  IonButton,
   IonButtons,
   IonChip,
   IonContent,
@@ -19,7 +17,6 @@ import {
 } from "@ionic/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  codeSlashOutline,
   cubeOutline,
   gitBranchOutline,
   layersOutline,
@@ -29,6 +26,7 @@ import {
 
 import { TerminalViewHost } from "./botster/TerminalViewHost";
 import { ConnectionDiagnosticsPanel } from "./botster/ConnectionDiagnosticsPanel";
+import { DogfoodFirstScreen, type DogfoodEntityLoadStatus } from "./botster/dogfoodFirstScreen";
 import { UiNodeSurface } from "./botster/UiNodeSurface";
 import { botsterWebCapabilities, defaultUiCapabilitySet } from "./botster/capabilities";
 import { botsterWebClientContract, createBotsterWebClient } from "./botster/client";
@@ -45,6 +43,7 @@ import {
   type ConnectionDiagnostic
 } from "./botster/connectionDiagnostics";
 import { createDogfoodRuntimeConfig } from "./botster/dogfoodMode";
+import { realHubDogfoodSessionId } from "./botster/realHubDogfoodTransport";
 import type { ActionBinding } from "./botster/actions";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
 
@@ -112,6 +111,11 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<ConnectionDiagnostic[]>(() =>
     initialConnectionDiagnostics(dogfoodRuntime.mode, dogfoodRuntime.statusText)
   );
+  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"package" | "session" | "draft", DogfoodEntityLoadStatus>>({
+    package: "not_loaded",
+    session: "not_loaded",
+    draft: "not_loaded"
+  });
   const [, setFrameVersion] = useState(0);
   const recordDiagnostic = useCallback((diagnostic: ConnectionDiagnostic | undefined) => {
     setDiagnostics((current) => upsertDiagnostic(current, diagnostic));
@@ -142,6 +146,24 @@ export default function App() {
       }
     });
 
+    const pullDogfoodEntity = async (
+      key: "package" | "session" | "draft",
+      request: { family: string; id?: string }
+    ) => {
+      setEntityLoadStatus((current) => ({ ...current, [key]: "loading" }));
+      try {
+        await runtimeClient.entities.pull(request);
+        if (!cancelled) {
+          setEntityLoadStatus((current) => ({ ...current, [key]: "loaded" }));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setEntityLoadStatus((current) => ({ ...current, [key]: "error" }));
+        }
+        throw error;
+      }
+    };
+
     void runtimeClient.hub
       .connect(botsterWebCapabilities)
       .then(() => {
@@ -149,9 +171,9 @@ export default function App() {
       })
       .then(() => runtimeClient.hub.subscribe())
       .then(() => runtimeClient.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/local" }))
-      .then(() => runtimeClient.entities.pull({ family: "botster-web.package" }))
-      .then(() => runtimeClient.entities.pull({ family: "botster-web.session" }))
-      .then(() => runtimeClient.entities.pull({ family: "botster-web.session_draft", id: "draft-1" }))
+      .then(() => pullDogfoodEntity("package", { family: "botster-web.package" }))
+      .then(() => pullDogfoodEntity("session", { family: "botster-web.session" }))
+      .then(() => pullDogfoodEntity("draft", { family: "botster-web.session_draft", id: "draft-1" }))
       .catch((error: unknown) => {
         if (!cancelled) {
           setLocalState({
@@ -175,10 +197,13 @@ export default function App() {
     (action: ActionBinding) => {
       setLocalState({ "dogfood.action_status": `Dispatching ${action.id}` });
       void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
+        const isSpawnAction = action.id === "botster.session.select";
         setLocalState({
-          "dogfood.action_status": result.accepted
-            ? `Accepted ${action.id}`
-            : result.reason ?? `Rejected ${action.id}`
+          "dogfood.action_status": result.accepted && isSpawnAction
+            ? `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
+            : result.accepted
+              ? `Accepted ${action.id}`
+              : result.reason ?? `Rejected ${action.id}`
         });
         recordDiagnostic(actionFailureDiagnostic(action, result));
       });
@@ -191,6 +216,12 @@ export default function App() {
     },
     [recordDiagnostic]
   );
+  const packages = runtimeClient.entities.list("botster-web.package");
+  const sessions = runtimeClient.entities.list("botster-web.session");
+  const actionStatus =
+    typeof localState["dogfood.action_status"] === "string"
+      ? localState["dogfood.action_status"]
+      : dogfoodRuntime.statusText;
 
   return (
     <IonApp>
@@ -235,40 +266,22 @@ export default function App() {
                   <IonChip color={dogfoodRuntime.mode === "real-hub" ? "success" : "medium"} outline>
                     <IonLabel>{dogfoodRuntime.mode}</IonLabel>
                   </IonChip>
-                <IonButton fill="solid" color="primary">
-                  <IonIcon slot="start" icon={codeSlashOutline} aria-hidden="true" />
-                  Inspect frames
-                </IonButton>
               </IonButtons>
             </IonToolbar>
           </IonHeader>
 
           <IonContent fullscreen>
             <main className="workspace-shell">
-              <section className="workspace-overview" aria-labelledby="overview-heading">
-                <div>
-                  <p className="eyebrow">First-party client</p>
-                  <h1 id="overview-heading">Ionic React renderer shell</h1>
-                  <p>
-                    Open the local session surface, run a session action, and inspect
-                    the terminal bridge from one workbench.
-                  </p>
-                </div>
-                <div className="status-strip" aria-label="Shell contract status">
-                  <span>
-                    <IonBadge color="success">Ionic</IonBadge>
-                    shell
-                  </span>
-                  <span>
-                    <IonBadge color="tertiary">UiNode</IonBadge>
-                    frame seam
-                  </span>
-                  <span>
-                    <IonBadge color="medium">Restty</IonBadge>
-                    terminal_view
-                  </span>
-                </div>
-              </section>
+              <DogfoodFirstScreen
+                mode={dogfoodRuntime.mode}
+                statusText={dogfoodRuntime.statusText}
+                diagnostics={diagnostics}
+                packages={packages}
+                packageLoadStatus={entityLoadStatus.package}
+                sessions={sessions}
+                sessionLoadStatus={entityLoadStatus.session}
+                actionStatus={actionStatus}
+              />
 
               <section className="contract-strip" aria-label="Botster client contract">
                 {botsterWebClientContract.seams.map((seam) => (

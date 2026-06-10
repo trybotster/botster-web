@@ -87,18 +87,28 @@ async function runPackagedBrowserSmoke(scenario) {
     await page.goto(`http://${host}:${port}/?dogfood=real-hub`, {
       waitUntil: "domcontentloaded"
     });
-    await page.getByText("Isolated local hub dogfood").waitFor();
-    await page.getByRole("button", { name: "Spawn isolated session" }).click();
+    await page.getByText("Local hub workbench").waitFor();
+    await page.getByRole("heading", { name: "Spawn botster-web-dogfood-session" }).waitFor();
+    await page.getByText("botster-web-dogfood-ready").first().waitFor();
+    await page.getByText("Output appears in the terminal panel").first().waitFor();
+    await page.getByText("Terminal output destination: botster-web-dogfood-session").waitFor();
+    const staleOverviewCount = await page.getByText("Ionic React renderer shell").count();
+    if (staleOverviewCount > 0) {
+      throw new Error("packaged browser smoke rendered the stale renderer-shell overview");
+    }
+
+    await page.getByRole("button", { name: "Spawn botster-web-dogfood-session to terminal" }).click();
 
     if (scenario.spawnFails) {
       await page.getByText("Hub action failed").waitFor();
-      await page.getByText(spawnFailureMessage).waitFor();
-      await page.getByText("Operation: spawn").waitFor();
+      await page.getByText(spawnFailureMessage).first().waitFor();
+      await page.getByText("Operation: spawn").first().waitFor();
       const genericRuntimeErrorCount = await page.getByText(spawnRuntimeError).count();
       if (genericRuntimeErrorCount === 0) {
         throw new Error("spawn failure smoke did not render the generic runtime error");
       }
     } else {
+      await page.getByText("Session botster-web-dogfood-session is running").waitFor();
       await page.locator("[data-terminal-renderer='restty']").waitFor({ state: "attached" });
       await page.locator("[data-terminal-session-id='botster-web-dogfood-session']").waitFor({
         state: "attached"

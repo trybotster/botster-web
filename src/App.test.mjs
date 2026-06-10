@@ -29,6 +29,7 @@ const [
   realHubTerminalDataPlane,
   connectionDiagnostics,
   connectionDiagnosticsPanel,
+  dogfoodFirstScreen,
   protocol,
   entities,
   uiNodes,
@@ -58,6 +59,7 @@ const [
   readFile(new URL("./botster/realHubTerminalDataPlane.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/connectionDiagnostics.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/ConnectionDiagnosticsPanel.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./botster/dogfoodFirstScreen.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/protocol.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/entities.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/uiNodes.ts", import.meta.url), "utf8"),
@@ -83,6 +85,7 @@ assert.match(main, /<App \/>/);
 assert.match(app, /import \{ UiNodeSurface \} from "\.\/botster\/UiNodeSurface"/);
 assert.match(app, /import \{ TerminalViewHost \} from "\.\/botster\/TerminalViewHost"/);
 assert.match(app, /import \{ ConnectionDiagnosticsPanel \} from "\.\/botster\/ConnectionDiagnosticsPanel"/);
+assert.match(app, /import \{ DogfoodFirstScreen/);
 assert.match(app, /createBotsterWebClient/);
 assert.match(app, /createDogfoodRuntimeConfig/);
 assert.match(app, /packageRuntime \? \{ bridgeUrl: `\$\{window\.location\.origin\}\/request` \} : \{\}/);
@@ -99,8 +102,12 @@ assert.doesNotMatch(app, /uiNodeConformanceSnapshot/);
 assert.doesNotMatch(app, /createInMemoryEntityFrameStore\(fixtureEntityFrames\)/);
 assert.match(app, /botsterWebClientContract\.label/);
 assert.match(app, /botsterWebClientContract\.seams\.map/);
+assert.doesNotMatch(app, /Ionic React renderer shell/);
+assert.doesNotMatch(app, /<IonButton fill="solid" color="primary">\s*[\s\S]*Inspect frames/);
+assert.doesNotMatch(app, /Inspect frames/);
 assert.match(app, /<UiNodeSurface/);
 assert.match(app, /<ConnectionDiagnosticsPanel/);
+assert.match(app, /<DogfoodFirstScreen/);
 assert.match(app, /onAction=\{dispatchAction\}/);
 assert.match(app, /dataPlane=\{dogfoodRuntime\.terminalDataPlane\}/);
 assert.match(app, /descriptor=\{dogfoodRuntime\.terminalDescriptor\}/);
@@ -155,6 +162,12 @@ assert.match(connectionDiagnostics, /schemaVersionDiagnosticFromFrame/);
 assert.match(connectionDiagnostics, /operatorErrorDiagnostic/);
 assert.match(connectionDiagnostics, /terminalUnavailableDiagnostic/);
 assert.match(connectionDiagnosticsPanel, /data-diagnostic-id/);
+assert.match(connectionDiagnosticsPanel, /severityRank/);
+assert.match(connectionDiagnosticsPanel, /severityLabel/);
+assert.match(dogfoodFirstScreen, /Local hub workbench/);
+assert.match(dogfoodFirstScreen, /packageLoadStatus/);
+assert.match(dogfoodFirstScreen, /sessionLoadStatus/);
+assert.match(dogfoodFirstScreen, /realHubDogfoodSessionId/);
 assert.match(dogfoodBridgeScript, /protocol = "botster-hub-daemon-v1"/);
 assert.match(dogfoodBridgeScript, /resolveDogfoodBridgeMode/);
 assert.match(dogfoodBridgeScript, /serveStaticUi/);
@@ -427,8 +440,17 @@ assert.match(dogfoodMainRule, /display:\s*grid/);
 const diagnosticPanelRule = extractTopLevelCssRule(desktopCss, ".diagnostic-panel");
 assert.match(diagnosticPanelRule, /padding:\s*14px/);
 
+const dogfoodStatusGridRule = extractTopLevelCssRule(desktopCss, ".dogfood-status-grid");
+assert.match(dogfoodStatusGridRule, /display:\s*grid/);
+assert.match(dogfoodStatusGridRule, /grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
+
+const dogfoodPrimaryActionRule = extractTopLevelCssRule(desktopCss, ".dogfood-primary-action");
+assert.match(dogfoodPrimaryActionRule, /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/);
+
 const mobileCss = extractCssAtRule(css, "@media (max-width: 860px)");
 assert.match(extractTopLevelCssRule(mobileCss, ".workspace-grid"), /grid-template-columns:\s*1fr\s*;/);
+assert.match(extractTopLevelCssRule(mobileCss, ".dogfood-status-grid"), /grid-template-columns:\s*1fr\s*;/);
+assert.match(extractTopLevelCssRule(mobileCss, ".dogfood-primary-action"), /grid-template-columns:\s*1fr\s*;/);
 assert.match(extractTopLevelCssRule(mobileCss, ".terminal-panel"), /max-height:\s*none/);
 
 const testCompileDir = await mkdtemp(join(tmpdir(), "botster-terminal-smoke-"));
@@ -494,6 +516,7 @@ const {
   createHttpDaemonBridgeClient,
   createRealHubDogfoodTransport,
   daemonResponseFrames,
+  defaultSpawnCommand,
   realHubDogfoodSessionId
 } = requireRuntime("./botster/realHubDogfoodTransport.js");
 const { createRealHubTerminalDataPlane } = requireRuntime("./botster/realHubTerminalDataPlane.js");
@@ -898,6 +921,7 @@ const realMode = createDogfoodRuntimeConfig({
 assert.equal(realMode.mode, "real-hub");
 assert.equal(realMode.terminalDataPlaneKind, "real-hub");
 assert.equal(realMode.terminalDescriptor.sessionId, realHubDogfoodSessionId);
+assert.match(defaultSpawnCommand(), /botster-web-dogfood-ready/);
 assert.notEqual(realMode.terminalDescriptor.sessionId, "terminal_view_smoke_session");
 assert.notEqual(realMode.terminalDataPlane.constructor.name, "MockTerminalDataPlane");
 
@@ -1471,6 +1495,7 @@ try {
     { dogfoodUiTreeSnapshot },
     { realHubDogfoodUiTreeSnapshot },
     { ConnectionDiagnosticsPanel },
+    { DogfoodFirstScreen },
     { createInMemoryEntityFrameStore }
   ] = await Promise.all([
     vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
@@ -1478,6 +1503,7 @@ try {
     vite.ssrLoadModule("/src/botster/localDogfoodTransport.ts"),
     vite.ssrLoadModule("/src/botster/realHubDogfoodTransport.ts"),
     vite.ssrLoadModule("/src/botster/ConnectionDiagnosticsPanel.tsx"),
+    vite.ssrLoadModule("/src/botster/dogfoodFirstScreen.tsx"),
     vite.ssrLoadModule("/src/botster/entities.ts")
   ]);
 
@@ -1707,6 +1733,159 @@ try {
   assert.match(realHubMarkup, /worker stderr: fixture failure/);
   assert.doesNotMatch(realHubMarkup, /install_package|enable_package|disable_package|remove_package|start_package|stop_package|restart_package|retry_package/);
 
+  const healthyFirstScreenMarkup = renderToStaticMarkup(
+    createElement(DogfoodFirstScreen, {
+      mode: "real-hub",
+      statusText: "Packaged runtime attached to real hub bridge",
+      diagnostics: [matchingSchemaDiagnostic, compatibleDescriptorDiagnostic],
+      packages: [
+        {
+          id: "botster-web",
+          title: "botster-web",
+          status: "enabled",
+          entrypoint_process_summary: "web-client running"
+        }
+      ],
+      packageLoadStatus: "loaded",
+      sessions: [{ id: realHubDogfoodSessionId, status: "running" }],
+      sessionLoadStatus: "loaded",
+      actionStatus: `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
+    })
+  );
+  assert.match(healthyFirstScreenMarkup, /Local hub workbench/);
+  assert.match(healthyFirstScreenMarkup, /Hub, bridge, package registry, session state, spawn action, and terminal/);
+  assert.match(healthyFirstScreenMarkup, new RegExp(`Spawn ${realHubDogfoodSessionId}`));
+  assert.match(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
+  assert.match(healthyFirstScreenMarkup, /Output appears in the terminal panel/);
+  assert.match(healthyFirstScreenMarkup, /Packages/);
+  assert.match(healthyFirstScreenMarkup, /Loaded/);
+  assert.match(healthyFirstScreenMarkup, /Sessions/);
+  assert.match(healthyFirstScreenMarkup, /Running/);
+  assert.match(healthyFirstScreenMarkup, /Terminal output destination/);
+  assert.doesNotMatch(healthyFirstScreenMarkup, /Ionic React renderer shell/);
+  assert.doesNotMatch(healthyFirstScreenMarkup, /Spawn succeeded/);
+
+  const bridgeDownFirstScreenMarkup = renderToStaticMarkup(
+    createElement(DogfoodFirstScreen, {
+      mode: "real-hub",
+      statusText: "Packaged runtime attached to real hub bridge",
+      diagnostics: [bridgeUnavailableDiagnostic(new Error("connect ECONNREFUSED"))],
+      packages: [],
+      packageLoadStatus: "not_loaded",
+      sessions: [],
+      sessionLoadStatus: "not_loaded",
+      actionStatus: "connect ECONNREFUSED"
+    })
+  );
+  assert.match(bridgeDownFirstScreenMarkup, /<h3>Hub<\/h3><ion-badge color="danger">Blocked/);
+  assert.match(bridgeDownFirstScreenMarkup, /<h3>Bridge<\/h3><ion-badge color="danger">Blocked/);
+  assert.match(bridgeDownFirstScreenMarkup, /connect ECONNREFUSED/);
+  assert.doesNotMatch(bridgeDownFirstScreenMarkup, /<h3>Hub<\/h3><ion-badge color="success">Connected/);
+
+  const unloadedFirstScreenMarkup = renderToStaticMarkup(
+    createElement(DogfoodFirstScreen, {
+      mode: "real-hub",
+      statusText: "Packaged runtime attached to real hub bridge",
+      diagnostics: [],
+      packages: [],
+      packageLoadStatus: "not_loaded",
+      sessions: [],
+      sessionLoadStatus: "not_loaded",
+      actionStatus: "Packaged runtime attached to real hub bridge"
+    })
+  );
+  assert.match(unloadedFirstScreenMarkup, /Not loaded/);
+  assert.match(unloadedFirstScreenMarkup, /Package registry pull has not completed yet/);
+  assert.match(unloadedFirstScreenMarkup, /Session pull has not completed yet/);
+  assert.doesNotMatch(unloadedFirstScreenMarkup, /Loaded package registry returned zero package records/);
+
+  const emptyFirstScreenMarkup = renderToStaticMarkup(
+    createElement(DogfoodFirstScreen, {
+      mode: "real-hub",
+      statusText: "Packaged runtime attached to real hub bridge",
+      diagnostics: [],
+      packages: [],
+      packageLoadStatus: "loaded",
+      sessions: [],
+      sessionLoadStatus: "loaded",
+      actionStatus: "Packaged runtime attached to real hub bridge"
+    })
+  );
+  assert.match(emptyFirstScreenMarkup, /Empty/);
+  assert.match(emptyFirstScreenMarkup, /Loaded package registry returned zero package records/);
+  assert.match(emptyFirstScreenMarkup, /No sessions are loaded yet/);
+
+  const failedPackageFirstScreenMarkup = renderToStaticMarkup(
+    createElement(DogfoodFirstScreen, {
+      mode: "real-hub",
+      statusText: "Packaged runtime attached to real hub bridge",
+      diagnostics: [compatibleDescriptorDiagnostic],
+      packages: [
+        {
+          id: "botster-web",
+          status: "enabled",
+          entrypoint_process_summary: "web-client running; worker failed (exit_status exit:42)"
+        }
+      ],
+      packageLoadStatus: "loaded",
+      sessions: [{ id: realHubDogfoodSessionId, status: "running" }],
+      sessionLoadStatus: "loaded",
+      actionStatus: `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
+    })
+  );
+  assert.match(failedPackageFirstScreenMarkup, /<article class="dogfood-status-card danger"><div class="dogfood-status-title"><h3>Packages<\/h3><ion-badge color="danger">Error/);
+  assert.match(failedPackageFirstScreenMarkup, /1 has failed entrypoint state/);
+
+  const degradedTerminalFirstScreenMarkup = renderToStaticMarkup(
+    createElement(DogfoodFirstScreen, {
+      mode: "real-hub",
+      statusText: "Packaged runtime attached to real hub bridge",
+      diagnostics: [terminalUnavailableDiagnostic(new Error("terminal stream closed"))],
+      packages: [{ id: "botster-web", status: "enabled", entrypoint_process_summary: "web-client running" }],
+      packageLoadStatus: "loaded",
+      sessions: [{ id: realHubDogfoodSessionId, status: "running" }],
+      sessionLoadStatus: "loaded",
+      actionStatus: `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
+    })
+  );
+  assert.match(degradedTerminalFirstScreenMarkup, /terminal stream closed/);
+  assert.match(degradedTerminalFirstScreenMarkup, /Packages/);
+  assert.match(degradedTerminalFirstScreenMarkup, /Sessions/);
+  assert.match(degradedTerminalFirstScreenMarkup, /Running/);
+
+  const spawnRequestedFirstScreenMarkup = renderToStaticMarkup(
+    createElement(DogfoodFirstScreen, {
+      mode: "real-hub",
+      statusText: "Packaged runtime attached to real hub bridge",
+      diagnostics: [compatibleDescriptorDiagnostic],
+      packages: [{ id: "botster-web", status: "enabled", entrypoint_process_summary: "web-client running" }],
+      packageLoadStatus: "loaded",
+      sessions: [],
+      sessionLoadStatus: "loaded",
+      actionStatus: `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
+    })
+  );
+  assert.match(spawnRequestedFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="medium">Requested/);
+  assert.doesNotMatch(spawnRequestedFirstScreenMarkup, /Session botster-web-dogfood-session is running/);
+
+  const spawnFailedFirstScreenMarkup = renderToStaticMarkup(
+    createElement(DogfoodFirstScreen, {
+      mode: "real-hub",
+      statusText: "Packaged runtime attached to real hub bridge",
+      diagnostics: [spawnFailureOperatorDiagnostic, spawnFailureHubDiagnostic],
+      packages: [{ id: "botster-web", status: "enabled", entrypoint_process_summary: "web-client running" }],
+      packageLoadStatus: "loaded",
+      sessions: [],
+      sessionLoadStatus: "loaded",
+      actionStatus: "runtime failed while handling Spawn: Runtime"
+    })
+  );
+  assert.match(spawnFailedFirstScreenMarkup, /Spawn action/);
+  assert.match(spawnFailedFirstScreenMarkup, /Blocked/);
+  assert.match(spawnFailedFirstScreenMarkup, new RegExp(spawnFailureDiagnosticMessage));
+  assert.doesNotMatch(spawnFailedFirstScreenMarkup, /Session botster-web-dogfood-session is running/);
+  assert.doesNotMatch(spawnFailedFirstScreenMarkup, /Spawn succeeded/);
+
   const diagnosticsMarkup = renderToStaticMarkup(
     createElement(ConnectionDiagnosticsPanel, {
       diagnostics: [
@@ -1749,6 +1928,13 @@ try {
   assert.match(diagnosticsMarkup, /Action failed/);
   assert.match(diagnosticsMarkup, /Terminal stream unavailable/);
   assert.match(diagnosticsMarkup, /data-diagnostic-id="terminal-unavailable"/);
+  assert.match(diagnosticsMarkup, /Blocked \/ bridge/);
+  assert.match(diagnosticsMarkup, /Warning \/ action/);
+  assert.match(diagnosticsMarkup, /Healthy \/ compatibility/);
+  assert.ok(
+    diagnosticsMarkup.indexOf("Local hub bridge unavailable") < diagnosticsMarkup.indexOf("Hub action failed"),
+    "danger diagnostics should render before warning diagnostics"
+  );
 
   const transitionedDiagnosticsMarkup = renderToStaticMarkup(
     createElement(ConnectionDiagnosticsPanel, {
