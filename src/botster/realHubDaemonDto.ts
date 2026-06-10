@@ -62,12 +62,52 @@ export interface DaemonPackage {
   classification: string;
   state: string;
   requested_capabilities: DaemonCapability[];
+  runnable_entrypoints: DaemonPackageRunnableEntrypoint[];
   provider_profile_admitted: boolean;
 }
 
 export interface DaemonCapability {
   surface: string;
   scope?: string | null;
+}
+
+export interface DaemonPackageRunnableEntrypoint {
+  id: string;
+  kind: string;
+  command: string;
+  args: string[];
+  working_directory: DaemonPackageWorkingDirectory;
+  environment: DaemonPackageEnvironmentRequirement[];
+  mode: string;
+  capabilities: DaemonCapability[];
+  may_supervise: boolean;
+  process: DaemonPackageProcess;
+}
+
+export interface DaemonPackageWorkingDirectory {
+  policy: string;
+  path?: string | null;
+}
+
+export interface DaemonPackageEnvironmentRequirement {
+  name: string;
+  required: boolean;
+  default?: string | null;
+  description?: string | null;
+}
+
+export interface DaemonPackageProcess {
+  state: string;
+  pid?: number | null;
+  started_at?: number | null;
+  exited_at?: number | null;
+  exit_status?: string | null;
+  diagnostics: DaemonPackageDiagnostic[];
+}
+
+export interface DaemonPackageDiagnostic {
+  kind: string;
+  message: string;
 }
 
 export type DaemonEvent =

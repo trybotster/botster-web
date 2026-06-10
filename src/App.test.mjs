@@ -120,6 +120,15 @@ assert.match(realHubDaemonDto, /export interface DaemonResponse/);
 assert.match(realHubDaemonDto, /packages\?: DaemonPackage\[\]/);
 assert.match(realHubDaemonDto, /package_name: string/);
 assert.match(realHubDaemonDto, /requested_capabilities: DaemonCapability\[\]/);
+assert.match(realHubDaemonDto, /runnable_entrypoints: DaemonPackageRunnableEntrypoint\[\]/);
+assert.match(realHubDaemonDto, /export interface DaemonPackageProcess/);
+assert.match(realHubDaemonDto, /state: string/);
+assert.match(realHubDaemonDto, /pid\?: number \| null/);
+assert.match(realHubDaemonDto, /started_at\?: number \| null/);
+assert.match(realHubDaemonDto, /exited_at\?: number \| null/);
+assert.match(realHubDaemonDto, /exit_status\?: string \| null/);
+assert.match(realHubDaemonDto, /export interface DaemonPackageDiagnostic/);
+assert.match(realHubDaemonDto, /message: string/);
 assert.match(realHubDaemonDto, /diagnostics\?: DaemonDiagnostic\[\]/);
 assert.match(realHubDaemonDto, /export type DaemonEvent/);
 assert.match(realHubDogfoodTransport, /kind: "daemon_request"/);
@@ -129,7 +138,7 @@ assert.match(realHubDogfoodTransport, /realHubDogfoodUiTreeSnapshot/);
 assert.match(realHubDogfoodTransport, /const packageFamily = "botster-web\.package"/);
 assert.match(realHubDogfoodTransport, /bridge\.request\(\{ type: "list_packages" \}\)/);
 assert.match(realHubDogfoodTransport, /family: packageFamily/);
-assert.doesNotMatch(realHubDogfoodTransport, /install_package|enable_package|disable_package|remove_package/);
+assert.doesNotMatch(realHubDogfoodTransport, /install_package|enable_package|disable_package|remove_package|start_package|stop_package|restart_package|retry_package/);
 assert.match(realHubTerminalDataPlane, /streamTerminal/);
 assert.match(realHubTerminalDataPlane, /type: "send_input"/);
 assert.match(realHubTerminalDataPlane, /type: "detach"/);
@@ -644,6 +653,43 @@ const bridge = {
               { surface: "SessionActions", scope: "project-pipelines" },
               { surface: "McpTools", scope: null }
             ],
+            runnable_entrypoints: [
+              {
+                id: "web-client",
+                kind: "web",
+                command: "node",
+                args: ["scripts/real-hub-dogfood-bridge.mjs"],
+                working_directory: { policy: "package_root", path: null },
+                environment: [],
+                mode: "dev",
+                capabilities: [{ surface: "network", scope: "localhost" }],
+                may_supervise: true,
+                process: {
+                  state: "running",
+                  pid: 4273,
+                  started_at: 1781112500,
+                  diagnostics: []
+                }
+              },
+              {
+                id: "worker",
+                kind: "daemon",
+                command: "node",
+                args: ["scripts/worker.mjs"],
+                working_directory: { policy: "package_root", path: null },
+                environment: [],
+                mode: "dev",
+                capabilities: [],
+                may_supervise: true,
+                process: {
+                  state: "failed",
+                  started_at: 1781112400,
+                  exited_at: 1781112460,
+                  exit_status: "exit:42",
+                  diagnostics: [{ kind: "stderr", message: "fixture failure" }]
+                }
+              }
+            ],
             provider_profile_admitted: false
           },
           {
@@ -652,6 +698,26 @@ const bridge = {
             classification: "provider",
             state: "disabled",
             requested_capabilities: [{ surface: "ClientAdmission", scope: "github" }],
+            runnable_entrypoints: [
+              {
+                id: "poller",
+                kind: "provider",
+                command: "node",
+                args: ["scripts/poller.mjs"],
+                working_directory: { policy: "package_root", path: null },
+                environment: [],
+                mode: "local",
+                capabilities: [],
+                may_supervise: true,
+                process: {
+                  state: "stopped",
+                  started_at: 1781112100,
+                  exited_at: 1781112200,
+                  exit_status: "signal:term",
+                  diagnostics: []
+                }
+              }
+            ],
             provider_profile_admitted: false
           },
           {
@@ -660,6 +726,7 @@ const bridge = {
             classification: "plugin",
             state: "installed",
             requested_capabilities: [],
+            runnable_entrypoints: [],
             provider_profile_admitted: false
           }
         ],
@@ -834,8 +901,19 @@ assert.deepEqual(realRuntime.entities.list("botster-web.package").map((record) =
 assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").status, "enabled");
 assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").capability_summary, /SessionActions:project-pipelines/);
 assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").capability_summary, /McpTools/);
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_count, 2);
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_summary, /web-client \(web\)/);
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_summary, /worker \(daemon\)/);
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_process_summary, /web-client running/);
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_process_summary, /pid 4273/);
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_process_summary, /worker failed/);
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_process_summary, /exit_status exit:42/);
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_diagnostics_summary, /worker stderr: fixture failure/);
 assert.equal(realRuntime.entities.get("botster-web.package", "github-provider").status, "disabled");
+assert.match(realRuntime.entities.get("botster-web.package", "github-provider").entrypoint_process_summary, /poller stopped/);
+assert.match(realRuntime.entities.get("botster-web.package", "github-provider").entrypoint_process_summary, /exited_at 1781112200/);
 assert.equal(realRuntime.entities.get("botster-web.package", "local-diagnostics").capability_summary, "No requested capabilities");
+assert.equal(realRuntime.entities.get("botster-web.package", "local-diagnostics").entrypoint_summary, "No runnable entrypoints");
 assert.deepEqual(realRuntime.entities.get("botster-web.hub_status", "local-hub").compatibility.features, [
   "sessions",
   "terminal_streaming",
@@ -1316,6 +1394,25 @@ try {
         classification: "plugin",
         state: "enabled",
         requested_capabilities: [{ surface: "SessionActions", scope: "project-pipelines" }],
+        runnable_entrypoints: [
+          {
+            id: "web-client",
+            kind: "web",
+            command: "node",
+            args: ["scripts/real-hub-dogfood-bridge.mjs"],
+            working_directory: { policy: "package_root", path: null },
+            environment: [],
+            mode: "dev",
+            capabilities: [],
+            may_supervise: true,
+            process: {
+              state: "running",
+              pid: 4273,
+              started_at: 1781112500,
+              diagnostics: []
+            }
+          }
+        ],
         provider_profile_admitted: false
       },
       {
@@ -1324,6 +1421,26 @@ try {
         classification: "provider",
         state: "disabled",
         requested_capabilities: [{ surface: "ClientAdmission", scope: "github" }],
+        runnable_entrypoints: [
+          {
+            id: "poller",
+            kind: "provider",
+            command: "node",
+            args: ["scripts/poller.mjs"],
+            working_directory: { policy: "package_root", path: null },
+            environment: [],
+            mode: "local",
+            capabilities: [],
+            may_supervise: true,
+            process: {
+              state: "stopped",
+              started_at: 1781112100,
+              exited_at: 1781112200,
+              exit_status: "signal:term",
+              diagnostics: []
+            }
+          }
+        ],
         provider_profile_admitted: false
       },
       {
@@ -1332,6 +1449,26 @@ try {
         classification: "plugin",
         state: "installed",
         requested_capabilities: [],
+        runnable_entrypoints: [
+          {
+            id: "worker",
+            kind: "daemon",
+            command: "node",
+            args: ["scripts/worker.mjs"],
+            working_directory: { policy: "package_root", path: null },
+            environment: [],
+            mode: "dev",
+            capabilities: [],
+            may_supervise: true,
+            process: {
+              state: "failed",
+              started_at: 1781112400,
+              exited_at: 1781112460,
+              exit_status: "exit:42",
+              diagnostics: [{ kind: "stderr", message: "fixture failure" }]
+            }
+          }
+        ],
         provider_profile_admitted: false
       }
     ]
@@ -1363,7 +1500,17 @@ try {
   assert.match(realHubMarkup, /SessionActions:project-pipelines/);
   assert.match(realHubMarkup, /No requested capabilities/);
   assert.match(realHubMarkup, /No provider profile admission/);
-  assert.doesNotMatch(realHubMarkup, /install_package|enable_package|disable_package|remove_package/);
+  assert.match(realHubMarkup, /web-client \(web\)/);
+  assert.match(realHubMarkup, /web-client running/);
+  assert.match(realHubMarkup, /pid 4273/);
+  assert.match(realHubMarkup, /poller \(provider\)/);
+  assert.match(realHubMarkup, /poller stopped/);
+  assert.match(realHubMarkup, /exited_at 1781112200/);
+  assert.match(realHubMarkup, /worker \(daemon\)/);
+  assert.match(realHubMarkup, /worker failed/);
+  assert.match(realHubMarkup, /exit_status exit:42/);
+  assert.match(realHubMarkup, /worker stderr: fixture failure/);
+  assert.doesNotMatch(realHubMarkup, /install_package|enable_package|disable_package|remove_package|start_package|stop_package|restart_package|retry_package/);
 
   const diagnosticsMarkup = renderToStaticMarkup(
     createElement(ConnectionDiagnosticsPanel, {
