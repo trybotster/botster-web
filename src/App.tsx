@@ -88,7 +88,11 @@ export default function App() {
     () =>
       createDogfoodRuntimeConfig({
         env: import.meta.env,
-        locationHref: window.location.href
+        locationHref: window.location.href,
+        bridgeUrl: `${window.location.origin}/request`,
+        packageRuntime: Boolean(
+          (window as typeof window & { __BOTSTER_PACKAGE_RUNTIME__?: boolean }).__BOTSTER_PACKAGE_RUNTIME__
+        )
       }),
     []
   );
