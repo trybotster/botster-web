@@ -80,13 +80,23 @@ try {
   await page.getByRole("button", { name: "Spawn botster-web-dogfood-session to terminal" }).click();
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "spawn" }, "spawn request");
   await waitForSessionStatus(page, "running");
+  await waitForSessionAttachable(page, true);
   await page.getByText("Attachable").waitFor();
   await waitForTerminalSession(page, "botster-web-dogfood-session");
   await waitForTerminalOutput(page, "botster-web-dogfood-ready");
 
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByText("Local hub workbench").waitFor();
+  await page.getByText("real-hub").waitFor();
+  await waitForSessionStatus(page, "running");
+  await waitForSessionAttachable(page, true);
+  await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
+  await waitForTerminalSession(page, "botster-web-dogfood-session");
+
   await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "send_input" }, "send_input request");
   await waitForTerminalOutput(page, `botster-web-dogfood-echo:${echoProbe}`);
+  await waitForTerminalAttachState(page, ["scrollback_unavailable", "live_only"]);
 
   const requestedResize = await latestTerminalResize(page);
   await waitForHarnessEvent(
@@ -243,6 +253,47 @@ async function waitForSessionStatus(page, status) {
     },
     `session entity status ${status}`
   );
+}
+
+async function waitForSessionAttachable(page, attachable) {
+  await page.waitForFunction(
+    ({ expectedAttachable }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events.some((entry) => {
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "entity_snapshot") return false;
+        const payload = entry.payload.payload;
+        return (
+          payload?.family === "botster-web.session" &&
+          payload.records?.some(
+            (record) =>
+              record.id === "botster-web-dogfood-session" &&
+              record.status === "running" &&
+              record.attachable === expectedAttachable
+          )
+        );
+      });
+    },
+    { expectedAttachable: attachable },
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for restored session attachable=${attachable}: ${error.message}`);
+  });
+}
+
+async function waitForTerminalAttachState(page, states) {
+  const expectedStates = Array.isArray(states) ? states : [states];
+  await page.waitForFunction(
+    ({ expectedStates: nextExpectedStates }) => {
+      const status = globalThis.document
+        .querySelector(".terminal-status")
+        ?.getAttribute("data-terminal-attach-state");
+      return nextExpectedStates.includes(status);
+    },
+    { expectedStates },
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for terminal attach state ${expectedStates.join(" or ")}: ${error.message}`);
+  });
 }
 
 async function waitForTerminalSession(page, sessionId) {
