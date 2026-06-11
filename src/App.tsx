@@ -117,6 +117,9 @@ export default function App() {
     draft: "not_loaded"
   });
   const [, setFrameVersion] = useState(0);
+  const updateLocalState = useCallback((patch: Record<string, unknown>) => {
+    setLocalState((current) => ({ ...current, ...patch }));
+  }, []);
   const recordDiagnostic = useCallback((diagnostic: ConnectionDiagnostic | undefined) => {
     setDiagnostics((current) => upsertDiagnostic(current, diagnostic));
   }, []);
@@ -176,7 +179,7 @@ export default function App() {
       .then(() => pullDogfoodEntity("draft", { family: "botster-web.session_draft", id: "draft-1" }))
       .catch((error: unknown) => {
         if (!cancelled) {
-          setLocalState({
+          updateLocalState({
             "dogfood.action_status": error instanceof Error ? error.message : "Local dogfood connection failed"
           });
           recordDiagnostic(connectionFailureDiagnostic(controlStreamEstablished, error));
@@ -191,15 +194,16 @@ export default function App() {
       runtimeClient.actions.rejectPending("botster-web unmounted");
       void runtimeClient.hub.disconnect();
     };
-  }, [recordDiagnostic, recordDiagnostics, runtimeClient]);
+  }, [recordDiagnostic, recordDiagnostics, runtimeClient, updateLocalState]);
 
   const dispatchAction = useCallback(
     (action: ActionBinding) => {
-      setLocalState({ "dogfood.action_status": `Dispatching ${action.id}` });
+      const isSpawnAction = action.id === "botster.session.select" && action.target === realHubDogfoodSessionId;
+      const statusKey = isSpawnAction ? "dogfood.action_status" : "dogfood.diagnostic_action_status";
+      updateLocalState({ [statusKey]: `Dispatching ${action.id}` });
       void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
-        const isSpawnAction = action.id === "botster.session.select";
-        setLocalState({
-          "dogfood.action_status": result.accepted && isSpawnAction
+        updateLocalState({
+          [statusKey]: result.accepted && isSpawnAction
             ? `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
             : result.accepted
               ? `Accepted ${action.id}`
@@ -208,7 +212,7 @@ export default function App() {
         recordDiagnostic(actionFailureDiagnostic(action, result));
       });
     },
-    [recordDiagnostic, runtimeClient]
+    [recordDiagnostic, runtimeClient, updateLocalState]
   );
   const recordTerminalDiagnostic = useCallback(
     (error: unknown) => {

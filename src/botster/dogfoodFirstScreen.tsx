@@ -99,7 +99,7 @@ function dogfoodStatusSummaries({
     diagnostics.filter((diagnostic) => diagnostic.source === "stream" || diagnostic.source === "compatibility")
   );
   const terminalDiagnostic = highestSeverityDiagnostic(diagnostics.filter((diagnostic) => diagnostic.source === "terminal"));
-  const actionDiagnostics = diagnostics.filter((diagnostic) => diagnostic.source === "action");
+  const actionDiagnostics = diagnostics.filter((diagnostic) => diagnostic.source === "action" && isSpawnDiagnostic(diagnostic));
   const actionDiagnostic =
     actionDiagnostics.find((diagnostic) => diagnostic.title === "Hub action failed") ??
     highestSeverityDiagnostic(actionDiagnostics);
@@ -250,6 +250,11 @@ function stateLabel(severity: ConnectionDiagnostic["severity"]) {
 
 function spawnRequested(actionStatus: string) {
   return actionStatus.toLowerCase().includes("spawn requested");
+}
+
+function isSpawnDiagnostic(diagnostic: ConnectionDiagnostic) {
+  return diagnostic.operation === "spawn" ||
+    (diagnostic.actionId === "botster.session.select" && diagnostic.actionTarget === realHubDogfoodSessionId);
 }
 
 function badgeColor(severity: ConnectionDiagnostic["severity"]) {

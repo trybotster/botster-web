@@ -647,15 +647,20 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
           id: "real-hub-validation-form",
           primitive: "form",
           props: {
-            title: "Error state",
+            title: "Diagnostic action failure",
             submit: {
               id: "botster.session.rename",
               target: "missing-real-hub-session",
-              label: "Trigger invalid action",
+              label: "Run missing-session diagnostic",
               params: { mode: "real_hub_dogfood_error" }
             }
           },
           bindings: [{ source: "entity", path: `/${draftFamily}/draft-1/fields`, prop: "fields" }]
+        },
+        {
+          id: "real-hub-diagnostic-action-status",
+          primitive: "text",
+          bindings: [{ source: "local_state", path: "dogfood.diagnostic_action_status", prop: "text" }]
         }
       ]
     }
