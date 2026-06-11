@@ -1,6 +1,6 @@
 import type {
+  TerminalAttachmentStatus,
   TerminalDataPlaneAttachment,
-  TerminalDataPlaneDiagnostic,
   TerminalOutput,
   TerminalSubscription
 } from "./terminal";
@@ -10,6 +10,7 @@ import type { DaemonEvent } from "./realHubDaemonDto";
 
 const maxAttachAttempts = 80;
 const attachRetryDelayMs = 250;
+let nextSubscriptionSequence = 1;
 
 export interface RealHubTerminalDataPlaneOptions {
   bridge: DaemonBridgeClient;
@@ -22,7 +23,11 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   private readonly subscriptionId: string;
   private readonly listeners = new Set<(data: TerminalOutput) => void>();
-  private readonly diagnosticListeners = new Set<(diagnostic: TerminalDataPlaneDiagnostic) => void>();
+  private readonly statusListeners = new Set<(status: TerminalAttachmentStatus) => void>();
+  private currentStatus: TerminalAttachmentStatus = {
+    state: "attaching",
+    message: "Attaching terminal stream."
+  };
   private streamSubscription: { unsubscribe(): void } | undefined;
   private attachPromise: Promise<void> | undefined;
   private pendingResize: { rows: number; columns: number } | undefined;
@@ -30,7 +35,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   constructor(private readonly options: RealHubTerminalDataPlaneOptions) {
     this.sessionId = options.sessionId ?? realHubDogfoodSessionId;
-    this.subscriptionId = options.subscriptionId ?? realHubDogfoodSubscriptionId;
+    this.subscriptionId = options.subscriptionId ?? createTerminalSubscriptionId();
   }
 
   async writeInput(data: string): Promise<void> {
@@ -45,7 +50,15 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription {
     this.listeners.add(listener);
+    this.emitStatus({
+      state: "attaching",
+      message: "Attaching terminal stream."
+    });
     void this.ensureAttached().catch((error: unknown) => {
+      this.emitStatus({
+        state: "failed",
+        message: error instanceof Error ? error.message : "Terminal stream attach failed."
+      });
       recordLiveHarnessTerminal("attach_failed", {
         message: error instanceof Error ? error.message : String(error)
       });
@@ -61,12 +74,13 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     };
   }
 
-  subscribeDiagnostics(listener: (diagnostic: TerminalDataPlaneDiagnostic) => void): TerminalSubscription {
-    this.diagnosticListeners.add(listener);
+  subscribeStatus(listener: (status: TerminalAttachmentStatus) => void): TerminalSubscription {
+    this.statusListeners.add(listener);
+    listener(this.currentStatus);
 
     return {
       unsubscribe: () => {
-        this.diagnosticListeners.delete(listener);
+        this.statusListeners.delete(listener);
       }
     };
   }
@@ -82,7 +96,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.detached = true;
     this.closeStream();
     this.listeners.clear();
-    this.diagnosticListeners.clear();
+    this.statusListeners.clear();
 
     await this.options.bridge.request({
       type: "detach",
@@ -152,46 +166,57 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   private emitTerminalEvent(event: DaemonEvent): void {
-    if (
-      (event.type === "snapshot" || event.type === "scrollback") &&
-      event.session_id === this.sessionId &&
-      event.subscription_id === this.subscriptionId
-    ) {
-      this.emitHistoricalScrollbackUnavailable(event);
+    if (!isTerminalStreamEvent(event) || event.session_id !== this.sessionId || event.subscription_id !== this.subscriptionId) {
       return;
     }
 
-    if (
-      event.type !== "terminal_output" ||
-      event.session_id !== this.sessionId ||
-      event.subscription_id !== this.subscriptionId
-    ) {
+    if (event.type === "attach_state") {
+      this.emitStatus(attachStateStatus(event.state));
+      recordLiveHarnessTerminal("attach_state", { state: event.state });
       return;
     }
 
-    for (const listener of this.listeners) {
-      listener(event.data);
+    if (event.type === "process_exit") {
+      this.emitStatus({
+        state: "exited",
+        message: typeof event.code === "number"
+          ? `Terminal process exited with ${event.code}.`
+          : "Terminal process exited."
+      });
+      recordLiveHarnessTerminal("process_exit", { code: event.code });
+      return;
     }
-    recordLiveHarnessTerminal("output", { data: event.data });
+
+    if (event.type === "snapshot" || event.type === "scrollback") {
+      this.emitStatus(snapshotStatus(event));
+      recordLiveHarnessTerminal(event.type, { bytes: event.bytes });
+      return;
+    }
+
+    if (event.type === "terminal_output") {
+      if (this.currentStatus.state === "attaching" || this.currentStatus.state === "attached") {
+        this.emitStatus({
+          state: "live_only",
+          message: "Terminal stream attached live; no historical scrollback was delivered by the daemon."
+        });
+      }
+      this.emitOutput(event.data, "output");
+    }
   }
 
-  private emitHistoricalScrollbackUnavailable(
-    event: Extract<DaemonEvent, { type: "snapshot" | "scrollback" }>
-  ): void {
-    const diagnostic: TerminalDataPlaneDiagnostic = {
-      id: "historical-scrollback-unavailable",
-      title: "Historical scrollback unavailable",
-      detail: `Real hub reported ${event.bytes} bytes of ${event.type}, but the daemon protocol exposes only byte counts to botster-web.`,
-      severity: "warning"
-    };
-
-    for (const listener of this.diagnosticListeners) {
-      listener(diagnostic);
+  private emitOutput(data: TerminalOutput, kind: "output" | "snapshot" | "scrollback"): void {
+    for (const listener of this.listeners) {
+      listener(data);
     }
-    recordLiveHarnessTerminal("historical_scrollback_unavailable", {
-      event_type: event.type,
-      bytes: event.bytes
-    });
+    recordLiveHarnessTerminal(kind === "output" ? "output" : `${kind}_output`, { data });
+  }
+
+  private emitStatus(status: TerminalAttachmentStatus): void {
+    this.currentStatus = status;
+    for (const listener of this.statusListeners) {
+      listener(status);
+    }
+    recordLiveHarnessTerminal("status", status);
   }
 }
 
@@ -199,8 +224,52 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isTerminalStreamEvent(event: DaemonEvent): event is Extract<
+  DaemonEvent,
+  { session_id: string; subscription_id: string }
+> {
+  return "session_id" in event && "subscription_id" in event;
+}
+
+function attachStateStatus(state: string): TerminalAttachmentStatus {
+  if (state === "attached") {
+    return {
+      state: "attached",
+      message: "Terminal stream attached; waiting for available output."
+    };
+  }
+
+  return {
+    state: "attaching",
+    message: `Terminal stream state: ${state}.`
+  };
+}
+
+function snapshotStatus(event: Extract<DaemonEvent, { type: "snapshot" | "scrollback" }>): TerminalAttachmentStatus {
+  if (event.bytes > 0) {
+    return {
+      state: "scrollback_unavailable",
+      message: "Historical scrollback was delivered as a daemon snapshot, but botster-web cannot render that snapshot format yet. Live output is attached."
+    };
+  }
+
+  return {
+    state: "live_only",
+    message: "Terminal stream attached live; no historical scrollback was delivered by the daemon."
+  };
+}
+
 export function createRealHubTerminalDataPlane(options: RealHubTerminalDataPlaneOptions): TerminalDataPlaneAttachment {
   return new RealHubTerminalDataPlane(options);
+}
+
+function createTerminalSubscriptionId(): string {
+  const randomId = globalThis.crypto?.randomUUID?.();
+  if (randomId) {
+    return `${realHubDogfoodSubscriptionId}-${randomId}`;
+  }
+
+  return `${realHubDogfoodSubscriptionId}-${Date.now()}-${nextSubscriptionSequence++}`;
 }
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {

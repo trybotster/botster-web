@@ -3,8 +3,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DefaultTerminalViewBridge,
   MockTerminalDataPlane,
+  type TerminalAttachmentStatus,
   type TerminalDataPlaneAttachment,
-  type TerminalDataPlaneDiagnostic,
   type TerminalViewBridge,
   type TerminalViewDescriptor,
   type TerminalViewMount
@@ -37,8 +37,8 @@ export function TerminalViewHost({
   const terminalRef = useRef<HTMLDivElement>(null);
   const onDiagnosticRef = useRef(onDiagnostic);
   const [mountDiagnostic, setMountDiagnostic] = useState<string | undefined>();
-  const [dataPlaneDiagnostic, setDataPlaneDiagnostic] = useState<TerminalDataPlaneDiagnostic | undefined>();
-  const terminalDataPlane = useMemo<TerminalDataPlaneAttachment>(
+  const [attachmentStatus, setAttachmentStatus] = useState<TerminalAttachmentStatus | undefined>();
+  const terminalDataPlane = useMemo(
     () =>
       dataPlane ??
       new MockTerminalDataPlane(descriptor.sessionId, [
@@ -59,14 +59,28 @@ export function TerminalViewHost({
     let cancelled = false;
     let mount: TerminalViewMount | undefined;
     let observer: ResizeObserver | undefined;
-    let dataPlaneDiagnosticSubscription: { unsubscribe(): void } | undefined;
+    let statusSubscription: { unsubscribe(): void } | undefined;
+    let scheduledResize: number | undefined;
+    let lastResize: { rows: number; columns: number } | undefined;
+
     const resize = () => {
       // Placeholder metrics until the Restty adapter exposes measured cell dimensions.
       const rows = Math.max(4, Math.floor(container.clientHeight / placeholderCellSize.height));
       const columns = Math.max(20, Math.floor(container.clientWidth / placeholderCellSize.width));
+      if (lastResize?.rows === rows && lastResize.columns === columns) return;
+      lastResize = { rows, columns };
       void bridge.resize(descriptor, rows, columns).catch(() => {
         if (!cancelled) {
           container.dataset.terminalResize = "failed";
+        }
+      });
+    };
+    const scheduleResize = () => {
+      if (scheduledResize !== undefined) return;
+      scheduledResize = window.requestAnimationFrame(() => {
+        scheduledResize = undefined;
+        if (!cancelled) {
+          resize();
         }
       });
     };
@@ -80,18 +94,13 @@ export function TerminalViewHost({
           return;
         }
 
-        setDataPlaneDiagnostic(undefined);
-        dataPlaneDiagnosticSubscription = terminalDataPlane.subscribeDiagnostics?.((diagnostic: TerminalDataPlaneDiagnostic) => {
-          if (!cancelled) {
-            setDataPlaneDiagnostic(diagnostic);
-          }
-        });
+        statusSubscription = terminalDataPlane.subscribeStatus?.(setAttachmentStatus);
         await bridge.attach(descriptor, terminalDataPlane);
         installLiveHarnessTerminalControls(bridge, descriptor);
         setMountDiagnostic(undefined);
         container.dataset.terminalMount = "mounted";
-        resize();
-        observer = new ResizeObserver(resize);
+        scheduleResize();
+        observer = new ResizeObserver(scheduleResize);
         observer.observe(container);
       })
       .catch((error: unknown) => {
@@ -108,7 +117,10 @@ export function TerminalViewHost({
     return () => {
       cancelled = true;
       observer?.disconnect();
-      dataPlaneDiagnosticSubscription?.unsubscribe();
+      statusSubscription?.unsubscribe();
+      if (scheduledResize !== undefined) {
+        window.cancelAnimationFrame(scheduledResize);
+      }
       if (mount) {
         void bridge.unmount(descriptor, mount);
       }
@@ -120,7 +132,12 @@ export function TerminalViewHost({
       <div className="panel-heading">
         <h2 id="terminal-heading">Terminal renderer</h2>
       </div>
-      <p className="terminal-status">Restty owns terminal rendering; Botster data-plane attachments own terminal bytes.</p>
+      <p
+        className="terminal-status"
+        data-terminal-attach-state={attachmentStatus?.state ?? "unknown"}
+      >
+        {attachmentStatus?.message ?? "Restty owns terminal rendering; Botster data-plane attachments own terminal bytes."}
+      </p>
       <div
         ref={terminalRef}
         className="terminal-view-container"
@@ -142,16 +159,6 @@ export function TerminalViewHost({
         <div className="diagnostic-panel" data-terminal-diagnostic="mount-failed">
           <strong>Terminal renderer unavailable</strong>
           <span>{mountDiagnostic}</span>
-        </div>
-      ) : null}
-      {dataPlaneDiagnostic ? (
-        <div
-          className="diagnostic-panel"
-          data-terminal-diagnostic={dataPlaneDiagnostic.id}
-          data-terminal-diagnostic-severity={dataPlaneDiagnostic.severity}
-        >
-          <strong>{dataPlaneDiagnostic.title}</strong>
-          <span>{dataPlaneDiagnostic.detail}</span>
         </div>
       ) : null}
     </aside>

@@ -80,6 +80,7 @@ try {
   await page.getByRole("button", { name: "Spawn botster-web-dogfood-session to terminal" }).click();
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "spawn" }, "spawn request");
   await waitForSessionStatus(page, "running");
+  await waitForSessionAttachable(page, true);
   await page.getByText("Attachable").waitFor();
   await waitForTerminalSession(page, "botster-web-dogfood-session");
   await waitForTerminalOutput(page, "botster-web-dogfood-ready");
@@ -88,14 +89,14 @@ try {
   await page.getByText("Local hub workbench").waitFor();
   await page.getByText("real-hub").waitFor();
   await waitForSessionStatus(page, "running");
-  await page.getByText("Attachable").waitFor();
+  await waitForSessionAttachable(page, true);
   await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
   await waitForTerminalSession(page, "botster-web-dogfood-session");
-  await recordHistoricalScrollbackObservation(page);
 
   await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "send_input" }, "send_input request");
   await waitForTerminalOutput(page, `botster-web-dogfood-echo:${echoProbe}`);
+  await waitForTerminalAttachState(page, ["scrollback_unavailable", "live_only"]);
 
   const requestedResize = await latestTerminalResize(page);
   await waitForHarnessEvent(
@@ -219,44 +220,6 @@ async function waitForTerminalOutput(page, text) {
   });
 }
 
-async function recordHistoricalScrollbackObservation(page) {
-  const observedFallback = await page.waitForFunction(
-    () => {
-      const terminalEvents = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
-      const daemonEvents = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      const unavailable = terminalEvents.some((entry) => entry.kind === "historical_scrollback_unavailable");
-      const byteCountOnlyHistory = daemonEvents.some(
-        (entry) =>
-          entry.kind === "daemon_event" &&
-          (entry.payload?.type === "snapshot" || entry.payload?.type === "scrollback") &&
-          typeof entry.payload?.bytes === "number" &&
-          typeof entry.payload?.data === "undefined"
-      );
-      const visibleDiagnostic = globalThis.document.querySelector(
-        '[data-terminal-diagnostic="historical-scrollback-unavailable"]'
-      );
-
-      return unavailable && byteCountOnlyHistory && visibleDiagnostic !== null;
-    },
-    undefined,
-    { timeout: 3_000 }
-  ).then(
-    () => true,
-    () => false
-  );
-
-  if (observedFallback) return;
-
-  await page.evaluate(() => {
-    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal?.push({
-      kind: "historical_scrollback_not_observed",
-      payload: {
-        detail: "Refreshed real-hub attach emitted no snapshot or scrollback daemon event before live output proof."
-      }
-    });
-  });
-}
-
 async function waitForResizeProof(page, requestedResize) {
   const deadline = Date.now() + 20_000;
   let lastObservedSize = "none";
@@ -290,6 +253,47 @@ async function waitForSessionStatus(page, status) {
     },
     `session entity status ${status}`
   );
+}
+
+async function waitForSessionAttachable(page, attachable) {
+  await page.waitForFunction(
+    ({ expectedAttachable }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events.some((entry) => {
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "entity_snapshot") return false;
+        const payload = entry.payload.payload;
+        return (
+          payload?.family === "botster-web.session" &&
+          payload.records?.some(
+            (record) =>
+              record.id === "botster-web-dogfood-session" &&
+              record.status === "running" &&
+              record.attachable === expectedAttachable
+          )
+        );
+      });
+    },
+    { expectedAttachable: attachable },
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for restored session attachable=${attachable}: ${error.message}`);
+  });
+}
+
+async function waitForTerminalAttachState(page, states) {
+  const expectedStates = Array.isArray(states) ? states : [states];
+  await page.waitForFunction(
+    ({ expectedStates: nextExpectedStates }) => {
+      const status = globalThis.document
+        .querySelector(".terminal-status")
+        ?.getAttribute("data-terminal-attach-state");
+      return nextExpectedStates.includes(status);
+    },
+    { expectedStates },
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for terminal attach state ${expectedStates.join(" or ")}: ${error.message}`);
+  });
 }
 
 async function waitForTerminalSession(page, sessionId) {

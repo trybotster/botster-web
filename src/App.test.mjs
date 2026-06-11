@@ -153,6 +153,9 @@ assert.match(realHubDaemonDto, /export interface DaemonPackageDiagnostic/);
 assert.match(realHubDaemonDto, /message: string/);
 assert.match(realHubDaemonDto, /diagnostics\?: DaemonDiagnostic\[\]/);
 assert.match(realHubDaemonDto, /export type DaemonEvent/);
+assert.match(realHubDaemonDto, /type: "snapshot" \| "scrollback"/);
+assert.match(realHubDaemonDto, /bytes: number/);
+assert.doesNotMatch(realHubDaemonDto, /data\?: string|compressed\?: boolean|encoding\?: string/);
 assert.match(realHubDogfoodTransport, /kind: "daemon_request"/);
 assert.match(realHubDogfoodTransport, /reply\.kind !== "daemon_response"/);
 assert.match(realHubDogfoodTransport, /subscribeEvents/);
@@ -168,9 +171,11 @@ assert.match(realHubTerminalDataPlane, /streamTerminal/);
 assert.match(realHubTerminalDataPlane, /type: "send_input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
-assert.match(realHubTerminalDataPlane, /subscribeDiagnostics/);
-assert.match(realHubTerminalDataPlane, /historical_scrollback_unavailable/);
-assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("output"/);
+assert.match(realHubTerminalDataPlane, /this\.emitOutput\(event\.data, "output"\)/);
+assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("attach_state"/);
+assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\(event\.type/);
+assert.match(realHubTerminalDataPlane, /scrollback_unavailable/);
+assert.doesNotMatch(realHubTerminalDataPlane, /renderableTerminalPayload/);
 assert.match(realHubTerminalDataPlane, /type: "detach"/);
 assert.match(realHubTerminalDataPlane, /const maxAttachAttempts = \d+/);
 assert.match(realHubTerminalDataPlane, /attempt <= maxAttachAttempts/);
@@ -207,9 +212,10 @@ assert.match(liveProtocolHarnessScript, /chromium\.launch/);
 assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-ready/);
 assert.match(liveProtocolHarnessScript, /page\.reload/);
-assert.match(liveProtocolHarnessScript, /recordHistoricalScrollbackObservation/);
-assert.match(liveProtocolHarnessScript, /historical_scrollback_not_observed/);
+assert.match(liveProtocolHarnessScript, /waitForSessionAttachable\(page, true\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
+assert.match(liveProtocolHarnessScript, /type: "send_input"/);
+assert.match(liveProtocolHarnessScript, /waitForTerminalAttachState\(page, \["scrollback_unavailable", "live_only"\]\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-echo:/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-size:/);
@@ -253,9 +259,11 @@ assert.match(resttyRenderer, /fontSources: botsterResttyFontSources/);
 assert.doesNotMatch(resttyRenderer, /fontPreset:\s*"none"/);
 assert.match(resttyRenderer, /this\.terminal\.dispose\(\)/);
 assert.match(terminalHost, /ResizeObserver/);
+assert.match(terminalHost, /requestAnimationFrame/);
+assert.match(terminalHost, /cancelAnimationFrame/);
+assert.match(terminalHost, /data-terminal-attach-state/);
+assert.match(terminalHost, /subscribeStatus/);
 assert.match(terminalHost, /bridge\.attach/);
-assert.match(terminalHost, /subscribeDiagnostics/);
-assert.match(terminalHost, /data-terminal-diagnostic=\{dataPlaneDiagnostic\.id\}/);
 assert.match(terminalHost, /bridge\.unmount/);
 assert.match(terminalHost, /terminalMount/);
 assert.match(terminalHost, /data-terminal-diagnostic="mount-failed"/);
@@ -945,16 +953,16 @@ const bridge = {
   streamTerminal(sessionId, subscriptionId, onEvent) {
     bridgeTerminalStreams.push({ sessionId, subscriptionId });
     onEvent({
-      type: "snapshot",
+      type: "attach_state",
       session_id: sessionId,
       subscription_id: subscriptionId,
-      bytes: 128
+      state: "attached"
     });
     onEvent({
       type: "scrollback",
       session_id: sessionId,
       subscription_id: subscriptionId,
-      bytes: 64
+      bytes: 23
     });
     onEvent({
       type: "terminal_output",
@@ -1177,6 +1185,16 @@ assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessi
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attachable, true);
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.id, "botster.session.attach");
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.disabled, false);
+assert.equal(
+  daemonResponseFrames({ kind: "status", sessions: [], packages: [], events: [] }, 21)
+    .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session"),
+  false
+);
+assert.equal(
+  daemonResponseFrames({ kind: "sessions", sessions: [], packages: [], events: [] }, 21)
+    .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session"),
+  true
+);
 
 const attachSuccess = realRuntime.actions.dispatch({
   origin: "ui_node",
@@ -1501,8 +1519,8 @@ const terminalDataPlane = createRealHubTerminalDataPlane({
   bridge
 });
 const terminalOutput = [];
-const terminalDiagnostics = [];
-terminalDataPlane.subscribeDiagnostics((diagnostic) => terminalDiagnostics.push(diagnostic));
+const terminalStatuses = [];
+const terminalStatusSubscription = terminalDataPlane.subscribeStatus((status) => terminalStatuses.push(status));
 const terminalSubscription = terminalDataPlane.subscribeOutput((data) => terminalOutput.push(data));
 await flushMicrotasks();
 await terminalDataPlane.writeInput("ping\n");
@@ -1515,17 +1533,19 @@ assert.equal(
 );
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
 await terminalDataPlane.detach();
+terminalStatusSubscription.unsubscribe();
 assert.equal(bridgeTerminalStreams.some((stream) => stream.sessionId === realHubDogfoodSessionId), true);
 assert.equal(bridgeRequests.some((request) => request.type === "send_input" && request.data === "ping\n"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "resize" && request.rows === 24 && request.cols === 80), true);
 assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
+assert.equal(terminalOutput.some((data) => data.includes("botster-web-scrollback")), false);
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
-assert.equal(terminalOutput.some((data) => data.includes("128")), false);
-assert.equal(terminalDiagnostics.length, 2);
-assert.equal(terminalDiagnostics[0].id, "historical-scrollback-unavailable");
-assert.match(terminalDiagnostics[0].detail, /128 bytes of snapshot/);
-assert.match(terminalDiagnostics[1].detail, /64 bytes of scrollback/);
+assert.equal(terminalStatuses.some((status) => status.state === "scrollback_unavailable"), true);
+assert.match(
+  terminalStatuses.find((status) => status.state === "scrollback_unavailable").message,
+  /cannot render that snapshot format yet/
+);
 
 const delayedBridgeRequests = [];
 const delayedBridgeTerminalStreams = [];
@@ -1561,10 +1581,13 @@ const delayedTerminalDataPlane = createRealHubTerminalDataPlane({
   }
 });
 const delayedOutput = [];
+const delayedStatuses = [];
+delayedTerminalDataPlane.subscribeStatus((status) => delayedStatuses.push(status));
 delayedTerminalDataPlane.subscribeOutput((data) => delayedOutput.push(data));
 const delayedResize = delayedTerminalDataPlane.resize(9, 34);
 await waitFor(() => delayedOutput.some((data) => data.includes("ready-after-retry")));
 await delayedResize;
+assert.equal(delayedStatuses.some((status) => status.state === "live_only"), true);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize").length, 1);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].rows, 9);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].cols, 34);

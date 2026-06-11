@@ -11,22 +11,20 @@ export interface TerminalViewMount {
 export type TerminalInput = string;
 export type TerminalOutput = string;
 
-export interface TerminalDataPlaneDiagnostic {
-  id: string;
-  title: string;
-  detail: string;
-  severity: "info" | "warning" | "danger";
-}
-
 export interface TerminalSubscription {
   unsubscribe(): void;
+}
+
+export interface TerminalAttachmentStatus {
+  state: "attaching" | "attached" | "live_only" | "scrollback_unavailable" | "exited" | "failed";
+  message: string;
 }
 
 export interface TerminalDataPlaneAttachment {
   sessionId: string;
   writeInput(data: TerminalInput): void | Promise<void>;
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription;
-  subscribeDiagnostics?(listener: (diagnostic: TerminalDataPlaneDiagnostic) => void): TerminalSubscription;
+  subscribeStatus?(listener: (status: TerminalAttachmentStatus) => void): TerminalSubscription;
   resize?(rows: number, columns: number): void | Promise<void>;
   detach?(): void | Promise<void>;
 }
@@ -192,6 +190,7 @@ export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
   readonly inputs: TerminalInput[] = [];
   readonly resizes: Array<{ rows: number; columns: number }> = [];
   private readonly listeners = new Set<(data: TerminalOutput) => void>();
+  private readonly statusListeners = new Set<(status: TerminalAttachmentStatus) => void>();
   private detached = false;
 
   constructor(
@@ -216,6 +215,20 @@ export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
     };
   }
 
+  subscribeStatus(listener: (status: TerminalAttachmentStatus) => void): TerminalSubscription {
+    this.statusListeners.add(listener);
+    listener({
+      state: "attached",
+      message: "Mock terminal data plane attached."
+    });
+
+    return {
+      unsubscribe: () => {
+        this.statusListeners.delete(listener);
+      }
+    };
+  }
+
   emitOutput(data: TerminalOutput): void {
     if (!this.detached) {
       this.listeners.forEach((listener) => listener(data));
@@ -231,5 +244,6 @@ export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
   detach(): void {
     this.detached = true;
     this.listeners.clear();
+    this.statusListeners.clear();
   }
 }
