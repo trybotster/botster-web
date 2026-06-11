@@ -92,13 +92,11 @@ try {
   await waitForSessionAttachable(page, true);
   await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
   await waitForTerminalSession(page, "botster-web-dogfood-session");
-  await waitForTerminalStreamEvidence(page, "attach_state");
-  await waitForTerminalStreamEvidence(page, ["snapshot", "scrollback"]);
-  await waitForTerminalAttachState(page, ["scrollback_unavailable", "live_only"]);
 
   await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "send_input" }, "send_input request");
   await waitForTerminalOutput(page, `botster-web-dogfood-echo:${echoProbe}`);
+  await waitForTerminalAttachState(page, ["scrollback_unavailable", "live_only"]);
 
   const requestedResize = await latestTerminalResize(page);
   await waitForHarnessEvent(
@@ -279,20 +277,6 @@ async function waitForSessionAttachable(page, attachable) {
     { timeout: 15_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for restored session attachable=${attachable}: ${error.message}`);
-  });
-}
-
-async function waitForTerminalStreamEvidence(page, kinds) {
-  const expectedKinds = Array.isArray(kinds) ? kinds : [kinds];
-  await page.waitForFunction(
-    ({ expectedKinds: nextExpectedKinds }) => {
-      const terminalEvents = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
-      return terminalEvents.some((entry) => nextExpectedKinds.includes(entry.kind));
-    },
-    { expectedKinds },
-    { timeout: 15_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for terminal stream evidence ${expectedKinds.join(" or ")}: ${error.message}`);
   });
 }
 

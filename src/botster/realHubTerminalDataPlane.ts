@@ -10,6 +10,7 @@ import type { DaemonEvent } from "./realHubDaemonDto";
 
 const maxAttachAttempts = 80;
 const attachRetryDelayMs = 250;
+let nextSubscriptionSequence = 1;
 
 export interface RealHubTerminalDataPlaneOptions {
   bridge: DaemonBridgeClient;
@@ -34,7 +35,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   constructor(private readonly options: RealHubTerminalDataPlaneOptions) {
     this.sessionId = options.sessionId ?? realHubDogfoodSessionId;
-    this.subscriptionId = options.subscriptionId ?? realHubDogfoodSubscriptionId;
+    this.subscriptionId = options.subscriptionId ?? createTerminalSubscriptionId();
   }
 
   async writeInput(data: string): Promise<void> {
@@ -193,6 +194,12 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     if (event.type === "terminal_output") {
+      if (this.currentStatus.state === "attaching" || this.currentStatus.state === "attached") {
+        this.emitStatus({
+          state: "live_only",
+          message: "Terminal stream attached live; no historical scrollback was delivered by the daemon."
+        });
+      }
       this.emitOutput(event.data, "output");
     }
   }
@@ -254,6 +261,15 @@ function snapshotStatus(event: Extract<DaemonEvent, { type: "snapshot" | "scroll
 
 export function createRealHubTerminalDataPlane(options: RealHubTerminalDataPlaneOptions): TerminalDataPlaneAttachment {
   return new RealHubTerminalDataPlane(options);
+}
+
+function createTerminalSubscriptionId(): string {
+  const randomId = globalThis.crypto?.randomUUID?.();
+  if (randomId) {
+    return `${realHubDogfoodSubscriptionId}-${randomId}`;
+  }
+
+  return `${realHubDogfoodSubscriptionId}-${Date.now()}-${nextSubscriptionSequence++}`;
 }
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {

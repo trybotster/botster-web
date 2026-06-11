@@ -199,7 +199,7 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
     });
   }
 
-  if (Array.isArray(response.sessions)) {
+  if (responseOwnsSessions(response) && Array.isArray(response.sessions)) {
     frames.push({
       kind: "entity_snapshot",
       payload: {
@@ -211,7 +211,7 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
     });
   }
 
-  if (Array.isArray(response.packages)) {
+  if (responseOwnsPackages(response) && Array.isArray(response.packages)) {
     frames.push({
       kind: "entity_snapshot",
       payload: {
@@ -241,6 +241,14 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
   }
 
   return frames;
+}
+
+function responseOwnsSessions(response: DaemonResponse): boolean {
+  return response.kind === "sessions" || response.kind === "spawned";
+}
+
+function responseOwnsPackages(response: DaemonResponse): boolean {
+  return response.kind === "packages";
 }
 
 export function daemonEventFrame(event: DaemonEvent, sequence: number): HubControlFrame | undefined {

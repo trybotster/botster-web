@@ -213,9 +213,9 @@ assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-ready/);
 assert.match(liveProtocolHarnessScript, /page\.reload/);
 assert.match(liveProtocolHarnessScript, /waitForSessionAttachable\(page, true\)/);
-assert.match(liveProtocolHarnessScript, /waitForTerminalStreamEvidence\(page, "attach_state"\)/);
-assert.match(liveProtocolHarnessScript, /waitForTerminalStreamEvidence\(page, \["snapshot", "scrollback"\]\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
+assert.match(liveProtocolHarnessScript, /type: "send_input"/);
+assert.match(liveProtocolHarnessScript, /waitForTerminalAttachState\(page, \["scrollback_unavailable", "live_only"\]\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-echo:/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-size:/);
@@ -1185,6 +1185,16 @@ assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessi
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attachable, true);
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.id, "botster.session.attach");
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.disabled, false);
+assert.equal(
+  daemonResponseFrames({ kind: "status", sessions: [], packages: [], events: [] }, 21)
+    .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session"),
+  false
+);
+assert.equal(
+  daemonResponseFrames({ kind: "sessions", sessions: [], packages: [], events: [] }, 21)
+    .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session"),
+  true
+);
 
 const attachSuccess = realRuntime.actions.dispatch({
   origin: "ui_node",
@@ -1571,10 +1581,13 @@ const delayedTerminalDataPlane = createRealHubTerminalDataPlane({
   }
 });
 const delayedOutput = [];
+const delayedStatuses = [];
+delayedTerminalDataPlane.subscribeStatus((status) => delayedStatuses.push(status));
 delayedTerminalDataPlane.subscribeOutput((data) => delayedOutput.push(data));
 const delayedResize = delayedTerminalDataPlane.resize(9, 34);
 await waitFor(() => delayedOutput.some((data) => data.includes("ready-after-retry")));
 await delayedResize;
+assert.equal(delayedStatuses.some((status) => status.state === "live_only"), true);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize").length, 1);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].rows, 9);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].cols, 34);
