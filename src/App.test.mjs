@@ -97,6 +97,7 @@ assert.match(app, /runtimeClient\.entities\.pull/);
 assert.match(app, /schemaVersionDiagnosticFromFrame/);
 assert.match(app, /operatorErrorDiagnostic/);
 assert.match(app, /hubConnectionDiagnosticFromFrame/);
+assert.match(app, /dogfood\.diagnostic_action_status/);
 assert.match(app, /terminalUnavailableDiagnostic/);
 assert.match(app, /surfaceSnapshot \?\? loadingSnapshot/);
 assert.doesNotMatch(app, /fixtureEntityFrames/);
@@ -1432,6 +1433,13 @@ assert.equal(
   ).detail,
   "Session not found"
 );
+assert.equal(
+  actionFailureDiagnostic(
+    { id: "botster.session.rename", target: "missing-real-hub-session" },
+    { accepted: false, reason: "Session not found" }
+  ).actionTarget,
+  "missing-real-hub-session"
+);
 
 const terminalDataPlane = createRealHubTerminalDataPlane({
   bridge
@@ -1795,6 +1803,10 @@ try {
         semantic_actions: true,
         terminal_view_bridge: true,
         plugin_surface_sandbox: true
+      },
+      localState: {
+        "dogfood.action_status": `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`,
+        "dogfood.diagnostic_action_status": "Session not found"
       }
     })
   );
@@ -1818,6 +1830,12 @@ try {
   assert.match(realHubMarkup, /worker failed/);
   assert.match(realHubMarkup, /exit_status exit:42/);
   assert.match(realHubMarkup, /worker stderr: fixture failure/);
+  assert.match(realHubMarkup, /Diagnostic action failure/);
+  assert.match(realHubMarkup, /Run missing-session diagnostic/);
+  assert.match(realHubMarkup, /Session not found/);
+  assert.match(realHubMarkup, new RegExp(`Spawn requested for ${realHubDogfoodSessionId}`));
+  assert.doesNotMatch(realHubMarkup, /Trigger invalid action/);
+  assert.doesNotMatch(realHubMarkup, /Error state/);
   assert.doesNotMatch(realHubMarkup, /install_package|enable_package|disable_package|remove_package|start_package|stop_package|restart_package|retry_package/);
 
   const healthyFirstScreenMarkup = renderToStaticMarkup(
@@ -1972,6 +1990,77 @@ try {
   assert.match(spawnFailedFirstScreenMarkup, new RegExp(spawnFailureDiagnosticMessage));
   assert.doesNotMatch(spawnFailedFirstScreenMarkup, /Session botster-web-dogfood-session is running/);
   assert.doesNotMatch(spawnFailedFirstScreenMarkup, /Spawn succeeded/);
+
+  const missingSessionOperatorDiagnostic = operatorErrorDiagnostic({
+    kind: "operator_error",
+    payload: {
+      operation: "shutdown_session",
+      code: "session_not_found",
+      message: "unknown session: missing-real-hub-session"
+    }
+  });
+  const missingSessionActionDiagnostic = actionFailureDiagnostic(
+    { id: "botster.session.rename", target: "missing-real-hub-session" },
+    { accepted: false, reason: "unknown session: missing-real-hub-session" }
+  );
+  const missingSessionFirstScreenMarkup = renderToStaticMarkup(
+    createElement(DogfoodFirstScreen, {
+      mode: "real-hub",
+      statusText: "Packaged runtime attached to real hub bridge",
+      diagnostics: [missingSessionOperatorDiagnostic, missingSessionActionDiagnostic],
+      packages: [{ id: "botster-web", status: "enabled", entrypoint_process_summary: "web-client running" }],
+      packageLoadStatus: "loaded",
+      sessions: [],
+      sessionLoadStatus: "loaded",
+      actionStatus: "Packaged runtime attached to real hub bridge"
+    })
+  );
+  assert.match(missingSessionFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="medium">Ready/);
+  assert.match(missingSessionFirstScreenMarkup, new RegExp(`Creates ${realHubDogfoodSessionId}`));
+  assert.doesNotMatch(missingSessionFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="danger">Blocked/);
+  assert.doesNotMatch(missingSessionFirstScreenMarkup, /unknown session: missing-real-hub-session/);
+
+  const nonSpawnHubActionDiagnostic = hubConnectionDiagnosticFromFrame({
+    kind: "connection_diagnostic",
+    payload: {
+      kind: "action_failure",
+      operation: "rename",
+      message: "unknown session: missing-real-hub-session"
+    }
+  });
+  const nonSpawnHubActionFirstScreenMarkup = renderToStaticMarkup(
+    createElement(DogfoodFirstScreen, {
+      mode: "real-hub",
+      statusText: "Packaged runtime attached to real hub bridge",
+      diagnostics: [nonSpawnHubActionDiagnostic],
+      packages: [{ id: "botster-web", status: "enabled", entrypoint_process_summary: "web-client running" }],
+      packageLoadStatus: "loaded",
+      sessions: [],
+      sessionLoadStatus: "loaded",
+      actionStatus: "Packaged runtime attached to real hub bridge"
+    })
+  );
+  assert.match(nonSpawnHubActionFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="medium">Ready/);
+  assert.doesNotMatch(nonSpawnHubActionFirstScreenMarkup, /unknown session: missing-real-hub-session/);
+
+  const primaryActionFailureDiagnostic = actionFailureDiagnostic(
+    { id: "botster.session.select", target: realHubDogfoodSessionId },
+    { accepted: false, reason: "spawn action rejected" }
+  );
+  const primaryActionFailedFirstScreenMarkup = renderToStaticMarkup(
+    createElement(DogfoodFirstScreen, {
+      mode: "real-hub",
+      statusText: "Packaged runtime attached to real hub bridge",
+      diagnostics: [primaryActionFailureDiagnostic],
+      packages: [{ id: "botster-web", status: "enabled", entrypoint_process_summary: "web-client running" }],
+      packageLoadStatus: "loaded",
+      sessions: [],
+      sessionLoadStatus: "loaded",
+      actionStatus: "spawn action rejected"
+    })
+  );
+  assert.match(primaryActionFailedFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="warning">Blocked/);
+  assert.match(primaryActionFailedFirstScreenMarkup, /spawn action rejected/);
 
   const diagnosticsMarkup = renderToStaticMarkup(
     createElement(ConnectionDiagnosticsPanel, {

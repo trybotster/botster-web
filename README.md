@@ -156,7 +156,7 @@ Expected proof markers:
 - `Terminal stream unavailable` is scoped to the terminal data-plane seam. The control-plane surface can still render status, sessions, and action errors when the held terminal SSE stream is missing or rejected.
 - `Spawn isolated session` sends `DaemonRequest::Spawn` and updates entity-backed session rows. Package rows are read-only in this slice; botster-web does not expose install, enable, disable, or remove actions.
 - A compatible current hub build should stream `botster-web-dogfood-ready` through the terminal SSE path; typing in the terminal sends `DaemonRequest::SendInput` while the held stream receives live terminal output.
-- `Trigger invalid action` sends a deliberately invalid daemon request and surfaces an operator error through action/error state.
+- `Run missing-session diagnostic` sends a deliberately invalid daemon request and surfaces the result as diagnostic/debug state without replacing the primary spawn action status.
 - Closing the bridge sends `DaemonRequest::DaemonShutdown` only in spawned isolated hub mode. Existing hub attach mode leaves the already-running hub and its data directory alone.
 
 Known limitation: the control-plane round trip (status/list/spawn/input/resize/operator-error/teardown) has been verified end-to-end through this bridge. Terminal output depends on the hub's streaming attach path; older local hub binaries may not emit the ready marker even though control-plane daemon DTOs succeed.

@@ -23,6 +23,9 @@ export interface ConnectionDiagnostic {
   detail: string;
   severity: ConnectionDiagnosticSeverity;
   source: "bridge" | "compatibility" | "stream" | "action" | "terminal";
+  operation?: string;
+  actionId?: string;
+  actionTarget?: string;
 }
 
 export function hubConnectionDiagnosticFromFrame(frame: HubControlFrame): ConnectionDiagnostic | undefined {
@@ -46,7 +49,8 @@ export function hubConnectionDiagnosticFromFrame(frame: HubControlFrame): Connec
     title: hubDiagnosticTitle(kind),
     detail: details.join(" "),
     severity: hubDiagnosticSeverity(kind),
-    source: hubDiagnosticSource(kind)
+    source: hubDiagnosticSource(kind),
+    operation
   };
 }
 
@@ -106,7 +110,9 @@ export function actionFailureDiagnostic(action: ActionBinding, result: ActionDis
     title: "Action failed",
     detail: result.reason ?? `The hub rejected ${action.id}.`,
     severity: "warning",
-    source: "action"
+    source: "action",
+    actionId: action.id,
+    actionTarget: action.target
   };
 }
 
@@ -120,7 +126,8 @@ export function operatorErrorDiagnostic(frame: HubControlFrame): ConnectionDiagn
     title: "Hub operator error",
     detail: String(frame.payload.message ?? "The hub returned an operator error."),
     severity: "danger",
-    source: "action"
+    source: "action",
+    operation: typeof frame.payload.operation === "string" ? frame.payload.operation : undefined
   };
 }
 
