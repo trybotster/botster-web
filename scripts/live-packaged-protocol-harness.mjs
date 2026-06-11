@@ -52,7 +52,7 @@ try {
   browser = await chromium.launch();
   page = await browser.newPage();
   await page.addInitScript(() => {
-    window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {
       events: [],
       terminal: []
     };
@@ -106,7 +106,7 @@ try {
   console.log("live packaged protocol harness passed");
 } catch (error) {
   const harnessState = page
-    ? await page.evaluate(() => window.__BOTSTER_LIVE_PROTOCOL_HARNESS__).catch(() => undefined)
+    ? await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__).catch(() => undefined)
     : undefined;
   let diagnosticMessage = `${error.message}\nbridge stdout:\n${bridgeStdout}\nbridge stderr:\n${bridgeStderr}`;
   if (harnessState) {
@@ -148,10 +148,10 @@ async function requestDaemonShutdown() {
 }
 
 async function callTerminalControl(page, method, ...args) {
-  await page.waitForFunction(() => Boolean(window.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl));
+  await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl));
   await page.evaluate(
     async ({ method: nextMethod, args: nextArgs }) => {
-      await window.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl[nextMethod](...nextArgs);
+      await globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl[nextMethod](...nextArgs);
     },
     { method, args }
   );
@@ -160,7 +160,7 @@ async function callTerminalControl(page, method, ...args) {
 async function waitForHarnessEvent(page, criteria, label) {
   await page.waitForFunction(
     ({ criteria: expectedCriteria }) => {
-      const events = window.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events.some((entry) => {
         if (entry.kind !== expectedCriteria.kind) return false;
         const payload = entry.payload ?? {};
@@ -184,7 +184,7 @@ async function waitForHarnessEvent(page, criteria, label) {
 async function waitForTerminalOutput(page, text) {
   await page.waitForFunction(
     ({ expectedText }) =>
-      (window.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
         (entry) => entry.kind === "output" && String(entry.payload?.data ?? "").includes(expectedText)
       ),
     { expectedText: text },
@@ -232,14 +232,14 @@ async function waitForSessionStatus(page, status) {
 
 async function terminalOutputCount(page) {
   return page.evaluate(
-    () => (window.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "output").length
+    () => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "output").length
   );
 }
 
 async function waitForNextSizeProbe(page, outputCount) {
   return page.waitForFunction(
     ({ previousOutputCount }) => {
-      const outputs = (window.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
+      const outputs = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
         .filter((entry) => entry.kind === "output")
         .slice(previousOutputCount);
       return outputs
@@ -253,13 +253,13 @@ async function waitForNextSizeProbe(page, outputCount) {
 
 async function latestTerminalResize(page) {
   await page.waitForFunction(
-    () => (window.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) => entry.kind === "resize"),
+    () => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) => entry.kind === "resize"),
     undefined,
     { timeout: 15_000 }
   );
 
   const resize = await page.evaluate(() => {
-    const terminalEvents = window.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+    const terminalEvents = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
     const resizeEvents = terminalEvents.filter((entry) => entry.kind === "resize");
     return resizeEvents.at(-1)?.payload;
   });
