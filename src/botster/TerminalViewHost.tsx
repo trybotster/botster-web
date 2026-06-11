@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DefaultTerminalViewBridge,
   MockTerminalDataPlane,
+  type TerminalAttachmentStatus,
   type TerminalDataPlaneAttachment,
   type TerminalViewBridge,
   type TerminalViewDescriptor,
@@ -36,6 +37,7 @@ export function TerminalViewHost({
   const terminalRef = useRef<HTMLDivElement>(null);
   const onDiagnosticRef = useRef(onDiagnostic);
   const [mountDiagnostic, setMountDiagnostic] = useState<string | undefined>();
+  const [attachmentStatus, setAttachmentStatus] = useState<TerminalAttachmentStatus | undefined>();
   const terminalDataPlane = useMemo(
     () =>
       dataPlane ??
@@ -57,6 +59,7 @@ export function TerminalViewHost({
     let cancelled = false;
     let mount: TerminalViewMount | undefined;
     let observer: ResizeObserver | undefined;
+    let statusSubscription: { unsubscribe(): void } | undefined;
     let scheduledResize: number | undefined;
     let lastResize: { rows: number; columns: number } | undefined;
 
@@ -91,6 +94,7 @@ export function TerminalViewHost({
           return;
         }
 
+        statusSubscription = terminalDataPlane.subscribeStatus?.(setAttachmentStatus);
         await bridge.attach(descriptor, terminalDataPlane);
         installLiveHarnessTerminalControls(bridge, descriptor);
         setMountDiagnostic(undefined);
@@ -113,6 +117,7 @@ export function TerminalViewHost({
     return () => {
       cancelled = true;
       observer?.disconnect();
+      statusSubscription?.unsubscribe();
       if (scheduledResize !== undefined) {
         window.cancelAnimationFrame(scheduledResize);
       }
@@ -127,7 +132,12 @@ export function TerminalViewHost({
       <div className="panel-heading">
         <h2 id="terminal-heading">Terminal renderer</h2>
       </div>
-      <p className="terminal-status">Restty owns terminal rendering; Botster data-plane attachments own terminal bytes.</p>
+      <p
+        className="terminal-status"
+        data-terminal-attach-state={attachmentStatus?.state ?? "unknown"}
+      >
+        {attachmentStatus?.message ?? "Restty owns terminal rendering; Botster data-plane attachments own terminal bytes."}
+      </p>
       <div
         ref={terminalRef}
         className="terminal-view-container"

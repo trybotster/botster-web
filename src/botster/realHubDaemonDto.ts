@@ -126,12 +126,7 @@ export type DaemonEvent =
       type: "snapshot" | "scrollback";
       session_id: string;
       subscription_id: string;
-      bytes?: number;
-      data?: string;
-      compressed?: boolean;
-      encoding?: string;
-      rows?: number;
-      cols?: number;
+      bytes: number;
     }
   | {
       type: "process_exit";
