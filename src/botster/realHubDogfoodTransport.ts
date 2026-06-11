@@ -119,6 +119,7 @@ export function createRealHubDogfoodTransport({
   let sequence = 1;
 
   const emit = (frame: HubControlFrame) => {
+    recordLiveHarnessEvent("hub_frame", frame);
     queueMicrotask(() => ingress?.(frame));
   };
   const emitResponse = (response: DaemonResponse) => {

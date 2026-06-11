@@ -94,13 +94,12 @@ try {
     { kind: "daemon_request", type: "resize", rows: requestedResize.rows, cols: requestedResize.columns },
     "resize request"
   );
-  await callTerminalControl(page, "writeInput", "botster-web-dogfood-size\n");
-  await waitForTerminalOutput(page, `botster-web-dogfood-size:${requestedResize.rows}x${requestedResize.columns}`);
+  await waitForResizeProof(page, requestedResize);
 
   await callTerminalControl(page, "writeInput", "botster-web-dogfood-exit\n");
   await waitForTerminalOutput(page, "botster-web-dogfood-exiting");
   await waitForHarnessEvent(page, { kind: "daemon_event", type: "process_exit" }, "process_exit event");
-  await page.getByText(/process exited|exited/i).first().waitFor();
+  await waitForSessionStatus(page, "exited");
 
   assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
   await requestDaemonShutdown();
@@ -109,9 +108,17 @@ try {
   const harnessState = page
     ? await page.evaluate(() => window.__BOTSTER_LIVE_PROTOCOL_HARNESS__).catch(() => undefined)
     : undefined;
-  error.message = `${error.message}\nbridge stdout:\n${bridgeStdout}\nbridge stderr:\n${bridgeStderr}`;
+  let diagnosticMessage = `${error.message}\nbridge stdout:\n${bridgeStdout}\nbridge stderr:\n${bridgeStderr}`;
   if (harnessState) {
-    error.message += `\nharness state:\n${JSON.stringify(harnessState, null, 2)}`;
+    diagnosticMessage += `\nharness state:\n${JSON.stringify(harnessState, null, 2)}`;
+  }
+  const browserFailureMessage = browserFailureSummary({ consoleEvents, pageErrors, responseErrors });
+  if (browserFailureMessage) {
+    diagnosticMessage += `\n${browserFailureMessage}`;
+  }
+  error.message = diagnosticMessage;
+  if (typeof error.stack === "string") {
+    error.stack = `${diagnosticMessage}\n${error.stack}`;
   }
   throw error;
 } finally {
@@ -157,6 +164,10 @@ async function waitForHarnessEvent(page, criteria, label) {
       return events.some((entry) => {
         if (entry.kind !== expectedCriteria.kind) return false;
         const payload = entry.payload ?? {};
+        if (expectedCriteria.frameKind && payload.kind !== expectedCriteria.frameKind) return false;
+        if (expectedCriteria.family && payload.payload?.key?.family !== expectedCriteria.family) return false;
+        if (expectedCriteria.id && payload.payload?.key?.id !== expectedCriteria.id) return false;
+        if (expectedCriteria.status && payload.payload?.record?.status !== expectedCriteria.status) return false;
         if (expectedCriteria.type && payload.type !== expectedCriteria.type) return false;
         if (typeof expectedCriteria.rows === "number" && payload.rows !== expectedCriteria.rows) return false;
         if (typeof expectedCriteria.cols === "number" && payload.cols !== expectedCriteria.cols) return false;
@@ -181,6 +192,63 @@ async function waitForTerminalOutput(page, text) {
   ).catch((error) => {
     throw new Error(`timed out waiting for terminal output ${text}: ${error.message}`);
   });
+}
+
+async function waitForResizeProof(page, requestedResize) {
+  const deadline = Date.now() + 20_000;
+  let lastObservedSize = "none";
+
+  while (Date.now() < deadline) {
+    const outputCount = await terminalOutputCount(page);
+    await callTerminalControl(page, "writeInput", "botster-web-dogfood-size\n");
+    const observedSize = await waitForNextSizeProbe(page, outputCount).catch(() => undefined);
+    lastObservedSize = observedSize ?? lastObservedSize;
+
+    if (observedSize === `${requestedResize.rows}x${requestedResize.columns}`) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  throw new Error(
+    `timed out waiting for PTY resize ${requestedResize.rows}x${requestedResize.columns}; last observed ${lastObservedSize}`
+  );
+}
+
+async function waitForSessionStatus(page, status) {
+  await waitForHarnessEvent(
+    page,
+    {
+      kind: "hub_frame",
+      frameKind: "entity_patch",
+      family: "botster-web.session",
+      id: "botster-web-dogfood-session",
+      status
+    },
+    `session entity status ${status}`
+  );
+}
+
+async function terminalOutputCount(page) {
+  return page.evaluate(
+    () => (window.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "output").length
+  );
+}
+
+async function waitForNextSizeProbe(page, outputCount) {
+  return page.waitForFunction(
+    ({ previousOutputCount }) => {
+      const outputs = (window.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
+        .filter((entry) => entry.kind === "output")
+        .slice(previousOutputCount);
+      return outputs
+        .map((entry) => String(entry.payload?.data ?? "").match(/botster-web-dogfood-size:(\d+x\d+)/)?.[1])
+        .find((size) => typeof size === "string") ?? null;
+    },
+    { previousOutputCount: outputCount },
+    { timeout: 5_000 }
+  ).then((handle) => handle.jsonValue());
 }
 
 async function latestTerminalResize(page) {
@@ -231,6 +299,13 @@ async function waitForHtmlShell(url) {
 }
 
 function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) {
+  const message = browserFailureSummary({ consoleEvents, pageErrors, responseErrors });
+  if (message) {
+    throw new Error(message);
+  }
+}
+
+function browserFailureSummary({ consoleEvents, pageErrors, responseErrors }) {
   const fatalConsole = consoleEvents.filter((event) => {
     const text = event.text.toLowerCase();
     return (
@@ -248,8 +323,9 @@ function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) 
     ...responseErrors.map((message) => `response: ${message}`)
   ];
   if (failures.length > 0) {
-    throw new Error(`live packaged protocol harness failed:\n${failures.join("\n")}`);
+    return `live packaged protocol harness failed:\n${failures.join("\n")}`;
   }
+  return undefined;
 }
 
 function bridgeEnvironment() {
