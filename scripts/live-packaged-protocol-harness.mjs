@@ -79,6 +79,9 @@ try {
 
   await page.getByRole("button", { name: "Spawn botster-web-dogfood-session to terminal" }).click();
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "spawn" }, "spawn request");
+  await waitForSessionStatus(page, "running");
+  await page.getByText("Attachable").waitFor();
+  await waitForTerminalSession(page, "botster-web-dogfood-session");
   await waitForTerminalOutput(page, "botster-web-dogfood-ready");
 
   await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
@@ -97,6 +100,8 @@ try {
   await waitForTerminalOutput(page, "botster-web-dogfood-exiting");
   await waitForHarnessEvent(page, { kind: "daemon_event", type: "process_exit" }, "process_exit event");
   await waitForSessionStatus(page, "exited");
+  await page.getByText("Exited sessions cannot attach").waitFor();
+  await waitForTerminalDetached(page);
 
   await assertNoUnknownSession(page);
   assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
@@ -163,9 +168,22 @@ async function waitForHarnessEvent(page, criteria, label) {
         if (entry.kind !== expectedCriteria.kind) return false;
         const payload = entry.payload ?? {};
         if (expectedCriteria.frameKind && payload.kind !== expectedCriteria.frameKind) return false;
-        if (expectedCriteria.family && payload.payload?.key?.family !== expectedCriteria.family) return false;
-        if (expectedCriteria.id && payload.payload?.key?.id !== expectedCriteria.id) return false;
-        if (expectedCriteria.status && payload.payload?.record?.status !== expectedCriteria.status) return false;
+        const framePayload = payload.payload ?? {};
+        if (
+          expectedCriteria.family &&
+          framePayload.key?.family !== expectedCriteria.family &&
+          framePayload.family !== expectedCriteria.family
+        ) return false;
+        if (
+          expectedCriteria.id &&
+          framePayload.key?.id !== expectedCriteria.id &&
+          !framePayload.records?.some((record) => record.id === expectedCriteria.id)
+        ) return false;
+        if (
+          expectedCriteria.status &&
+          framePayload.record?.status !== expectedCriteria.status &&
+          !framePayload.records?.some((record) => record.status === expectedCriteria.status)
+        ) return false;
         if (expectedCriteria.type && payload.type !== expectedCriteria.type) return false;
         if (typeof expectedCriteria.rows === "number" && payload.rows !== expectedCriteria.rows) return false;
         if (typeof expectedCriteria.cols === "number" && payload.cols !== expectedCriteria.cols) return false;
@@ -219,13 +237,33 @@ async function waitForSessionStatus(page, status) {
     page,
     {
       kind: "hub_frame",
-      frameKind: "entity_patch",
       family: "botster-web.session",
       id: "botster-web-dogfood-session",
       status
     },
     `session entity status ${status}`
   );
+}
+
+async function waitForTerminalSession(page, sessionId) {
+  await page.waitForFunction(
+    ({ expectedSessionId }) =>
+      globalThis.document.querySelector(".terminal-view-container")?.getAttribute("data-terminal-session-id") === expectedSessionId,
+    { expectedSessionId: sessionId },
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for terminal session ${sessionId}: ${error.message}`);
+  });
+}
+
+async function waitForTerminalDetached(page) {
+  await page.waitForFunction(
+    () => globalThis.document.querySelector("[data-terminal-session-id='none']") !== null,
+    undefined,
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for terminal detach placeholder: ${error.message}`);
+  });
 }
 
 async function terminalOutputCount(page) {

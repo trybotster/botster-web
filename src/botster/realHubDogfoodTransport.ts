@@ -252,8 +252,7 @@ export function daemonEventFrame(event: DaemonEvent, sequence: number): HubContr
         key: { family: sessionFamily, id: event.session_id },
         sequence,
         record: {
-          id: event.session_id,
-          status: event.state,
+          ...sessionAttachFields(event.session_id, event.state),
           last_result: `session ${event.state}`
         }
       } satisfies EntityFrame
@@ -268,8 +267,7 @@ export function daemonEventFrame(event: DaemonEvent, sequence: number): HubContr
         key: { family: sessionFamily, id: event.session_id },
         sequence,
         record: {
-          id: event.session_id,
-          status: "exited",
+          ...sessionAttachFields(event.session_id, "exited"),
           last_result: `process exited${typeof event.code === "number" ? ` with ${event.code}` : ""}`
         }
       } satisfies EntityFrame
@@ -303,11 +301,28 @@ function statusRecord(status: NonNullable<DaemonResponse["status"]>, responseDia
 
 function sessionRecord(session: DaemonSession) {
   return {
-    id: session.session_id,
     title: session.session_id,
-    status: session.lifecycle,
     target: "isolated-local-hub",
-    last_result: `daemon session ${session.lifecycle}`
+    last_result: `daemon session ${session.lifecycle}`,
+    ...sessionAttachFields(session.session_id, session.lifecycle)
+  };
+}
+
+function sessionAttachFields(sessionId: string, lifecycle: string) {
+  const isRunning = lifecycle === "running";
+
+  return {
+    id: sessionId,
+    status: lifecycle,
+    attachable: isRunning,
+    attach_status: isRunning ? "Attachable" : "Exited sessions cannot attach",
+    attach_action: {
+      id: "botster.session.attach",
+      target: sessionId,
+      label: isRunning ? `Attach ${sessionId}` : "Not attachable",
+      disabled: !isRunning,
+      params: { mode: "real_hub_dogfood" }
+    } satisfies ActionBinding
   };
 }
 
@@ -431,6 +446,23 @@ async function dispatchDaemonAction(
     });
     emitResponse(response);
     emit(actionResultFrame(request, !response.error, response.error?.message, { session_id: sessionId, kind: response.kind }));
+    return;
+  }
+
+  if (action.id === "botster.session.attach") {
+    const targetSessionId = action.target ?? "";
+    if (!targetSessionId) {
+      emit(actionResultFrame(request, false, "Real hub attach action is missing a session target"));
+      return;
+    }
+
+    emit(
+      actionResultFrame(request, true, undefined, {
+        session_id: targetSessionId,
+        state: "selected",
+        mode: "real_hub_dogfood"
+      })
+    );
     return;
   }
 
@@ -629,7 +661,9 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                   children: [
                     { id: "real-hub-session-title", primitive: "text", bindings: [{ source: "entity", path: "@/title", prop: "text" }] },
                     { id: "real-hub-session-status", primitive: "badge", bindings: [{ source: "entity", path: "@/status", prop: "text" }] },
-                    { id: "real-hub-session-result", primitive: "text", bindings: [{ source: "entity", path: "@/last_result", prop: "text" }] }
+                    { id: "real-hub-session-result", primitive: "text", bindings: [{ source: "entity", path: "@/last_result", prop: "text" }] },
+                    { id: "real-hub-session-attach-status", primitive: "text", bindings: [{ source: "entity", path: "@/attach_status", prop: "text" }] },
+                    { id: "real-hub-session-attach-action", primitive: "action", bindings: [{ source: "entity", path: "@/attach_action", prop: "action" }] }
                   ]
                 }
               }

@@ -112,8 +112,12 @@ assert.match(app, /<UiNodeSurface/);
 assert.match(app, /<ConnectionDiagnosticsPanel/);
 assert.match(app, /<DogfoodFirstScreen/);
 assert.match(app, /onAction=\{dispatchAction\}/);
-assert.match(app, /dataPlane=\{dogfoodRuntime\.terminalDataPlane\}/);
-assert.match(app, /descriptor=\{dogfoodRuntime\.terminalDescriptor\}/);
+assert.match(app, /selectedRealHubTerminalSessionId/);
+assert.match(app, /isAttachableSession/);
+assert.match(app, /dogfoodRuntime\.createTerminalDataPlane\(terminalDescriptor\.sessionId\)/);
+assert.match(app, /descriptor=\{terminalDescriptor\}/);
+assert.match(app, /dataPlane=\{terminalDataPlane\}/);
+assert.match(app, /Select a running session to attach the terminal panel/);
 assert.match(app, /onDiagnostic=\{recordTerminalDiagnostic\}/);
 assert.doesNotMatch(app, /terminal-placeholder/);
 assert.match(client, /export const botsterWebClientContract/);
@@ -201,6 +205,8 @@ assert.match(liveProtocolHarnessScript, /chromium\.launch/);
 assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-ready/);
 assert.doesNotMatch(liveProtocolHarnessScript, /page\.reload/);
+assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
+assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-echo:/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-size:/);
 assert.match(liveProtocolHarnessScript, /waitForResizeProof/);
@@ -962,6 +968,7 @@ const realMode = createDogfoodRuntimeConfig({
 assert.equal(realMode.mode, "real-hub");
 assert.equal(realMode.terminalDataPlaneKind, "real-hub");
 assert.equal(realMode.terminalDescriptor.sessionId, realHubDogfoodSessionId);
+assert.notEqual(realMode.createTerminalDataPlane(realHubDogfoodSessionId), realMode.terminalDataPlane);
 assert.match(defaultSpawnCommand(), /botster-web-dogfood-ready/);
 assert.match(defaultSpawnCommand(), /botster-web-dogfood-size/);
 assert.match(defaultSpawnCommand(), /stty size/);
@@ -1149,6 +1156,37 @@ assert.deepEqual(realRuntime.entities.get("botster-web.hub_status", "local-hub")
   "plugin_surface_action"
 ]);
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).target, "isolated-local-hub");
+assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attachable, true);
+assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.id, "botster.session.attach");
+assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.disabled, false);
+
+const attachSuccess = realRuntime.actions.dispatch({
+  origin: "ui_node",
+  action: { id: "botster.session.attach", target: realHubDogfoodSessionId }
+});
+await flushMicrotasks();
+assert.deepEqual(await attachSuccess, {
+  accepted: true,
+  request_id: "real-runtime-action-1",
+  result: {
+    session_id: realHubDogfoodSessionId,
+    state: "selected",
+    mode: "real_hub_dogfood"
+  },
+  reason: undefined
+});
+
+for (const frame of daemonResponseFrames({
+  kind: "events",
+  events: [{ type: "process_exit", session_id: realHubDogfoodSessionId, code: 0 }]
+}, 22)) {
+  if (frame.kind === "entity_patch") {
+    realRuntime.entities.apply(frame.payload);
+  }
+}
+assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).status, "exited");
+assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attachable, false);
+assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.disabled, true);
 
 const runtimeDiagnostics = [];
 const diagnosticRuntime = createBotsterWebClient({
@@ -1793,6 +1831,14 @@ try {
       realHubStore.apply(frame.payload);
     }
   }
+  for (const frame of daemonResponseFrames({
+    kind: "sessions",
+    sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }]
+  }, 14)) {
+    if (frame.kind === "entity_snapshot") {
+      realHubStore.apply(frame.payload);
+    }
+  }
 
   const realHubMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(realHubDogfoodUiTreeSnapshot, realHubStore, {
@@ -1836,6 +1882,8 @@ try {
   assert.match(realHubMarkup, new RegExp(`Spawn requested for ${realHubDogfoodSessionId}`));
   assert.doesNotMatch(realHubMarkup, /Trigger invalid action/);
   assert.doesNotMatch(realHubMarkup, /Error state/);
+  assert.match(realHubMarkup, /Attachable/);
+  assert.match(realHubMarkup, /data-action-id="botster\.session\.attach"/);
   assert.doesNotMatch(realHubMarkup, /install_package|enable_package|disable_package|remove_package|start_package|stop_package|restart_package|retry_package/);
 
   const healthyFirstScreenMarkup = renderToStaticMarkup(
