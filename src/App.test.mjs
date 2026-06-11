@@ -165,6 +165,9 @@ assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("output"/);
 assert.match(realHubTerminalDataPlane, /type: "detach"/);
+assert.match(realHubTerminalDataPlane, /const maxAttachAttempts = \d+/);
+assert.match(realHubTerminalDataPlane, /attempt <= maxAttachAttempts/);
+assert.match(realHubTerminalDataPlane, /this\.listeners\.size === 0/);
 assert.match(connectionDiagnostics, /expectedDaemonSchemaVersion = 1/);
 assert.match(connectionDiagnostics, /schemaVersionDiagnosticFromFrame/);
 assert.match(connectionDiagnostics, /operatorErrorDiagnostic/);
@@ -196,9 +199,11 @@ assert.match(liveProtocolHarnessScript, /delete env\.BOTSTER_HUB_DATA_DIR/);
 assert.match(liveProtocolHarnessScript, /chromium\.launch/);
 assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-ready/);
+assert.doesNotMatch(liveProtocolHarnessScript, /page\.reload/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-echo:/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-size:/);
 assert.match(liveProtocolHarnessScript, /waitForResizeProof/);
+assert.match(liveProtocolHarnessScript, /assertNoUnknownSession/);
 assert.match(liveProtocolHarnessScript, /last observed/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-exiting/);
 assert.match(liveProtocolHarnessScript, /process_exit/);
@@ -1451,6 +1456,50 @@ assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
 
+const delayedBridgeRequests = [];
+const delayedBridgeTerminalStreams = [];
+let delayedListSessions = 0;
+const delayedTerminalDataPlane = createRealHubTerminalDataPlane({
+  bridge: {
+    async request(request) {
+      delayedBridgeRequests.push(request);
+      if (request.type === "list_sessions") {
+        delayedListSessions += 1;
+        return {
+          kind: "sessions",
+          sessions: delayedListSessions >= 3 ? [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }] : [],
+          events: []
+        };
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(sessionId, subscriptionId, onEvent) {
+      delayedBridgeTerminalStreams.push({ sessionId, subscriptionId });
+      onEvent({
+        type: "terminal_output",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        data: "botster-web-dogfood-ready-after-retry\r\n"
+      });
+      return {
+        unsubscribe() {
+          delayedBridgeTerminalStreams.push({ sessionId, subscriptionId, unsubscribed: true });
+        }
+      };
+    }
+  }
+});
+const delayedOutput = [];
+delayedTerminalDataPlane.subscribeOutput((data) => delayedOutput.push(data));
+const delayedResize = delayedTerminalDataPlane.resize(9, 34);
+await waitFor(() => delayedOutput.some((data) => data.includes("ready-after-retry")));
+await delayedResize;
+assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize").length, 1);
+assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].rows, 9);
+assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].cols, 34);
+assert.equal(delayedBridgeRequests.filter((request) => request.type === "list_sessions").length, 3);
+assert.equal(delayedBridgeTerminalStreams.length, 1);
+
 const terminalWithoutStream = createRealHubTerminalDataPlane({
   bridge: {
     async request() {
@@ -2108,6 +2157,15 @@ async function findAvailablePort() {
   server.close();
   await once(server, "close");
   return port;
+}
+
+async function waitFor(predicate) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("timed out waiting for condition");
 }
 
 async function waitForHttpOk(url, assertStillRunning) {
