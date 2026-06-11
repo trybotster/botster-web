@@ -153,6 +153,9 @@ assert.match(realHubDaemonDto, /export interface DaemonPackageDiagnostic/);
 assert.match(realHubDaemonDto, /message: string/);
 assert.match(realHubDaemonDto, /diagnostics\?: DaemonDiagnostic\[\]/);
 assert.match(realHubDaemonDto, /export type DaemonEvent/);
+assert.match(realHubDaemonDto, /type: "snapshot" \| "scrollback"/);
+assert.match(realHubDaemonDto, /data\?: string/);
+assert.match(realHubDaemonDto, /compressed\?: boolean/);
 assert.match(realHubDogfoodTransport, /kind: "daemon_request"/);
 assert.match(realHubDogfoodTransport, /reply\.kind !== "daemon_response"/);
 assert.match(realHubDogfoodTransport, /subscribeEvents/);
@@ -168,7 +171,10 @@ assert.match(realHubTerminalDataPlane, /streamTerminal/);
 assert.match(realHubTerminalDataPlane, /type: "send_input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
-assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("output"/);
+assert.match(realHubTerminalDataPlane, /this\.emitOutput\(event\.data, "output"\)/);
+assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("attach_state"/);
+assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\(event\.type/);
+assert.match(realHubTerminalDataPlane, /renderableTerminalPayload/);
 assert.match(realHubTerminalDataPlane, /type: "detach"/);
 assert.match(realHubTerminalDataPlane, /const maxAttachAttempts = \d+/);
 assert.match(realHubTerminalDataPlane, /attempt <= maxAttachAttempts/);
@@ -204,7 +210,10 @@ assert.match(liveProtocolHarnessScript, /delete env\.BOTSTER_HUB_DATA_DIR/);
 assert.match(liveProtocolHarnessScript, /chromium\.launch/);
 assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-ready/);
-assert.doesNotMatch(liveProtocolHarnessScript, /page\.reload/);
+assert.match(liveProtocolHarnessScript, /page\.reload/);
+assert.match(liveProtocolHarnessScript, /waitForSessionAttachable\(page, true\)/);
+assert.match(liveProtocolHarnessScript, /waitForTerminalStreamEvidence\(page, "attach_state"\)/);
+assert.match(liveProtocolHarnessScript, /waitForTerminalStreamEvidence\(page, \["snapshot", "scrollback"\]\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-echo:/);
@@ -249,6 +258,8 @@ assert.match(resttyRenderer, /fontSources: botsterResttyFontSources/);
 assert.doesNotMatch(resttyRenderer, /fontPreset:\s*"none"/);
 assert.match(resttyRenderer, /this\.terminal\.dispose\(\)/);
 assert.match(terminalHost, /ResizeObserver/);
+assert.match(terminalHost, /requestAnimationFrame/);
+assert.match(terminalHost, /cancelAnimationFrame/);
 assert.match(terminalHost, /bridge\.attach/);
 assert.match(terminalHost, /bridge\.unmount/);
 assert.match(terminalHost, /terminalMount/);
@@ -939,6 +950,19 @@ const bridge = {
   streamTerminal(sessionId, subscriptionId, onEvent) {
     bridgeTerminalStreams.push({ sessionId, subscriptionId });
     onEvent({
+      type: "attach_state",
+      session_id: sessionId,
+      subscription_id: subscriptionId,
+      state: "attached"
+    });
+    onEvent({
+      type: "scrollback",
+      session_id: sessionId,
+      subscription_id: subscriptionId,
+      bytes: 23,
+      data: "botster-web-scrollback\r\n"
+    });
+    onEvent({
       type: "terminal_output",
       session_id: sessionId,
       subscription_id: subscriptionId,
@@ -1500,6 +1524,7 @@ assert.equal(bridgeRequests.some((request) => request.type === "send_input" && r
 assert.equal(bridgeRequests.some((request) => request.type === "resize" && request.rows === 24 && request.cols === 80), true);
 assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
+assert.equal(terminalOutput.some((data) => data.includes("botster-web-scrollback")), true);
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
 
 const delayedBridgeRequests = [];

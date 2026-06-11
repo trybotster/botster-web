@@ -57,13 +57,27 @@ export function TerminalViewHost({
     let cancelled = false;
     let mount: TerminalViewMount | undefined;
     let observer: ResizeObserver | undefined;
+    let scheduledResize: number | undefined;
+    let lastResize: { rows: number; columns: number } | undefined;
+
     const resize = () => {
       // Placeholder metrics until the Restty adapter exposes measured cell dimensions.
       const rows = Math.max(4, Math.floor(container.clientHeight / placeholderCellSize.height));
       const columns = Math.max(20, Math.floor(container.clientWidth / placeholderCellSize.width));
+      if (lastResize?.rows === rows && lastResize.columns === columns) return;
+      lastResize = { rows, columns };
       void bridge.resize(descriptor, rows, columns).catch(() => {
         if (!cancelled) {
           container.dataset.terminalResize = "failed";
+        }
+      });
+    };
+    const scheduleResize = () => {
+      if (scheduledResize !== undefined) return;
+      scheduledResize = window.requestAnimationFrame(() => {
+        scheduledResize = undefined;
+        if (!cancelled) {
+          resize();
         }
       });
     };
@@ -81,8 +95,8 @@ export function TerminalViewHost({
         installLiveHarnessTerminalControls(bridge, descriptor);
         setMountDiagnostic(undefined);
         container.dataset.terminalMount = "mounted";
-        resize();
-        observer = new ResizeObserver(resize);
+        scheduleResize();
+        observer = new ResizeObserver(scheduleResize);
         observer.observe(container);
       })
       .catch((error: unknown) => {
@@ -99,6 +113,9 @@ export function TerminalViewHost({
     return () => {
       cancelled = true;
       observer?.disconnect();
+      if (scheduledResize !== undefined) {
+        window.cancelAnimationFrame(scheduledResize);
+      }
       if (mount) {
         void bridge.unmount(descriptor, mount);
       }

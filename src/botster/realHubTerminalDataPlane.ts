@@ -135,23 +135,63 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   private emitTerminalEvent(event: DaemonEvent): void {
-    if (
-      event.type !== "terminal_output" ||
-      event.session_id !== this.sessionId ||
-      event.subscription_id !== this.subscriptionId
-    ) {
+    if (!isTerminalStreamEvent(event) || event.session_id !== this.sessionId || event.subscription_id !== this.subscriptionId) {
       return;
     }
 
-    for (const listener of this.listeners) {
-      listener(event.data);
+    if (event.type === "attach_state") {
+      recordLiveHarnessTerminal("attach_state", { state: event.state });
+      return;
     }
-    recordLiveHarnessTerminal("output", { data: event.data });
+
+    if (event.type === "process_exit") {
+      recordLiveHarnessTerminal("process_exit", { code: event.code });
+      return;
+    }
+
+    if (event.type === "snapshot" || event.type === "scrollback") {
+      recordLiveHarnessTerminal(event.type, {
+        bytes: event.bytes,
+        compressed: event.compressed,
+        encoding: event.encoding,
+        rows: event.rows,
+        cols: event.cols,
+        hasData: typeof event.data === "string" && event.data.length > 0
+      });
+      const payload = renderableTerminalPayload(event);
+      if (payload) {
+        this.emitOutput(payload, event.type);
+      }
+      return;
+    }
+
+    if (event.type === "terminal_output") {
+      this.emitOutput(event.data, "output");
+    }
+  }
+
+  private emitOutput(data: TerminalOutput, kind: "output" | "snapshot" | "scrollback"): void {
+    for (const listener of this.listeners) {
+      listener(data);
+    }
+    recordLiveHarnessTerminal(kind === "output" ? "output" : `${kind}_output`, { data });
   }
 }
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTerminalStreamEvent(event: DaemonEvent): event is Extract<
+  DaemonEvent,
+  { session_id: string; subscription_id: string }
+> {
+  return "session_id" in event && "subscription_id" in event;
+}
+
+function renderableTerminalPayload(event: Extract<DaemonEvent, { type: "snapshot" | "scrollback" }>): string | undefined {
+  if (event.compressed === true) return undefined;
+  return typeof event.data === "string" ? event.data : undefined;
 }
 
 export function createRealHubTerminalDataPlane(options: RealHubTerminalDataPlaneOptions): TerminalDataPlaneAttachment {
