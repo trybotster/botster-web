@@ -45,6 +45,7 @@ import {
 import { createDogfoodRuntimeConfig } from "./botster/dogfoodMode";
 import { realHubDogfoodSessionId } from "./botster/realHubDogfoodTransport";
 import type { ActionBinding } from "./botster/actions";
+import type { TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
 
 setupIonicReact({
@@ -82,6 +83,12 @@ const loadingSnapshot: UiTreeSnapshot = {
   }
 };
 
+const terminalRenderer = "restty" as const;
+
+function isAttachableSession(record: Record<string, unknown> | undefined): record is Record<string, unknown> & { id: string } {
+  return Boolean(record && typeof record.id === "string" && record.status === "running" && record.attachable === true);
+}
+
 export default function App() {
   const dogfoodRuntime = useMemo(
     () => {
@@ -116,6 +123,7 @@ export default function App() {
     session: "not_loaded",
     draft: "not_loaded"
   });
+  const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
     setLocalState((current) => ({ ...current, ...patch }));
@@ -202,9 +210,15 @@ export default function App() {
       const statusKey = isSpawnAction ? "dogfood.action_status" : "dogfood.diagnostic_action_status";
       updateLocalState({ [statusKey]: `Dispatching ${action.id}` });
       void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
+        const isAttachAction = action.id === "botster.session.attach";
+        if (result.accepted && isAttachAction && action.target) {
+          setSelectedRealHubTerminalSessionId(action.target);
+        }
         updateLocalState({
           [statusKey]: result.accepted && isSpawnAction
             ? `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
+            : result.accepted && isAttachAction && action.target
+              ? `Attached terminal panel to ${action.target}.`
             : result.accepted
               ? `Accepted ${action.id}`
               : result.reason ?? `Rejected ${action.id}`
@@ -222,6 +236,30 @@ export default function App() {
   );
   const packages = runtimeClient.entities.list("botster-web.package");
   const sessions = runtimeClient.entities.list("botster-web.session");
+  const attachableDogfoodSession = sessions.find((session) => session.id === realHubDogfoodSessionId && isAttachableSession(session));
+  const selectedRealHubSession = selectedRealHubTerminalSessionId
+    ? sessions.find((session) => session.id === selectedRealHubTerminalSessionId)
+    : undefined;
+  const selectedRealHubSessionAttachable = isAttachableSession(selectedRealHubSession);
+  const activeRealHubTerminalSessionId = selectedRealHubSessionAttachable
+    ? selectedRealHubTerminalSessionId
+    : attachableDogfoodSession?.id;
+  const terminalDescriptor: TerminalViewDescriptor | undefined = useMemo(
+    () =>
+      dogfoodRuntime.mode === "real-hub"
+        ? activeRealHubTerminalSessionId
+          ? { sessionId: activeRealHubTerminalSessionId, renderer: terminalRenderer }
+          : undefined
+        : dogfoodRuntime.terminalDescriptor,
+    [
+      activeRealHubTerminalSessionId,
+      dogfoodRuntime
+    ]
+  );
+  const terminalDataPlane: TerminalDataPlaneAttachment | undefined = useMemo(
+    () => (terminalDescriptor ? dogfoodRuntime.createTerminalDataPlane(terminalDescriptor.sessionId) : undefined),
+    [dogfoodRuntime, terminalDescriptor]
+  );
   const actionStatus =
     typeof localState["dogfood.action_status"] === "string"
       ? localState["dogfood.action_status"]
@@ -309,11 +347,22 @@ export default function App() {
                     onAction={dispatchAction}
                   />
                 </div>
-                <TerminalViewHost
-                  dataPlane={dogfoodRuntime.terminalDataPlane}
-                  descriptor={dogfoodRuntime.terminalDescriptor}
-                  onDiagnostic={recordTerminalDiagnostic}
-                />
+                {terminalDescriptor && terminalDataPlane ? (
+                  <TerminalViewHost
+                    dataPlane={terminalDataPlane}
+                    descriptor={terminalDescriptor}
+                    onDiagnostic={recordTerminalDiagnostic}
+                  />
+                ) : (
+                  <aside className="terminal-panel" aria-labelledby="terminal-heading">
+                    <div className="panel-heading">
+                      <h2 id="terminal-heading">Terminal renderer</h2>
+                    </div>
+                    <p className="terminal-status" data-terminal-session-id="none">
+                      Select a running session to attach the terminal panel.
+                    </p>
+                  </aside>
+                )}
               </section>
             </main>
           </IonContent>

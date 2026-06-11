@@ -19,6 +19,7 @@ export interface DogfoodRuntimeConfig {
   terminalDescriptor: TerminalViewDescriptor;
   terminalDataPlane: TerminalDataPlaneAttachment;
   terminalDataPlaneKind: TerminalDataPlaneKind;
+  createTerminalDataPlane(sessionId: string): TerminalDataPlaneAttachment;
 }
 
 export interface DogfoodRuntimeConfigOptions {
@@ -46,9 +47,15 @@ export function createDogfoodRuntimeConfig(options: DogfoodRuntimeConfigOptions)
         renderer: "restty"
       },
       terminalDataPlane: createRealHubTerminalDataPlane({ bridge }),
-      terminalDataPlaneKind: "real-hub"
+      terminalDataPlaneKind: "real-hub",
+      createTerminalDataPlane: (sessionId) => createRealHubTerminalDataPlane({ bridge, sessionId })
     };
   }
+
+  const fixtureTerminalDataPlane = new MockTerminalDataPlane(fixtureSessionId, [
+    "botster-web terminal_view bridge\r\n",
+    "Restty renderer attached through mock terminal data plane.\r\n"
+  ]);
 
   return {
     mode: "fixture",
@@ -58,11 +65,12 @@ export function createDogfoodRuntimeConfig(options: DogfoodRuntimeConfigOptions)
       sessionId: fixtureSessionId,
       renderer: "restty"
     },
-    terminalDataPlane: new MockTerminalDataPlane(fixtureSessionId, [
-      "botster-web terminal_view bridge\r\n",
-      "Restty renderer attached through mock terminal data plane.\r\n"
-    ]),
-    terminalDataPlaneKind: "mock"
+    terminalDataPlane: fixtureTerminalDataPlane,
+    terminalDataPlaneKind: "mock",
+    createTerminalDataPlane: (sessionId) =>
+      sessionId === fixtureSessionId
+        ? fixtureTerminalDataPlane
+        : new MockTerminalDataPlane(sessionId, [])
   };
 }
 
