@@ -168,6 +168,8 @@ assert.match(realHubTerminalDataPlane, /streamTerminal/);
 assert.match(realHubTerminalDataPlane, /type: "send_input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
+assert.match(realHubTerminalDataPlane, /subscribeDiagnostics/);
+assert.match(realHubTerminalDataPlane, /historical_scrollback_unavailable/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("output"/);
 assert.match(realHubTerminalDataPlane, /type: "detach"/);
 assert.match(realHubTerminalDataPlane, /const maxAttachAttempts = \d+/);
@@ -204,7 +206,9 @@ assert.match(liveProtocolHarnessScript, /delete env\.BOTSTER_HUB_DATA_DIR/);
 assert.match(liveProtocolHarnessScript, /chromium\.launch/);
 assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-ready/);
-assert.doesNotMatch(liveProtocolHarnessScript, /page\.reload/);
+assert.match(liveProtocolHarnessScript, /page\.reload/);
+assert.match(liveProtocolHarnessScript, /recordHistoricalScrollbackObservation/);
+assert.match(liveProtocolHarnessScript, /historical_scrollback_not_observed/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-echo:/);
@@ -250,6 +254,8 @@ assert.doesNotMatch(resttyRenderer, /fontPreset:\s*"none"/);
 assert.match(resttyRenderer, /this\.terminal\.dispose\(\)/);
 assert.match(terminalHost, /ResizeObserver/);
 assert.match(terminalHost, /bridge\.attach/);
+assert.match(terminalHost, /subscribeDiagnostics/);
+assert.match(terminalHost, /data-terminal-diagnostic=\{dataPlaneDiagnostic\.id\}/);
 assert.match(terminalHost, /bridge\.unmount/);
 assert.match(terminalHost, /terminalMount/);
 assert.match(terminalHost, /data-terminal-diagnostic="mount-failed"/);
@@ -939,6 +945,18 @@ const bridge = {
   streamTerminal(sessionId, subscriptionId, onEvent) {
     bridgeTerminalStreams.push({ sessionId, subscriptionId });
     onEvent({
+      type: "snapshot",
+      session_id: sessionId,
+      subscription_id: subscriptionId,
+      bytes: 128
+    });
+    onEvent({
+      type: "scrollback",
+      session_id: sessionId,
+      subscription_id: subscriptionId,
+      bytes: 64
+    });
+    onEvent({
       type: "terminal_output",
       session_id: sessionId,
       subscription_id: subscriptionId,
@@ -1483,6 +1501,8 @@ const terminalDataPlane = createRealHubTerminalDataPlane({
   bridge
 });
 const terminalOutput = [];
+const terminalDiagnostics = [];
+terminalDataPlane.subscribeDiagnostics((diagnostic) => terminalDiagnostics.push(diagnostic));
 const terminalSubscription = terminalDataPlane.subscribeOutput((data) => terminalOutput.push(data));
 await flushMicrotasks();
 await terminalDataPlane.writeInput("ping\n");
@@ -1501,6 +1521,11 @@ assert.equal(bridgeRequests.some((request) => request.type === "resize" && reque
 assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
+assert.equal(terminalOutput.some((data) => data.includes("128")), false);
+assert.equal(terminalDiagnostics.length, 2);
+assert.equal(terminalDiagnostics[0].id, "historical-scrollback-unavailable");
+assert.match(terminalDiagnostics[0].detail, /128 bytes of snapshot/);
+assert.match(terminalDiagnostics[1].detail, /64 bytes of scrollback/);
 
 const delayedBridgeRequests = [];
 const delayedBridgeTerminalStreams = [];

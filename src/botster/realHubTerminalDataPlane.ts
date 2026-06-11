@@ -1,4 +1,9 @@
-import type { TerminalDataPlaneAttachment, TerminalOutput, TerminalSubscription } from "./terminal";
+import type {
+  TerminalDataPlaneAttachment,
+  TerminalDataPlaneDiagnostic,
+  TerminalOutput,
+  TerminalSubscription
+} from "./terminal";
 import type { DaemonBridgeClient } from "./realHubDogfoodTransport";
 import { realHubDogfoodSessionId, realHubDogfoodSubscriptionId } from "./realHubDogfoodTransport";
 import type { DaemonEvent } from "./realHubDaemonDto";
@@ -17,6 +22,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   private readonly subscriptionId: string;
   private readonly listeners = new Set<(data: TerminalOutput) => void>();
+  private readonly diagnosticListeners = new Set<(diagnostic: TerminalDataPlaneDiagnostic) => void>();
   private streamSubscription: { unsubscribe(): void } | undefined;
   private attachPromise: Promise<void> | undefined;
   private pendingResize: { rows: number; columns: number } | undefined;
@@ -55,6 +61,16 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     };
   }
 
+  subscribeDiagnostics(listener: (diagnostic: TerminalDataPlaneDiagnostic) => void): TerminalSubscription {
+    this.diagnosticListeners.add(listener);
+
+    return {
+      unsubscribe: () => {
+        this.diagnosticListeners.delete(listener);
+      }
+    };
+  }
+
   async resize(rows: number, columns: number): Promise<void> {
     recordLiveHarnessTerminal("resize", { rows, columns });
     this.pendingResize = { rows, columns };
@@ -66,6 +82,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.detached = true;
     this.closeStream();
     this.listeners.clear();
+    this.diagnosticListeners.clear();
 
     await this.options.bridge.request({
       type: "detach",
@@ -136,6 +153,15 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   private emitTerminalEvent(event: DaemonEvent): void {
     if (
+      (event.type === "snapshot" || event.type === "scrollback") &&
+      event.session_id === this.sessionId &&
+      event.subscription_id === this.subscriptionId
+    ) {
+      this.emitHistoricalScrollbackUnavailable(event);
+      return;
+    }
+
+    if (
       event.type !== "terminal_output" ||
       event.session_id !== this.sessionId ||
       event.subscription_id !== this.subscriptionId
@@ -147,6 +173,25 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
       listener(event.data);
     }
     recordLiveHarnessTerminal("output", { data: event.data });
+  }
+
+  private emitHistoricalScrollbackUnavailable(
+    event: Extract<DaemonEvent, { type: "snapshot" | "scrollback" }>
+  ): void {
+    const diagnostic: TerminalDataPlaneDiagnostic = {
+      id: "historical-scrollback-unavailable",
+      title: "Historical scrollback unavailable",
+      detail: `Real hub reported ${event.bytes} bytes of ${event.type}, but the daemon protocol exposes only byte counts to botster-web.`,
+      severity: "warning"
+    };
+
+    for (const listener of this.diagnosticListeners) {
+      listener(diagnostic);
+    }
+    recordLiveHarnessTerminal("historical_scrollback_unavailable", {
+      event_type: event.type,
+      bytes: event.bytes
+    });
   }
 }
 

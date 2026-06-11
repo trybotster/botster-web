@@ -11,6 +11,13 @@ export interface TerminalViewMount {
 export type TerminalInput = string;
 export type TerminalOutput = string;
 
+export interface TerminalDataPlaneDiagnostic {
+  id: string;
+  title: string;
+  detail: string;
+  severity: "info" | "warning" | "danger";
+}
+
 export interface TerminalSubscription {
   unsubscribe(): void;
 }
@@ -19,6 +26,7 @@ export interface TerminalDataPlaneAttachment {
   sessionId: string;
   writeInput(data: TerminalInput): void | Promise<void>;
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription;
+  subscribeDiagnostics?(listener: (diagnostic: TerminalDataPlaneDiagnostic) => void): TerminalSubscription;
   resize?(rows: number, columns: number): void | Promise<void>;
   detach?(): void | Promise<void>;
 }

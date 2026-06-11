@@ -84,6 +84,15 @@ try {
   await waitForTerminalSession(page, "botster-web-dogfood-session");
   await waitForTerminalOutput(page, "botster-web-dogfood-ready");
 
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByText("Local hub workbench").waitFor();
+  await page.getByText("real-hub").waitFor();
+  await waitForSessionStatus(page, "running");
+  await page.getByText("Attachable").waitFor();
+  await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
+  await waitForTerminalSession(page, "botster-web-dogfood-session");
+  await recordHistoricalScrollbackObservation(page);
+
   await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "send_input" }, "send_input request");
   await waitForTerminalOutput(page, `botster-web-dogfood-echo:${echoProbe}`);
@@ -207,6 +216,44 @@ async function waitForTerminalOutput(page, text) {
     { timeout: 15_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for terminal output ${text}: ${error.message}`);
+  });
+}
+
+async function recordHistoricalScrollbackObservation(page) {
+  const observedFallback = await page.waitForFunction(
+    () => {
+      const terminalEvents = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+      const daemonEvents = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const unavailable = terminalEvents.some((entry) => entry.kind === "historical_scrollback_unavailable");
+      const byteCountOnlyHistory = daemonEvents.some(
+        (entry) =>
+          entry.kind === "daemon_event" &&
+          (entry.payload?.type === "snapshot" || entry.payload?.type === "scrollback") &&
+          typeof entry.payload?.bytes === "number" &&
+          typeof entry.payload?.data === "undefined"
+      );
+      const visibleDiagnostic = globalThis.document.querySelector(
+        '[data-terminal-diagnostic="historical-scrollback-unavailable"]'
+      );
+
+      return unavailable && byteCountOnlyHistory && visibleDiagnostic !== null;
+    },
+    undefined,
+    { timeout: 3_000 }
+  ).then(
+    () => true,
+    () => false
+  );
+
+  if (observedFallback) return;
+
+  await page.evaluate(() => {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal?.push({
+      kind: "historical_scrollback_not_observed",
+      payload: {
+        detail: "Refreshed real-hub attach emitted no snapshot or scrollback daemon event before live output proof."
+      }
+    });
   });
 }
 

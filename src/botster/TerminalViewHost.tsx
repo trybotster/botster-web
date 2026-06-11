@@ -4,6 +4,7 @@ import {
   DefaultTerminalViewBridge,
   MockTerminalDataPlane,
   type TerminalDataPlaneAttachment,
+  type TerminalDataPlaneDiagnostic,
   type TerminalViewBridge,
   type TerminalViewDescriptor,
   type TerminalViewMount
@@ -36,7 +37,8 @@ export function TerminalViewHost({
   const terminalRef = useRef<HTMLDivElement>(null);
   const onDiagnosticRef = useRef(onDiagnostic);
   const [mountDiagnostic, setMountDiagnostic] = useState<string | undefined>();
-  const terminalDataPlane = useMemo(
+  const [dataPlaneDiagnostic, setDataPlaneDiagnostic] = useState<TerminalDataPlaneDiagnostic | undefined>();
+  const terminalDataPlane = useMemo<TerminalDataPlaneAttachment>(
     () =>
       dataPlane ??
       new MockTerminalDataPlane(descriptor.sessionId, [
@@ -57,6 +59,7 @@ export function TerminalViewHost({
     let cancelled = false;
     let mount: TerminalViewMount | undefined;
     let observer: ResizeObserver | undefined;
+    let dataPlaneDiagnosticSubscription: { unsubscribe(): void } | undefined;
     const resize = () => {
       // Placeholder metrics until the Restty adapter exposes measured cell dimensions.
       const rows = Math.max(4, Math.floor(container.clientHeight / placeholderCellSize.height));
@@ -77,6 +80,12 @@ export function TerminalViewHost({
           return;
         }
 
+        setDataPlaneDiagnostic(undefined);
+        dataPlaneDiagnosticSubscription = terminalDataPlane.subscribeDiagnostics?.((diagnostic: TerminalDataPlaneDiagnostic) => {
+          if (!cancelled) {
+            setDataPlaneDiagnostic(diagnostic);
+          }
+        });
         await bridge.attach(descriptor, terminalDataPlane);
         installLiveHarnessTerminalControls(bridge, descriptor);
         setMountDiagnostic(undefined);
@@ -99,6 +108,7 @@ export function TerminalViewHost({
     return () => {
       cancelled = true;
       observer?.disconnect();
+      dataPlaneDiagnosticSubscription?.unsubscribe();
       if (mount) {
         void bridge.unmount(descriptor, mount);
       }
@@ -132,6 +142,16 @@ export function TerminalViewHost({
         <div className="diagnostic-panel" data-terminal-diagnostic="mount-failed">
           <strong>Terminal renderer unavailable</strong>
           <span>{mountDiagnostic}</span>
+        </div>
+      ) : null}
+      {dataPlaneDiagnostic ? (
+        <div
+          className="diagnostic-panel"
+          data-terminal-diagnostic={dataPlaneDiagnostic.id}
+          data-terminal-diagnostic-severity={dataPlaneDiagnostic.severity}
+        >
+          <strong>{dataPlaneDiagnostic.title}</strong>
+          <span>{dataPlaneDiagnostic.detail}</span>
         </div>
       ) : null}
     </aside>
