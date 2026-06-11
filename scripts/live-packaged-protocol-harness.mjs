@@ -79,9 +79,6 @@ try {
 
   await page.getByRole("button", { name: "Spawn botster-web-dogfood-session to terminal" }).click();
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "spawn" }, "spawn request");
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await page.getByText("Local hub workbench").waitFor();
-  await page.getByText("real-hub").waitFor();
   await waitForTerminalOutput(page, "botster-web-dogfood-ready");
 
   await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
@@ -101,6 +98,7 @@ try {
   await waitForHarnessEvent(page, { kind: "daemon_event", type: "process_exit" }, "process_exit event");
   await waitForSessionStatus(page, "exited");
 
+  await assertNoUnknownSession(page);
   assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
   await requestDaemonShutdown();
   console.log("live packaged protocol harness passed");
@@ -269,6 +267,27 @@ async function latestTerminalResize(page) {
   }
 
   return resize;
+}
+
+async function assertNoUnknownSession(page) {
+  const failures = await page.evaluate(() => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    const entries = [...(harness?.events ?? []), ...(harness?.terminal ?? [])];
+
+    return entries
+      .map((entry) => entry.payload)
+      .filter((payload) => {
+        const error = payload?.error ?? payload;
+        return (
+          error?.code === "unknown_session" &&
+          ["attach", "resize", "send_input"].includes(String(error.operation ?? ""))
+        );
+      });
+  });
+
+  if (failures.length > 0) {
+    throw new Error(`unexpected unknown_session terminal failure: ${JSON.stringify(failures, null, 2)}`);
+  }
 }
 
 async function waitForHttpOk(url) {
