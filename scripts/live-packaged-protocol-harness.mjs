@@ -94,7 +94,7 @@ try {
   await waitForTerminalSession(page, "botster-web-dogfood-session");
   await waitForTerminalStreamEvidence(page, "attach_state");
   await waitForTerminalStreamEvidence(page, ["snapshot", "scrollback"]);
-  await waitForTerminalOutput(page, "botster-web-dogfood-ready");
+  await waitForTerminalAttachState(page, ["scrollback_unavailable", "live_only"]);
 
   await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "send_input" }, "send_input request");
@@ -293,6 +293,22 @@ async function waitForTerminalStreamEvidence(page, kinds) {
     { timeout: 15_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for terminal stream evidence ${expectedKinds.join(" or ")}: ${error.message}`);
+  });
+}
+
+async function waitForTerminalAttachState(page, states) {
+  const expectedStates = Array.isArray(states) ? states : [states];
+  await page.waitForFunction(
+    ({ expectedStates: nextExpectedStates }) => {
+      const status = globalThis.document
+        .querySelector(".terminal-status")
+        ?.getAttribute("data-terminal-attach-state");
+      return nextExpectedStates.includes(status);
+    },
+    { expectedStates },
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for terminal attach state ${expectedStates.join(" or ")}: ${error.message}`);
   });
 }
 
