@@ -49,6 +49,18 @@ npm run smoke:packaged-browser
 
 The smoke command builds the app, serves the compiled package runtime through the dogfood bridge, opens `/?dogfood=real-hub` in Playwright Chromium, clicks the real-hub spawn action, and fails on unexpected browser console/page errors, unexpected 404s, fatal Restty font loading, missing mounted terminal errors, and focus stack overflows. If Chromium is not installed for Playwright, run `npx playwright install chromium` once.
 
+Live packaged protocol harness:
+
+```bash
+BOTSTER_HUB_BIN=/path/to/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
+npm run smoke:live-packaged-protocol
+```
+
+This command builds the app, starts the package bridge in real-hub mode, starts an isolated local hub when `BOTSTER_HUB_BIN` is supplied, opens the compiled packaged UI in Playwright Chromium, and drives the mounted terminal data-plane path. It proves status/schema compatibility, package listing, session listing, spawn of `botster-web-dogfood-session`, terminal attach output containing `botster-web-dogfood-ready`, input echo output containing `botster-web-dogfood-echo:<input>`, resize output containing `botster-web-dogfood-size:<rows>x<cols>`, deterministic exit through `botster-web-dogfood-exit`, observed `process_exit`, and clean shutdown.
+
+The live harness can also attach to an explicitly isolated existing hub with `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR`. Existing-hub mode does not shut down or remove the attached hub. The harness must not use fake daemon responses, and it fails on browser console/page errors, packaged asset 404s, terminal mount failure, stack overflow, unhandled promise rejection, missing Playwright Chromium, missing hub binaries, or missing live resize/process-exit evidence. It proves the packaged UI + real hub control loop + dogfood bridge terminal egress; it does not prove the production WebRTC data plane.
+
 Lint:
 
 ```bash

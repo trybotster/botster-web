@@ -78,6 +78,7 @@ export function TerminalViewHost({
         }
 
         await bridge.attach(descriptor, terminalDataPlane);
+        installLiveHarnessTerminalControls(bridge, descriptor);
         setMountDiagnostic(undefined);
         container.dataset.terminalMount = "mounted";
         resize();
@@ -135,4 +136,25 @@ export function TerminalViewHost({
       ) : null}
     </aside>
   );
+}
+
+function installLiveHarnessTerminalControls(
+  bridge: TerminalViewBridge,
+  descriptor: TerminalViewDescriptor
+): void {
+  const harness = (window as typeof window & {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
+      terminalControl?: {
+        writeInput(data: string): Promise<void>;
+        resize(rows: number, columns: number): Promise<void>;
+      };
+    };
+  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+
+  if (!harness) return;
+
+  harness.terminalControl = {
+    writeInput: (data: string) => bridge.writeInput(descriptor, data),
+    resize: (rows: number, columns: number) => bridge.resize(descriptor, rows, columns)
+  };
 }

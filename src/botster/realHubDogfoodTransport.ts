@@ -26,6 +26,7 @@ const statusFamily = hubStatusFamily;
 
 export interface DaemonBridgeClient {
   request(request: DaemonRequest): Promise<DaemonResponse>;
+  subscribeEvents?(onEvent: (event: DaemonEvent) => void): { unsubscribe(): void };
   streamTerminal?(
     sessionId: string,
     subscriptionId: string,
@@ -46,8 +47,11 @@ export function createHttpDaemonBridgeClient({
   fetchImpl = fetch,
   requestIdGenerator = createRequestIdGenerator("daemon-request")
 }: HttpDaemonBridgeClientOptions): DaemonBridgeClient {
+  const eventListeners = new Set<(event: DaemonEvent) => void>();
+
   return {
     async request(request) {
+      recordLiveHarnessEvent("daemon_request", request);
       const envelope: DaemonBridgeRequestEnvelope = {
         kind: "daemon_request",
         request_id: requestIdGenerator(),
@@ -68,7 +72,16 @@ export function createHttpDaemonBridgeClient({
         throw new Error("real hub bridge returned an unexpected transport envelope");
       }
 
+      recordLiveHarnessEvent("daemon_response", reply.payload);
       return reply.payload;
+    },
+    subscribeEvents(onEvent) {
+      eventListeners.add(onEvent);
+      return {
+        unsubscribe: () => {
+          eventListeners.delete(onEvent);
+        }
+      };
     },
     streamTerminal(sessionId, subscriptionId, onEvent) {
       const terminalStreamUrl = new URL(terminalUrl, window.location.href);
@@ -76,7 +89,10 @@ export function createHttpDaemonBridgeClient({
       terminalStreamUrl.searchParams.set("subscription_id", subscriptionId);
       const source = new EventSource(terminalStreamUrl.toString());
       source.addEventListener("daemon_event", (event) => {
-        onEvent(JSON.parse(event.data) as DaemonEvent);
+        const daemonEvent = JSON.parse(event.data) as DaemonEvent;
+        recordLiveHarnessEvent("daemon_event", daemonEvent);
+        eventListeners.forEach((listener) => listener(daemonEvent));
+        onEvent(daemonEvent);
       });
 
       return {
@@ -110,14 +126,23 @@ export function createRealHubDogfoodTransport({
       emit(frame);
     }
   };
+  let daemonEventSubscription: { unsubscribe(): void } | undefined;
 
   return {
     async connect(_capabilities, nextIngress) {
       ingress = nextIngress;
+      daemonEventSubscription = bridge.subscribeEvents?.((event) => {
+        const frame = daemonEventFrame(event, sequence++);
+        if (frame) {
+          emit(frame);
+        }
+      });
       emit({ kind: "hello_ack", payload: { mode: "real_hub_dogfood" } });
       emitResponse(await bridge.request({ type: "status" }));
     },
     async disconnect() {
+      daemonEventSubscription?.unsubscribe();
+      daemonEventSubscription = undefined;
       ingress = undefined;
     },
     async send(frame) {
@@ -467,12 +492,23 @@ function responseDiagnostics(response: DaemonResponse): DaemonDiagnostic[] {
 }
 
 export function defaultSpawnCommand(): string {
-  return "printf 'botster-web-dogfood-ready\\n'; while IFS= read -r line; do printf 'botster-web-dogfood-echo:%s\\n' \"$line\"; done";
+  return "printf 'botster-web-dogfood-ready\\n'; while IFS= read -r line; do if [ \"$line\" = 'botster-web-dogfood-size' ]; then set -- $(stty size 2>/dev/null || printf '0 0'); printf 'botster-web-dogfood-size:%sx%s\\n' \"$1\" \"$2\"; elif [ \"$line\" = 'botster-web-dogfood-exit' ]; then printf 'botster-web-dogfood-exiting\\n'; exit 0; else printf 'botster-web-dogfood-echo:%s\\n' \"$line\"; fi; done";
 }
 
 function createRequestIdGenerator(prefix: string) {
   let next = 1;
   return () => `${prefix}-${next++}`;
+}
+
+function recordLiveHarnessEvent(kind: string, payload: unknown): void {
+  if (typeof window === "undefined") return;
+
+  const harness = (window as typeof window & {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
+      events?: Array<{ kind: string; payload: unknown }>;
+    };
+  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  harness?.events?.push({ kind, payload });
 }
 
 export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
