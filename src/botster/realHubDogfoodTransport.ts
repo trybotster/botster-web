@@ -466,7 +466,7 @@ function responseDiagnostics(response: DaemonResponse): DaemonDiagnostic[] {
   return diagnostics;
 }
 
-function defaultSpawnCommand(): string {
+export function defaultSpawnCommand(): string {
   return "printf 'botster-web-dogfood-ready\\n'; while IFS= read -r line; do printf 'botster-web-dogfood-echo:%s\\n' \"$line\"; done";
 }
 
@@ -499,7 +499,7 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                 id: "real-hub-copy",
                 primitive: "text",
                 props: {
-                  text: "Status, session rows, actions, validation errors, and terminal output are mapped from daemon DTOs after they cross the local bridge."
+                  text: `Spawn creates ${realHubDogfoodSessionId}, runs the dogfood readiness command, and sends output to the terminal panel.`
                 }
               },
               {
@@ -514,7 +514,7 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                   action: {
                     id: "botster.session.select",
                     target: realHubDogfoodSessionId,
-                    label: "Spawn isolated session",
+                    label: `Spawn ${realHubDogfoodSessionId} to terminal`,
                     params: { mode: "real_hub_dogfood" }
                   } satisfies ActionBinding
                 }

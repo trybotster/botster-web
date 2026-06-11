@@ -70,22 +70,26 @@ body {
   padding: 28px 0 40px;
 }
 
-.workspace-overview {
-  display: flex;
-  justify-content: space-between;
-  gap: 24px;
-  align-items: end;
-  padding: 22px 0 26px;
+.dogfood-first-screen {
+  display: grid;
+  gap: 14px;
+  padding: 22px 0 20px;
 }
 
-.workspace-overview h1 {
+.dogfood-status-lead {
+  min-width: 0;
+}
+
+.dogfood-status-lead h1 {
   margin: 4px 0 8px;
   font-size: 32px;
   line-height: 1.1;
   letter-spacing: 0;
 }
 
-.workspace-overview p {
+.dogfood-status-lead p,
+.dogfood-primary-action p,
+.dogfood-status-card p {
   max-width: 640px;
   margin: 0;
   color: #586174;
@@ -100,31 +104,86 @@ body {
   text-transform: uppercase;
 }
 
-.status-strip {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: end;
-  gap: 8px;
-}
-
-.status-strip span {
-  min-height: 32px;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  border: 1px solid #d8dee7;
-  border-radius: 6px;
-  background: #ffffff;
-  color: #475265;
-  font-size: 13px;
-}
-
 .contract-strip {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   padding: 0 0 18px;
+}
+
+.dogfood-primary-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid #c9d7ef;
+  border-radius: 8px;
+  background: #f7faff;
+}
+
+.dogfood-primary-action h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+  line-height: 1.25;
+  letter-spacing: 0;
+}
+
+.dogfood-primary-action code {
+  overflow-wrap: anywhere;
+}
+
+.dogfood-action-state {
+  margin-top: 8px !important;
+  font-weight: 700;
+  color: #263245 !important;
+}
+
+.dogfood-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dogfood-status-card {
+  min-width: 0;
+  min-height: 112px;
+  padding: 12px;
+  border: 1px solid #d8dee7;
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.dogfood-status-card.success {
+  border-left-color: var(--ion-color-success);
+}
+
+.dogfood-status-card.info {
+  border-left-color: var(--ion-color-medium);
+}
+
+.dogfood-status-card.warning {
+  border-left-color: var(--ion-color-warning);
+}
+
+.dogfood-status-card.danger {
+  border-left-color: var(--ion-color-danger);
+}
+
+.dogfood-status-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.dogfood-status-title h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.25;
+  letter-spacing: 0;
 }
 
 .contract-strip ion-chip {
@@ -428,13 +487,14 @@ body {
     padding-top: 18px;
   }
 
-  .workspace-overview {
+  .dogfood-first-screen {
     display: grid;
     align-items: start;
   }
 
-  .status-strip {
-    justify-content: start;
+  .dogfood-primary-action,
+  .dogfood-status-grid {
+    grid-template-columns: 1fr;
   }
 
   .workspace-grid {
