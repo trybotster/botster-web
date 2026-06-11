@@ -44,6 +44,7 @@ const [
   pluginEntrypoint,
   dogfoodBridgeModeScript,
   dogfoodBridgeScript,
+  liveProtocolHarnessScript,
   architecture,
   readme,
   css,
@@ -74,6 +75,7 @@ const [
   readFile(new URL("../plugin.lua", import.meta.url), "utf8"),
   readFile(new URL("../scripts/dogfoodBridgeMode.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/real-hub-dogfood-bridge.mjs", import.meta.url), "utf8"),
+  readFile(new URL("../scripts/live-packaged-protocol-harness.mjs", import.meta.url), "utf8"),
   readFile(new URL("../docs/architecture.md", import.meta.url), "utf8"),
   readFile(new URL("../README.md", import.meta.url), "utf8"),
   readFile(new URL("./theme/app.css", import.meta.url), "utf8"),
@@ -148,6 +150,9 @@ assert.match(realHubDaemonDto, /diagnostics\?: DaemonDiagnostic\[\]/);
 assert.match(realHubDaemonDto, /export type DaemonEvent/);
 assert.match(realHubDogfoodTransport, /kind: "daemon_request"/);
 assert.match(realHubDogfoodTransport, /reply\.kind !== "daemon_response"/);
+assert.match(realHubDogfoodTransport, /subscribeEvents/);
+assert.match(realHubDogfoodTransport, /daemonEventSubscription/);
+assert.match(realHubDogfoodTransport, /recordLiveHarnessEvent\("hub_frame"/);
 assert.match(realHubDogfoodTransport, /daemonResponseFrames/);
 assert.match(realHubDogfoodTransport, /realHubDogfoodUiTreeSnapshot/);
 assert.match(realHubDogfoodTransport, /const packageFamily = "botster-web\.package"/);
@@ -156,6 +161,9 @@ assert.match(realHubDogfoodTransport, /family: packageFamily/);
 assert.doesNotMatch(realHubDogfoodTransport, /install_package|enable_package|disable_package|remove_package|start_package|stop_package|restart_package|retry_package/);
 assert.match(realHubTerminalDataPlane, /streamTerminal/);
 assert.match(realHubTerminalDataPlane, /type: "send_input"/);
+assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
+assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
+assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("output"/);
 assert.match(realHubTerminalDataPlane, /type: "detach"/);
 assert.match(connectionDiagnostics, /expectedDaemonSchemaVersion = 1/);
 assert.match(connectionDiagnostics, /schemaVersionDiagnosticFromFrame/);
@@ -181,6 +189,25 @@ assert.match(dogfoodBridgeScript, /kind: "daemon_response"/);
 assert.match(dogfoodBridgeScript, /existing_hub_shutdown_ignored/);
 assert.match(dogfoodBridgeScript, /text\/event-stream/);
 assert.match(dogfoodBridgeScript, /sendSseEvent\(response, "daemon_event"/);
+assert.match(liveProtocolHarnessScript, /BOTSTER_HUB_BIN/);
+assert.match(liveProtocolHarnessScript, /BOTSTER_SESSION_WORKER_BIN/);
+assert.match(liveProtocolHarnessScript, /delete env\.BOTSTER_HUB_SOCKET/);
+assert.match(liveProtocolHarnessScript, /delete env\.BOTSTER_HUB_DATA_DIR/);
+assert.match(liveProtocolHarnessScript, /chromium\.launch/);
+assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
+assert.match(liveProtocolHarnessScript, /botster-web-dogfood-ready/);
+assert.match(liveProtocolHarnessScript, /botster-web-dogfood-echo:/);
+assert.match(liveProtocolHarnessScript, /botster-web-dogfood-size:/);
+assert.match(liveProtocolHarnessScript, /waitForResizeProof/);
+assert.match(liveProtocolHarnessScript, /last observed/);
+assert.match(liveProtocolHarnessScript, /botster-web-dogfood-exiting/);
+assert.match(liveProtocolHarnessScript, /process_exit/);
+assert.match(liveProtocolHarnessScript, /waitForSessionStatus/);
+assert.match(liveProtocolHarnessScript, /hub_frame/);
+assert.match(liveProtocolHarnessScript, /botster-web\.session/);
+assert.match(liveProtocolHarnessScript, /daemon_shutdown/);
+assert.match(liveProtocolHarnessScript, /assertNoBrowserFailures/);
+assert.match(liveProtocolHarnessScript, /browserFailureSummary/);
 assert.match(protocol, /type HubControlFrameKind/);
 assert.match(protocol, /"action_request"/);
 assert.match(protocol, /"ui_tree_snapshot"/);
@@ -230,6 +257,10 @@ assert.match(readme, /VITE_BOTSTER_REAL_HUB_DOGFOOD=1/);
 assert.match(readme, /BOTSTER_HUB_BIN/);
 assert.match(readme, /BOTSTER_HUB_SOCKET/);
 assert.match(readme, /BOTSTER_HUB_DATA_DIR/);
+assert.match(readme, /smoke:live-packaged-protocol/);
+assert.match(readme, /not prove the production WebRTC data plane/);
+assert.match(readme, /botster-web-dogfood-size:<rows>x<cols>/);
+assert.match(readme, /botster-web-dogfood-exit/);
 assert.match(readme, /botster-package\.json/);
 assert.match(readme, /packages install --data-dir[\s\S]*--path/);
 assert.match(readme, /packages show --data-dir .* botster-web/);
@@ -246,6 +277,10 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
+assert.equal(
+  packageJson.scripts["smoke:live-packaged-protocol"],
+  "npm run build && node scripts/live-packaged-protocol-harness.mjs"
+);
 assert.equal(packageManifest.kind, "plugin");
 assert.equal(packageManifest.botster, ">=0.1.0");
 assert.deepEqual(packageManifest.source, { type: "path", path: "." });
@@ -922,6 +957,9 @@ assert.equal(realMode.mode, "real-hub");
 assert.equal(realMode.terminalDataPlaneKind, "real-hub");
 assert.equal(realMode.terminalDescriptor.sessionId, realHubDogfoodSessionId);
 assert.match(defaultSpawnCommand(), /botster-web-dogfood-ready/);
+assert.match(defaultSpawnCommand(), /botster-web-dogfood-size/);
+assert.match(defaultSpawnCommand(), /stty size/);
+assert.match(defaultSpawnCommand(), /botster-web-dogfood-exit/);
 assert.notEqual(realMode.terminalDescriptor.sessionId, "terminal_view_smoke_session");
 assert.notEqual(realMode.terminalDataPlane.constructor.name, "MockTerminalDataPlane");
 

@@ -23,6 +23,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   async writeInput(data: string): Promise<void> {
+    recordLiveHarnessTerminal("input", { data });
     await this.options.bridge.request({
       type: "send_input",
       session_id: this.sessionId,
@@ -45,6 +46,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   async resize(rows: number, columns: number): Promise<void> {
+    recordLiveHarnessTerminal("resize", { rows, columns });
     await this.options.bridge.request({
       type: "resize",
       session_id: this.sessionId,
@@ -98,9 +100,21 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     for (const listener of this.listeners) {
       listener(event.data);
     }
+    recordLiveHarnessTerminal("output", { data: event.data });
   }
 }
 
 export function createRealHubTerminalDataPlane(options: RealHubTerminalDataPlaneOptions): TerminalDataPlaneAttachment {
   return new RealHubTerminalDataPlane(options);
+}
+
+function recordLiveHarnessTerminal(kind: string, payload: unknown): void {
+  if (typeof window === "undefined") return;
+
+  const harness = (window as typeof window & {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
+      terminal?: Array<{ kind: string; payload: unknown }>;
+    };
+  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  harness?.terminal?.push({ kind, payload });
 }
