@@ -61,6 +61,8 @@ This command builds the app, starts the package bridge in real-hub mode, starts 
 
 The live harness can also attach to an explicitly isolated existing hub with `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR`. Existing-hub mode does not shut down or remove the attached hub. The harness must not use fake daemon responses, and it fails on browser console/page errors, packaged asset 404s, terminal mount failure, stack overflow, unhandled promise rejection, missing Playwright Chromium, missing hub binaries, or missing live resize/process-exit evidence. It proves the packaged UI + real hub control loop + dogfood bridge terminal egress; it does not prove the production WebRTC data plane.
 
+The harness reloads the packaged UI after the browser-dispatched spawn before asserting terminal output. That keeps this smoke focused on proving the live protocol loop against an existing real session while a separate follow-up tracks the product race where immediate terminal attach after spawn can briefly hit `UnknownSession`.
+
 Lint:
 
 ```bash
