@@ -60,6 +60,7 @@ export function TerminalViewHost({
     let mount: TerminalViewMount | undefined;
     let observer: ResizeObserver | undefined;
     let statusSubscription: { unsubscribe(): void } | undefined;
+    let uninstallLiveHarnessTerminalControls: (() => void) | undefined;
     let scheduledResize: number | undefined;
     let lastResize: { rows: number; columns: number } | undefined;
 
@@ -96,7 +97,7 @@ export function TerminalViewHost({
 
         statusSubscription = terminalDataPlane.subscribeStatus?.(setAttachmentStatus);
         await bridge.attach(descriptor, terminalDataPlane);
-        installLiveHarnessTerminalControls(bridge, descriptor);
+        uninstallLiveHarnessTerminalControls = installLiveHarnessTerminalControls(bridge, descriptor);
         setMountDiagnostic(undefined);
         container.dataset.terminalMount = "mounted";
         scheduleResize();
@@ -118,6 +119,7 @@ export function TerminalViewHost({
       cancelled = true;
       observer?.disconnect();
       statusSubscription?.unsubscribe();
+      uninstallLiveHarnessTerminalControls?.();
       if (scheduledResize !== undefined) {
         window.cancelAnimationFrame(scheduledResize);
       }
@@ -168,7 +170,7 @@ export function TerminalViewHost({
 function installLiveHarnessTerminalControls(
   bridge: TerminalViewBridge,
   descriptor: TerminalViewDescriptor
-): void {
+): () => void {
   const harness = (window as typeof window & {
     __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
       terminalControl?: {
@@ -178,10 +180,17 @@ function installLiveHarnessTerminalControls(
     };
   }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
 
-  if (!harness) return;
+  if (!harness) return () => undefined;
 
-  harness.terminalControl = {
+  const terminalControl = {
     writeInput: (data: string) => bridge.writeInput(descriptor, data),
     resize: (rows: number, columns: number) => bridge.resize(descriptor, rows, columns)
+  };
+  harness.terminalControl = terminalControl;
+
+  return () => {
+    if (harness.terminalControl === terminalControl) {
+      delete harness.terminalControl;
+    }
   };
 }

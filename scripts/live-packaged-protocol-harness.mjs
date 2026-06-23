@@ -96,10 +96,31 @@ try {
   await waitForTerminalSession(page, "botster-web-dogfood-session");
   await waitForHistoricalTerminalRestore(page);
   await waitForTerminalOutput(page, "botster-web-dogfood-ready");
+  await waitForTerminalRendererWrite(page, "botster-web-dogfood-ready");
+  await waitForTerminalCanvas(page);
 
-  await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "send_input" }, "send_input request");
+  const sendInputRequestsBeforeEcho = await daemonRequestCount(page, {
+    type: "send_input",
+    data: `${echoProbe}\n`
+  });
+  await dispatchResttyInput(page, `${echoProbe}\n`);
+  await waitForDaemonRequestCount(
+    page,
+    { type: "send_input", data: `${echoProbe}\n` },
+    sendInputRequestsBeforeEcho + 1,
+    "single echo send_input request"
+  );
   await waitForTerminalOutput(page, `botster-web-dogfood-echo:${echoProbe}`);
+  await waitForTerminalRendererWrite(page, `botster-web-dogfood-echo:${echoProbe}`);
+  const sendInputRequestsAfterEcho = await daemonRequestCount(page, {
+    type: "send_input",
+    data: `${echoProbe}\n`
+  });
+  if (sendInputRequestsAfterEcho !== sendInputRequestsBeforeEcho + 1) {
+    throw new Error(
+      `expected one send_input for ${echoProbe}, observed ${sendInputRequestsAfterEcho - sendInputRequestsBeforeEcho}`
+    );
+  }
   await waitForTerminalAttachState(page, ["attached"]);
 
   const requestedResize = await latestTerminalResize(page);
@@ -174,6 +195,13 @@ async function callTerminalControl(page, method, ...args) {
   );
 }
 
+async function dispatchResttyInput(page, text) {
+  await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalRendererInput));
+  await page.evaluate((nextText) => {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalRendererInput(nextText);
+  }, text);
+}
+
 async function waitForHarnessEvent(page, criteria, label) {
   await page.waitForFunction(
     ({ criteria: expectedCriteria }) => {
@@ -224,18 +252,48 @@ async function waitForTerminalOutput(page, text) {
   });
 }
 
-async function waitForHistoricalTerminalRestore(page) {
+async function waitForTerminalRendererWrite(page, text) {
   await page.waitForFunction(
-    () =>
+    ({ expectedText }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
+        (entry) => entry.kind === "renderer_write" && String(entry.payload?.data ?? "").includes(expectedText)
+      ),
+    { expectedText: text },
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for mounted terminal renderer write ${text}: ${error.message}`);
+  });
+}
+
+async function waitForTerminalCanvas(page) {
+  await page.waitForFunction(
+    () => {
+      const canvas = globalThis.document.querySelector(".terminal-view-container canvas");
+      if (canvas?.tagName !== "CANVAS") return false;
+      const bounds = canvas.getBoundingClientRect();
+      return bounds.width > 0 && bounds.height > 0;
+    },
+    undefined,
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for mounted Restty canvas: ${error.message}`);
+  });
+}
+
+async function waitForHistoricalTerminalRestore(page) {
+  const historyPayload = await page.waitForFunction(
+    () => {
+      const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).find(
         (entry) =>
           entry.kind === "output" &&
           (entry.payload?.source === "snapshot" || entry.payload?.source === "scrollback") &&
           typeof entry.payload?.data === "string"
-      ),
+      );
+      return entry?.payload?.data ?? null;
+    },
     undefined,
     { timeout: 15_000 }
-  ).catch(async (error) => {
+  ).then((handle) => handle.jsonValue()).catch(async (error) => {
     const observedHistoryEvents = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .filter((entry) => entry.kind === "daemon_event")
@@ -253,6 +311,7 @@ async function waitForHistoricalTerminalRestore(page) {
       `timed out waiting for renderable snapshot.data/scrollback.data after refresh Attach; observed history events: ${JSON.stringify(observedHistoryEvents, null, 2)}`
     );
   });
+  await waitForTerminalRendererWrite(page, historyPayload);
 }
 
 async function waitForResizeProof(page, requestedResize) {
@@ -356,6 +415,37 @@ async function terminalOutputCount(page) {
   return page.evaluate(
     () => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "output").length
   );
+}
+
+async function daemonRequestCount(page, criteria) {
+  return page.evaluate(
+    ({ expectedCriteria }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) => {
+        if (entry.kind !== "daemon_request") return false;
+        const payload = entry.payload ?? {};
+        if (expectedCriteria.type && payload.type !== expectedCriteria.type) return false;
+        if (expectedCriteria.data && payload.data !== expectedCriteria.data) return false;
+        return true;
+      }).length,
+    { expectedCriteria: criteria }
+  );
+}
+
+async function waitForDaemonRequestCount(page, criteria, expectedCount, label) {
+  await page.waitForFunction(
+    ({ expectedCriteria, nextExpectedCount }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) => {
+        if (entry.kind !== "daemon_request") return false;
+        const payload = entry.payload ?? {};
+        if (expectedCriteria.type && payload.type !== expectedCriteria.type) return false;
+        if (expectedCriteria.data && payload.data !== expectedCriteria.data) return false;
+        return true;
+      }).length === nextExpectedCount,
+    { expectedCriteria: criteria, nextExpectedCount: expectedCount },
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for ${label}: ${error.message}`);
+  });
 }
 
 async function waitForNextSizeProbe(page, outputCount) {

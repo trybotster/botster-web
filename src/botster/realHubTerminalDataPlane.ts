@@ -51,6 +51,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription {
     this.listeners.add(listener);
+    this.detached = false;
     if (!this.streamSubscription) {
       this.restoredHistory = false;
     }
@@ -110,7 +111,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   private ensureAttached(): Promise<void> {
-    if (this.streamSubscription || this.detached) {
+    if (this.streamSubscription || (this.detached && this.listeners.size === 0)) {
       return Promise.resolve();
     }
 
@@ -127,7 +128,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   private async attachWhenSessionIsVisible(): Promise<void> {
     for (let attempt = 1; attempt <= maxAttachAttempts; attempt += 1) {
-      if (this.streamSubscription || this.detached || this.listeners.size === 0) {
+      if (this.streamSubscription || (this.detached && this.listeners.size === 0) || this.listeners.size === 0) {
         return;
       }
 

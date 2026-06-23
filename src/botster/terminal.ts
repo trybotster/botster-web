@@ -59,6 +59,7 @@ interface TerminalMountState {
   descriptor: TerminalViewDescriptor;
   mountId: number;
   renderer: TerminalRendererAdapter;
+  container: HTMLElement;
   dataPlane?: TerminalDataPlaneAttachment;
   inputSubscription?: TerminalSubscription;
   outputSubscription?: TerminalSubscription;
@@ -86,7 +87,7 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
       const renderer = this.createRenderer(descriptor);
       await renderer.mount(container);
       const mount: TerminalViewMount = { sessionId, mountId };
-      this.mounts.set(sessionId, { descriptor, mountId, renderer });
+      this.mounts.set(sessionId, { descriptor, mountId, renderer, container });
       return mount;
     });
 
@@ -107,6 +108,13 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     dataPlane: TerminalDataPlaneAttachment
   ): Promise<void> {
     const state = this.requireMount(descriptor);
+    if (
+      state.dataPlane === dataPlane &&
+      state.inputSubscription &&
+      state.outputSubscription
+    ) {
+      return;
+    }
 
     await this.detach(descriptor);
     state.dataPlane = dataPlane;
@@ -114,7 +122,12 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
       void dataPlane.writeInput(data);
     });
     state.outputSubscription = dataPlane.subscribeOutput((data) => {
-      void state.renderer.write(data);
+      void Promise.resolve(state.renderer.write(data)).then(() => {
+        if (state.container.dataset) {
+          state.container.dataset.terminalLastRenderedOutput = data;
+        }
+        recordLiveHarnessTerminal("renderer_write", { data, sessionId: descriptor.sessionId });
+      });
     });
   }
 
@@ -192,6 +205,10 @@ export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
   private readonly listeners = new Set<(data: TerminalOutput) => void>();
   private readonly statusListeners = new Set<(status: TerminalAttachmentStatus) => void>();
   private detached = false;
+  detachCount = 0;
+  inputSubscriptionCount = 0;
+  outputSubscriptionCount = 0;
+  outputUnsubscribeCount = 0;
 
   constructor(
     readonly sessionId: string,
@@ -206,11 +223,13 @@ export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription {
     this.listeners.add(listener);
+    this.outputSubscriptionCount += 1;
     this.initialOutput.forEach((line) => listener(line));
 
     return {
       unsubscribe: () => {
         this.listeners.delete(listener);
+        this.outputUnsubscribeCount += 1;
       }
     };
   }
@@ -242,8 +261,20 @@ export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   detach(): void {
+    this.detachCount += 1;
     this.detached = true;
     this.listeners.clear();
     this.statusListeners.clear();
   }
+}
+
+function recordLiveHarnessTerminal(kind: string, payload: unknown): void {
+  if (typeof window === "undefined") return;
+
+  const harness = (window as typeof window & {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
+      terminal?: Array<{ kind: string; payload: unknown }>;
+    };
+  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  harness?.terminal?.push({ kind, payload });
 }

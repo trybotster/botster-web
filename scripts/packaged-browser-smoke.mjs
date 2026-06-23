@@ -31,6 +31,7 @@ async function runPackagedBrowserSmoke(scenario) {
   const pageErrors = [];
   const responseErrors = [];
   const daemonRequests = [];
+  const terminalInputProbe = "browser-smoke-input";
 
   await mkdir(root, { recursive: true });
   const daemon = createFakeDaemon(socketPath, daemonRequests, scenario);
@@ -62,6 +63,7 @@ async function runPackagedBrowserSmoke(scenario) {
   });
 
   let browser;
+  let page;
 
   try {
     await waitForHttpOk(`http://${host}:${port}/health`, {
@@ -70,7 +72,13 @@ async function runPackagedBrowserSmoke(scenario) {
       bridgeStderr: () => bridgeStderr
     });
     browser = await chromium.launch();
-    const page = await browser.newPage();
+    page = await browser.newPage();
+    await page.addInitScript(() => {
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {
+        events: [],
+        terminal: []
+      };
+    });
 
     page.on("console", (message) => {
       consoleEvents.push({ type: message.type(), text: message.text() });
@@ -113,6 +121,31 @@ async function runPackagedBrowserSmoke(scenario) {
       await page.locator("[data-terminal-session-id='botster-web-dogfood-session']").waitFor({
         state: "attached"
       });
+      await waitForTerminalRendererWrite(page, "browser-smoke-snapshot");
+      await waitForTerminalRendererWrite(page, "browser-smoke-scrollback");
+      await waitForTerminalCanvas(page);
+
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.getByText("Local hub workbench").waitFor();
+      await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
+      await page.locator("[data-terminal-session-id='botster-web-dogfood-session']").waitFor({
+        state: "attached"
+      });
+      await waitForTerminalRendererWrite(page, "browser-smoke-snapshot");
+      await waitForTerminalRendererWrite(page, "browser-smoke-scrollback");
+      await waitForTerminalCanvas(page);
+
+      const sendInputRequestsBeforeTyping = sendInputRequestsForSession(daemonRequests).length;
+      await dispatchResttyInput(page, `${terminalInputProbe}\n`);
+      await waitForTerminalRendererWrite(page, `browser-smoke-echo:${terminalInputProbe}`);
+      const typedInputRequests = sendInputRequestsForSession(daemonRequests).slice(sendInputRequestsBeforeTyping);
+      const typedInput = typedInputRequests.map((request) => request.data).join("");
+      if (typedInput.replace(/\r/g, "\n") !== `${terminalInputProbe}\n`) {
+        throw new Error(
+          `renderer input path sent unexpected data ${JSON.stringify(typedInput)} for ${terminalInputProbe}`
+        );
+      }
+
       await page.waitForTimeout(500);
       const mountFailureCount = await page.locator("[data-terminal-diagnostic='mount-failed']").count();
       if (mountFailureCount > 0) {
@@ -125,7 +158,20 @@ async function runPackagedBrowserSmoke(scenario) {
       throw new Error(`packaged browser smoke ${scenario.name} did not dispatch the spawn action through the bridge`);
     }
   } catch (error) {
-    error.message = `${scenario.name}: ${error.message}\nbridge stdout:\n${bridgeStdout}\nbridge stderr:\n${bridgeStderr}`;
+    const harnessState = page
+      ? await page.evaluate(() => ({
+        harness: globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__,
+        activeElement: globalThis.document.activeElement
+          ? {
+            tagName: globalThis.document.activeElement.tagName,
+            className: globalThis.document.activeElement.className,
+            role: globalThis.document.activeElement.getAttribute("role")
+          }
+          : null,
+        terminalHtml: globalThis.document.querySelector(".terminal-view-container")?.innerHTML
+      })).catch(() => undefined)
+      : undefined;
+    error.message = `${scenario.name}: ${error.message}\nbridge stdout:\n${bridgeStdout}\nbridge stderr:\n${bridgeStderr}\ndaemon requests:\n${JSON.stringify(daemonRequests, null, 2)}\nharness state:\n${JSON.stringify(harnessState, null, 2)}`;
     throw error;
   } finally {
     await browser?.close();
@@ -138,6 +184,54 @@ async function runPackagedBrowserSmoke(scenario) {
     await once(daemon, "close").catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function waitForTerminalRendererWrite(page, text) {
+  await page.waitForFunction(
+    ({ expectedText }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
+        (entry) => entry.kind === "renderer_write" && String(entry.payload?.data ?? "").includes(expectedText)
+      ),
+    { expectedText: text },
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for mounted terminal renderer write ${text}: ${error.message}`);
+  });
+}
+
+async function waitForTerminalCanvas(page) {
+  await page.waitForFunction(
+    () => {
+      const canvas = globalThis.document.querySelector(".terminal-view-container canvas");
+      if (canvas?.tagName !== "CANVAS") return false;
+      const bounds = canvas.getBoundingClientRect();
+      return bounds.width > 0 && bounds.height > 0;
+    },
+    undefined,
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for mounted Restty canvas: ${error.message}`);
+  });
+}
+
+function sendInputRequestsForSession(requests) {
+  return requests.filter(
+    (request) =>
+      request.type === "send_input" &&
+      request.session_id === "botster-web-dogfood-session" &&
+      typeof request.data === "string"
+  );
+}
+
+async function dispatchResttyInput(page, text) {
+  await page.waitForFunction(
+    () => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalRendererInput),
+    undefined,
+    { timeout: 15_000 }
+  );
+  await page.evaluate((nextText) => {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalRendererInput(nextText);
+  }, text);
 }
 
 function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) {
@@ -165,6 +259,12 @@ function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) 
 }
 
 function createFakeDaemon(path, requests, scenario) {
+  const state = {
+    inputBuffers: new Map(),
+    latestSubscriptions: new Map(),
+    terminalQueues: new Map()
+  };
+
   return createNetServer((socket) => {
     socket.setEncoding("utf8");
     let buffer = "";
@@ -174,14 +274,14 @@ function createFakeDaemon(path, requests, scenario) {
       while (newline >= 0) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
-        handleDaemonLine(socket, line, requests, scenario);
+        handleDaemonLine(socket, line, requests, scenario, state);
         newline = buffer.indexOf("\n");
       }
     });
   });
 }
 
-function handleDaemonLine(socket, line, requests, scenario) {
+function handleDaemonLine(socket, line, requests, scenario, state) {
   if (!line.trim()) return;
   const request = JSON.parse(line);
   if (request.protocol === protocol) {
@@ -190,10 +290,10 @@ function handleDaemonLine(socket, line, requests, scenario) {
   }
 
   requests.push(request);
-  socket.write(`${JSON.stringify(daemonResponse(request, scenario))}\n`);
+  socket.write(`${JSON.stringify(daemonResponse(request, scenario, state))}\n`);
 }
 
-function daemonResponse(request, scenario) {
+function daemonResponse(request, scenario, state) {
   if (request.type === "status") {
     return {
       kind: "status",
@@ -259,11 +359,33 @@ function daemonResponse(request, scenario) {
   }
 
   if (request.type === "attach") {
+    state.latestSubscriptions.set(request.session_id, request.subscription_id);
     return {
       events: [
         {
+          type: "attach_state",
+          session_id: request.session_id,
+          subscription_id: request.subscription_id,
+          state: "attached"
+        },
+        {
+          type: "snapshot",
+          session_id: request.session_id,
+          subscription_id: request.subscription_id,
+          data: "browser-smoke-snapshot\r\n",
+          bytes: 24
+        },
+        {
+          type: "scrollback",
+          session_id: request.session_id,
+          subscription_id: request.subscription_id,
+          data: "browser-smoke-scrollback\r\n",
+          bytes: 26
+        },
+        {
           type: "terminal_output",
           session_id: request.session_id,
+          subscription_id: request.subscription_id,
           data: "browser-smoke-ready\r\n"
         }
       ]
@@ -271,14 +393,41 @@ function daemonResponse(request, scenario) {
   }
 
   if (request.type === "drain") {
-    return { events: [] };
+    const queue = state.terminalQueues.get(request.session_id) ?? [];
+    state.terminalQueues.set(request.session_id, []);
+    return { events: queue };
   }
 
   if (request.type === "detach") {
     return { events: [] };
   }
 
-  if (request.type === "resize" || request.type === "send_input") {
+  if (request.type === "send_input") {
+    const currentBuffer = state.inputBuffers.get(request.session_id) ?? "";
+    const nextBuffer = currentBuffer + request.data;
+    if (nextBuffer.includes("\n") || nextBuffer.includes("\r")) {
+      const line = nextBuffer.replace(/[\r\n]/g, "");
+      const subscriptionId = state.latestSubscriptions.get(request.session_id);
+      const queue = state.terminalQueues.get(request.session_id) ?? [];
+      queue.push({
+        type: "terminal_output",
+        session_id: request.session_id,
+        subscription_id: subscriptionId,
+        data: `browser-smoke-echo:${line}\r\n`
+      });
+      state.terminalQueues.set(request.session_id, queue);
+      state.inputBuffers.set(request.session_id, "");
+    } else {
+      state.inputBuffers.set(request.session_id, nextBuffer);
+    }
+
+    return {
+      kind: "terminal_ack",
+      events: []
+    };
+  }
+
+  if (request.type === "resize") {
     return {
       kind: "terminal_ack",
       events: []
