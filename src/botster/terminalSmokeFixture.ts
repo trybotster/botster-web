@@ -77,6 +77,7 @@ export async function runTerminalViewBridgeSmokeFixture() {
 
   await bridge.mount(container, descriptor);
   await bridge.attach(descriptor, dataPlane);
+  await bridge.attach(descriptor, dataPlane);
   renderers[0].onFocus = () => {
     void bridge.focus(descriptor);
   };

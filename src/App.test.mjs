@@ -214,6 +214,9 @@ assert.match(liveProtocolHarnessScript, /botster-web-dogfood-ready/);
 assert.match(liveProtocolHarnessScript, /page\.reload/);
 assert.match(liveProtocolHarnessScript, /waitForSessionAttachable\(page, true\)/);
 assert.match(liveProtocolHarnessScript, /waitForHistoricalTerminalRestore/);
+assert.match(liveProtocolHarnessScript, /waitForTerminalRendererWrite/);
+assert.match(liveProtocolHarnessScript, /waitForTerminalCanvas/);
+assert.match(liveProtocolHarnessScript, /waitForDaemonRequestCount/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
 assert.match(liveProtocolHarnessScript, /type: "send_input"/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalAttachState\(page, \["attached"\]\)/);
@@ -251,6 +254,9 @@ assert.match(terminal, /class DefaultTerminalViewBridge/);
 assert.match(terminal, /TerminalViewMount/);
 assert.match(terminal, /attach\(/);
 assert.match(terminal, /detach\(/);
+assert.match(terminal, /state\.dataPlane === dataPlane/);
+assert.match(terminal, /renderer_write/);
+assert.match(terminal, /terminalLastRenderedOutput/);
 assert.match(terminal, /writeInput\(/);
 assert.match(terminal, /subscribeOutput/);
 assert.match(terminal, /renderer\.destroy\(\)/);
@@ -266,6 +272,7 @@ assert.match(terminalHost, /data-terminal-attach-state/);
 assert.match(terminalHost, /subscribeStatus/);
 assert.match(terminalHost, /bridge\.attach/);
 assert.match(terminalHost, /bridge\.unmount/);
+assert.match(terminalHost, /delete harness\.terminalControl/);
 assert.match(terminalHost, /terminalMount/);
 assert.match(terminalHost, /data-terminal-diagnostic="mount-failed"/);
 assert.match(terminalSmokeFixture, /runTerminalViewBridgeSmokeFixture/);
@@ -544,9 +551,13 @@ const smoke = await runTerminalViewBridgeSmokeFixture();
 assert.deepEqual(smoke.dataPlane.inputs, ["ls\n"]);
 assert.deepEqual(smoke.firstRenderer.writes, ["ready\r\n", "ok\r\n"]);
 assert.deepEqual(smoke.firstRenderer.resizes, [{ rows: 24, columns: 80 }]);
+assert.equal(smoke.dataPlane.outputSubscriptionCount, 1);
+assert.equal(smoke.dataPlane.outputUnsubscribeCount, 1);
+assert.equal(smoke.dataPlane.detachCount, 1);
 assert.ok(smoke.secondRenderer);
 assert.ok(smoke.lifecycle.indexOf("destroy") < smoke.lifecycle.lastIndexOf("create"));
 assert.equal(smoke.lifecycle.filter((event) => event === "focus").length, 2);
+assert.equal(smoke.lifecycle.filter((event) => event === "input:unsubscribe").length, 1);
 assert.doesNotMatch(smoke.firstRenderer.writes.join(""), /stale/);
 assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /stale/);
 assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /premount/);
@@ -1585,9 +1596,7 @@ const byteOnlyTerminalDataPlane = createRealHubTerminalDataPlane({
         data: "byte-only-live-output\r\n"
       });
       return {
-        unsubscribe() {
-          undefined;
-        }
+        unsubscribe() {}
       };
     }
   }
