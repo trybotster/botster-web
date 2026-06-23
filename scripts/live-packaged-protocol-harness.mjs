@@ -88,15 +88,19 @@ try {
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.getByText("Local hub workbench").waitFor();
   await page.getByText("real-hub").waitFor();
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "post-refresh status request");
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, "post-refresh list_sessions request");
   await waitForSessionStatus(page, "running");
   await waitForSessionAttachable(page, true);
   await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
   await waitForTerminalSession(page, "botster-web-dogfood-session");
+  await waitForHistoricalTerminalRestore(page);
+  await waitForTerminalOutput(page, "botster-web-dogfood-ready");
 
   await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "send_input" }, "send_input request");
   await waitForTerminalOutput(page, `botster-web-dogfood-echo:${echoProbe}`);
-  await waitForTerminalAttachState(page, ["scrollback_unavailable", "live_only"]);
+  await waitForTerminalAttachState(page, ["attached"]);
 
   const requestedResize = await latestTerminalResize(page);
   await waitForHarnessEvent(
@@ -217,6 +221,37 @@ async function waitForTerminalOutput(page, text) {
     { timeout: 15_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for terminal output ${text}: ${error.message}`);
+  });
+}
+
+async function waitForHistoricalTerminalRestore(page) {
+  await page.waitForFunction(
+    () =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
+        (entry) =>
+          entry.kind === "output" &&
+          (entry.payload?.source === "snapshot" || entry.payload?.source === "scrollback") &&
+          typeof entry.payload?.data === "string"
+      ),
+    undefined,
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observedHistoryEvents = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) => entry.kind === "daemon_event")
+        .map((entry) => entry.payload)
+        .filter((payload) => payload?.type === "snapshot" || payload?.type === "scrollback")
+    );
+
+    if (observedHistoryEvents.length === 0) {
+      throw new Error(
+        `timed out waiting for snapshot.data/scrollback.data after refresh Attach; no snapshot or scrollback daemon events were observed: ${error.message}`
+      );
+    }
+
+    throw new Error(
+      `timed out waiting for renderable snapshot.data/scrollback.data after refresh Attach; observed history events: ${JSON.stringify(observedHistoryEvents, null, 2)}`
+    );
   });
 }
 

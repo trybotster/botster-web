@@ -32,6 +32,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private attachPromise: Promise<void> | undefined;
   private pendingResize: { rows: number; columns: number } | undefined;
   private detached = false;
+  private restoredHistory = false;
 
   constructor(private readonly options: RealHubTerminalDataPlaneOptions) {
     this.sessionId = options.sessionId ?? realHubDogfoodSessionId;
@@ -50,6 +51,9 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription {
     this.listeners.add(listener);
+    if (!this.streamSubscription) {
+      this.restoredHistory = false;
+    }
     this.emitStatus({
       state: "attaching",
       message: "Attaching terminal stream."
@@ -188,13 +192,20 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     if (event.type === "snapshot" || event.type === "scrollback") {
-      this.emitStatus(snapshotStatus(event));
+      if (typeof event.data === "string") {
+        this.restoredHistory = true;
+        this.emitStatus(historyRestoredStatus(event.type));
+        this.emitOutput(event.data, event.type);
+        return;
+      }
+
+      this.emitStatus(historyUnavailableStatus(event));
       recordLiveHarnessTerminal(event.type, { bytes: event.bytes });
       return;
     }
 
     if (event.type === "terminal_output") {
-      if (this.currentStatus.state === "attaching" || this.currentStatus.state === "attached") {
+      if (this.currentStatus.state === "attaching" || (this.currentStatus.state === "attached" && !this.restoredHistory)) {
         this.emitStatus({
           state: "live_only",
           message: "Terminal stream attached live; no historical scrollback was delivered by the daemon."
@@ -208,7 +219,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     for (const listener of this.listeners) {
       listener(data);
     }
-    recordLiveHarnessTerminal(kind === "output" ? "output" : `${kind}_output`, { data });
+    recordLiveHarnessTerminal("output", { data, source: kind });
   }
 
   private emitStatus(status: TerminalAttachmentStatus): void {
@@ -245,8 +256,15 @@ function attachStateStatus(state: string): TerminalAttachmentStatus {
   };
 }
 
-function snapshotStatus(event: Extract<DaemonEvent, { type: "snapshot" | "scrollback" }>): TerminalAttachmentStatus {
-  if (event.bytes > 0) {
+function historyRestoredStatus(kind: "snapshot" | "scrollback"): TerminalAttachmentStatus {
+  return {
+    state: "attached",
+    message: `Historical terminal ${kind} restored from renderable daemon data.`
+  };
+}
+
+function historyUnavailableStatus(event: Extract<DaemonEvent, { type: "snapshot" | "scrollback" }>): TerminalAttachmentStatus {
+  if ((event.bytes ?? 0) > 0) {
     return {
       state: "scrollback_unavailable",
       message: "Historical scrollback was delivered as a daemon snapshot, but botster-web cannot render that snapshot format yet. Live output is attached."

@@ -154,8 +154,8 @@ assert.match(realHubDaemonDto, /message: string/);
 assert.match(realHubDaemonDto, /diagnostics\?: DaemonDiagnostic\[\]/);
 assert.match(realHubDaemonDto, /export type DaemonEvent/);
 assert.match(realHubDaemonDto, /type: "snapshot" \| "scrollback"/);
-assert.match(realHubDaemonDto, /bytes: number/);
-assert.doesNotMatch(realHubDaemonDto, /data\?: string|compressed\?: boolean|encoding\?: string/);
+assert.match(realHubDaemonDto, /type: "snapshot" \| "scrollback";[\s\S]*data\?: string;[\s\S]*bytes\?: number;/);
+assert.doesNotMatch(realHubDaemonDto, /compressed\?: boolean|encoding\?: string/);
 assert.match(realHubDogfoodTransport, /kind: "daemon_request"/);
 assert.match(realHubDogfoodTransport, /reply\.kind !== "daemon_response"/);
 assert.match(realHubDogfoodTransport, /subscribeEvents/);
@@ -172,10 +172,10 @@ assert.match(realHubTerminalDataPlane, /type: "send_input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
 assert.match(realHubTerminalDataPlane, /this\.emitOutput\(event\.data, "output"\)/);
+assert.match(realHubTerminalDataPlane, /this\.emitOutput\(event\.data, event\.type\)/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("attach_state"/);
-assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\(event\.type/);
 assert.match(realHubTerminalDataPlane, /scrollback_unavailable/);
-assert.doesNotMatch(realHubTerminalDataPlane, /renderableTerminalPayload/);
+assert.match(realHubTerminalDataPlane, /Historical terminal \$\{kind\} restored/);
 assert.match(realHubTerminalDataPlane, /type: "detach"/);
 assert.match(realHubTerminalDataPlane, /const maxAttachAttempts = \d+/);
 assert.match(realHubTerminalDataPlane, /attempt <= maxAttachAttempts/);
@@ -213,9 +213,10 @@ assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-ready/);
 assert.match(liveProtocolHarnessScript, /page\.reload/);
 assert.match(liveProtocolHarnessScript, /waitForSessionAttachable\(page, true\)/);
+assert.match(liveProtocolHarnessScript, /waitForHistoricalTerminalRestore/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
 assert.match(liveProtocolHarnessScript, /type: "send_input"/);
-assert.match(liveProtocolHarnessScript, /waitForTerminalAttachState\(page, \["scrollback_unavailable", "live_only"\]\)/);
+assert.match(liveProtocolHarnessScript, /waitForTerminalAttachState\(page, \["attached"\]\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-echo:/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-size:/);
@@ -959,10 +960,18 @@ const bridge = {
       state: "attached"
     });
     onEvent({
+      type: "snapshot",
+      session_id: sessionId,
+      subscription_id: subscriptionId,
+      data: "snapshot-history\r\n",
+      bytes: 18
+    });
+    onEvent({
       type: "scrollback",
       session_id: sessionId,
       subscription_id: subscriptionId,
-      bytes: 23
+      data: "scrollback-history\r\n",
+      bytes: 20
     });
     onEvent({
       type: "terminal_output",
@@ -1539,11 +1548,57 @@ assert.equal(bridgeRequests.some((request) => request.type === "send_input" && r
 assert.equal(bridgeRequests.some((request) => request.type === "resize" && request.rows === 24 && request.cols === 80), true);
 assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
-assert.equal(terminalOutput.some((data) => data.includes("botster-web-scrollback")), false);
+assert.deepEqual(terminalOutput.slice(0, 3), [
+  "snapshot-history\r\n",
+  "scrollback-history\r\n",
+  "botster-web-dogfood-ready\r\n"
+]);
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
-assert.equal(terminalStatuses.some((status) => status.state === "scrollback_unavailable"), true);
+assert.equal(terminalStatuses.some((status) => status.state === "attached" && status.message.includes("Historical terminal scrollback restored")), true);
+assert.equal(terminalStatuses.some((status) => status.state === "scrollback_unavailable"), false);
+
+const byteOnlyTerminalStatuses = [];
+const byteOnlyTerminalOutput = [];
+const byteOnlyTerminalDataPlane = createRealHubTerminalDataPlane({
+  bridge: {
+    async request(request) {
+      if (request.type === "list_sessions") {
+        return {
+          kind: "sessions",
+          sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }],
+          events: []
+        };
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(sessionId, subscriptionId, onEvent) {
+      onEvent({
+        type: "snapshot",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        bytes: 19
+      });
+      onEvent({
+        type: "terminal_output",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        data: "byte-only-live-output\r\n"
+      });
+      return {
+        unsubscribe() {
+          undefined;
+        }
+      };
+    }
+  }
+});
+byteOnlyTerminalDataPlane.subscribeStatus((status) => byteOnlyTerminalStatuses.push(status));
+byteOnlyTerminalDataPlane.subscribeOutput((data) => byteOnlyTerminalOutput.push(data));
+await waitFor(() => byteOnlyTerminalOutput.some((data) => data.includes("byte-only-live-output")));
+assert.deepEqual(byteOnlyTerminalOutput, ["byte-only-live-output\r\n"]);
+assert.equal(byteOnlyTerminalStatuses.some((status) => status.state === "scrollback_unavailable"), true);
 assert.match(
-  terminalStatuses.find((status) => status.state === "scrollback_unavailable").message,
+  byteOnlyTerminalStatuses.find((status) => status.state === "scrollback_unavailable").message,
   /cannot render that snapshot format yet/
 );
 
