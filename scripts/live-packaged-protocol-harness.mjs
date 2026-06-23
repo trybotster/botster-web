@@ -103,7 +103,7 @@ try {
     type: "send_input",
     data: `${echoProbe}\n`
   });
-  await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
+  await dispatchResttyInput(page, `${echoProbe}\n`);
   await waitForDaemonRequestCount(
     page,
     { type: "send_input", data: `${echoProbe}\n` },
@@ -193,6 +193,13 @@ async function callTerminalControl(page, method, ...args) {
     },
     { method, args }
   );
+}
+
+async function dispatchResttyInput(page, text) {
+  await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalRendererInput));
+  await page.evaluate((nextText) => {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalRendererInput(nextText);
+  }, text);
 }
 
 async function waitForHarnessEvent(page, criteria, label) {

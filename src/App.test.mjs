@@ -264,6 +264,8 @@ assert.match(resttyRenderer, /from "\.\.\/vendor\/restty\/xterm\.js"/);
 assert.match(resttyRenderer, /new ResttyTerminal/);
 assert.match(resttyRenderer, /fontSources: botsterResttyFontSources/);
 assert.doesNotMatch(resttyRenderer, /fontPreset:\s*"none"/);
+assert.match(resttyRenderer, /terminalRendererInput/);
+assert.match(resttyRenderer, /sendKeyInput\(data, "key"\)/);
 assert.match(resttyRenderer, /this\.terminal\.dispose\(\)/);
 assert.match(terminalHost, /ResizeObserver/);
 assert.match(terminalHost, /requestAnimationFrame/);
@@ -1567,6 +1569,19 @@ assert.deepEqual(terminalOutput.slice(0, 3), [
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
 assert.equal(terminalStatuses.some((status) => status.state === "attached" && status.message.includes("Historical terminal scrollback restored")), true);
 assert.equal(terminalStatuses.some((status) => status.state === "scrollback_unavailable"), false);
+
+const reattachedTerminalOutput = [];
+const reattachedTerminalSubscription = terminalDataPlane.subscribeOutput((data) => reattachedTerminalOutput.push(data));
+await waitFor(() => reattachedTerminalOutput.some((data) => data.includes("botster-web-dogfood-ready")));
+reattachedTerminalSubscription.unsubscribe();
+assert.equal(
+  bridgeTerminalStreams.filter((stream) => stream.sessionId === realHubDogfoodSessionId && stream.unsubscribed !== true).length,
+  2
+);
+assert.equal(
+  bridgeRequests.filter((request) => request.type === "list_sessions").length >= 2,
+  true
+);
 
 const byteOnlyTerminalStatuses = [];
 const byteOnlyTerminalOutput = [];
