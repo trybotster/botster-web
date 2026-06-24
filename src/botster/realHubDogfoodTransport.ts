@@ -733,7 +733,12 @@ async function dispatchDaemonAction(
       payload: jsonObject(action.params?.payload)
     });
     emitResponse(response);
-    emit(actionResultFrame(request, !response.error, response.error?.message, { package_name: packageName, surface_id: surfaceId, kind: response.kind }));
+    emit(actionResultFrame(request, !response.error, response.error?.message, {
+      package_name: packageName,
+      surface_id: surfaceId,
+      kind: response.kind,
+      plugin_surface: response.plugin_surface
+    }));
     return;
   }
 
@@ -1042,6 +1047,25 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                     { id: "real-hub-package-settings-surface-launch", primitive: "action", bindings: [{ source: "entity", path: "@/launch_action", prop: "action" }] }
                   ]
                 }
+              }
+            ]
+          }
+        },
+        {
+          id: "real-hub-plugin-surface-render-result",
+          primitive: "section",
+          props: { label: "Rendered package surface" },
+          slots: {
+            children: [
+              {
+                id: "real-hub-plugin-surface-render-result-heading",
+                primitive: "heading",
+                props: { level: 3, text: "Rendered package surface" }
+              },
+              {
+                id: "real-hub-plugin-surface-render-result-text",
+                primitive: "text",
+                bindings: [{ source: "local_state", path: "dogfood.plugin_surface_status", prop: "text" }]
               }
             ]
           }

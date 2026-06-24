@@ -5,6 +5,26 @@
   "botster": ">=0.1.0",
   "source": { "type": "path", "path": "." },
   "capabilities": [],
+  "surfaces": [
+    {
+      "id": "dogfood-app",
+      "kind": "app",
+      "title": "botster-web Dogfood",
+      "description": "Descriptor-backed botster-web app surface for package launcher dogfood.",
+      "order": 1,
+      "category": "dogfood",
+      "supports": ["render"]
+    },
+    {
+      "id": "dogfood-settings",
+      "kind": "settings",
+      "title": "botster-web Settings",
+      "description": "Descriptor-backed settings surface for package launcher dogfood.",
+      "order": 2,
+      "category": "dogfood",
+      "supports": ["render"]
+    }
+  ],
   "entrypoints": [
     { "runtime": "lua", "path": "plugin.lua", "bootstrap": false }
   ],

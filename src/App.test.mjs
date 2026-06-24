@@ -100,6 +100,7 @@ assert.match(app, /schemaVersionDiagnosticFromFrame/);
 assert.match(app, /operatorErrorDiagnostic/);
 assert.match(app, /hubConnectionDiagnosticFromFrame/);
 assert.match(app, /dogfood\.diagnostic_action_status/);
+assert.match(app, /dogfood\.plugin_surface_status/);
 assert.match(app, /terminalUnavailableDiagnostic/);
 assert.match(app, /surfaceSnapshot \?\? loadingSnapshot/);
 assert.doesNotMatch(app, /fixtureEntityFrames/);
@@ -238,6 +239,9 @@ assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_BIN/);
 assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_SOCKET/);
 assert.match(dogfoodBridgeModeScript, /BOTSTER_HUB_DATA_DIR/);
 assert.match(dogfoodBridgeScript, /kind: "daemon_response"/);
+assert.match(dogfoodBridgeScript, /deterministicBotsterWebSurfaceResponse/);
+assert.match(dogfoodBridgeScript, /package_name: "botster-web"/);
+assert.match(dogfoodBridgeScript, /surface_id: daemonRequest\.surface_id/);
 assert.match(dogfoodBridgeScript, /existing_hub_shutdown_ignored/);
 assert.match(dogfoodBridgeScript, /text\/event-stream/);
 assert.match(dogfoodBridgeScript, /sendSseEvent\(response, "daemon_event"/);
@@ -340,6 +344,9 @@ assert.match(readme, /packages show --data-dir .* botster-web/);
 assert.match(readme, /packages enable --data-dir .* botster-web/);
 assert.match(readme, /local_development/);
 assert.match(readme, /first-party-ready/);
+assert.match(readme, /dogfood-app/);
+assert.match(readme, /dogfood-settings/);
+assert.match(readme, /PluginSurfaceRender/);
 assert.match(vendorReadme, /e9742252312ee616d8f186b697d70349cf329250/);
 assert.doesNotMatch(uiNodes, /terminal_view/);
 assert.doesNotMatch(protocol, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
@@ -358,6 +365,28 @@ assert.equal(packageManifest.kind, "plugin");
 assert.equal(packageManifest.botster, ">=0.1.0");
 assert.deepEqual(packageManifest.source, { type: "path", path: "." });
 assert.deepEqual(packageManifest.capabilities, []);
+assert.deepEqual(packageManifest.surfaces, [
+  {
+    id: "dogfood-app",
+    kind: "app",
+    title: "botster-web Dogfood",
+    description: "Descriptor-backed botster-web app surface for package launcher dogfood.",
+    order: 1,
+    category: "dogfood",
+    supports: ["render"]
+  },
+  {
+    id: "dogfood-settings",
+    kind: "settings",
+    title: "botster-web Settings",
+    description: "Descriptor-backed settings surface for package launcher dogfood.",
+    order: 2,
+    category: "dogfood",
+    supports: ["render"]
+  }
+]);
+assert.equal(packageManifest.surfaces.some((surface) => surface.kind === "app"), true);
+assert.equal(packageManifest.surfaces.some((surface) => surface.kind === "settings"), true);
 assert.deepEqual(packageManifest.entrypoints, [
   { runtime: "lua", path: "plugin.lua", bootstrap: false }
 ]);
@@ -954,6 +983,35 @@ const bridge = {
         kind: "packages",
         packages: [
           {
+            package_name: "botster-web",
+            version: "0.1.0",
+            classification: "plugin",
+            state: "enabled",
+            requested_capabilities: [],
+            surfaces: packageManifest.surfaces,
+            runnable_entrypoints: [
+              {
+                id: "web-client",
+                kind: "web",
+                command: "node",
+                args: ["scripts/real-hub-dogfood-bridge.mjs"],
+                working_directory: { policy: "package_root", path: null },
+                environment: [],
+                mode: "dev",
+                capabilities: [{ surface: "network", scope: "localhost" }],
+                may_supervise: true,
+                process: {
+                  state: "running",
+                  pid: 41739,
+                  started_at: 1781112600,
+                  diagnostics: []
+                }
+              }
+            ],
+            configuration: emptyPackageConfiguration,
+            provider_profile_admitted: false
+          },
+          {
             package_name: "project-pipelines",
             version: "0.8.0",
             classification: "plugin",
@@ -1135,6 +1193,24 @@ const bridge = {
     }
 
     if (request.type === "plugin_surface_render") {
+      if (request.package_name === "botster-web") {
+        const settings = request.surface_id === "dogfood-settings";
+        return {
+          kind: "plugin_surface",
+          plugin_surface: {
+            package_name: "botster-web",
+            surface_id: request.surface_id,
+            title: settings ? "botster-web Settings" : "botster-web Dogfood",
+            body: settings
+              ? "Deterministic settings surface rendered by the botster-web dogfood package."
+              : "Deterministic app surface rendered by the botster-web dogfood package.",
+            payload: request.payload
+          },
+          events: [],
+          diagnostics: []
+        };
+      }
+
       return {
         kind: "plugin_surface",
         plugin_surface: {
@@ -1423,6 +1499,16 @@ for (const action of [
     target: "project-pipelines",
     params: { package_name: "project-pipelines", surface_id: "home" }
   },
+  {
+    id: "botster.package.surface.render",
+    target: "botster-web",
+    params: { package_name: "botster-web", surface_id: "dogfood-app" }
+  },
+  {
+    id: "botster.package.surface.render",
+    target: "botster-web",
+    params: { package_name: "botster-web", surface_id: "dogfood-settings" }
+  },
   { id: "botster.package.enable", target: "project-pipelines", params: { package_name: "project-pipelines" } },
   { id: "botster.package.disable", target: "project-pipelines", params: { package_name: "project-pipelines" } },
   { id: "botster.package.remove", target: "project-pipelines", params: { package_name: "project-pipelines" } },
@@ -1488,6 +1574,23 @@ assert.deepEqual(
     payload: {}
   }
 );
+assert.deepEqual(
+  bridgeRequests.filter((request) => request.type === "plugin_surface_render" && request.package_name === "botster-web"),
+  [
+    {
+      type: "plugin_surface_render",
+      package_name: "botster-web",
+      surface_id: "dogfood-app",
+      payload: {}
+    },
+    {
+      type: "plugin_surface_render",
+      package_name: "botster-web",
+      surface_id: "dogfood-settings",
+      payload: {}
+    }
+  ]
+);
 assert.equal(bridgeRequests.some((request) => request.type === "enable_package" && request.package_name === "project-pipelines"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "disable_package" && request.package_name === "project-pipelines"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "remove_package" && request.package_name === "project-pipelines"), true);
@@ -1536,10 +1639,36 @@ assert.deepEqual(realRuntime.entities.list("botster-web.session").map((record) =
 assert.equal(realRuntime.entities.get("botster-web.session", "session-local-1"), undefined);
 assert.equal(realRuntime.entities.get("botster-web.hub_status", "local-hub").host_id, "dogfood-host");
 assert.deepEqual(realRuntime.entities.list("botster-web.package").map((record) => record.id), [
+  "botster-web",
   "project-pipelines",
   "github-provider",
   "local-diagnostics"
 ]);
+assert.equal(realRuntime.entities.get("botster-web.package", "botster-web").status, "enabled");
+assert.equal(realRuntime.entities.get("botster-web.package", "botster-web").app_surface_count, 1);
+assert.equal(realRuntime.entities.get("botster-web.package", "botster-web").settings_surface_count, 1);
+assert.deepEqual(realRuntime.entities.get("botster-web.package", "botster-web").app_surfaces[0].launch_action, {
+  id: "botster.package.surface.render",
+  target: "botster-web",
+  label: "botster-web Dogfood",
+  params: {
+    package_name: "botster-web",
+    surface_id: "dogfood-app",
+    surface_kind: "app",
+    supports: ["render"]
+  }
+});
+assert.deepEqual(realRuntime.entities.get("botster-web.package", "botster-web").settings_surfaces[0].launch_action, {
+  id: "botster.package.surface.render",
+  target: "botster-web",
+  label: "botster-web Settings",
+  params: {
+    package_name: "botster-web",
+    surface_id: "dogfood-settings",
+    surface_kind: "settings",
+    supports: ["render"]
+  }
+});
 assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").status, "enabled");
 assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").capability_summary, /SessionActions:project-pipelines/);
 assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").capability_summary, /McpTools/);
@@ -1599,6 +1728,28 @@ assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessi
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attachable, true);
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.id, "botster.session.attach");
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.disabled, false);
+const appSurfaceRender = realRuntime.actions.dispatch({
+  origin: "ui_node",
+  action: realRuntime.entities.get("botster-web.package", "botster-web").app_surfaces[0].launch_action
+});
+await flushMicrotasks();
+assert.deepEqual(await appSurfaceRender, {
+  accepted: true,
+  request_id: "real-runtime-action-1",
+  result: {
+    package_name: "botster-web",
+    surface_id: "dogfood-app",
+    kind: "plugin_surface",
+    plugin_surface: {
+      package_name: "botster-web",
+      surface_id: "dogfood-app",
+      title: "botster-web Dogfood",
+      body: "Deterministic app surface rendered by the botster-web dogfood package.",
+      payload: {}
+    }
+  },
+  reason: undefined
+});
 assert.equal(
   daemonResponseFrames({ kind: "status", sessions: [], packages: [], events: [] }, 21)
     .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session"),
@@ -1617,7 +1768,7 @@ const attachSuccess = realRuntime.actions.dispatch({
 await flushMicrotasks();
 assert.deepEqual(await attachSuccess, {
   accepted: true,
-  request_id: "real-runtime-action-1",
+  request_id: "real-runtime-action-2",
   result: {
     session_id: realHubDogfoodSessionId,
     state: "selected",
@@ -2262,6 +2413,35 @@ try {
     kind: "packages",
     packages: [
       {
+        package_name: "botster-web",
+        version: "0.1.0",
+        classification: "plugin",
+        state: "enabled",
+        requested_capabilities: [],
+        surfaces: packageManifest.surfaces,
+        runnable_entrypoints: [
+          {
+            id: "web-client",
+            kind: "web",
+            command: "node",
+            args: ["scripts/real-hub-dogfood-bridge.mjs"],
+            working_directory: { policy: "package_root", path: null },
+            environment: [],
+            mode: "dev",
+            capabilities: [{ surface: "network", scope: "localhost" }],
+            may_supervise: true,
+            process: {
+              state: "running",
+              pid: 41739,
+              started_at: 1781112600,
+              diagnostics: []
+            }
+          }
+        ],
+        configuration: emptyPackageConfiguration,
+        provider_profile_admitted: false
+      },
+      {
         package_name: "project-pipelines",
         version: "0.8.0",
         classification: "plugin",
@@ -2393,11 +2573,20 @@ try {
       },
       localState: {
         "dogfood.action_status": `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`,
-        "dogfood.diagnostic_action_status": "Session not found"
+        "dogfood.diagnostic_action_status": "Session not found",
+        "dogfood.plugin_surface_status": "botster-web Dogfood: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)"
       }
     })
   );
   assert.match(realHubMarkup, /Installed packages/);
+  assert.match(realHubMarkup, /botster-web/);
+  assert.match(realHubMarkup, /botster-web Dogfood/);
+  assert.match(realHubMarkup, /Descriptor-backed botster-web app surface/);
+  assert.match(realHubMarkup, /botster-web Settings/);
+  assert.match(realHubMarkup, /dogfood-settings/);
+  assert.match(realHubMarkup, /Rendered package surface/);
+  assert.match(realHubMarkup, /Deterministic app surface rendered by the botster-web dogfood package/);
+  assert.match(realHubMarkup, /botster-web\/dogfood-app/);
   assert.match(realHubMarkup, /project-pipelines/);
   assert.match(realHubMarkup, /enabled/);
   assert.match(realHubMarkup, /github-provider/);

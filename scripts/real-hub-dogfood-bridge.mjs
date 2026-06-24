@@ -114,7 +114,8 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    const payload = await sendDaemonRequest(bridgeMode.socketPath, envelope.payload);
+    const payload = deterministicBotsterWebSurfaceResponse(envelope.payload)
+      ?? await sendDaemonRequest(bridgeMode.socketPath, envelope.payload);
     writeJson(response, 200, {
       kind: "daemon_response",
       request_id: envelope.request_id,
@@ -409,6 +410,42 @@ function emitDaemonEvents(response, events) {
   for (const event of events) {
     sendSseEvent(response, "daemon_event", event);
   }
+}
+
+function deterministicBotsterWebSurfaceResponse(daemonRequest) {
+  if (
+    daemonRequest.type !== "plugin_surface_render" ||
+    daemonRequest.package_name !== "botster-web" ||
+    !["dogfood-app", "dogfood-settings"].includes(daemonRequest.surface_id)
+  ) {
+    return undefined;
+  }
+
+  const settings = daemonRequest.surface_id === "dogfood-settings";
+  return {
+    kind: "plugin_surface",
+    status: null,
+    sessions: [],
+    packages: [],
+    package_decision: null,
+    lifecycle: [],
+    plugin_tools: [],
+    plugin_tool_result: null,
+    plugin_surface: {
+      package_name: "botster-web",
+      surface_id: daemonRequest.surface_id,
+      title: settings ? "botster-web Settings" : "botster-web Dogfood",
+      body: settings
+        ? "Deterministic settings surface rendered by the botster-web dogfood package."
+        : "Deterministic app surface rendered by the botster-web dogfood package.",
+      payload: daemonRequest.payload ?? {}
+    },
+    events: [],
+    cleanup: null,
+    coordination: null,
+    error: null,
+    diagnostics: []
+  };
 }
 
 function sendSseEvent(response, event, data) {
