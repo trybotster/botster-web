@@ -11,7 +11,7 @@ import {
   IonSelectOption,
   IonTextarea
 } from "@ionic/react";
-import type { ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import { defaultUiCapabilitySet } from "./capabilities";
 import type { EntityFrameStore, EntityRecord } from "./entities";
@@ -173,40 +173,182 @@ function renderChildren(
   return nodes.map((child) => renderNode(child, store, options, row));
 }
 
-function renderField(field: Record<string, unknown>): ReactNode {
+function fieldErrors(field: Record<string, unknown>): string[] {
+  return Array.isArray(field.errors) ? field.errors.filter((error): error is string => typeof error === "string") : [];
+}
+
+function renderField(
+  field: Record<string, unknown>,
+  valueOverride?: unknown,
+  onChange?: (value: unknown) => void
+): ReactNode {
   const id = readString(field.id);
   const label = readString(field.label, id);
   const kind = readString(field.kind, "text_input");
-  const value = field.value;
-  const errors = Array.isArray(field.errors) ? field.errors.filter((error): error is string => typeof error === "string") : [];
+  const value = valueOverride ?? field.value;
+  const errors = fieldErrors(field);
+  const required = readBoolean(field.required);
+  const placeholder = readString(field.placeholder, undefined);
+  const helper = readString(field.helper, undefined);
+  const labelText = required ? `${label} *` : label;
 
   const control =
     kind === "textarea" ? (
-      <IonTextarea value={readString(value)} readonly />
+      <IonTextarea
+        value={readString(value)}
+        placeholder={placeholder}
+        onIonInput={(event) => onChange?.(event.detail.value ?? "")}
+        readonly={!onChange}
+      />
     ) : kind === "checkbox" ? (
-      <IonCheckbox checked={readBoolean(value)} disabled />
+      <IonCheckbox checked={readBoolean(value)} disabled={!onChange} onIonChange={(event) => onChange?.(event.detail.checked)} />
     ) : kind === "select" ? (
-      <IonSelect value={value} disabled>
+      <IonSelect value={value} disabled={!onChange} placeholder={placeholder} onIonChange={(event) => onChange?.(event.detail.value)}>
         {readRecords(field.options).map((option) => (
           <IonSelectOption key={readString(option.value)} value={option.value}>
             {readString(option.label)}
           </IonSelectOption>
         ))}
       </IonSelect>
+    ) : kind === "secret" ? (
+      <IonInput
+        type="password"
+        value={readString(value)}
+        placeholder={placeholder}
+        onIonInput={(event) => onChange?.(event.detail.value ?? "")}
+        readonly={!onChange}
+      />
     ) : (
-      <IonInput value={readString(value)} readonly />
+      <IonInput
+        value={readString(value)}
+        placeholder={placeholder}
+        onIonInput={(event) => onChange?.(event.detail.value ?? "")}
+        readonly={!onChange}
+      />
     );
 
   return (
     <IonItem key={id} className={errors.length > 0 ? "uinode-field invalid" : "uinode-field"}>
-      <IonLabel position="stacked">{label}</IonLabel>
+      <IonLabel position="stacked">{labelText}</IonLabel>
       {control}
+      {helper ? <IonNote slot="helper">{helper}</IonNote> : null}
       {errors.map((error) => (
         <IonNote color="danger" key={error} slot="error">
           {error}
         </IonNote>
       ))}
     </IonItem>
+  );
+}
+
+function draftValue(field: Record<string, unknown>): unknown {
+  if (readString(field.kind) === "secret") {
+    return "";
+  }
+
+  if (Object.hasOwn(field, "value")) {
+    return field.value;
+  }
+
+  return readString(field.kind) === "checkbox" ? false : "";
+}
+
+function initialDraft(fields: Record<string, unknown>[]): Record<string, unknown> {
+  return Object.fromEntries(fields.map((field) => [readString(field.id), draftValue(field)]));
+}
+
+function typedFormValue(field: Record<string, unknown>, value: unknown): unknown {
+  const configType = readString(field.config_type, readString(field.kind, "string"));
+
+  if (configType === "secret") {
+    const secret = readString(value).trim();
+    return secret ? { type: "secret", state: "write_only" } : undefined;
+  }
+
+  if (configType === "boolean") {
+    return { type: "boolean", value: readBoolean(value) };
+  }
+
+  if (configType === "select") {
+    return readString(value) ? { type: "select", value: readString(value) } : undefined;
+  }
+
+  if (configType === "number" || configType === "integer") {
+    if (value === "" || value === null || typeof value === "undefined") {
+      return undefined;
+    }
+    return { type: configType, value: Number(value) };
+  }
+
+  const text = readString(value);
+  if (!text && !readBoolean(field.required)) {
+    return undefined;
+  }
+
+  return { type: configType, value: text };
+}
+
+function UiNodeForm({
+  node,
+  props,
+  options
+}: {
+  node: UiNode;
+  props: Record<string, unknown>;
+  options: UiNodeRenderOptions;
+}) {
+  const fields = useMemo(() => readRecords(props.fields), [props.fields]);
+  const [draft, setDraft] = useState<Record<string, unknown>>(() => initialDraft(fields));
+
+  const submit = readRecord(props.submit);
+  const submitAction = {
+    id: readString(submit.id),
+    target: readString(submit.target, undefined),
+    params: readRecord(submit.params),
+    label: readString(submit.label, "Submit"),
+    disabled: readBoolean(submit.disabled)
+  };
+  options.collectAction?.(submitAction, node);
+
+  return (
+    <form className="uinode-form" data-ui-node-id={node.id}>
+      <h3>{readString(props.title, "Form")}</h3>
+      <IonList>
+        {fields.map((field) => {
+          const id = readString(field.id);
+          return renderField(field, draft[id], (value) => {
+            setDraft((current) => ({ ...current, [id]: value }));
+          });
+        })}
+      </IonList>
+      <IonButton
+        data-action-id={submitAction.id}
+        data-action-target={submitAction.target}
+        disabled={submitAction.disabled}
+        type="button"
+        onClick={() => {
+          const values = Object.fromEntries(
+            fields.flatMap((field) => {
+              const id = readString(field.id);
+              const value = typedFormValue(field, draft[id]);
+              return typeof value === "undefined" ? [] : [[id, value]];
+            })
+          );
+          options.dispatchAction?.(
+            {
+              ...submitAction,
+              params: {
+                ...submitAction.params,
+                values
+              }
+            },
+            node
+          );
+        }}
+      >
+        {submitAction.label}
+      </IonButton>
+    </form>
   );
 }
 
@@ -351,33 +493,7 @@ function renderNode(
       );
     }
     case "form": {
-      const submit = readRecord(props.submit);
-      const submitAction = {
-        id: readString(submit.id),
-        target: readString(submit.target, undefined),
-        params: readRecord(submit.params),
-        label: readString(submit.label, "Submit"),
-        disabled: readBoolean(submit.disabled)
-      };
-      options.collectAction?.(submitAction, node);
-
-      return (
-        <form className="uinode-form" data-ui-node-id={node.id} key={node.id}>
-          <h3>{readString(props.title, "Form")}</h3>
-          <IonList>{readRecords(props.fields).map((field) => renderField(field))}</IonList>
-          <IonButton
-            data-action-id={submitAction.id}
-            data-action-target={submitAction.target}
-            disabled={submitAction.disabled}
-            type="button"
-            onClick={() => {
-              options.dispatchAction?.(submitAction, node);
-            }}
-          >
-            {submitAction.label}
-          </IonButton>
-        </form>
-      );
+      return <UiNodeForm node={node} props={props} options={options} key={`${node.id}:${JSON.stringify(props.fields ?? [])}`} />;
     }
     case "field":
       return renderField({ id: node.id, ...props });

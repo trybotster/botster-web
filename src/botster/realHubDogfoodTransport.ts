@@ -9,9 +9,11 @@ import type {
   DaemonEvent,
   DaemonOperatorError,
   DaemonPackage,
+  DaemonPackageConfiguration,
   DaemonRequest,
   DaemonResponse,
-  DaemonSession
+  DaemonSession,
+  JsonValue
 } from "./realHubDaemonDto";
 import type { UiTreeSnapshot } from "./uiNodes";
 
@@ -342,6 +344,8 @@ function sessionAttachFields(sessionId: string, lifecycle: string) {
 function packageRecord(packageRecord: DaemonPackage) {
   const capabilities = packageRecord.requested_capabilities ?? [];
   const runnableEntrypoints = packageRecord.runnable_entrypoints ?? [];
+  const configurationFields = packageConfigurationFields(packageRecord.configuration);
+  const configurable = configurationFields.length > 0;
   const capabilitySummary =
     capabilities.length === 0
       ? "No requested capabilities"
@@ -366,8 +370,109 @@ function packageRecord(packageRecord: DaemonPackage) {
     entrypoint_summary: entrypointSummary,
     entrypoint_process_summary: entrypointProcessSummary,
     entrypoint_diagnostics_summary: entrypointDiagnosticsSummary,
+    configurable,
+    configure_action: {
+      id: "botster.package.configure",
+      target: packageRecord.package_name,
+      label: configurable ? `Configure ${packageRecord.package_name}` : "No configuration",
+      disabled: !configurable,
+      params: { package_name: packageRecord.package_name }
+    } satisfies ActionBinding,
+    configuration_title: `${packageRecord.package_name} configuration`,
+    configuration_fields: configurationFields,
+    configuration_submit: {
+      id: "botster.package.configuration.save",
+      target: packageRecord.package_name,
+      label: "Save configuration",
+      disabled: !configurable,
+      params: { package_name: packageRecord.package_name }
+    } satisfies ActionBinding,
     diagnostics_summary: `${packageRecord.classification} package is ${packageRecord.state}`
   };
+}
+
+function packageConfigurationFields(configuration: DaemonPackageConfiguration | undefined) {
+  const schema = readConfigObject(configuration?.schema);
+  const fields = Array.isArray(schema.fields) ? schema.fields.filter(isRecord) : [];
+  const effectiveValues = isRecord(configuration?.effective_values) ? configuration.effective_values : {};
+  const missingRequired = Array.isArray(configuration?.missing_required)
+    ? configuration.missing_required.filter((key): key is string => typeof key === "string")
+    : [];
+  const diagnostics = Array.isArray(configuration?.diagnostics) ? configuration.diagnostics : [];
+
+  return fields.map((field) => {
+    const id = readConfigString(field.key);
+    const configType = readConfigString(field.type, "string");
+    const value = effectiveValues[id];
+    const redactedSecret = isSecretValue(value, "redacted");
+    const errors = [
+      ...(missingRequired.includes(id) ? ["Required configuration is missing."] : []),
+      ...diagnostics.map((diagnostic) => diagnostic.message).filter((message): message is string => typeof message === "string")
+    ];
+
+    return {
+      id,
+      label: readConfigString(field.label, id),
+      kind: formFieldKind(configType),
+      config_type: configType,
+      required: field.required === true,
+      value: redactedSecret ? "" : configurationValue(value),
+      placeholder: redactedSecret ? "Existing secret is saved" : undefined,
+      helper: redactedSecret ? "Leave blank to keep the existing secret." : readConfigString(field.description, undefined),
+      options: readConfigOptions(field.options),
+      errors
+    };
+  });
+}
+
+function formFieldKind(configType: string): string {
+  if (configType === "multiline_text") return "textarea";
+  if (configType === "boolean") return "checkbox";
+  if (configType === "select") return "select";
+  if (configType === "secret") return "secret";
+  return "text_input";
+}
+
+function configurationValue(value: unknown): unknown {
+  if (!isRecord(value)) return "";
+  if (value.type === "boolean") return value.value === true;
+  if (typeof value.value === "string" || typeof value.value === "number") return value.value;
+  return "";
+}
+
+function isSecretValue(value: unknown, state: string): boolean {
+  return isRecord(value) && value.type === "secret" && value.state === state;
+}
+
+function readConfigOptions(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter(isRecord).map((option) => ({
+      value: readConfigString(option.value),
+      label: readConfigString(option.label, readConfigString(option.value))
+    }))
+    : [];
+}
+
+function readConfigObject(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function readConfigString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function jsonObject(value: unknown): Record<string, JsonValue> {
+  return isRecord(value) ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string, JsonValue] => isJsonValue(entry[1]))) : {};
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isRecord(value) && Object.values(value).every(isJsonValue);
 }
 
 function capabilityLabel(capability: { surface: string; scope?: string | null }) {
@@ -486,6 +591,33 @@ async function dispatchDaemonAction(
     });
     emitResponse(response);
     emit(actionResultFrame(request, false, response.error?.message ?? "Real hub rejected the validation action", response.error));
+    return;
+  }
+
+  if (action.id === "botster.package.configure") {
+    emit(
+      actionResultFrame(request, true, undefined, {
+        package_name: action.target,
+        state: "selected"
+      })
+    );
+    return;
+  }
+
+  if (action.id === "botster.package.configuration.save") {
+    const packageName = action.target ?? readConfigString(action.params?.package_name);
+    if (!packageName) {
+      emit(actionResultFrame(request, false, "Package configuration save is missing a package target"));
+      return;
+    }
+
+    const response = await bridge.request({
+      type: "set_package_configuration",
+      package_name: packageName,
+      values: jsonObject(action.params?.values)
+    });
+    emitResponse(response);
+    emit(actionResultFrame(request, !response.error, response.error?.message, { package_name: packageName, kind: response.kind }));
     return;
   }
 
@@ -646,6 +778,7 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                     { id: "real-hub-package-entrypoints", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_summary", prop: "text" }] },
                     { id: "real-hub-package-entrypoint-processes", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_process_summary", prop: "text" }] },
                     { id: "real-hub-package-entrypoint-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_diagnostics_summary", prop: "text" }] },
+                    { id: "real-hub-package-configure-action", primitive: "action", bindings: [{ source: "entity", path: "@/configure_action", prop: "action" }] },
                     { id: "real-hub-package-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/diagnostics_summary", prop: "text" }] }
                   ]
                 }
@@ -656,6 +789,32 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                 id: "real-hub-packages-empty",
                 primitive: "empty_state",
                 props: { title: "No installed packages", body: "This daemon returned an empty package registry." }
+              }
+            ]
+          }
+        },
+        {
+          id: "real-hub-package-configuration-list",
+          primitive: "list",
+          props: { label: "Package configuration" },
+          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items", where: { configurable: true } }],
+          slots: {
+            item: [
+              {
+                id: "real-hub-package-configuration-form",
+                primitive: "form",
+                bindings: [
+                  { source: "entity", path: "@/configuration_title", prop: "title" },
+                  { source: "entity", path: "@/configuration_fields", prop: "fields" },
+                  { source: "entity", path: "@/configuration_submit", prop: "submit" }
+                ]
+              }
+            ],
+            empty: [
+              {
+                id: "real-hub-package-configuration-empty",
+                primitive: "empty_state",
+                props: { title: "No package configuration", body: "Installed packages did not expose configuration schema." }
               }
             ]
           }

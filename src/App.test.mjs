@@ -145,6 +145,7 @@ assert.doesNotMatch(realHubDaemonDto, /export interface DaemonPackage\s*\{/);
 assert.doesNotMatch(realHubDaemonDto, /export type DaemonEvent\s*=/);
 assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client Rust serde DTOs/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_packages" \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "set_package_configuration"; package_name: string; values: Record<string, JsonValue> \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "install_package_local_path"; path: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "start_package_entrypoint"; package_name: string; entrypoint_id: string; environment_overrides\?: Record<string, string> \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue \}/);
@@ -153,6 +154,11 @@ assert.match(generatedDaemonProtocol, /export interface DaemonPackage/);
 assert.match(generatedDaemonProtocol, /package_name: string/);
 assert.match(generatedDaemonProtocol, /requested_capabilities: DaemonCapability\[\]/);
 assert.match(generatedDaemonProtocol, /runnable_entrypoints: DaemonPackageRunnableEntrypoint\[\]/);
+assert.match(generatedDaemonProtocol, /configuration: DaemonPackageConfiguration;/);
+assert.match(generatedDaemonProtocol, /export interface DaemonPackageConfiguration/);
+assert.match(generatedDaemonProtocol, /schema\?: JsonValue \| null;/);
+assert.match(generatedDaemonProtocol, /effective_values\?: Record<string, JsonValue>;/);
+assert.match(generatedDaemonProtocol, /missing_required\?: string\[\];/);
 assert.match(generatedDaemonProtocol, /export interface DaemonPackageProcess/);
 assert.match(generatedDaemonProtocol, /pid\?: number;/);
 assert.match(generatedDaemonProtocol, /diagnostics\?: DaemonDiagnostic\[\]/);
@@ -168,6 +174,9 @@ assert.match(realHubDogfoodTransport, /daemonResponseFrames/);
 assert.match(realHubDogfoodTransport, /realHubDogfoodUiTreeSnapshot/);
 assert.match(realHubDogfoodTransport, /const packageFamily = "botster-web\.package"/);
 assert.match(realHubDogfoodTransport, /bridge\.request\(\{ type: "list_packages" \}\)/);
+assert.match(realHubDogfoodTransport, /type: "set_package_configuration"/);
+assert.match(realHubDogfoodTransport, /botster\.package\.configuration\.save/);
+assert.match(realHubDogfoodTransport, /botster\.package\.configure/);
 assert.match(realHubDogfoodTransport, /family: packageFamily/);
 assert.doesNotMatch(realHubDogfoodTransport, /install_package|enable_package|disable_package|remove_package|start_package|stop_package|restart_package|retry_package/);
 assert.match(realHubTerminalDataPlane, /streamTerminal/);
@@ -620,11 +629,23 @@ const {
 
 assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), [
   "list_packages",
+  "set_package_configuration",
   "install_package_local_path",
   "start_package_entrypoint",
   "plugin_surface_render",
   "plugin_surface_action"
 ]);
+assert.deepEqual(
+  generatedDaemonRequestFixtures.find((request) => request.type === "set_package_configuration"),
+  {
+    type: "set_package_configuration",
+    package_name: "project-pipelines",
+    values: {
+      endpoint: { type: "url", value: "https://example.invalid/hook" },
+      api_token: { type: "secret", state: "write_only" }
+    }
+  }
+);
 assert.deepEqual(
   generatedDaemonRequestFixtures.find((request) => request.type === "plugin_surface_render"),
   {
@@ -806,6 +827,44 @@ await runtime.entities.replayActivePulls();
 await runtime.hub.replaySurfaceSubscriptions();
 assert.deepEqual(transport.sent.map((frame) => frame.kind), ["entity_pull", "surface_subscribe"]);
 
+const configurablePackageConfiguration = {
+  schema: {
+    fields: [
+      { key: "endpoint", type: "url", label: "Webhook endpoint", required: true },
+      {
+        key: "mode",
+        type: "select",
+        label: "Mode",
+        default: { type: "select", value: "read" },
+        options: [
+          { value: "read", label: "Read" },
+          { value: "write", label: "Write" }
+        ]
+      },
+      { key: "enabled", type: "boolean", label: "Enabled", default: { type: "boolean", value: true } },
+      { key: "api_token", type: "secret", label: "API token", required: true, default: { type: "secret", state: "unset" } }
+    ]
+  },
+  effective_values: {
+    mode: { type: "select", value: "read" },
+    enabled: { type: "boolean", value: true },
+    api_token: { type: "secret", state: "redacted" }
+  },
+  missing_required: ["endpoint"],
+  diagnostics: []
+};
+const configuredPackageConfiguration = {
+  ...configurablePackageConfiguration,
+  effective_values: {
+    endpoint: { type: "url", value: "https://example.invalid/hook" },
+    mode: { type: "select", value: "read" },
+    enabled: { type: "boolean", value: true },
+    api_token: { type: "secret", state: "redacted" }
+  },
+  missing_required: []
+};
+const emptyPackageConfiguration = {};
+
 const bridgeRequests = [];
 const bridgeTerminalStreams = [];
 const bridge = {
@@ -909,6 +968,7 @@ const bridge = {
                 }
               }
             ],
+            configuration: configurablePackageConfiguration,
             provider_profile_admitted: false
           },
           {
@@ -937,6 +997,7 @@ const bridge = {
                 }
               }
             ],
+            configuration: emptyPackageConfiguration,
             provider_profile_admitted: false
           },
           {
@@ -946,6 +1007,7 @@ const bridge = {
             state: "installed",
             requested_capabilities: [],
             runnable_entrypoints: [],
+            configuration: emptyPackageConfiguration,
             provider_profile_admitted: false
           }
         ],
@@ -957,6 +1019,31 @@ const bridge = {
             message: "Package registry listed"
           }
         ]
+      };
+    }
+
+    if (request.type === "set_package_configuration") {
+      const endpoint = request.values.endpoint;
+      const configuration =
+        endpoint && typeof endpoint === "object" && "value" in endpoint && endpoint.value
+          ? configuredPackageConfiguration
+          : configurablePackageConfiguration;
+      return {
+        kind: "packages",
+        packages: [
+          {
+            package_name: request.package_name,
+            version: "0.8.0",
+            classification: "plugin",
+            state: "enabled",
+            requested_capabilities: [{ surface: "SessionActions", scope: "project-pipelines" }],
+            runnable_entrypoints: [],
+            configuration,
+            provider_profile_admitted: false
+          }
+        ],
+        events: [],
+        diagnostics: []
       };
     }
 
@@ -1187,10 +1274,62 @@ await realTransport.send({
   }
 });
 await flushMicrotasks();
+await realTransport.send({
+  kind: "action_request",
+  payload: {
+    request_id: "real-config-save-missing-required",
+    origin: "ui_node",
+    action: {
+      id: "botster.package.configuration.save",
+      target: "project-pipelines",
+      params: {
+        values: {}
+      }
+    }
+  }
+});
+await flushMicrotasks();
+await realTransport.send({
+  kind: "action_request",
+  payload: {
+    request_id: "real-config-save-1",
+    origin: "ui_node",
+    action: {
+      id: "botster.package.configuration.save",
+      target: "project-pipelines",
+      params: {
+        values: {
+          endpoint: { type: "url", value: "https://example.invalid/hook" },
+          mode: { type: "select", value: "write" },
+          enabled: { type: "boolean", value: true }
+        }
+      }
+    }
+  }
+});
+await flushMicrotasks();
 assert.equal(bridgeRequests.some((request) => request.type === "status"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "list_sessions"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "spawn" && request.session_id === realHubDogfoodSessionId), true);
+const configSaveRequests = bridgeRequests.filter((request) => request.type === "set_package_configuration");
+assert.equal(configSaveRequests.length, 2);
+assert.deepEqual(configSaveRequests[0], {
+  type: "set_package_configuration",
+  package_name: "project-pipelines",
+  values: {}
+});
+const configSaveRequest = configSaveRequests[1];
+assert.deepEqual(configSaveRequest, {
+  type: "set_package_configuration",
+  package_name: "project-pipelines",
+  values: {
+    endpoint: { type: "url", value: "https://example.invalid/hook" },
+    mode: { type: "select", value: "write" },
+    enabled: { type: "boolean", value: true }
+  }
+});
+assert.doesNotMatch(JSON.stringify(configSaveRequest), /api_token|redacted|write_only|super-secret-token/);
 assert.equal(realFrames.some((frame) => frame.kind === "ui_tree_snapshot"), true);
 assert.equal(realFrames.some((frame) => frame.kind === "entity_snapshot"), true);
 assert.equal(
@@ -1936,6 +2075,7 @@ try {
             }
           }
         ],
+        configuration: configurablePackageConfiguration,
         provider_profile_admitted: false
       },
       {
@@ -1964,6 +2104,7 @@ try {
             }
           }
         ],
+        configuration: emptyPackageConfiguration,
         provider_profile_admitted: false
       },
       {
@@ -1992,6 +2133,7 @@ try {
             }
           }
         ],
+        configuration: emptyPackageConfiguration,
         provider_profile_admitted: false
       }
     ]
@@ -2045,6 +2187,18 @@ try {
   assert.match(realHubMarkup, /worker failed/);
   assert.match(realHubMarkup, /exit_status exit:42/);
   assert.match(realHubMarkup, /worker stderr: fixture failure/);
+  assert.match(realHubMarkup, /Package configuration/);
+  assert.match(realHubMarkup, /project-pipelines configuration/);
+  assert.match(realHubMarkup, /Webhook endpoint \*/);
+  assert.match(realHubMarkup, /API token \*/);
+  assert.match(realHubMarkup, /Mode/);
+  assert.match(realHubMarkup, /Enabled/);
+  assert.match(realHubMarkup, /Required configuration is missing/);
+  assert.match(realHubMarkup, /Existing secret is saved/);
+  assert.match(realHubMarkup, /Save configuration/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.configuration\.save"/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.configure"/);
+  assert.doesNotMatch(realHubMarkup, /write_only|super-secret-token/);
   assert.match(realHubMarkup, /Diagnostic action failure/);
   assert.match(realHubMarkup, /Run missing-session diagnostic/);
   assert.match(realHubMarkup, /Session not found/);
