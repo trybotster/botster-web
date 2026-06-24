@@ -155,6 +155,7 @@ Expected proof markers:
 - `Local hub bridge unavailable` or `Control stream disconnected` means the browser could not complete a bridge request or the bridge stopped while the dogfood surface was loading. Check that `npm run dogfood:hub` is still running and that Vite was opened with `?dogfood=real-hub`.
 - `Terminal stream unavailable` is scoped to the terminal data-plane seam. The control-plane surface can still render status, sessions, and action errors when the held terminal SSE stream is missing or rejected.
 - `Spawn isolated session` sends `DaemonRequest::Spawn` and updates entity-backed session rows. Package rows expose configuration forms when `DaemonPackage.configuration.schema.fields` is present. Saving sends `DaemonRequest::SetPackageConfiguration` with form values only; required markers and validation messages reflect hub-returned configuration state, and redacted secrets render as blank replacement fields.
+- Descriptor-backed package app and settings surfaces render through `DaemonRequest::PluginSurfaceRender`. The local `botster-web` package declares `dogfood-app` and `dogfood-settings`, and the bridge returns deterministic visible output for those surface ids.
 - Package install, enable, disable, remove, start, stop, restart, and retry controls remain outside this slice.
 - A compatible current hub build should stream `botster-web-dogfood-ready` through the terminal SSE path; typing in the terminal sends `DaemonRequest::SendInput` while the held stream receives live terminal output.
 - `Run missing-session diagnostic` sends a deliberately invalid daemon request and surfaces the result as diagnostic/debug state without replacing the primary spawn action status.
@@ -220,6 +221,15 @@ health: http://127.0.0.1:41739/health
 ```
 
 `GET /`, `GET /?dogfood=real-hub`, and SPA fallback routes return the built `dist/index.html`. The bridge injects a package-runtime marker into served HTML so the app uses real-hub mode from the package server without a Vite build-time flag, and `src/App.tsx` derives the bridge URL from the page origin so non-default package ports still post to the same server. Static assets are served from `dist` without marker injection.
+
+The manifest also declares descriptor-backed UI surfaces:
+
+```text
+app:      dogfood-app
+settings: dogfood-settings
+```
+
+When loaded through `cargo run -- dogfood --web-package-path ../botster-web`, the Apps and Settings package launcher entries should list those descriptors. Clicking either entry sends `PluginSurfaceRender` for `package_name: botster-web` and shows deterministic output naming the selected surface id.
 
 When the hub supervises this entrypoint, it should provide `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR`. Either value selects existing-hub attach mode, so the bridge does not require `BOTSTER_HUB_BIN`, does not spawn a second hub, does not shut down the attached hub, and does not remove the attached hub data directory.
 

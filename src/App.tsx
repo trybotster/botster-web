@@ -89,6 +89,32 @@ function isAttachableSession(record: Record<string, unknown> | undefined): recor
   return Boolean(record && typeof record.id === "string" && record.status === "running" && record.attachable === true);
 }
 
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function pluginSurfaceStatus(result: unknown): string | undefined {
+  const pluginSurface = readRecord(readRecord(result).plugin_surface);
+  const packageName = readString(pluginSurface.package_name);
+  const surfaceId = readString(pluginSurface.surface_id);
+
+  if (!packageName || !surfaceId) {
+    return undefined;
+  }
+
+  const title = readString(pluginSurface.title) ?? "Plugin surface";
+  const body = readString(pluginSurface.body);
+  return body
+    ? `${title}: ${body} (${packageName}/${surfaceId})`
+    : `${title} rendered (${packageName}/${surfaceId})`;
+}
+
 export default function App() {
   const dogfoodRuntime = useMemo(
     () => {
@@ -211,6 +237,9 @@ export default function App() {
       updateLocalState({ [statusKey]: `Dispatching ${action.id}` });
       void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
         const isAttachAction = action.id === "botster.session.attach";
+        const renderedSurfaceStatus = action.id === "botster.package.surface.render"
+          ? pluginSurfaceStatus(result.result)
+          : undefined;
         if (result.accepted && isAttachAction && action.target) {
           setSelectedRealHubTerminalSessionId(action.target);
         }
@@ -221,7 +250,8 @@ export default function App() {
               ? `Attached terminal panel to ${action.target}.`
             : result.accepted
               ? `Accepted ${action.id}`
-              : result.reason ?? `Rejected ${action.id}`
+              : result.reason ?? `Rejected ${action.id}`,
+          ...(renderedSurfaceStatus ? { "dogfood.plugin_surface_status": renderedSurfaceStatus } : {})
         });
         recordDiagnostic(actionFailureDiagnostic(action, result));
       });
