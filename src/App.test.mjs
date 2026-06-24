@@ -104,6 +104,15 @@ assert.match(app, /dogfood\.diagnostic_action_status/);
 assert.match(app, /dogfood\.plugin_surface_status/);
 assert.match(app, /terminalUnavailableDiagnostic/);
 assert.match(app, /surfaceSnapshot \?\? loadingSnapshot/);
+assert.match(app, /packageAppSurfaces\(app\)/);
+assert.match(app, /packageSettingsSurfaces\(app\)/);
+assert.match(app, /dispatchAction\(launchAction\)/);
+assert.match(app, /surfaceLaunchAction\(surface\)/);
+assert.match(app, /aria-label="Rendered package surface"/);
+assert.doesNotMatch(app, /function pluginViewSurface/);
+assert.doesNotMatch(app, /function pluginSettingsSurface/);
+assert.doesNotMatch(app, /app\.view_surface(?!s)|app\.plugin_view_surface|app\.primary_surface|app\.ui_surface/);
+assert.doesNotMatch(app, /app\.settings_surface(?!s)|app\.plugin_settings_surface/);
 assert.doesNotMatch(app, /fixtureEntityFrames/);
 assert.doesNotMatch(app, /uiNodeConformanceSnapshot/);
 assert.doesNotMatch(app, /createInMemoryEntityFrameStore\(fixtureEntityFrames\)/);
@@ -2318,7 +2327,14 @@ try {
     { realHubDogfoodUiTreeSnapshot },
     { ConnectionDiagnosticsPanel },
     { DogfoodFirstScreen },
-    { createInMemoryEntityFrameStore }
+    { createInMemoryEntityFrameStore },
+    {
+      PluginListItem,
+      PluginSettingsPanel,
+      packageAppSurfaces,
+      packageSettingsSurfaces,
+      surfaceLaunchAction
+    }
   ] = await Promise.all([
     vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
     vite.ssrLoadModule("/src/botster/__fixtures__/uiNodeConformance.ts"),
@@ -2326,8 +2342,147 @@ try {
     vite.ssrLoadModule("/src/botster/realHubDogfoodTransport.ts"),
     vite.ssrLoadModule("/src/botster/ConnectionDiagnosticsPanel.tsx"),
     vite.ssrLoadModule("/src/botster/dogfoodFirstScreen.tsx"),
-    vite.ssrLoadModule("/src/botster/entities.ts")
+    vite.ssrLoadModule("/src/botster/entities.ts"),
+    vite.ssrLoadModule("/src/App.tsx")
   ]);
+
+  function findReactElement(node, predicate) {
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const match = findReactElement(child, predicate);
+        if (match) return match;
+      }
+      return undefined;
+    }
+    if (!node || typeof node !== "object") return undefined;
+    if ("props" in node && predicate(node)) return node;
+    const children = "props" in node ? node.props.children : undefined;
+    const queue = Array.isArray(children) ? children : [children];
+    for (const child of queue) {
+      const match = findReactElement(child, predicate);
+      if (match) return match;
+    }
+    return undefined;
+  }
+
+  const descriptorApp = {
+    id: "descriptor-only",
+    title: "Descriptor Only",
+    version: "1.0.0",
+    capability_summary: "PackageSurfaces:render",
+    app_surfaces: [
+      {
+        surface_id: "dogfood-app",
+        title: "Descriptor Dogfood",
+        description: "Descriptor-backed app surface",
+        launch_action: {
+          id: "botster.package.surface.render",
+          target: "descriptor-only",
+          label: "Descriptor Dogfood",
+          params: {
+            package_name: "descriptor-only",
+            surface_id: "dogfood-app",
+            surface_kind: "app",
+            supports: ["render"]
+          }
+        }
+      }
+    ],
+    settings_surfaces: [
+      {
+        surface_id: "dogfood-settings",
+        title: "Descriptor Settings",
+        description: "Descriptor-backed settings surface",
+        launch_action: {
+          id: "botster.package.surface.render",
+          target: "descriptor-only",
+          label: "Descriptor Settings",
+          params: {
+            package_name: "descriptor-only",
+            surface_id: "dogfood-settings",
+            surface_kind: "settings",
+            supports: ["render"]
+          }
+        }
+      }
+    ]
+  };
+  const legacyOnlyApp = {
+    id: "legacy-only",
+    title: "Legacy Only",
+    version: "0.9.0",
+    capability_summary: "PackageSurfaces:legacy",
+    view_surface: { id: "legacy-view", title: "Legacy View" },
+    settings_surface: { id: "legacy-settings", title: "Legacy Settings" }
+  };
+  const openedSurfaces = [];
+  const openedSettings = [];
+  const descriptorListMarkup = renderToStaticMarkup(
+    createElement(PluginListItem, {
+      app: descriptorApp,
+      onOpen: () => undefined,
+      onOpenSurface: (appRecord, surface) => openedSurfaces.push({ appRecord, surface }),
+      onSettings: (appRecord) => openedSettings.push(appRecord)
+    })
+  );
+  assert.match(descriptorListMarkup, /Descriptor Only/);
+  assert.match(descriptorListMarkup, /Descriptor Dogfood/);
+  assert.match(descriptorListMarkup, /1 UI/);
+  assert.match(descriptorListMarkup, /surface-action-row/);
+  assert.equal(packageAppSurfaces(descriptorApp).length, 1);
+  assert.equal(packageSettingsSurfaces(descriptorApp).length, 1);
+  assert.equal(surfaceLaunchAction(packageAppSurfaces(descriptorApp)[0]).id, "botster.package.surface.render");
+
+  const descriptorListTree = PluginListItem({
+    app: descriptorApp,
+    onOpen: () => undefined,
+    onOpenSurface: (appRecord, surface) => openedSurfaces.push({ appRecord, surface }),
+    onSettings: (appRecord) => openedSettings.push(appRecord)
+  });
+  const descriptorLaunchButton = findReactElement(
+    descriptorListTree,
+    (element) => element.props?.children === "Descriptor Dogfood" && typeof element.props?.onClick === "function"
+  );
+  assert.ok(descriptorLaunchButton);
+  descriptorLaunchButton.props.onClick({ stopPropagation() {} });
+  assert.equal(openedSurfaces.length, 1);
+  assert.equal(openedSurfaces[0].appRecord.id, "descriptor-only");
+  assert.deepEqual(surfaceLaunchAction(openedSurfaces[0].surface), descriptorApp.app_surfaces[0].launch_action);
+
+  const dispatchedSettings = [];
+  const descriptorSettingsMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsPanel, {
+      app: descriptorApp,
+      onAction: (action) => dispatchedSettings.push(action)
+    })
+  );
+  assert.match(descriptorSettingsMarkup, /Descriptor Settings/);
+  assert.match(descriptorSettingsMarkup, /Descriptor-backed settings surface/);
+  const descriptorSettingsTree = PluginSettingsPanel({
+    app: descriptorApp,
+    onAction: (action) => dispatchedSettings.push(action)
+  });
+  const descriptorSettingsItem = findReactElement(
+    descriptorSettingsTree,
+    (element) => typeof element.props?.onClick === "function"
+  );
+  assert.ok(descriptorSettingsItem);
+  descriptorSettingsItem.props.onClick();
+  assert.deepEqual(dispatchedSettings, [descriptorApp.settings_surfaces[0].launch_action]);
+
+  const legacyListMarkup = renderToStaticMarkup(
+    createElement(PluginListItem, {
+      app: legacyOnlyApp,
+      onOpen: () => undefined,
+      onOpenSurface: (appRecord, surface) => openedSurfaces.push({ appRecord, surface }),
+      onSettings: (appRecord) => openedSettings.push(appRecord)
+    })
+  );
+  assert.match(legacyListMarkup, /Legacy Only/);
+  assert.match(legacyListMarkup, /No UI/);
+  assert.doesNotMatch(legacyListMarkup, /Legacy View|Legacy Settings|surface-action-row/);
+  assert.equal(packageAppSurfaces(legacyOnlyApp).length, 0);
+  assert.equal(packageSettingsSurfaces(legacyOnlyApp).length, 0);
 
   const collectedActions = [];
   const markup = renderToStaticMarkup(

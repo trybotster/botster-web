@@ -214,6 +214,13 @@ body {
   color: var(--ion-color-primary);
 }
 
+.surface-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
 .dashboard-main {
   display: grid;
   gap: 14px;
