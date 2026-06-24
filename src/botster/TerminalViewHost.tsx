@@ -16,11 +16,6 @@ const defaultDescriptor: TerminalViewDescriptor = {
   sessionId: "terminal_view_smoke_session",
   renderer: "restty"
 };
-const placeholderCellSize = {
-  height: 18,
-  width: 9
-};
-
 export interface TerminalViewHostProps {
   bridge?: TerminalViewBridge;
   dataPlane?: TerminalDataPlaneAttachment;
@@ -58,33 +53,8 @@ export function TerminalViewHost({
 
     let cancelled = false;
     let mount: TerminalViewMount | undefined;
-    let observer: ResizeObserver | undefined;
     let statusSubscription: { unsubscribe(): void } | undefined;
     let uninstallLiveHarnessTerminalControls: (() => void) | undefined;
-    let scheduledResize: number | undefined;
-    let lastResize: { rows: number; columns: number } | undefined;
-
-    const resize = () => {
-      // Placeholder metrics until the Restty adapter exposes measured cell dimensions.
-      const rows = Math.max(4, Math.floor(container.clientHeight / placeholderCellSize.height));
-      const columns = Math.max(20, Math.floor(container.clientWidth / placeholderCellSize.width));
-      if (lastResize?.rows === rows && lastResize.columns === columns) return;
-      lastResize = { rows, columns };
-      void bridge.resize(descriptor, rows, columns).catch(() => {
-        if (!cancelled) {
-          container.dataset.terminalResize = "failed";
-        }
-      });
-    };
-    const scheduleResize = () => {
-      if (scheduledResize !== undefined) return;
-      scheduledResize = window.requestAnimationFrame(() => {
-        scheduledResize = undefined;
-        if (!cancelled) {
-          resize();
-        }
-      });
-    };
 
     void bridge
       .mount(container, descriptor)
@@ -100,9 +70,6 @@ export function TerminalViewHost({
         uninstallLiveHarnessTerminalControls = installLiveHarnessTerminalControls(bridge, descriptor);
         setMountDiagnostic(undefined);
         container.dataset.terminalMount = "mounted";
-        scheduleResize();
-        observer = new ResizeObserver(scheduleResize);
-        observer.observe(container);
       })
       .catch((error: unknown) => {
         container.dataset.terminalMount = "failed";
@@ -117,12 +84,8 @@ export function TerminalViewHost({
 
     return () => {
       cancelled = true;
-      observer?.disconnect();
       statusSubscription?.unsubscribe();
       uninstallLiveHarnessTerminalControls?.();
-      if (scheduledResize !== undefined) {
-        window.cancelAnimationFrame(scheduledResize);
-      }
       if (mount) {
         void bridge.unmount(descriptor, mount);
       }
@@ -146,16 +109,6 @@ export function TerminalViewHost({
         data-terminal-renderer={descriptor.renderer}
         data-terminal-session-id={descriptor.sessionId}
         role="region"
-        tabIndex={0}
-        onFocus={() => {
-          void bridge.focus(descriptor).catch((error: unknown) => {
-            const container = terminalRef.current;
-            if (container) {
-              container.dataset.terminalFocus = "failed";
-            }
-            onDiagnosticRef.current?.(error);
-          });
-        }}
       />
       {mountDiagnostic ? (
         <div className="diagnostic-panel" data-terminal-diagnostic="mount-failed">

@@ -31,6 +31,7 @@ export interface TerminalDataPlaneAttachment {
 
 export interface TerminalRendererAdapter {
   mount(container: HTMLElement): void | Promise<void>;
+  attachDataPlane?(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription | void | Promise<TerminalSubscription | void>;
   onInput(listener: (data: TerminalInput) => void): TerminalSubscription;
   write(data: TerminalOutput): void | Promise<void>;
   resize(rows: number, columns: number): void | Promise<void>;
@@ -61,6 +62,7 @@ interface TerminalMountState {
   renderer: TerminalRendererAdapter;
   container: HTMLElement;
   dataPlane?: TerminalDataPlaneAttachment;
+  rendererDataPlaneSubscription?: TerminalSubscription;
   inputSubscription?: TerminalSubscription;
   outputSubscription?: TerminalSubscription;
   focusing?: boolean;
@@ -118,6 +120,15 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
 
     await this.detach(descriptor);
     state.dataPlane = dataPlane;
+
+    if (state.renderer.attachDataPlane) {
+      const subscription = await state.renderer.attachDataPlane(dataPlane);
+      if (subscription) {
+        state.rendererDataPlaneSubscription = subscription;
+      }
+      return;
+    }
+
     state.inputSubscription = state.renderer.onInput((data) => {
       void dataPlane.writeInput(data);
     });
@@ -137,8 +148,10 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
 
     state.inputSubscription?.unsubscribe();
     state.outputSubscription?.unsubscribe();
+    state.rendererDataPlaneSubscription?.unsubscribe();
     state.inputSubscription = undefined;
     state.outputSubscription = undefined;
+    state.rendererDataPlaneSubscription = undefined;
 
     if (state.dataPlane?.detach) {
       await state.dataPlane.detach();

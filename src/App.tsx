@@ -1,15 +1,29 @@
 import {
   IonApp,
+  IonBadge,
+  IonButton,
   IonButtons,
+  IonCard,
+  IonCardContent,
+  IonCardHeader,
+  IonCardSubtitle,
+  IonCardTitle,
   IonChip,
+  IonCol,
   IonContent,
+  IonGrid,
   IonHeader,
   IonIcon,
+  IonItem,
   IonLabel,
   IonList,
+  IonListHeader,
   IonMenu,
   IonMenuButton,
+  IonMenuToggle,
+  IonModal,
   IonPage,
+  IonRow,
   IonSplitPane,
   IonTitle,
   IonToolbar,
@@ -17,11 +31,18 @@ import {
 } from "@ionic/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  cogOutline,
+  constructOutline,
   cubeOutline,
   gitBranchOutline,
+  keyOutline,
   layersOutline,
-  radioButtonOnOutline,
-  terminalOutline
+  listCircleOutline,
+  openOutline,
+  powerOutline,
+  pricetagOutline,
+  refreshOutline,
+  serverOutline
 } from "ionicons/icons";
 
 import { TerminalViewHost } from "./botster/TerminalViewHost";
@@ -45,18 +66,25 @@ import {
 import { createDogfoodRuntimeConfig } from "./botster/dogfoodMode";
 import { realHubDogfoodSessionId } from "./botster/realHubDogfoodTransport";
 import type { ActionBinding } from "./botster/actions";
+import type { EntityFrameStore } from "./botster/entities";
 import type { TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
 
+const mobileUserAgentPattern = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
+
 setupIonicReact({
-  mode: "md"
+  mode: "md",
+  platform: {
+    desktop: (win) => !mobileUserAgentPattern.test(win.navigator.userAgent)
+  }
 });
 
-const navigationItems = [
-  { label: "Workbench", icon: layersOutline, active: true },
-  { label: "Entity Frames", icon: cubeOutline, active: false },
-  { label: "Actions", icon: radioButtonOnOutline, active: false },
-  { label: "Terminal", icon: terminalOutline, active: false }
+type AppView = "dashboard" | "apps" | "diagnostics";
+
+const navigationItems: Array<{ label: string; icon: string; view: AppView }> = [
+  { label: "Dashboard", icon: layersOutline, view: "dashboard" },
+  { label: "Apps", icon: cubeOutline, view: "apps" },
+  { label: "Diagnostics", icon: listCircleOutline, view: "diagnostics" }
 ];
 
 const loadingSnapshot: UiTreeSnapshot = {
@@ -149,6 +177,9 @@ export default function App() {
     session: "not_loaded",
     draft: "not_loaded"
   });
+  const [activeView, setActiveView] = useState<AppView>("dashboard");
+  const [selectedPackageId, setSelectedPackageId] = useState<string | undefined>();
+  const [settingsPackageId, setSettingsPackageId] = useState<string | undefined>();
   const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
@@ -264,16 +295,41 @@ export default function App() {
     },
     [recordDiagnostic]
   );
+  const openPackage = useCallback(
+    (app: Record<string, unknown>) => {
+      setSelectedPackageId(String(app.id));
+      const surface = pluginViewSurface(app);
+      if (surface) {
+        setSettingsPackageId(undefined);
+        void runtimeClient.hub.subscribeSurface({ surface, path: `/apps/${app.id}` });
+      } else {
+        setSettingsPackageId(String(app.id));
+      }
+    },
+    [runtimeClient]
+  );
+  const openPackageSettings = useCallback((app: Record<string, unknown>) => {
+    setSettingsPackageId(String(app.id));
+    setSelectedPackageId(String(app.id));
+  }, []);
   const packages = runtimeClient.entities.list("botster-web.package");
+  const selectedPackage = selectedPackageId
+    ? packages.find((app) => app.id === selectedPackageId)
+    : undefined;
+  const settingsPackage = settingsPackageId
+    ? packages.find((app) => app.id === settingsPackageId)
+    : undefined;
+  const packagesWithUi = packages.filter((app) => Boolean(pluginViewSurface(app)));
+  const packagesWithoutUi = packages.filter((app) => !pluginViewSurface(app));
   const sessions = runtimeClient.entities.list("botster-web.session");
   const attachableDogfoodSession = sessions.find((session) => session.id === realHubDogfoodSessionId && isAttachableSession(session));
   const selectedRealHubSession = selectedRealHubTerminalSessionId
     ? sessions.find((session) => session.id === selectedRealHubTerminalSessionId)
     : undefined;
   const selectedRealHubSessionAttachable = isAttachableSession(selectedRealHubSession);
-  const activeRealHubTerminalSessionId = selectedRealHubSessionAttachable
-    ? selectedRealHubTerminalSessionId
-    : attachableDogfoodSession?.id;
+  const selectedTerminalSessionId = selectedRealHubSessionAttachable ? selectedRealHubTerminalSessionId : undefined;
+  const defaultTerminalSessionId = attachableDogfoodSession ? String(attachableDogfoodSession.id) : undefined;
+  const activeRealHubTerminalSessionId = selectedTerminalSessionId ?? defaultTerminalSessionId;
   const terminalDescriptor: TerminalViewDescriptor | undefined = useMemo(
     () =>
       dogfoodRuntime.mode === "real-hub"
@@ -294,11 +350,68 @@ export default function App() {
     typeof localState["dogfood.action_status"] === "string"
       ? localState["dogfood.action_status"]
       : dogfoodRuntime.statusText;
+  const diagnosticActionStatus =
+    typeof localState["dogfood.diagnostic_action_status"] === "string"
+      ? localState["dogfood.diagnostic_action_status"]
+      : "No diagnostic action has been dispatched.";
+  const runningSessions = sessions.filter((session) => session.status === "running");
+  const blockingDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "danger");
+  const warningDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "warning");
+  const workflowSummaries = [
+    {
+      key: "connection",
+      label: "Connection",
+      value: dogfoodRuntime.mode === "real-hub" ? "Real hub" : "Fixture",
+      detail: dogfoodRuntime.statusText,
+      severity: blockingDiagnostics.length > 0 ? "danger" : warningDiagnostics.length > 0 ? "warning" : "success"
+    },
+    {
+      key: "packages",
+      label: "Packages",
+      value: entityLoadStatus.package === "loaded" ? String(packages.length) : loadStatusLabel(entityLoadStatus.package),
+      detail: packages.length === 1 ? "1 package record loaded" : `${packages.length} package records loaded`,
+      severity: entityLoadStatus.package === "error" ? "danger" : entityLoadStatus.package === "loaded" ? "success" : "info"
+    },
+    {
+      key: "sessions",
+      label: "Sessions",
+      value: runningSessions.length > 0 ? `${runningSessions.length} running` : loadStatusLabel(entityLoadStatus.session),
+      detail: sessions.length === 1 ? "1 session record loaded" : `${sessions.length} session records loaded`,
+      severity: entityLoadStatus.session === "error" ? "danger" : runningSessions.length > 0 ? "success" : "info"
+    },
+    {
+      key: "terminal",
+      label: "Terminal",
+      value: terminalDescriptor ? "Attached" : "Detached",
+      detail: terminalDescriptor ? `${terminalDescriptor.sessionId} via ${terminalDescriptor.renderer}` : "No attachable session selected",
+      severity: terminalDescriptor ? "success" : "info"
+    }
+  ] satisfies WorkflowSummary[];
+  const terminalPanel = terminalDescriptor && terminalDataPlane ? (
+    <TerminalViewHost
+      dataPlane={terminalDataPlane}
+      descriptor={terminalDescriptor}
+      onDiagnostic={recordTerminalDiagnostic}
+    />
+  ) : (
+    <aside className="terminal-panel" aria-labelledby="terminal-heading">
+      <div className="panel-heading">
+        <h2 id="terminal-heading">Terminal renderer</h2>
+      </div>
+      <p className="terminal-status" data-terminal-session-id="none">
+        Select a running session to attach the terminal panel.
+      </p>
+    </aside>
+  );
 
   return (
     <IonApp>
-      <IonSplitPane contentId="main-content" when="lg">
-        <IonMenu contentId="main-content" type="overlay" className="app-sidebar">
+      <IonSplitPane contentId="main-content" when="md" className="app-split-pane">
+        <IonMenu
+          contentId="main-content"
+          type="overlay"
+          className="app-sidebar"
+        >
           <IonHeader>
             <IonToolbar>
               <IonTitle>Botster</IonTitle>
@@ -308,17 +421,37 @@ export default function App() {
             <nav aria-label="Botster workbench">
               <IonList lines="none" className="nav-list">
                 {navigationItems.map((item) => (
-                  <button
-                    type="button"
-                    className={item.active ? "nav-item active" : "nav-item"}
-                    key={item.label}
-                    aria-current={item.active ? "page" : undefined}
-                  >
-                    <IonIcon icon={item.icon} aria-hidden="true" />
-                    <span>{item.label}</span>
-                  </button>
+                  <IonMenuToggle autoHide={false} key={item.label}>
+                    <button
+                      type="button"
+                      className={activeView === item.view ? "nav-item active" : "nav-item"}
+                      aria-current={activeView === item.view ? "page" : undefined}
+                      onClick={() => setActiveView(item.view)}
+                    >
+                      <IonIcon icon={item.icon} aria-hidden="true" />
+                      <span>{item.label}</span>
+                    </button>
+                  </IonMenuToggle>
                 ))}
               </IonList>
+              <div className="sidebar-section" aria-label="Installed app shortcuts">
+                <p className="sidebar-section-label">Apps</p>
+                {packages.slice(0, 5).map((app) => (
+                  <IonMenuToggle autoHide={false} key={app.id}>
+                    <button
+                      type="button"
+                      className="nav-item app-shortcut"
+                      onClick={() => {
+                        setActiveView("apps");
+                        openPackage(app);
+                      }}
+                    >
+                      <IonIcon icon={cubeOutline} aria-hidden="true" />
+                      <span>{stringValue(app.title, app.id)}</span>
+                    </button>
+                  </IonMenuToggle>
+                ))}
+              </div>
             </nav>
           </IonContent>
         </IonMenu>
@@ -344,60 +477,540 @@ export default function App() {
 
           <IonContent fullscreen>
             <main className="workspace-shell">
-              <DogfoodFirstScreen
-                mode={dogfoodRuntime.mode}
-                statusText={dogfoodRuntime.statusText}
-                diagnostics={diagnostics}
-                packages={packages}
-                packageLoadStatus={entityLoadStatus.package}
-                sessions={sessions}
-                sessionLoadStatus={entityLoadStatus.session}
-                actionStatus={actionStatus}
-              />
-
-              <section className="contract-strip" aria-label="Botster client contract">
-                {botsterWebClientContract.seams.map((seam) => (
-                  <IonChip key={seam} color="light">
-                    <IonLabel>{seam}</IonLabel>
-                  </IonChip>
-                ))}
-              </section>
-
-              <section className="workspace-grid" aria-label="Renderer workbench">
-                <div className="dogfood-main">
-                  <ConnectionDiagnosticsPanel diagnostics={diagnostics} />
-                  <UiNodeSurface
-                    snapshot={surfaceSnapshot ?? loadingSnapshot}
-                    entities={runtimeClient.entities}
-                    capabilities={{
-                      ...defaultUiCapabilitySet,
-                      isolated_plugin_asset: false
-                    }}
-                    localState={localState}
-                    onAction={dispatchAction}
-                  />
-                </div>
-                {terminalDescriptor && terminalDataPlane ? (
-                  <TerminalViewHost
-                    dataPlane={terminalDataPlane}
-                    descriptor={terminalDescriptor}
-                    onDiagnostic={recordTerminalDiagnostic}
-                  />
-                ) : (
-                  <aside className="terminal-panel" aria-labelledby="terminal-heading">
-                    <div className="panel-heading">
-                      <h2 id="terminal-heading">Terminal renderer</h2>
+              {activeView === "dashboard" ? (
+                <section className="view-stack" aria-labelledby="dashboard-heading" data-testid="dashboard-view">
+                  <div className="page-heading">
+                    <div>
+                      <p className="eyebrow">Home</p>
+                      <h1 id="dashboard-heading">Dashboard</h1>
                     </div>
-                    <p className="terminal-status" data-terminal-session-id="none">
-                      Select a running session to attach the terminal panel.
-                    </p>
-                  </aside>
-                )}
-              </section>
+                    <IonBadge color={blockingDiagnostics.length > 0 ? "danger" : "success"}>
+                      {blockingDiagnostics.length > 0 ? `${blockingDiagnostics.length} blocked` : "Ready"}
+                    </IonBadge>
+                  </div>
+                  <IonGrid className="workflow-overview" id="workflow-overview" aria-label="Workflow overview" data-testid="workflow-overview">
+                    <IonRow>
+                      {workflowSummaries.map((summary) => (
+                        <IonCol size="12" sizeMd="6" sizeLg="3" key={summary.key}>
+                          <IonCard className={`workflow-card ${summary.severity}`} data-testid={`workflow-${summary.key}`}>
+                            <IonCardHeader>
+                              <IonCardSubtitle>{summary.label}</IonCardSubtitle>
+                              <IonBadge color={badgeColor(summary.severity)}>{summary.value}</IonBadge>
+                            </IonCardHeader>
+                            <IonCardContent>{summary.detail}</IonCardContent>
+                          </IonCard>
+                        </IonCol>
+                      ))}
+                    </IonRow>
+                  </IonGrid>
+                  <IonGrid className="dashboard-layout" aria-label="Dashboard widgets">
+                    <IonRow>
+                      <IonCol size="12">
+                        <div className="dashboard-main">
+                          <section className="workflow-section" aria-labelledby="attention-heading">
+                            <div className="section-heading">
+                              <div>
+                                <p className="eyebrow">Attention</p>
+                                <h2 id="attention-heading">What needs attention</h2>
+                              </div>
+                              <IonBadge color={blockingDiagnostics.length > 0 ? "danger" : "medium"}>
+                                {blockingDiagnostics.length + warningDiagnostics.length}
+                              </IonBadge>
+                            </div>
+                            <IonGrid className="dashboard-widget-list">
+                              <IonRow>
+                                <IonCol size="12" sizeMd="4">
+                                  <DashboardWidget
+                                    title="Running sessions"
+                                    value={String(runningSessions.length)}
+                                    detail={runningSessions.length > 0 ? "Active terminal work is available." : "No session is running yet."}
+                                    severity={runningSessions.length > 0 ? "success" : "info"}
+                                  />
+                                </IonCol>
+                                <IonCol size="12" sizeMd="4">
+                                  <DashboardWidget
+                                    title="Installed apps"
+                                    value={String(packages.length)}
+                                    detail={packages.length > 0 ? "Apps are available from the Apps view." : "No plugin apps are loaded yet."}
+                                    severity={packages.length > 0 ? "success" : "warning"}
+                                  />
+                                </IonCol>
+                                <IonCol size="12" sizeMd="4">
+                                  <DashboardWidget
+                                    title="Diagnostics"
+                                    value={blockingDiagnostics.length > 0 ? "Blocked" : warningDiagnostics.length > 0 ? "Warnings" : "Healthy"}
+                                    detail={blockingDiagnostics[0]?.detail ?? warningDiagnostics[0]?.detail ?? "No blocking diagnostics are active."}
+                                    severity={blockingDiagnostics.length > 0 ? "danger" : warningDiagnostics.length > 0 ? "warning" : "success"}
+                                  />
+                                </IonCol>
+                              </IonRow>
+                            </IonGrid>
+                          </section>
+                          <section className="workflow-section" aria-labelledby="plugin-widgets-heading">
+                            <div className="section-heading">
+                              <div>
+                                <p className="eyebrow">Plugin widgets</p>
+                                <h2 id="plugin-widgets-heading">Dashboard widgets</h2>
+                              </div>
+                              <IonBadge color="medium">Host managed</IonBadge>
+                            </div>
+                            <IonGrid className="plugin-widget-grid">
+                              <IonRow>
+                                {packages.length > 0 ? packages.slice(0, 3).map((app) => (
+                                  <IonCol size="12" sizeMd="4" key={app.id}>
+                                    <IonCard className="plugin-widget">
+                                      <IonCardHeader>
+                                        <IonCardSubtitle>
+                                          <IonIcon icon={cubeOutline} aria-hidden="true" />
+                                          App
+                                        </IonCardSubtitle>
+                                        <IonCardTitle>{stringValue(app.title, app.id)}</IonCardTitle>
+                                      </IonCardHeader>
+                                      <IonCardContent>
+                                        {stringValue(app.diagnostics_summary, stringValue(app.status, "Loaded"))}
+                                      </IonCardContent>
+                                    </IonCard>
+                                  </IonCol>
+                                )) : (
+                                  <IonCol size="12">
+                                    <p className="entity-empty">No plugin dashboard widgets are registered yet.</p>
+                                  </IonCol>
+                                )}
+                              </IonRow>
+                            </IonGrid>
+                          </section>
+                        </div>
+                      </IonCol>
+                    </IonRow>
+                  </IonGrid>
+                </section>
+              ) : null}
+
+              {activeView === "apps" ? (
+                <section className="view-stack" aria-labelledby="apps-heading" data-testid="apps-view">
+                  <div className="page-heading">
+                    <div>
+                      <p className="eyebrow">Launcher</p>
+                      <h1 id="apps-heading">Apps</h1>
+                    </div>
+                    <IonBadge color="medium">{packages.length}</IonBadge>
+                  </div>
+                  {packages.length > 0 ? (
+                    <>
+                      <IonList lines="full" aria-label="Installed apps">
+                        {packagesWithUi.length > 0 ? (
+                          <>
+                            <IonListHeader>
+                              <IonLabel>Apps with UI</IonLabel>
+                            </IonListHeader>
+                            {packagesWithUi.map((app) => (
+                              <PluginListItem
+                                app={app}
+                                key={app.id}
+                                onOpen={openPackage}
+                                onSettings={openPackageSettings}
+                              />
+                            ))}
+                          </>
+                        ) : null}
+                        {packagesWithoutUi.length > 0 ? (
+                          <>
+                            <IonListHeader>
+                              <IonLabel>Settings only</IonLabel>
+                            </IonListHeader>
+                            {packagesWithoutUi.map((app) => (
+                              <PluginListItem
+                                app={app}
+                                key={app.id}
+                                onOpen={openPackage}
+                                onSettings={openPackageSettings}
+                              />
+                            ))}
+                          </>
+                        ) : null}
+                      </IonList>
+                      {selectedPackage && pluginViewSurface(selectedPackage) ? (
+                        <PluginViewPanel
+                          app={selectedPackage}
+                          snapshot={surfaceSnapshot}
+                          entities={runtimeClient.entities}
+                          localState={localState}
+                          onAction={dispatchAction}
+                        />
+                      ) : null}
+                    </>
+                  ) : (
+                    <article className="workflow-section">
+                      <div className="section-heading">
+                        <div>
+                          <p className="eyebrow">Apps</p>
+                          <h2>No apps loaded</h2>
+                        </div>
+                      </div>
+                      <p className="entity-empty">The package registry has not returned any app records.</p>
+                    </article>
+                  )}
+                </section>
+              ) : null}
+
+              {activeView === "diagnostics" ? (
+                <section className="view-stack" aria-labelledby="diagnostics-view-heading" data-testid="diagnostics-view">
+                  <div className="page-heading">
+                    <div>
+                      <p className="eyebrow">Operations</p>
+                      <h1 id="diagnostics-view-heading">Diagnostics</h1>
+                    </div>
+                    <IonBadge color={blockingDiagnostics.length > 0 ? "danger" : "medium"}>
+                      {diagnostics.length}
+                    </IonBadge>
+                  </div>
+                  <DogfoodFirstScreen
+                    mode={dogfoodRuntime.mode}
+                    statusText={dogfoodRuntime.statusText}
+                    diagnostics={diagnostics}
+                    packages={packages}
+                    packageLoadStatus={entityLoadStatus.package}
+                    sessions={sessions}
+                    sessionLoadStatus={entityLoadStatus.session}
+                    actionStatus={actionStatus}
+                  />
+                  <IonGrid className="workspace-grid" aria-label="Diagnostic workspace">
+                    <IonRow>
+                      <IonCol size="12" sizeLg="8">
+                        <div className="dogfood-main">
+                          <section className="workflow-section" aria-label="Renderer registry surface" data-testid="renderer-registry-workflow">
+                            <div className="section-heading">
+                              <div>
+                                <p className="eyebrow">Renderer surface</p>
+                                <h2>Renderer registry</h2>
+                              </div>
+                              <IonBadge color="medium">Diagnostic</IonBadge>
+                            </div>
+                            <UiNodeSurface
+                              snapshot={surfaceSnapshot ?? loadingSnapshot}
+                              entities={runtimeClient.entities}
+                              capabilities={{
+                                ...defaultUiCapabilitySet,
+                                isolated_plugin_asset: false
+                              }}
+                              localState={localState}
+                              onAction={dispatchAction}
+                            />
+                          </section>
+                          <section className="workflow-section contract-section" aria-label="Botster client contract" data-testid="client-contract">
+                            <div className="section-heading">
+                              <div>
+                                <p className="eyebrow">Client contract</p>
+                                <h2>Protocol surfaces under test</h2>
+                              </div>
+                              <IonBadge color="medium">{botsterWebClientContract.seams.length} seams</IonBadge>
+                            </div>
+                            <div className="contract-strip">
+                              {botsterWebClientContract.seams.map((seam) => (
+                                <IonChip key={seam} color="light">
+                                  <IonLabel>{seam}</IonLabel>
+                                </IonChip>
+                              ))}
+                            </div>
+                          </section>
+                          <div id="diagnostics-workflow" data-testid="diagnostics-workflow">
+                            <ConnectionDiagnosticsPanel diagnostics={diagnostics} />
+                          </div>
+                          <section className="workflow-section" id="entity-workflow" aria-labelledby="entity-workflow-heading" data-testid="entity-workflow">
+                            <div className="section-heading">
+                              <div>
+                                <p className="eyebrow">Entity frames</p>
+                                <h2 id="entity-workflow-heading">Loaded hub state</h2>
+                              </div>
+                              <IonBadge color="medium">{runtimeClient.entities.activePullCount()} active pulls</IonBadge>
+                            </div>
+                            <IonGrid className="entity-summary-grid">
+                              <IonRow>
+                                <IonCol size="12" sizeMd="6">
+                                  <EntityFamilyPanel
+                                    title="Packages"
+                                    records={packages}
+                                    emptyText="No package records loaded."
+                                    primaryField="title"
+                                    secondaryField="status"
+                                  />
+                                </IonCol>
+                                <IonCol size="12" sizeMd="6">
+                                  <EntityFamilyPanel
+                                    title="Sessions"
+                                    records={sessions}
+                                    emptyText="No session records loaded."
+                                    primaryField="title"
+                                    secondaryField="status"
+                                  />
+                                </IonCol>
+                              </IonRow>
+                            </IonGrid>
+                          </section>
+                          <section className="workflow-section" id="action-workflow" aria-labelledby="action-workflow-heading" data-testid="action-workflow">
+                            <div className="section-heading">
+                              <div>
+                                <p className="eyebrow">Actions</p>
+                                <h2 id="action-workflow-heading">Dispatch status</h2>
+                              </div>
+                              <IonIcon icon={serverOutline} aria-hidden="true" />
+                            </div>
+                            <dl className="action-status-list">
+                              <div>
+                                <dt>Spawn session</dt>
+                                <dd>{actionStatus}</dd>
+                              </div>
+                              <div>
+                                <dt>Diagnostic action</dt>
+                                <dd>{diagnosticActionStatus}</dd>
+                              </div>
+                              <div>
+                                <dt>Terminal session</dt>
+                                <dd>{terminalDescriptor?.sessionId ?? "No terminal session attached"}</dd>
+                              </div>
+                            </dl>
+                          </section>
+                        </div>
+                      </IonCol>
+                      <IonCol size="12" sizeLg="4">
+                        {terminalPanel}
+                      </IonCol>
+                    </IonRow>
+                  </IonGrid>
+                </section>
+              ) : null}
             </main>
           </IonContent>
         </IonPage>
       </IonSplitPane>
+      <IonModal
+        isOpen={Boolean(settingsPackage)}
+        initialBreakpoint={0.85}
+        breakpoints={[0.5, 0.85, 1]}
+        handle
+        onDidDismiss={() => setSettingsPackageId(undefined)}
+      >
+        <IonHeader>
+          <IonToolbar>
+            <IonTitle>{settingsPackage ? appDisplayName(settingsPackage.title, String(settingsPackage.id)) : "Plugin"}</IonTitle>
+            <IonButtons slot="end">
+              <IonButton onClick={() => setSettingsPackageId(undefined)}>Close</IonButton>
+            </IonButtons>
+          </IonToolbar>
+        </IonHeader>
+        <IonContent>
+          {settingsPackage ? <PluginSettingsPanel app={settingsPackage} /> : null}
+        </IonContent>
+      </IonModal>
     </IonApp>
   );
+}
+
+interface WorkflowSummary {
+  key: string;
+  label: string;
+  value: string;
+  detail: string;
+  severity: "success" | "info" | "warning" | "danger";
+}
+
+interface EntityFamilyPanelProps {
+  title: string;
+  records: Record<string, unknown>[];
+  emptyText: string;
+  primaryField: string;
+  secondaryField: string;
+}
+
+function DashboardWidget({ title, value, detail, severity }: Omit<WorkflowSummary, "key" | "label"> & { title: string }) {
+  return (
+    <IonCard className={`dashboard-widget ${severity}`}>
+      <IonCardHeader>
+        <IonCardTitle>{title}</IonCardTitle>
+        <IonBadge color={badgeColor(severity)}>{value}</IonBadge>
+      </IonCardHeader>
+      <IonCardContent>{detail}</IonCardContent>
+    </IonCard>
+  );
+}
+
+function EntityFamilyPanel({ title, records, emptyText, primaryField, secondaryField }: EntityFamilyPanelProps) {
+  return (
+    <IonCard className="entity-family-panel">
+      <div className="entity-family-heading">
+        <h3>{title}</h3>
+        <IonBadge color="medium">{records.length}</IonBadge>
+      </div>
+      {records.length > 0 ? (
+        <div className="entity-record-list">
+          {records.slice(0, 4).map((record) => (
+            <div className="entity-record-row" key={String(record.id)}>
+              <strong>{stringValue(record[primaryField], String(record.id))}</strong>
+              <span>{stringValue(record[secondaryField], "unknown")}</span>
+            </div>
+          ))}
+          {records.length > 4 ? <p className="entity-overflow">{records.length - 4} more records loaded.</p> : null}
+        </div>
+      ) : (
+        <p className="entity-empty">{emptyText}</p>
+      )}
+    </IonCard>
+  );
+}
+
+interface PluginListItemProps {
+  app: Record<string, unknown>;
+  onOpen: (app: Record<string, unknown>) => void;
+  onSettings: (app: Record<string, unknown>) => void;
+}
+
+function PluginListItem({ app, onOpen, onSettings }: PluginListItemProps) {
+  const hasUi = Boolean(pluginViewSurface(app));
+
+  return (
+    <IonItem
+      button
+      detail={hasUi}
+      onClick={() => onOpen(app)}
+    >
+      <IonIcon slot="start" icon={cubeOutline} color="primary" aria-hidden="true" />
+      <IonLabel>
+        <h2 title={stringValue(app.title, String(app.id))}>{appDisplayName(app.title, String(app.id))}</h2>
+        <p>
+          <IonIcon icon={pricetagOutline} aria-hidden="true" /> {stringValue(app.version, "unknown")}
+          {" "}
+          <IonIcon icon={keyOutline} aria-hidden="true" /> {capabilityCountLabel(app.capability_summary)}
+        </p>
+      </IonLabel>
+      <IonBadge slot="end" color={hasUi ? "primary" : "medium"}>
+        {hasUi ? "UI" : "Settings"}
+      </IonBadge>
+      <IonButton
+        slot="end"
+        fill="clear"
+        aria-label={`Settings for ${appDisplayName(app.title, String(app.id))}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onSettings(app);
+        }}
+      >
+        <IonIcon icon={cogOutline} slot="icon-only" aria-hidden="true" />
+      </IonButton>
+    </IonItem>
+  );
+}
+
+interface PluginViewPanelProps {
+  app: Record<string, unknown>;
+  snapshot?: UiTreeSnapshot;
+  entities: EntityFrameStore;
+  localState: Record<string, unknown>;
+  onAction: (action: ActionBinding) => void;
+}
+
+function PluginViewPanel({ app, snapshot, entities, localState, onAction }: PluginViewPanelProps) {
+  const surface = pluginViewSurface(app);
+  const surfaceReady = Boolean(surface && snapshot?.surface === surface);
+
+  if (!surfaceReady || !snapshot) {
+    return null;
+  }
+
+  return (
+    <UiNodeSurface
+      snapshot={snapshot}
+      entities={entities}
+      capabilities={{
+        ...defaultUiCapabilitySet,
+        isolated_plugin_asset: false
+      }}
+      localState={localState}
+      onAction={(action) => onAction(action)}
+    />
+  );
+}
+
+interface PluginSettingsPanelProps {
+  app: Record<string, unknown>;
+}
+
+function PluginSettingsPanel({ app }: PluginSettingsPanelProps) {
+  const settingsSurface = pluginSettingsSurface(app);
+  const status = stringValue(app.status, "unknown");
+  const enabled = status === "enabled";
+
+  return (
+    <IonList lines="full">
+      <IonItem button disabled={!settingsSurface}>
+        <IonIcon slot="start" icon={constructOutline} aria-hidden="true" />
+        <IonLabel>
+          <h2>Configure</h2>
+          <p>{settingsSurface ? `${capabilityCountLabel(app.capability_summary)} capabilities` : "No settings surface registered"}</p>
+        </IonLabel>
+      </IonItem>
+      <IonItem button disabled>
+        <IonIcon slot="start" icon={refreshOutline} aria-hidden="true" />
+        <IonLabel>
+          <h2>Reload</h2>
+          <p>{status}</p>
+        </IonLabel>
+      </IonItem>
+      <IonItem button disabled>
+        <IonIcon slot="start" icon={openOutline} aria-hidden="true" />
+        <IonLabel>
+          <h2>Update</h2>
+          <p>Current version {stringValue(app.version, "unknown")}</p>
+        </IonLabel>
+      </IonItem>
+      <IonItem button disabled>
+        <IonIcon slot="start" icon={powerOutline} aria-hidden="true" />
+        <IonLabel>
+          <h2>{enabled ? "Disable" : "Enable"}</h2>
+          <p>{status}</p>
+        </IonLabel>
+      </IonItem>
+    </IonList>
+  );
+}
+
+function loadStatusLabel(status: DogfoodEntityLoadStatus): string {
+  if (status === "not_loaded") return "Not loaded";
+  if (status === "loading") return "Loading";
+  if (status === "loaded") return "Loaded";
+  return "Error";
+}
+
+function stringValue(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+function appDisplayName(title: unknown, fallback: string): string {
+  return stringValue(title, fallback).replace(/[-_]+/g, " ");
+}
+
+function capabilityCountLabel(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value === "No requested capabilities") {
+    return "0";
+  }
+
+  return String(value.split(",").filter((part) => part.trim().length > 0).length);
+}
+
+function pluginViewSurface(app: Record<string, unknown>): string | undefined {
+  return firstString(app.view_surface, app.plugin_view_surface, app.primary_surface, app.ui_surface);
+}
+
+function pluginSettingsSurface(app: Record<string, unknown>): string | undefined {
+  return firstString(app.settings_surface, app.plugin_settings_surface);
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === "string" && value.length > 0);
+}
+
+function badgeColor(severity: WorkflowSummary["severity"]): string {
+  if (severity === "danger") return "danger";
+  if (severity === "warning") return "warning";
+  if (severity === "success") return "success";
+  return "medium";
 }

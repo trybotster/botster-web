@@ -7,8 +7,16 @@ body {
   background: var(--ion-background-color);
 }
 
+.app-split-pane {
+  --side-width: 196px;
+  --side-min-width: 196px;
+  --side-max-width: 196px;
+}
+
 .app-sidebar {
-  --width: 268px;
+  --width: 196px;
+  --min-width: 196px;
+  --max-width: 196px;
   --background: #10131a;
   color: #f6f7fb;
 }
@@ -16,6 +24,7 @@ body {
 .app-sidebar ion-toolbar {
   --background: #10131a;
   --color: #f6f7fb;
+  --min-height: 46px;
 }
 
 .app-sidebar ion-content {
@@ -23,34 +32,62 @@ body {
 }
 
 .nav-list {
-  padding: 10px;
+  --background: transparent;
+  padding: 6px;
+  background: transparent;
+}
+
+.app-sidebar ion-list {
+  --background: transparent;
   background: transparent;
 }
 
 .nav-item {
   width: 100%;
-  min-height: 42px;
+  min-height: 36px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  border: 0;
+  gap: 8px;
   border-radius: 6px;
   margin: 2px 0;
-  padding: 0 12px;
+  padding: 0 9px;
+  border: 0;
   background: transparent;
   color: #c6ccd8;
   font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: none;
   text-align: left;
 }
 
 .nav-item ion-icon {
-  font-size: 18px;
+  font-size: 16px;
 }
 
 .nav-item.active,
 .nav-item:hover {
   background: #1d2430;
   color: #ffffff;
+}
+
+.sidebar-section {
+  margin-top: 12px;
+  padding: 0 6px;
+}
+
+.sidebar-section-label {
+  margin: 0 0 4px;
+  padding: 0 9px;
+  color: #7d8797;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.app-shortcut {
+  color: #aeb6c4;
 }
 
 .app-header ion-toolbar {
@@ -68,6 +105,146 @@ body {
   width: min(1180px, calc(100% - 32px));
   margin: 0 auto;
   padding: 28px 0 40px;
+}
+
+.view-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.page-heading {
+  min-width: 0;
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.page-heading h1 {
+  margin: 0;
+  font-size: 32px;
+  line-height: 1.1;
+  letter-spacing: 0;
+}
+
+.workflow-card,
+.workflow-section {
+  min-width: 0;
+  border: 1px solid #d8dee7;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.workflow-card {
+  min-height: 96px;
+  height: 100%;
+  margin: 0;
+  border-left-width: 4px;
+}
+
+.workflow-card.success {
+  border-left-color: var(--ion-color-success);
+}
+
+.workflow-card.info {
+  border-left-color: var(--ion-color-medium);
+}
+
+.workflow-card.warning {
+  border-left-color: var(--ion-color-warning);
+}
+
+.workflow-card.danger {
+  border-left-color: var(--ion-color-danger);
+}
+
+.workflow-card ion-card-header,
+.dashboard-widget ion-card-header,
+.section-heading,
+.entity-family-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workflow-card ion-card-subtitle,
+.plugin-widget ion-card-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workflow-card ion-badge,
+.dashboard-widget ion-badge {
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-section {
+  padding: 14px;
+}
+
+.workflow-section + .workflow-section,
+.workflow-section + .renderer-surface,
+.contract-section {
+  margin-top: 14px;
+}
+
+.section-heading {
+  margin-bottom: 12px;
+}
+
+.section-heading h2,
+.entity-family-heading h3 {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.section-heading h2 {
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.section-heading > ion-icon {
+  flex: 0 0 auto;
+  font-size: 22px;
+  color: var(--ion-color-primary);
+}
+
+.dashboard-main {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.dashboard-widget,
+.plugin-widget {
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+}
+
+.dashboard-widget {
+  border-left-width: 4px;
+}
+
+.dashboard-widget.success {
+  border-left-color: var(--ion-color-success);
+}
+
+.dashboard-widget.info {
+  border-left-color: var(--ion-color-medium);
+}
+
+.dashboard-widget.warning {
+  border-left-color: var(--ion-color-warning);
+}
+
+.dashboard-widget.danger {
+  border-left-color: var(--ion-color-danger);
 }
 
 .dogfood-first-screen {
@@ -108,7 +285,6 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 0 0 18px;
 }
 
 .dogfood-primary-action {
@@ -189,13 +365,78 @@ body {
 .contract-strip ion-chip {
   margin: 0;
   max-width: 100%;
+  --background: #eef2f7;
+  --color: #303948;
 }
 
-.workspace-grid {
+.entity-family-panel {
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+  padding: 12px;
+}
+
+.entity-record-list {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  gap: 18px;
-  align-items: start;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.entity-record-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid #e8edf4;
+}
+
+.entity-record-row strong,
+.entity-record-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.entity-record-row span {
+  color: #536070;
+  font-size: 13px;
+}
+
+.entity-empty,
+.entity-overflow {
+  margin: 10px 0 0;
+  color: #5b6575;
+  line-height: 1.4;
+}
+
+.action-status-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.action-status-list div {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid #e8edf4;
+}
+
+.action-status-list div:first-child {
+  border-top: 0;
+}
+
+.action-status-list dt {
+  color: #536070;
+  font-weight: 700;
+}
+
+.action-status-list dd {
+  min-width: 0;
+  margin: 0;
+  color: #263245;
+  overflow-wrap: anywhere;
 }
 
 .dogfood-main {
@@ -497,12 +738,14 @@ body {
     grid-template-columns: 1fr;
   }
 
-  .workspace-grid {
-    grid-template-columns: 1fr;
-  }
-
   .terminal-panel {
     min-height: 340px;
     max-height: none;
+  }
+
+  .action-status-list div,
+  .entity-record-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 }

@@ -5,6 +5,7 @@ import "@ionic/react/css/core.css";
 import "@ionic/react/css/normalize.css";
 import "@ionic/react/css/structure.css";
 import "@ionic/react/css/typography.css";
+import "@ionic/react/css/palettes/dark.system.css";
 
 import App from "./App";
 import "./theme/variables.css";

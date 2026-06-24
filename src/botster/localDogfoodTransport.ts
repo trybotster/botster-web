@@ -4,12 +4,47 @@ import type { HubControlFrame, HubControlFrameHandler, HubControlTransport } fro
 import type { UiTreeSnapshot } from "./uiNodes";
 
 const dogfoodSurface = "botster-web.dogfood.session";
+const packageFamily = "botster-web.package";
 const sessionFamily = "botster-web.session";
 const draftFamily = "botster-web.session_draft";
 
 // Local dogfood surface grammar mirrors the same temporary core-import gap as
 // uiNodeConformance.ts; replace both with canonical core fixtures when exposed.
 const initialEntityFrames: EntityFrame[] = [
+  {
+    operation: "entity_snapshot",
+    family: packageFamily,
+    sequence: 1,
+    records: [
+      {
+        id: "botster-web",
+        title: "botster-web",
+        version: "0.1.0",
+        status: "enabled",
+        classification: "plugin",
+        capability_summary: "No requested capabilities",
+        view_surface: "botster-web.plugin.botster-web",
+        settings_surface: "botster-web.plugin.botster-web.settings"
+      },
+      {
+        id: "project-pipelines",
+        title: "project-pipelines",
+        version: "1.0.0",
+        status: "enabled",
+        classification: "plugin",
+        capability_summary: "Mcp, PluginDb:project-pipelines",
+        view_surface: "project-pipelines.app"
+      },
+      {
+        id: "local-diagnostics",
+        title: "local-diagnostics",
+        version: "0.1.0",
+        status: "installed",
+        classification: "plugin",
+        capability_summary: "No requested capabilities"
+      }
+    ]
+  },
   {
     operation: "entity_snapshot",
     family: sessionFamily,
@@ -146,6 +181,77 @@ export const dogfoodUiTreeSnapshot: UiTreeSnapshot = {
   }
 };
 
+const botsterWebPluginSnapshot: UiTreeSnapshot = {
+  kind: "ui_tree_snapshot",
+  surface: "botster-web.plugin.botster-web",
+  version: "local-plugin-botster-web-v1",
+  root: {
+    id: "botster-web-plugin-root",
+    primitive: "stack",
+    props: { label: "botster-web plugin" },
+    slots: {
+      children: [
+        {
+          id: "botster-web-plugin-summary",
+          primitive: "section",
+          slots: {
+            children: [
+              {
+                id: "botster-web-plugin-heading",
+                primitive: "heading",
+                props: { level: 2, text: "botster-web" }
+              },
+              {
+                id: "botster-web-plugin-copy",
+                primitive: "text",
+                props: { text: "This plugin owns the web client dogfood surface and renderer diagnostics." }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+};
+
+const projectPipelinesPluginSnapshot: UiTreeSnapshot = {
+  kind: "ui_tree_snapshot",
+  surface: "project-pipelines.app",
+  version: "local-plugin-project-pipelines-v1",
+  root: {
+    id: "project-pipelines-root",
+    primitive: "stack",
+    props: { label: "Project pipelines" },
+    slots: {
+      children: [
+        {
+          id: "project-pipelines-summary",
+          primitive: "section",
+          slots: {
+            children: [
+              {
+                id: "project-pipelines-heading",
+                primitive: "heading",
+                props: { level: 2, text: "Project pipelines" }
+              },
+              {
+                id: "project-pipelines-copy",
+                primitive: "text",
+                props: { text: "Pipeline planning, review, and MCP-backed project workflows will render here." }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+};
+
+const pluginSnapshots = new Map<string, UiTreeSnapshot>([
+  [botsterWebPluginSnapshot.surface, botsterWebPluginSnapshot],
+  [projectPipelinesPluginSnapshot.surface, projectPipelinesPluginSnapshot]
+]);
+
 export interface LocalDogfoodTransportOptions {
   latencyMs?: number;
 }
@@ -164,8 +270,8 @@ export function createLocalDogfoodTransport(options: LocalDogfoodTransportOption
     }
   };
 
-  const emitDogfoodSurface = () => {
-    emit({ kind: "ui_tree_snapshot", payload: dogfoodUiTreeSnapshot });
+  const emitSurface = (surface: string) => {
+    emit({ kind: "ui_tree_snapshot", payload: pluginSnapshots.get(surface) ?? dogfoodUiTreeSnapshot });
   };
 
   const emitEntitySnapshot = (family: string) => {
@@ -185,7 +291,8 @@ export function createLocalDogfoodTransport(options: LocalDogfoodTransportOption
     },
     async send(frame) {
       if (frame.kind === "surface_subscribe") {
-        emitDogfoodSurface();
+        const request = frame.payload as { surface?: unknown };
+        emitSurface(typeof request.surface === "string" ? request.surface : dogfoodSurface);
         return;
       }
 
