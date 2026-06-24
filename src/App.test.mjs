@@ -25,6 +25,7 @@ const [
   dogfoodMode,
   localDogfoodTransport,
   realHubDaemonDto,
+  generatedDaemonProtocol,
   realHubDogfoodTransport,
   realHubTerminalDataPlane,
   connectionDiagnostics,
@@ -56,6 +57,7 @@ const [
   readFile(new URL("./botster/dogfoodMode.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/localDogfoodTransport.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/realHubDaemonDto.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/generated/daemon-protocol.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/realHubDogfoodTransport.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/realHubTerminalDataPlane.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/connectionDiagnostics.ts", import.meta.url), "utf8"),
@@ -134,27 +136,28 @@ assert.match(dogfoodMode, /dogfood"\) === realModeQueryValue/);
 assert.match(dogfoodMode, /packageRuntime/);
 assert.match(dogfoodMode, /createRealHubDogfoodTransport/);
 assert.match(dogfoodMode, /createRealHubTerminalDataPlane/);
-assert.match(realHubDaemonDto, /export type DaemonRequest/);
-assert.match(realHubDaemonDto, /type: "status"/);
-assert.match(realHubDaemonDto, /type: "list_packages"/);
-assert.match(realHubDaemonDto, /type: "spawn"/);
-assert.match(realHubDaemonDto, /export interface DaemonResponse/);
-assert.match(realHubDaemonDto, /packages\?: DaemonPackage\[\]/);
-assert.match(realHubDaemonDto, /package_name: string/);
-assert.match(realHubDaemonDto, /requested_capabilities: DaemonCapability\[\]/);
-assert.match(realHubDaemonDto, /runnable_entrypoints: DaemonPackageRunnableEntrypoint\[\]/);
-assert.match(realHubDaemonDto, /export interface DaemonPackageProcess/);
-assert.match(realHubDaemonDto, /state: string/);
-assert.match(realHubDaemonDto, /pid\?: number \| null/);
-assert.match(realHubDaemonDto, /started_at\?: number \| null/);
-assert.match(realHubDaemonDto, /exited_at\?: number \| null/);
-assert.match(realHubDaemonDto, /exit_status\?: string \| null/);
-assert.match(realHubDaemonDto, /export interface DaemonPackageDiagnostic/);
-assert.match(realHubDaemonDto, /message: string/);
-assert.match(realHubDaemonDto, /diagnostics\?: DaemonDiagnostic\[\]/);
-assert.match(realHubDaemonDto, /export type DaemonEvent/);
-assert.match(realHubDaemonDto, /type: "snapshot" \| "scrollback"/);
-assert.match(realHubDaemonDto, /type: "snapshot" \| "scrollback";[\s\S]*data\?: string;[\s\S]*bytes\?: number;/);
+assert.match(realHubDaemonDto, /export type \* from "\.\/generated\/daemon-protocol"/);
+assert.match(realHubDaemonDto, /DaemonBridgeRequestEnvelope/);
+assert.match(realHubDaemonDto, /DaemonBridgeResponseEnvelope/);
+assert.doesNotMatch(realHubDaemonDto, /export type DaemonRequest\s*=/);
+assert.doesNotMatch(realHubDaemonDto, /export interface DaemonResponse\s*\{/);
+assert.doesNotMatch(realHubDaemonDto, /export interface DaemonPackage\s*\{/);
+assert.doesNotMatch(realHubDaemonDto, /export type DaemonEvent\s*=/);
+assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client Rust serde DTOs/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "list_packages" \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "install_package_local_path"; path: string \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "start_package_entrypoint"; package_name: string; entrypoint_id: string; environment_overrides\?: Record<string, string> \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_action"; package_name: string; surface_id: string; action_id: string; payload: JsonValue \}/);
+assert.match(generatedDaemonProtocol, /export interface DaemonPackage/);
+assert.match(generatedDaemonProtocol, /package_name: string/);
+assert.match(generatedDaemonProtocol, /requested_capabilities: DaemonCapability\[\]/);
+assert.match(generatedDaemonProtocol, /runnable_entrypoints: DaemonPackageRunnableEntrypoint\[\]/);
+assert.match(generatedDaemonProtocol, /export interface DaemonPackageProcess/);
+assert.match(generatedDaemonProtocol, /pid\?: number;/);
+assert.match(generatedDaemonProtocol, /diagnostics\?: DaemonDiagnostic\[\]/);
+assert.match(generatedDaemonProtocol, /export type DaemonEvent/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "snapshot"; session_id: string; subscription_id: string; data: string; bytes: number \}/);
 assert.doesNotMatch(realHubDaemonDto, /compressed\?: boolean|encoding\?: string/);
 assert.match(realHubDogfoodTransport, /kind: "daemon_request"/);
 assert.match(realHubDogfoodTransport, /reply\.kind !== "daemon_response"/);
@@ -567,8 +570,10 @@ assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /premount/);
 const compiledRoot = join(tmpdir(), "botster-web-runtime-test");
 await rm(compiledRoot, { recursive: true, force: true });
 await mkdir(join(compiledRoot, "botster"), { recursive: true });
+await mkdir(join(compiledRoot, "botster/__fixtures__"), { recursive: true });
 
 await Promise.all([
+  compileTsModule("botster/__fixtures__/generatedDaemonProtocol.ts", join(compiledRoot, "botster/__fixtures__/generatedDaemonProtocol.js")),
   compileTsModule("botster/actions.ts", join(compiledRoot, "botster/actions.js")),
   compileTsModule("botster/capabilities.ts", join(compiledRoot, "botster/capabilities.js")),
   compileTsModule("botster/client.ts", join(compiledRoot, "botster/client.js")),
@@ -596,6 +601,10 @@ const {
 } = requireRuntime("./botster/realHubDogfoodTransport.js");
 const { createRealHubTerminalDataPlane } = requireRuntime("./botster/realHubTerminalDataPlane.js");
 const {
+  generatedDaemonRequestFixtures,
+  generatedPackageResponseFixture
+} = requireRuntime("./botster/__fixtures__/generatedDaemonProtocol.js");
+const {
   actionFailureDiagnostic,
   bridgeUnavailableDiagnostic,
   compatibilityDiagnosticsFromFrame,
@@ -608,6 +617,39 @@ const {
   terminalUnavailableDiagnostic,
   upsertDiagnostic
 } = requireRuntime("./botster/connectionDiagnostics.js");
+
+assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), [
+  "list_packages",
+  "install_package_local_path",
+  "start_package_entrypoint",
+  "plugin_surface_render",
+  "plugin_surface_action"
+]);
+assert.deepEqual(
+  generatedDaemonRequestFixtures.find((request) => request.type === "plugin_surface_render"),
+  {
+    type: "plugin_surface_render",
+    package_name: "project-pipelines",
+    surface_id: "home",
+    payload: { route: "/pipelines" }
+  }
+);
+assert.deepEqual(
+  generatedDaemonRequestFixtures.find((request) => request.type === "plugin_surface_action"),
+  {
+    type: "plugin_surface_action",
+    package_name: "project-pipelines",
+    surface_id: "home",
+    action_id: "ticket.open",
+    payload: { ticket_id: "ticket_1" }
+  }
+);
+assert.equal(
+  daemonResponseFrames(generatedPackageResponseFixture, 12)
+    .find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.package")
+    .payload.records[0].id,
+  "project-pipelines"
+);
 
 const transport = {
   sent: [],

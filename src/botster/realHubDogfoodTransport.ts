@@ -24,6 +24,8 @@ const draftFamily = "botster-web.session_draft";
 const packageFamily = "botster-web.package";
 const statusFamily = hubStatusFamily;
 
+type HubConnectionDiagnosticPayload = Omit<Partial<DaemonDiagnostic>, "kind"> & { kind: string };
+
 export interface DaemonBridgeClient {
   request(request: DaemonRequest): Promise<DaemonResponse>;
   subscribeEvents?(onEvent: (event: DaemonEvent) => void): { unsubscribe(): void };
@@ -292,7 +294,10 @@ export function daemonEventFrame(event: DaemonEvent, sequence: number): HubContr
   return undefined;
 }
 
-function statusRecord(status: NonNullable<DaemonResponse["status"]>, responseDiagnostics: DaemonDiagnostic[] = []) {
+function statusRecord(
+  status: NonNullable<DaemonResponse["status"]>,
+  responseDiagnostics: HubConnectionDiagnosticPayload[] = []
+) {
   return {
     id: "local-hub",
     title: status.host_display_name,
@@ -511,7 +516,7 @@ function operatorErrorFrame(error: DaemonOperatorError): HubControlFrame {
   };
 }
 
-function connectionDiagnosticFrame(diagnostic: DaemonDiagnostic): HubControlFrame {
+function connectionDiagnosticFrame(diagnostic: HubConnectionDiagnosticPayload): HubControlFrame {
   return {
     kind: "connection_diagnostic",
     payload: diagnostic
