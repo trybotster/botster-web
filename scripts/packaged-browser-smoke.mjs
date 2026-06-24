@@ -98,6 +98,11 @@ async function runPackagedBrowserSmoke(scenario) {
     await page.getByText("Local hub workbench").waitFor();
     await page.getByRole("heading", { name: "Spawn botster-web-dogfood-session" }).waitFor();
     await page.getByText("botster-web-dogfood-ready").first().waitFor();
+    await page.getByText("Package configuration").waitFor();
+    await page.getByText("Webhook endpoint").waitFor();
+    await page.getByText("API token").waitFor();
+    await page.getByPlaceholder("Existing secret is saved").first().waitFor();
+    await page.getByRole("button", { name: "Save configuration" }).waitFor();
     await page.getByText("Output appears in the terminal panel").first().waitFor();
     await page.getByText("Terminal output destination: botster-web-dogfood-session").waitFor();
     const staleOverviewCount = await page.getByText("Ionic React renderer shell").count();
@@ -156,6 +161,13 @@ async function runPackagedBrowserSmoke(scenario) {
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
     if (!daemonRequests.some((request) => request.type === "spawn")) {
       throw new Error(`packaged browser smoke ${scenario.name} did not dispatch the spawn action through the bridge`);
+    }
+    const secretLeak = JSON.stringify({
+      daemonRequests,
+      consoleEvents
+    });
+    if (/super-secret-token|write_only/.test(secretLeak)) {
+      throw new Error("packaged browser smoke leaked secret material or write-only markers before secret replacement");
     }
   } catch (error) {
     const harnessState = page
@@ -320,7 +332,15 @@ function daemonResponse(request, scenario, state) {
   if (request.type === "list_packages") {
     return {
       kind: "packages",
-      packages: [],
+      packages: [configurableSmokePackage(false)],
+      events: []
+    };
+  }
+
+  if (request.type === "set_package_configuration") {
+    return {
+      kind: "packages",
+      packages: [configurableSmokePackage(true)],
       events: []
     };
   }
@@ -445,6 +465,51 @@ function daemonResponse(request, scenario, state) {
       operation: request.type,
       message: `Unsupported smoke request: ${request.type}`
     }
+  };
+}
+
+function configurableSmokePackage(configured) {
+  return {
+    package_name: "botster-web",
+    version: "0.1.0",
+    classification: "plugin",
+    state: "enabled",
+    requested_capabilities: [],
+    runnable_entrypoints: [],
+    configuration: {
+      schema: {
+        fields: [
+          { key: "endpoint", type: "url", label: "Webhook endpoint", required: true },
+          {
+            key: "mode",
+            type: "select",
+            label: "Mode",
+            default: { type: "select", value: "read" },
+            options: [
+              { value: "read", label: "Read" },
+              { value: "write", label: "Write" }
+            ]
+          },
+          { key: "enabled", type: "boolean", label: "Enabled", default: { type: "boolean", value: true } },
+          { key: "api_token", type: "secret", label: "API token", required: true }
+        ]
+      },
+      effective_values: configured
+        ? {
+          endpoint: { type: "url", value: "https://example.invalid/hook" },
+          mode: { type: "select", value: "read" },
+          enabled: { type: "boolean", value: true },
+          api_token: { type: "secret", state: "redacted" }
+        }
+        : {
+          mode: { type: "select", value: "read" },
+          enabled: { type: "boolean", value: true },
+          api_token: { type: "secret", state: "redacted" }
+        },
+      missing_required: configured ? [] : ["endpoint"],
+      diagnostics: []
+    },
+    provider_profile_admitted: false
   };
 }
 
