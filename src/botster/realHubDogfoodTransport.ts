@@ -10,6 +10,8 @@ import type {
   DaemonOperatorError,
   DaemonPackage,
   DaemonPackageConfiguration,
+  DaemonPackageRunnableEntrypoint,
+  DaemonPackageSurfaceDescriptor,
   DaemonRequest,
   DaemonResponse,
   DaemonSession,
@@ -344,6 +346,8 @@ function sessionAttachFields(sessionId: string, lifecycle: string) {
 function packageRecord(packageRecord: DaemonPackage) {
   const capabilities = packageRecord.requested_capabilities ?? [];
   const runnableEntrypoints = packageRecord.runnable_entrypoints ?? [];
+  const appSurfaces = packageSurfaceRecords(packageRecord, "app");
+  const settingsSurfaces = packageSurfaceRecords(packageRecord, "settings");
   const configurationFields = packageConfigurationFields(packageRecord.configuration);
   const configurable = configurationFields.length > 0;
   const capabilitySummary =
@@ -370,6 +374,14 @@ function packageRecord(packageRecord: DaemonPackage) {
     entrypoint_summary: entrypointSummary,
     entrypoint_process_summary: entrypointProcessSummary,
     entrypoint_diagnostics_summary: entrypointDiagnosticsSummary,
+    has_app_surfaces: appSurfaces.length > 0,
+    app_surface_count: appSurfaces.length,
+    app_surfaces: appSurfaces,
+    app_surface_summary: surfaceListSummary(appSurfaces, "No app surfaces"),
+    has_settings_surfaces: settingsSurfaces.length > 0,
+    settings_surface_count: settingsSurfaces.length,
+    settings_surfaces: settingsSurfaces,
+    settings_surface_summary: surfaceListSummary(settingsSurfaces, "No settings surfaces"),
     configurable,
     configure_action: {
       id: "botster.package.configure",
@@ -387,7 +399,92 @@ function packageRecord(packageRecord: DaemonPackage) {
       disabled: !configurable,
       params: { package_name: packageRecord.package_name }
     } satisfies ActionBinding,
+    enable_action: packageAction(packageRecord.package_name, "botster.package.enable", "Enable package"),
+    disable_action: packageAction(packageRecord.package_name, "botster.package.disable", "Disable package"),
+    remove_action: packageAction(packageRecord.package_name, "botster.package.remove", "Remove package"),
+    reload_action: unsupportedPackageAction(packageRecord.package_name, "botster.package.reload", "Reload unavailable"),
+    update_action: unsupportedPackageAction(packageRecord.package_name, "botster.package.update", "Update unavailable"),
+    hub_restart_action: unsupportedPackageAction(packageRecord.package_name, "botster.hub.restart", "Hub restart unavailable"),
+    entrypoint_actions: runnableEntrypoints.flatMap((entrypoint) => entrypointActionRecords(packageRecord.package_name, entrypoint)),
     diagnostics_summary: `${packageRecord.classification} package is ${packageRecord.state}`
+  };
+}
+
+function packageSurfaceRecords(packageRecord: DaemonPackage, kind: "app" | "settings") {
+  return [...(packageRecord.surfaces ?? [])]
+    .filter((surface) => surface.kind === kind)
+    .sort(compareSurfaceDescriptors)
+    .map((surface) => ({
+      id: `${packageRecord.package_name}:${surface.id}`,
+      surface_id: surface.id,
+      kind: surface.kind,
+      title: surface.title,
+      description: surface.description ?? "",
+      icon: surface.icon ?? "",
+      category: surface.category ?? "",
+      supports: surface.supports ?? [],
+      launch_action: {
+        id: "botster.package.surface.render",
+        target: packageRecord.package_name,
+        label: surface.title,
+        params: {
+          package_name: packageRecord.package_name,
+          surface_id: surface.id,
+          surface_kind: surface.kind,
+          supports: surface.supports ?? []
+        }
+      } satisfies ActionBinding
+    }));
+}
+
+function compareSurfaceDescriptors(left: DaemonPackageSurfaceDescriptor, right: DaemonPackageSurfaceDescriptor): number {
+  const leftOrder = typeof left.order === "number" ? left.order : Number.POSITIVE_INFINITY;
+  const rightOrder = typeof right.order === "number" ? right.order : Number.POSITIVE_INFINITY;
+  return leftOrder - rightOrder || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
+}
+
+function surfaceListSummary(surfaces: ReturnType<typeof packageSurfaceRecords>, empty: string): string {
+  return surfaces.length === 0 ? empty : surfaces.map((surface) => `${surface.title} (${surface.surface_id})`).join("; ");
+}
+
+function packageAction(packageName: string, id: string, label: string): ActionBinding {
+  return {
+    id,
+    target: packageName,
+    label,
+    params: { package_name: packageName }
+  };
+}
+
+function unsupportedPackageAction(packageName: string, id: string, label: string): ActionBinding {
+  return {
+    ...packageAction(packageName, id, label),
+    disabled: true
+  };
+}
+
+function entrypointActionRecords(packageName: string, entrypoint: DaemonPackageRunnableEntrypoint) {
+  return [
+    entrypointAction(packageName, entrypoint.id, "botster.package.entrypoint.start", `Start ${entrypoint.id}`),
+    entrypointAction(packageName, entrypoint.id, "botster.package.entrypoint.stop", `Stop ${entrypoint.id}`),
+    entrypointAction(packageName, entrypoint.id, "botster.package.entrypoint.restart", `Restart ${entrypoint.id}`),
+    entrypointAction(packageName, entrypoint.id, "botster.package.entrypoint.status", `Refresh ${entrypoint.id} status`)
+  ];
+}
+
+function entrypointAction(packageName: string, entrypointId: string, id: string, label: string) {
+  return {
+    id: `${packageName}:${entrypointId}:${id}`,
+    entrypoint_id: entrypointId,
+    action: {
+      id,
+      target: packageName,
+      label,
+      params: {
+        package_name: packageName,
+        entrypoint_id: entrypointId
+      }
+    } satisfies ActionBinding
   };
 }
 
@@ -621,7 +718,86 @@ async function dispatchDaemonAction(
     return;
   }
 
+  if (action.id === "botster.package.surface.render") {
+    const packageName = action.target ?? readConfigString(action.params?.package_name);
+    const surfaceId = readConfigString(action.params?.surface_id);
+    if (!packageName || !surfaceId) {
+      emit(actionResultFrame(request, false, "Package surface render is missing a package or surface target"));
+      return;
+    }
+
+    const response = await bridge.request({
+      type: "plugin_surface_render",
+      package_name: packageName,
+      surface_id: surfaceId,
+      payload: jsonObject(action.params?.payload)
+    });
+    emitResponse(response);
+    emit(actionResultFrame(request, !response.error, response.error?.message, { package_name: packageName, surface_id: surfaceId, kind: response.kind }));
+    return;
+  }
+
+  if (action.id === "botster.package.enable" || action.id === "botster.package.disable" || action.id === "botster.package.remove") {
+    const packageName = action.target ?? readConfigString(action.params?.package_name);
+    if (!packageName) {
+      emit(actionResultFrame(request, false, "Package management action is missing a package target"));
+      return;
+    }
+
+    const response = await bridge.request(packageManagementRequest(action.id, packageName));
+    emitResponse(response);
+    emit(actionResultFrame(request, !response.error, response.error?.message, { package_name: packageName, kind: response.kind }));
+    return;
+  }
+
+  if (
+    action.id === "botster.package.entrypoint.start" ||
+    action.id === "botster.package.entrypoint.stop" ||
+    action.id === "botster.package.entrypoint.restart" ||
+    action.id === "botster.package.entrypoint.status"
+  ) {
+    const packageName = action.target ?? readConfigString(action.params?.package_name);
+    const entrypointId = readConfigString(action.params?.entrypoint_id);
+    if (!packageName || !entrypointId) {
+      emit(actionResultFrame(request, false, "Package entrypoint action is missing a package or entrypoint target"));
+      return;
+    }
+
+    const response = await bridge.request(packageEntrypointRequest(action.id, packageName, entrypointId));
+    emitResponse(response);
+    emit(actionResultFrame(request, !response.error, response.error?.message, { package_name: packageName, entrypoint_id: entrypointId, kind: response.kind }));
+    return;
+  }
+
   emit(actionResultFrame(request, false, `Unsupported real hub action: ${action.id}`));
+}
+
+function packageManagementRequest(actionId: string, packageName: string): DaemonRequest {
+  if (actionId === "botster.package.enable") {
+    return { type: "enable_package", package_name: packageName };
+  }
+
+  if (actionId === "botster.package.disable") {
+    return { type: "disable_package", package_name: packageName };
+  }
+
+  return { type: "remove_package", package_name: packageName };
+}
+
+function packageEntrypointRequest(actionId: string, packageName: string, entrypointId: string): DaemonRequest {
+  if (actionId === "botster.package.entrypoint.start") {
+    return { type: "start_package_entrypoint", package_name: packageName, entrypoint_id: entrypointId };
+  }
+
+  if (actionId === "botster.package.entrypoint.stop") {
+    return { type: "stop_package_entrypoint", package_name: packageName, entrypoint_id: entrypointId };
+  }
+
+  if (actionId === "botster.package.entrypoint.restart") {
+    return { type: "restart_package_entrypoint", package_name: packageName, entrypoint_id: entrypointId };
+  }
+
+  return { type: "package_entrypoint_status", package_name: packageName, entrypoint_id: entrypointId };
 }
 
 function actionResultFrame(
@@ -778,7 +954,15 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                     { id: "real-hub-package-entrypoints", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_summary", prop: "text" }] },
                     { id: "real-hub-package-entrypoint-processes", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_process_summary", prop: "text" }] },
                     { id: "real-hub-package-entrypoint-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_diagnostics_summary", prop: "text" }] },
+                    { id: "real-hub-package-app-surfaces", primitive: "text", bindings: [{ source: "entity", path: "@/app_surface_summary", prop: "text" }] },
+                    { id: "real-hub-package-settings-surfaces", primitive: "text", bindings: [{ source: "entity", path: "@/settings_surface_summary", prop: "text" }] },
                     { id: "real-hub-package-configure-action", primitive: "action", bindings: [{ source: "entity", path: "@/configure_action", prop: "action" }] },
+                    { id: "real-hub-package-enable-action", primitive: "action", bindings: [{ source: "entity", path: "@/enable_action", prop: "action" }] },
+                    { id: "real-hub-package-disable-action", primitive: "action", bindings: [{ source: "entity", path: "@/disable_action", prop: "action" }] },
+                    { id: "real-hub-package-remove-action", primitive: "action", bindings: [{ source: "entity", path: "@/remove_action", prop: "action" }] },
+                    { id: "real-hub-package-update-action", primitive: "action", bindings: [{ source: "entity", path: "@/update_action", prop: "action" }] },
+                    { id: "real-hub-package-reload-action", primitive: "action", bindings: [{ source: "entity", path: "@/reload_action", prop: "action" }] },
+                    { id: "real-hub-package-hub-restart-action", primitive: "action", bindings: [{ source: "entity", path: "@/hub_restart_action", prop: "action" }] },
                     { id: "real-hub-package-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/diagnostics_summary", prop: "text" }] }
                   ]
                 }
@@ -789,6 +973,75 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                 id: "real-hub-packages-empty",
                 primitive: "empty_state",
                 props: { title: "No installed packages", body: "This daemon returned an empty package registry." }
+              }
+            ]
+          }
+        },
+        {
+          id: "real-hub-package-app-surface-list",
+          primitive: "list",
+          props: { label: "Package app surfaces" },
+          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items", where: { has_app_surfaces: true } }],
+          slots: {
+            item: [
+              {
+                id: "real-hub-package-app-surface-table",
+                primitive: "table",
+                bindings: [{ source: "entity", path: "@/app_surfaces", prop: "rows" }],
+                props: {
+                  columns: [
+                    { key: "title", label: "App" },
+                    { key: "surface_id", label: "Surface ID" },
+                    { key: "description", label: "Description" }
+                  ]
+                }
+              }
+            ],
+            empty: [
+              {
+                id: "real-hub-package-app-surfaces-empty",
+                primitive: "empty_state",
+                props: { title: "No app surfaces", body: "Installed packages did not expose descriptor-backed app surfaces." }
+              }
+            ]
+          }
+        },
+        {
+          id: "real-hub-package-app-surface-actions",
+          primitive: "list",
+          props: { label: "Launch app surfaces" },
+          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items", where: { has_app_surfaces: true } }],
+          slots: {
+            item: [
+              {
+                id: "real-hub-package-app-surface-launches",
+                primitive: "list",
+                bindings: [{ source: "entity", path: "@/app_surfaces", prop: "items" }],
+                slots: {
+                  item: [
+                    { id: "real-hub-package-app-surface-launch", primitive: "action", bindings: [{ source: "entity", path: "@/launch_action", prop: "action" }] }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          id: "real-hub-package-settings-surface-actions",
+          primitive: "list",
+          props: { label: "Open settings surfaces" },
+          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items", where: { has_settings_surfaces: true } }],
+          slots: {
+            item: [
+              {
+                id: "real-hub-package-settings-surface-launches",
+                primitive: "list",
+                bindings: [{ source: "entity", path: "@/settings_surfaces", prop: "items" }],
+                slots: {
+                  item: [
+                    { id: "real-hub-package-settings-surface-launch", primitive: "action", bindings: [{ source: "entity", path: "@/launch_action", prop: "action" }] }
+                  ]
+                }
               }
             ]
           }
@@ -815,6 +1068,26 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                 id: "real-hub-package-configuration-empty",
                 primitive: "empty_state",
                 props: { title: "No package configuration", body: "Installed packages did not expose configuration schema." }
+              }
+            ]
+          }
+        },
+        {
+          id: "real-hub-package-entrypoint-actions",
+          primitive: "list",
+          props: { label: "Entrypoint controls" },
+          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items" }],
+          slots: {
+            item: [
+              {
+                id: "real-hub-package-entrypoint-action-list",
+                primitive: "list",
+                bindings: [{ source: "entity", path: "@/entrypoint_actions", prop: "items" }],
+                slots: {
+                  item: [
+                    { id: "real-hub-package-entrypoint-action", primitive: "action", bindings: [{ source: "entity", path: "@/action", prop: "action" }] }
+                  ]
+                }
               }
             ]
           }

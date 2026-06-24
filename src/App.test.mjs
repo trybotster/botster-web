@@ -147,7 +147,13 @@ assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_packages" \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "set_package_configuration"; package_name: string; values: Record<string, JsonValue> \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "install_package_local_path"; path: string \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "enable_package"; package_name: string \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "disable_package"; package_name: string \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "remove_package"; package_name: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "start_package_entrypoint"; package_name: string; entrypoint_id: string; environment_overrides\?: Record<string, string> \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "stop_package_entrypoint"; package_name: string; entrypoint_id: string \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "restart_package_entrypoint"; package_name: string; entrypoint_id: string \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "package_entrypoint_status"; package_name: string; entrypoint_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_action"; package_name: string; surface_id: string; action_id: string; payload: JsonValue \}/);
 assert.match(generatedDaemonProtocol, /export interface DaemonPackage/);
@@ -177,8 +183,27 @@ assert.match(realHubDogfoodTransport, /bridge\.request\(\{ type: "list_packages"
 assert.match(realHubDogfoodTransport, /type: "set_package_configuration"/);
 assert.match(realHubDogfoodTransport, /botster\.package\.configuration\.save/);
 assert.match(realHubDogfoodTransport, /botster\.package\.configure/);
+assert.match(realHubDogfoodTransport, /botster\.package\.surface\.render/);
+assert.match(realHubDogfoodTransport, /type: "plugin_surface_render"/);
+assert.match(realHubDogfoodTransport, /botster\.package\.enable/);
+assert.match(realHubDogfoodTransport, /type: "enable_package"/);
+assert.match(realHubDogfoodTransport, /botster\.package\.disable/);
+assert.match(realHubDogfoodTransport, /type: "disable_package"/);
+assert.match(realHubDogfoodTransport, /botster\.package\.remove/);
+assert.match(realHubDogfoodTransport, /type: "remove_package"/);
+assert.match(realHubDogfoodTransport, /botster\.package\.entrypoint\.start/);
+assert.match(realHubDogfoodTransport, /type: "start_package_entrypoint"/);
+assert.match(realHubDogfoodTransport, /botster\.package\.entrypoint\.stop/);
+assert.match(realHubDogfoodTransport, /type: "stop_package_entrypoint"/);
+assert.match(realHubDogfoodTransport, /botster\.package\.entrypoint\.restart/);
+assert.match(realHubDogfoodTransport, /type: "restart_package_entrypoint"/);
+assert.match(realHubDogfoodTransport, /botster\.package\.entrypoint\.status/);
+assert.match(realHubDogfoodTransport, /type: "package_entrypoint_status"/);
+assert.match(realHubDogfoodTransport, /botster\.package\.update/);
+assert.match(realHubDogfoodTransport, /botster\.package\.reload/);
+assert.match(realHubDogfoodTransport, /botster\.hub\.restart/);
 assert.match(realHubDogfoodTransport, /family: packageFamily/);
-assert.doesNotMatch(realHubDogfoodTransport, /install_package|enable_package|disable_package|remove_package|start_package|stop_package|restart_package|retry_package/);
+assert.doesNotMatch(realHubDogfoodTransport, /["']view_surface["']|["']settings_surface["']|UpdatePackage|update_package|reload_package|type: "restart_hub"/);
 assert.match(realHubTerminalDataPlane, /streamTerminal/);
 assert.match(realHubTerminalDataPlane, /type: "send_input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
@@ -632,6 +657,12 @@ assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), 
   "set_package_configuration",
   "install_package_local_path",
   "start_package_entrypoint",
+  "stop_package_entrypoint",
+  "restart_package_entrypoint",
+  "package_entrypoint_status",
+  "enable_package",
+  "disable_package",
+  "remove_package",
   "plugin_surface_render",
   "plugin_surface_action"
 ]);
@@ -931,6 +962,27 @@ const bridge = {
               { surface: "SessionActions", scope: "project-pipelines" },
               { surface: "McpTools", scope: null }
             ],
+            surfaces: [
+              {
+                id: "home",
+                kind: "app",
+                title: "Pipelines",
+                description: "Project Pipelines workbench",
+                order: 1,
+                category: "workflow",
+                supports: ["render"]
+              },
+              {
+                id: "settings",
+                kind: "settings",
+                title: "Pipeline Settings",
+                description: "Project Pipelines settings",
+                order: 2,
+                supports: ["render"]
+              }
+            ],
+            view_surface: { id: "legacy-view", title: "Legacy View" },
+            settings_surface: { id: "legacy-settings", title: "Legacy Settings" },
             runnable_entrypoints: [
               {
                 id: "web-client",
@@ -977,6 +1029,15 @@ const bridge = {
             classification: "provider",
             state: "disabled",
             requested_capabilities: [{ surface: "ClientAdmission", scope: "github" }],
+            surfaces: [
+              {
+                id: "settings",
+                kind: "settings",
+                title: "GitHub Settings",
+                order: 1,
+                supports: ["render"]
+              }
+            ],
             runnable_entrypoints: [
               {
                 id: "poller",
@@ -1006,6 +1067,15 @@ const bridge = {
             classification: "plugin",
             state: "installed",
             requested_capabilities: [],
+            surfaces: [
+              {
+                id: "misc",
+                kind: "diagnostic",
+                title: "Diagnostics",
+                order: 1,
+                supports: ["render"]
+              }
+            ],
             runnable_entrypoints: [],
             configuration: emptyPackageConfiguration,
             provider_profile_admitted: false
@@ -1037,6 +1107,15 @@ const bridge = {
             classification: "plugin",
             state: "enabled",
             requested_capabilities: [{ surface: "SessionActions", scope: "project-pipelines" }],
+            surfaces: [
+              {
+                id: "home",
+                kind: "app",
+                title: "Pipelines",
+                order: 1,
+                supports: ["render"]
+              }
+            ],
             runnable_entrypoints: [],
             configuration,
             provider_profile_admitted: false
@@ -1052,6 +1131,36 @@ const bridge = {
         kind: "sessions",
         sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }],
         events: []
+      };
+    }
+
+    if (request.type === "plugin_surface_render") {
+      return {
+        kind: "plugin_surface",
+        plugin_surface: {
+          package_name: request.package_name,
+          surface_id: request.surface_id,
+          rendered: true
+        },
+        events: [],
+        diagnostics: []
+      };
+    }
+
+    if (
+      request.type === "enable_package" ||
+      request.type === "disable_package" ||
+      request.type === "remove_package" ||
+      request.type === "start_package_entrypoint" ||
+      request.type === "stop_package_entrypoint" ||
+      request.type === "restart_package_entrypoint" ||
+      request.type === "package_entrypoint_status"
+    ) {
+      return {
+        kind: "packages",
+        packages: [],
+        events: [],
+        diagnostics: []
       };
     }
 
@@ -1308,6 +1417,46 @@ await realTransport.send({
   }
 });
 await flushMicrotasks();
+for (const action of [
+  {
+    id: "botster.package.surface.render",
+    target: "project-pipelines",
+    params: { package_name: "project-pipelines", surface_id: "home" }
+  },
+  { id: "botster.package.enable", target: "project-pipelines", params: { package_name: "project-pipelines" } },
+  { id: "botster.package.disable", target: "project-pipelines", params: { package_name: "project-pipelines" } },
+  { id: "botster.package.remove", target: "project-pipelines", params: { package_name: "project-pipelines" } },
+  {
+    id: "botster.package.entrypoint.start",
+    target: "project-pipelines",
+    params: { package_name: "project-pipelines", entrypoint_id: "web-client" }
+  },
+  {
+    id: "botster.package.entrypoint.stop",
+    target: "project-pipelines",
+    params: { package_name: "project-pipelines", entrypoint_id: "web-client" }
+  },
+  {
+    id: "botster.package.entrypoint.restart",
+    target: "project-pipelines",
+    params: { package_name: "project-pipelines", entrypoint_id: "web-client" }
+  },
+  {
+    id: "botster.package.entrypoint.status",
+    target: "project-pipelines",
+    params: { package_name: "project-pipelines", entrypoint_id: "web-client" }
+  }
+]) {
+  await realTransport.send({
+    kind: "action_request",
+    payload: {
+      request_id: `real-${action.id}`,
+      origin: "ui_node",
+      action
+    }
+  });
+  await flushMicrotasks();
+}
 assert.equal(bridgeRequests.some((request) => request.type === "status"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "list_sessions"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
@@ -1330,6 +1479,36 @@ assert.deepEqual(configSaveRequest, {
   }
 });
 assert.doesNotMatch(JSON.stringify(configSaveRequest), /api_token|redacted|write_only|super-secret-token/);
+assert.deepEqual(
+  bridgeRequests.find((request) => request.type === "plugin_surface_render"),
+  {
+    type: "plugin_surface_render",
+    package_name: "project-pipelines",
+    surface_id: "home",
+    payload: {}
+  }
+);
+assert.equal(bridgeRequests.some((request) => request.type === "enable_package" && request.package_name === "project-pipelines"), true);
+assert.equal(bridgeRequests.some((request) => request.type === "disable_package" && request.package_name === "project-pipelines"), true);
+assert.equal(bridgeRequests.some((request) => request.type === "remove_package" && request.package_name === "project-pipelines"), true);
+assert.equal(
+  bridgeRequests.some((request) => request.type === "start_package_entrypoint" && request.entrypoint_id === "web-client"),
+  true
+);
+assert.equal(
+  bridgeRequests.some((request) => request.type === "stop_package_entrypoint" && request.entrypoint_id === "web-client"),
+  true
+);
+assert.equal(
+  bridgeRequests.some((request) => request.type === "restart_package_entrypoint" && request.entrypoint_id === "web-client"),
+  true
+);
+assert.equal(
+  bridgeRequests.some((request) => request.type === "package_entrypoint_status" && request.entrypoint_id === "web-client"),
+  true
+);
+assert.equal(bridgeRequests.some((request) => /legacy/.test(JSON.stringify(request))), false);
+assert.equal(bridgeRequests.some((request) => /update_package|reload_package|restart_hub/.test(request.type)), false);
 assert.equal(realFrames.some((frame) => frame.kind === "ui_tree_snapshot"), true);
 assert.equal(realFrames.some((frame) => frame.kind === "entity_snapshot"), true);
 assert.equal(
@@ -1372,7 +1551,39 @@ assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines"
 assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_process_summary, /worker failed/);
 assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_process_summary, /exit_status exit:42/);
 assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_diagnostics_summary, /worker stderr: fixture failure/);
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").app_surface_count, 1);
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").settings_surface_count, 1);
+assert.deepEqual(realRuntime.entities.get("botster-web.package", "project-pipelines").app_surfaces[0].launch_action, {
+  id: "botster.package.surface.render",
+  target: "project-pipelines",
+  label: "Pipelines",
+  params: {
+    package_name: "project-pipelines",
+    surface_id: "home",
+    surface_kind: "app",
+    supports: ["render"]
+  }
+});
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").view_surface, undefined);
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").settings_surface, undefined);
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").enable_action.id, "botster.package.enable");
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").disable_action.id, "botster.package.disable");
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").remove_action.id, "botster.package.remove");
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").update_action.disabled, true);
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").reload_action.disabled, true);
+assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").hub_restart_action.disabled, true);
+assert.deepEqual(
+  realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_actions.map((entrypointAction) => entrypointAction.action.id).slice(0, 4),
+  [
+    "botster.package.entrypoint.start",
+    "botster.package.entrypoint.stop",
+    "botster.package.entrypoint.restart",
+    "botster.package.entrypoint.status"
+  ]
+);
 assert.equal(realRuntime.entities.get("botster-web.package", "github-provider").status, "disabled");
+assert.equal(realRuntime.entities.get("botster-web.package", "github-provider").app_surface_count, 0);
+assert.equal(realRuntime.entities.get("botster-web.package", "github-provider").settings_surface_count, 1);
 assert.match(realRuntime.entities.get("botster-web.package", "github-provider").entrypoint_process_summary, /poller stopped/);
 assert.match(realRuntime.entities.get("botster-web.package", "github-provider").entrypoint_process_summary, /exited_at 1781112200/);
 assert.equal(realRuntime.entities.get("botster-web.package", "local-diagnostics").capability_summary, "No requested capabilities");
@@ -2056,6 +2267,25 @@ try {
         classification: "plugin",
         state: "enabled",
         requested_capabilities: [{ surface: "SessionActions", scope: "project-pipelines" }],
+        surfaces: [
+          {
+            id: "home",
+            kind: "app",
+            title: "Pipelines",
+            description: "Project Pipelines workbench",
+            order: 1,
+            supports: ["render"]
+          },
+          {
+            id: "settings",
+            kind: "settings",
+            title: "Pipeline Settings",
+            order: 2,
+            supports: ["render"]
+          }
+        ],
+        view_surface: { id: "legacy-view", title: "Legacy View" },
+        settings_surface: { id: "legacy-settings", title: "Legacy Settings" },
         runnable_entrypoints: [
           {
             id: "web-client",
@@ -2196,9 +2426,27 @@ try {
   assert.match(realHubMarkup, /Required configuration is missing/);
   assert.match(realHubMarkup, /Existing secret is saved/);
   assert.match(realHubMarkup, /Save configuration/);
+  assert.match(realHubMarkup, /Package app surfaces/);
+  assert.match(realHubMarkup, /Launch app surfaces/);
+  assert.match(realHubMarkup, /Open settings surfaces/);
+  assert.match(realHubMarkup, /Pipelines/);
+  assert.match(realHubMarkup, /Project Pipelines workbench/);
+  assert.match(realHubMarkup, /Pipeline Settings/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.surface\.render"/);
   assert.match(realHubMarkup, /data-action-id="botster\.package\.configuration\.save"/);
   assert.match(realHubMarkup, /data-action-id="botster\.package\.configure"/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.enable"/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.disable"/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.remove"/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.entrypoint\.start"/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.entrypoint\.stop"/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.entrypoint\.restart"/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.entrypoint\.status"/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.update"[^>]*disabled=""/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.reload"[^>]*disabled=""/);
+  assert.match(realHubMarkup, /data-action-id="botster\.hub\.restart"[^>]*disabled=""/);
   assert.doesNotMatch(realHubMarkup, /write_only|super-secret-token/);
+  assert.doesNotMatch(realHubMarkup, /Legacy View|Legacy Settings/);
   assert.match(realHubMarkup, /Diagnostic action failure/);
   assert.match(realHubMarkup, /Run missing-session diagnostic/);
   assert.match(realHubMarkup, /Session not found/);
@@ -2207,7 +2455,7 @@ try {
   assert.doesNotMatch(realHubMarkup, /Error state/);
   assert.match(realHubMarkup, /Attachable/);
   assert.match(realHubMarkup, /data-action-id="botster\.session\.attach"/);
-  assert.doesNotMatch(realHubMarkup, /install_package|enable_package|disable_package|remove_package|start_package|stop_package|restart_package|retry_package/);
+  assert.doesNotMatch(realHubMarkup, /install_package|update_package|reload_package|restart_hub|retry_package/);
 
   const healthyFirstScreenMarkup = renderToStaticMarkup(
     createElement(DogfoodFirstScreen, {

@@ -17,6 +17,12 @@ export const generatedDaemonRequestFixtures = [
     entrypoint_id: "web-client",
     environment_overrides: { BOTSTER_HUB_SOCKET: "/tmp/botster-hub.sock" }
   },
+  { type: "stop_package_entrypoint", package_name: "project-pipelines", entrypoint_id: "web-client" },
+  { type: "restart_package_entrypoint", package_name: "project-pipelines", entrypoint_id: "web-client" },
+  { type: "package_entrypoint_status", package_name: "project-pipelines", entrypoint_id: "web-client" },
+  { type: "enable_package", package_name: "project-pipelines" },
+  { type: "disable_package", package_name: "project-pipelines" },
+  { type: "remove_package", package_name: "project-pipelines" },
   {
     type: "plugin_surface_render",
     package_name: "project-pipelines",
@@ -43,6 +49,25 @@ export const generatedPackageResponseFixture = {
       classification: "plugin",
       state: "enabled",
       requested_capabilities: [{ surface: "McpTools", scope: null }],
+      surfaces: [
+        {
+          id: "home",
+          kind: "app",
+          title: "Pipelines",
+          description: "Project Pipelines workbench",
+          order: 1,
+          category: "workflow",
+          supports: ["render"]
+        },
+        {
+          id: "settings",
+          kind: "settings",
+          title: "Pipeline Settings",
+          description: "Project Pipelines package settings",
+          order: 2,
+          supports: ["render"]
+        }
+      ],
       runnable_entrypoints: [],
       configuration: {
         schema: {
