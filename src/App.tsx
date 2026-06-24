@@ -66,7 +66,6 @@ import {
 import { createDogfoodRuntimeConfig } from "./botster/dogfoodMode";
 import { realHubDogfoodSessionId } from "./botster/realHubDogfoodTransport";
 import type { ActionBinding } from "./botster/actions";
-import type { EntityFrameStore } from "./botster/entities";
 import type { TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
 
@@ -178,7 +177,6 @@ export default function App() {
     draft: "not_loaded"
   });
   const [activeView, setActiveView] = useState<AppView>("dashboard");
-  const [selectedPackageId, setSelectedPackageId] = useState<string | undefined>();
   const [settingsPackageId, setSettingsPackageId] = useState<string | undefined>();
   const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
   const [, setFrameVersion] = useState(0);
@@ -297,30 +295,35 @@ export default function App() {
   );
   const openPackage = useCallback(
     (app: Record<string, unknown>) => {
-      setSelectedPackageId(String(app.id));
-      const surface = pluginViewSurface(app);
-      if (surface) {
+      const surface = packageAppSurfaces(app)[0];
+      const launchAction = surfaceLaunchAction(surface);
+      if (launchAction) {
         setSettingsPackageId(undefined);
-        void runtimeClient.hub.subscribeSurface({ surface, path: `/apps/${app.id}` });
+        dispatchAction(launchAction);
       } else {
         setSettingsPackageId(String(app.id));
       }
     },
-    [runtimeClient]
+    [dispatchAction]
+  );
+  const openPackageSurface = useCallback(
+    (app: Record<string, unknown>, surface: PackageSurfaceRecord) => {
+      const launchAction = surfaceLaunchAction(surface);
+      if (!launchAction) return;
+      setSettingsPackageId(undefined);
+      dispatchAction(launchAction);
+    },
+    [dispatchAction]
   );
   const openPackageSettings = useCallback((app: Record<string, unknown>) => {
     setSettingsPackageId(String(app.id));
-    setSelectedPackageId(String(app.id));
   }, []);
   const packages = runtimeClient.entities.list("botster-web.package");
-  const selectedPackage = selectedPackageId
-    ? packages.find((app) => app.id === selectedPackageId)
-    : undefined;
   const settingsPackage = settingsPackageId
     ? packages.find((app) => app.id === settingsPackageId)
     : undefined;
-  const packagesWithUi = packages.filter((app) => Boolean(pluginViewSurface(app)));
-  const packagesWithoutUi = packages.filter((app) => !pluginViewSurface(app));
+  const packagesWithUi = packages.filter((app) => packageAppSurfaces(app).length > 0);
+  const packagesWithoutUi = packages.filter((app) => packageAppSurfaces(app).length === 0);
   const sessions = runtimeClient.entities.list("botster-web.session");
   const attachableDogfoodSession = sessions.find((session) => session.id === realHubDogfoodSessionId && isAttachableSession(session));
   const selectedRealHubSession = selectedRealHubTerminalSessionId
@@ -354,6 +357,10 @@ export default function App() {
     typeof localState["dogfood.diagnostic_action_status"] === "string"
       ? localState["dogfood.diagnostic_action_status"]
       : "No diagnostic action has been dispatched.";
+  const pluginSurfaceStatusText =
+    typeof localState["dogfood.plugin_surface_status"] === "string"
+      ? localState["dogfood.plugin_surface_status"]
+      : undefined;
   const runningSessions = sessions.filter((session) => session.status === "running");
   const blockingDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "danger");
   const warningDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "warning");
@@ -608,6 +615,7 @@ export default function App() {
                                 app={app}
                                 key={app.id}
                                 onOpen={openPackage}
+                                onOpenSurface={openPackageSurface}
                                 onSettings={openPackageSettings}
                               />
                             ))}
@@ -623,20 +631,24 @@ export default function App() {
                                 app={app}
                                 key={app.id}
                                 onOpen={openPackage}
+                                onOpenSurface={openPackageSurface}
                                 onSettings={openPackageSettings}
                               />
                             ))}
                           </>
                         ) : null}
                       </IonList>
-                      {selectedPackage && pluginViewSurface(selectedPackage) ? (
-                        <PluginViewPanel
-                          app={selectedPackage}
-                          snapshot={surfaceSnapshot}
-                          entities={runtimeClient.entities}
-                          localState={localState}
-                          onAction={dispatchAction}
-                        />
+                      {pluginSurfaceStatusText ? (
+                        <article className="workflow-section" aria-label="Rendered package surface">
+                          <div className="section-heading">
+                            <div>
+                              <p className="eyebrow">Plugin surface</p>
+                              <h2>Rendered package surface</h2>
+                            </div>
+                            <IonBadge color="success">Accepted</IonBadge>
+                          </div>
+                          <p className="entity-empty">{pluginSurfaceStatusText}</p>
+                        </article>
                       ) : null}
                     </>
                   ) : (
@@ -799,7 +811,7 @@ export default function App() {
           </IonToolbar>
         </IonHeader>
         <IonContent>
-          {settingsPackage ? <PluginSettingsPanel app={settingsPackage} /> : null}
+          {settingsPackage ? <PluginSettingsPanel app={settingsPackage} onAction={dispatchAction} /> : null}
         </IonContent>
       </IonModal>
     </IonApp>
@@ -861,11 +873,15 @@ function EntityFamilyPanel({ title, records, emptyText, primaryField, secondaryF
 interface PluginListItemProps {
   app: Record<string, unknown>;
   onOpen: (app: Record<string, unknown>) => void;
+  onOpenSurface: (app: Record<string, unknown>, surface: PackageSurfaceRecord) => void;
   onSettings: (app: Record<string, unknown>) => void;
 }
 
-function PluginListItem({ app, onOpen, onSettings }: PluginListItemProps) {
-  const hasUi = Boolean(pluginViewSurface(app));
+export function PluginListItem({ app, onOpen, onOpenSurface, onSettings }: PluginListItemProps) {
+  const appSurfaces = packageAppSurfaces(app);
+  const settingsSurfaces = packageSettingsSurfaces(app);
+  const hasUi = appSurfaces.length > 0;
+  const hasSettings = settingsSurfaces.length > 0;
 
   return (
     <IonItem
@@ -881,13 +897,32 @@ function PluginListItem({ app, onOpen, onSettings }: PluginListItemProps) {
           {" "}
           <IonIcon icon={keyOutline} aria-hidden="true" /> {capabilityCountLabel(app.capability_summary)}
         </p>
+        {appSurfaces.length > 0 ? (
+          <div className="surface-action-row" aria-label={`${appDisplayName(app.title, String(app.id))} app surfaces`}>
+            {appSurfaces.map((surface) => (
+              <IonButton
+                key={surfaceKey(surface)}
+                fill="outline"
+                size="small"
+                disabled={!surfaceLaunchAction(surface)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenSurface(app, surface);
+                }}
+              >
+                {surfaceTitle(surface)}
+              </IonButton>
+            ))}
+          </div>
+        ) : null}
       </IonLabel>
       <IonBadge slot="end" color={hasUi ? "primary" : "medium"}>
-        {hasUi ? "UI" : "Settings"}
+        {hasUi ? `${appSurfaces.length} UI` : hasSettings ? "Settings" : "No UI"}
       </IonBadge>
       <IonButton
         slot="end"
         fill="clear"
+        disabled={!hasSettings}
         aria-label={`Settings for ${appDisplayName(app.title, String(app.id))}`}
         onClick={(event) => {
           event.stopPropagation();
@@ -900,54 +935,47 @@ function PluginListItem({ app, onOpen, onSettings }: PluginListItemProps) {
   );
 }
 
-interface PluginViewPanelProps {
+interface PluginSettingsPanelProps {
   app: Record<string, unknown>;
-  snapshot?: UiTreeSnapshot;
-  entities: EntityFrameStore;
-  localState: Record<string, unknown>;
   onAction: (action: ActionBinding) => void;
 }
 
-function PluginViewPanel({ app, snapshot, entities, localState, onAction }: PluginViewPanelProps) {
-  const surface = pluginViewSurface(app);
-  const surfaceReady = Boolean(surface && snapshot?.surface === surface);
-
-  if (!surfaceReady || !snapshot) {
-    return null;
-  }
-
-  return (
-    <UiNodeSurface
-      snapshot={snapshot}
-      entities={entities}
-      capabilities={{
-        ...defaultUiCapabilitySet,
-        isolated_plugin_asset: false
-      }}
-      localState={localState}
-      onAction={(action) => onAction(action)}
-    />
-  );
-}
-
-interface PluginSettingsPanelProps {
-  app: Record<string, unknown>;
-}
-
-function PluginSettingsPanel({ app }: PluginSettingsPanelProps) {
-  const settingsSurface = pluginSettingsSurface(app);
+export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps) {
+  const settingsSurfaces = packageSettingsSurfaces(app);
   const status = stringValue(app.status, "unknown");
   const enabled = status === "enabled";
 
   return (
     <IonList lines="full">
-      <IonItem button disabled={!settingsSurface}>
-        <IonIcon slot="start" icon={constructOutline} aria-hidden="true" />
-        <IonLabel>
-          <h2>Configure</h2>
-          <p>{settingsSurface ? `${capabilityCountLabel(app.capability_summary)} capabilities` : "No settings surface registered"}</p>
-        </IonLabel>
-      </IonItem>
+      {settingsSurfaces.length > 0 ? (
+        settingsSurfaces.map((surface) => {
+          const launchAction = surfaceLaunchAction(surface);
+          return (
+            <IonItem
+              button
+              key={surfaceKey(surface)}
+              disabled={!launchAction}
+              onClick={() => {
+                if (launchAction) onAction(launchAction);
+              }}
+            >
+              <IonIcon slot="start" icon={constructOutline} aria-hidden="true" />
+              <IonLabel>
+                <h2>{surfaceTitle(surface)}</h2>
+                <p>{surfaceDescription(surface) ?? `${capabilityCountLabel(app.capability_summary)} capabilities`}</p>
+              </IonLabel>
+            </IonItem>
+          );
+        })
+      ) : (
+        <IonItem disabled>
+          <IonIcon slot="start" icon={constructOutline} aria-hidden="true" />
+          <IonLabel>
+            <h2>Configure</h2>
+            <p>No settings surface registered</p>
+          </IonLabel>
+        </IonItem>
+      )}
       <IonItem button disabled>
         <IonIcon slot="start" icon={refreshOutline} aria-hidden="true" />
         <IonLabel>
@@ -996,12 +1024,38 @@ function capabilityCountLabel(value: unknown): string {
   return String(value.split(",").filter((part) => part.trim().length > 0).length);
 }
 
-function pluginViewSurface(app: Record<string, unknown>): string | undefined {
-  return firstString(app.view_surface, app.plugin_view_surface, app.primary_surface, app.ui_surface);
+export type PackageSurfaceRecord = Record<string, unknown> & {
+  launch_action?: ActionBinding;
+};
+
+export function packageAppSurfaces(app: Record<string, unknown>): PackageSurfaceRecord[] {
+  return packageSurfaceRecords(app.app_surfaces);
 }
 
-function pluginSettingsSurface(app: Record<string, unknown>): string | undefined {
-  return firstString(app.settings_surface, app.plugin_settings_surface);
+export function packageSettingsSurfaces(app: Record<string, unknown>): PackageSurfaceRecord[] {
+  return packageSurfaceRecords(app.settings_surfaces);
+}
+
+function packageSurfaceRecords(value: unknown): PackageSurfaceRecord[] {
+  return Array.isArray(value)
+    ? value.filter((surface): surface is PackageSurfaceRecord => Boolean(surface && typeof surface === "object" && !Array.isArray(surface)))
+    : [];
+}
+
+export function surfaceLaunchAction(surface: PackageSurfaceRecord | undefined): ActionBinding | undefined {
+  return surface?.launch_action && typeof surface.launch_action === "object" ? surface.launch_action : undefined;
+}
+
+function surfaceTitle(surface: PackageSurfaceRecord): string {
+  return firstString(surface.title, surface.surface_id, surface.id) ?? "Plugin surface";
+}
+
+function surfaceDescription(surface: PackageSurfaceRecord): string | undefined {
+  return firstString(surface.description);
+}
+
+function surfaceKey(surface: PackageSurfaceRecord): string {
+  return firstString(surface.surface_id, surface.id, surface.title) ?? JSON.stringify(surface);
 }
 
 function firstString(...values: unknown[]): string | undefined {
