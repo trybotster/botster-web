@@ -375,6 +375,10 @@ assert.match(readme, /packages show --data-dir .* botster-web/);
 assert.match(readme, /packages enable --data-dir .* botster-web/);
 assert.match(readme, /local_development/);
 assert.match(readme, /first-party-ready/);
+assert.match(readme, /kind: web_app/);
+assert.match(readme, /launch_mode: background/);
+assert.match(readme, /readiness: local_url/);
+assert.match(readme, /botster packages open botster-web web-client/);
 assert.match(readme, /dogfood-app/);
 assert.match(readme, /dogfood-settings/);
 assert.match(readme, /PluginSurfaceRender/);
@@ -427,26 +431,45 @@ assert.doesNotMatch(pluginEntrypoint, /tools|commands|surfaces|entities|mcp/);
 
 const [webClientEntrypoint] = packageManifest.runnable_entrypoints;
 assert.equal(webClientEntrypoint.id, "web-client");
-assert.equal(webClientEntrypoint.kind, "web");
+assert.equal(webClientEntrypoint.kind, "web_app");
+assert.equal(webClientEntrypoint.launch_mode, "background");
 assert.equal(webClientEntrypoint.command, "node");
 assert.deepEqual(webClientEntrypoint.args, ["scripts/real-hub-dogfood-bridge.mjs"]);
 assert.deepEqual(webClientEntrypoint.working_directory, { policy: "package_root" });
-assert.equal(webClientEntrypoint.mode, "dev");
+assert.equal(Object.hasOwn(webClientEntrypoint, "mode"), false);
 assert.equal(webClientEntrypoint.may_supervise, true);
 assert.deepEqual(webClientEntrypoint.capabilities, [{ surface: "network", scope: "localhost" }]);
 assert.deepEqual(
-  webClientEntrypoint.environment.map(({ name, required }) => ({ name, required })),
+  webClientEntrypoint.injections.map(({ kind, target, required }) => ({ kind, target, required })),
   [
-    { name: "BOTSTER_HUB_SOCKET", required: false },
-    { name: "BOTSTER_HUB_DATA_DIR", required: false }
+    {
+      kind: "hub_connection",
+      target: { type: "environment", name: "BOTSTER_HUB_CONNECTION" },
+      required: true
+    },
+    {
+      kind: "data_dir",
+      target: { type: "environment", name: "BOTSTER_HUB_DATA_DIR" },
+      required: true
+    },
+    {
+      kind: "hub_socket",
+      target: { type: "environment", name: "BOTSTER_HUB_SOCKET" },
+      required: true
+    }
   ]
 );
 assert.equal(
-  webClientEntrypoint.environment.some(({ name }) => name === "BOTSTER_HUB_BIN"),
+  webClientEntrypoint.environment.length,
+  0
+);
+assert.deepEqual(webClientEntrypoint.readiness, { result_fields: ["local_url"] });
+assert.equal(
+  webClientEntrypoint.injections.some(({ target }) => target.name === "BOTSTER_HUB_BIN"),
   false
 );
 assert.equal(
-  webClientEntrypoint.environment.some(({ name }) => name === "BOTSTER_WEB_DOGFOOD_DATA_DIR"),
+  webClientEntrypoint.injections.some(({ target }) => target.name === "BOTSTER_WEB_DOGFOOD_DATA_DIR"),
   false
 );
 
@@ -566,7 +589,8 @@ try {
     ok: true,
     mode: "existing_hub",
     source: "socket",
-    socket: "configured"
+    socket: "configured",
+    local_url: packageBridgeRuntime.origin
   });
 
   const requestResponse = await fetch(`${packageBridgeRuntime.origin}/request`, {

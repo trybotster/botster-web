@@ -50,6 +50,8 @@ if (bridgeMode.ownsHub) {
 
 await waitForSocket(bridgeMode.socketPath, () => hubExit, bridgeMode.diagnosticLabel);
 
+let localUrl;
+
 const server = createServer(async (request, response) => {
   response.setHeader("access-control-allow-origin", "http://127.0.0.1:5173");
   response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
@@ -62,7 +64,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && request.url === "/health") {
-    writeJson(response, 200, bridgeMode.health);
+    writeJson(response, 200, { ...bridgeMode.health, local_url: localUrl });
     return;
   }
 
@@ -142,9 +144,10 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`botster-web real hub dogfood bridge listening at http://${host}:${port}/request`);
-  console.log(`botster-web package UI available at http://${host}:${port}/`);
-  console.log(`botster-web package real-hub UI available at http://${host}:${port}/?dogfood=real-hub`);
+  localUrl = boundServerOrigin(server);
+  console.log(`botster-web real hub dogfood bridge listening at ${localUrl}/request`);
+  console.log(`botster-web package UI available at ${localUrl}/`);
+  console.log(`botster-web package real-hub UI available at ${localUrl}/?dogfood=real-hub`);
   console.log(`mode: ${bridgeMode.diagnosticLabel}`);
   if (bridgeMode.mode === "spawned_hub") {
     console.log(`isolated data dir: ${bridgeMode.dataDir}`);
@@ -152,6 +155,15 @@ server.listen(port, host, () => {
     console.log(`attached socket: configured ${bridgeMode.source}`);
   }
 });
+
+function boundServerOrigin(httpServer) {
+  const address = httpServer.address();
+  if (!address || typeof address === "string") {
+    return `http://${host}:${port}`;
+  }
+
+  return `http://${address.address}:${address.port}`;
+}
 
 const shutdown = async () => {
   server.close();
