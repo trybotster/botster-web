@@ -87,6 +87,7 @@ const [
 assert.match(main, /import App from "\.\/App"/);
 assert.match(main, /<App \/>/);
 assert.match(app, /import \{ UiNodeSurface \} from "\.\/botster\/UiNodeSurface"/);
+assert.match(app, /IonToast/);
 assert.match(app, /import \{ TerminalViewHost \} from "\.\/botster\/TerminalViewHost"/);
 assert.match(app, /import \{ ConnectionDiagnosticsPanel \} from "\.\/botster\/ConnectionDiagnosticsPanel"/);
 assert.match(app, /import \{ DogfoodFirstScreen/);
@@ -97,6 +98,19 @@ assert.match(app, /packageRuntime \? \{ bridgeUrl: `\$\{window\.location\.origin
 assert.match(app, /__BOTSTER_PACKAGE_RUNTIME__/);
 assert.match(app, /runtimeClient\.hub\.subscribeSurface/);
 assert.match(app, /runtimeClient\.entities\.pull/);
+assert.match(app, /const appViewPaths: Record<AppView, string>/);
+assert.match(app, /function appViewFromPathname\(pathname: string\): AppView/);
+assert.match(app, /function pushAppViewUrl\(view: AppView\): void/);
+assert.match(app, /window\.history\.pushState\(\{ botsterView: view \}/);
+assert.match(app, /window\.addEventListener\("popstate", syncViewFromLocation\)/);
+assert.match(app, /Marketplace registry path/);
+assert.match(app, /Local package path/);
+assert.match(app, /registry_path: registryPath/);
+assert.match(app, /request_type: "install_package_local_path"/);
+assert.match(app, /packageActionFeedback\(result\)/);
+assert.match(app, /setPackageActionToast\(packageFeedback\)/);
+assert.match(app, /package_decision/);
+assert.match(app, /install_plan/);
 assert.match(app, /schemaVersionDiagnosticFromFrame/);
 assert.match(app, /operatorErrorDiagnostic/);
 assert.match(app, /hubConnectionDiagnosticFromFrame/);
@@ -215,6 +229,9 @@ assert.match(realHubDogfoodTransport, /botster\.package\.surface\.render/);
 assert.match(realHubDogfoodTransport, /type: "plugin_surface_render"/);
 assert.match(realHubDogfoodTransport, /DaemonPackageActionState/);
 assert.match(realHubDogfoodTransport, /botster\.package\.daemon_request/);
+assert.match(realHubDogfoodTransport, /package_decision: response\.package_decision/);
+assert.match(realHubDogfoodTransport, /install_plan: response\.install_plan/);
+assert.match(realHubDogfoodTransport, /diagnostics: responseDiagnostics\(response\)/);
 assert.match(realHubDogfoodTransport, /daemonRequestFromDescriptor/);
 assert.match(realHubDogfoodTransport, /type: "enable_package"/);
 assert.match(realHubDogfoodTransport, /type: "disable_package"/);
@@ -2619,21 +2636,17 @@ try {
     view_surface: { id: "legacy-view", title: "Legacy View" },
     settings_surface: { id: "legacy-settings", title: "Legacy Settings" }
   };
-  const openedSurfaces = [];
   const openedSettings = [];
   const descriptorListMarkup = renderToStaticMarkup(
     createElement(PluginListItem, {
       app: descriptorApp,
       onOpen: () => undefined,
-      onOpenSurface: (appRecord, surface) => openedSurfaces.push({ appRecord, surface }),
       onSettings: (appRecord) => openedSettings.push(appRecord)
     })
   );
   assert.match(descriptorListMarkup, /Descriptor Only/);
-  assert.match(descriptorListMarkup, /Descriptor Dogfood/);
-  assert.match(descriptorListMarkup, /Disable Package/);
   assert.match(descriptorListMarkup, /1 UI/);
-  assert.match(descriptorListMarkup, /surface-action-row/);
+  assert.doesNotMatch(descriptorListMarkup, /Descriptor Dogfood|Disable Package|surface-action-row/);
   assert.equal(packageAppSurfaces(descriptorApp).length, 1);
   assert.equal(packageSettingsSurfaces(descriptorApp).length, 1);
   assert.equal(surfaceLaunchAction(packageAppSurfaces(descriptorApp)[0]).id, "botster.package.surface.render");
@@ -2641,28 +2654,15 @@ try {
   const descriptorListTree = PluginListItem({
     app: descriptorApp,
     onOpen: () => undefined,
-    onOpenSurface: (appRecord, surface) => openedSurfaces.push({ appRecord, surface }),
     onSettings: (appRecord) => openedSettings.push(appRecord)
   });
-  const descriptorLaunchButton = findReactElement(
+  const descriptorSettingsButton = findReactElement(
     descriptorListTree,
-    (element) => element.props?.children === "Descriptor Dogfood" && typeof element.props?.onClick === "function"
+    (element) => element.props?.["aria-label"] === "Settings for Descriptor Only" && typeof element.props?.onClick === "function"
   );
-  assert.ok(descriptorLaunchButton);
-  descriptorLaunchButton.props.onClick({ stopPropagation() {} });
-  assert.equal(openedSurfaces.length, 1);
-  assert.equal(openedSurfaces[0].appRecord.id, "descriptor-only");
-  assert.deepEqual(surfaceLaunchAction(openedSurfaces[0].surface), descriptorApp.app_surfaces[0].launch_action);
-  const descriptorPackageActionButton = findReactElement(
-    descriptorListTree,
-    (element) => element.props?.children === "Disable Package" && typeof element.props?.onClick === "function"
-  );
-  assert.ok(descriptorPackageActionButton);
-  descriptorPackageActionButton.props.onClick({ stopPropagation() {} });
-  assert.equal(openedSurfaces.length, 2);
-  assert.equal(openedSurfaces[1].appRecord.id, "descriptor-only");
-  assert.equal(openedSurfaces[1].surface.id, descriptorPackageAction.id);
-  assert.deepEqual(openedSurfaces[1].surface.launch_action, descriptorPackageAction.action);
+  assert.ok(descriptorSettingsButton);
+  descriptorSettingsButton.props.onClick({ stopPropagation() {} });
+  assert.deepEqual(openedSettings.map((appRecord) => appRecord.id), ["descriptor-only"]);
 
   const dispatchedSettings = [];
   const descriptorSettingsMarkup = renderToStaticMarkup(
@@ -2697,7 +2697,6 @@ try {
     createElement(PluginListItem, {
       app: legacyOnlyApp,
       onOpen: () => undefined,
-      onOpenSurface: (appRecord, surface) => openedSurfaces.push({ appRecord, surface }),
       onSettings: (appRecord) => openedSettings.push(appRecord)
     })
   );

@@ -285,7 +285,7 @@ function responseOwnsSessions(response: DaemonResponse): boolean {
 }
 
 function responseOwnsPackages(response: DaemonResponse): boolean {
-  return response.kind === "packages" || response.kind === "package_update_status";
+  return response.kind === "packages" || response.kind === "package_decision" || response.kind === "package_update_status";
 }
 
 function responseOwnsAvailablePackages(response: DaemonResponse): boolean {
@@ -850,7 +850,14 @@ async function dispatchDaemonAction(
 
     const response = await bridge.request(daemonRequest);
     emitResponse(response);
-    emit(actionResultFrame(request, !response.error, response.error?.message, { request_type: daemonRequest.type, kind: response.kind }));
+    emit(actionResultFrame(request, !response.error, response.error?.message, {
+      request_type: daemonRequest.type,
+      kind: response.kind,
+      package_decision: response.package_decision,
+      install_plan: response.install_plan,
+      update_status: response.update_status,
+      diagnostics: responseDiagnostics(response)
+    }));
     return;
   }
 
@@ -877,7 +884,10 @@ function daemonRequestFromDescriptor(request: DaemonPackageActionRequest): Daemo
   const entrypointId = request.entrypoint_id ?? "";
   const entryId = request.entry_id ?? "";
   const registryPath = request.registry_path ?? "";
+  const localPath = readConfigString((request as DaemonPackageActionRequest & { path?: unknown }).path);
 
+  if (request.request_type === "install_package_local_path" && localPath) return { type: "install_package_local_path", path: localPath };
+  if (request.request_type === "enable_package_local_path" && localPath) return { type: "enable_package_local_path", path: localPath };
   if (request.request_type === "enable_package" && packageName) return { type: "enable_package", package_name: packageName };
   if (request.request_type === "disable_package" && packageName) return { type: "disable_package", package_name: packageName };
   if (request.request_type === "remove_package" && packageName) return { type: "remove_package", package_name: packageName };

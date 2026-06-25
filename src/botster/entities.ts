@@ -31,6 +31,7 @@ export interface EntityPullRequest {
   family: string;
   id?: string;
   where?: Record<string, string | number | boolean>;
+  [key: string]: string | number | boolean | Record<string, string | number | boolean> | undefined;
 }
 
 export interface EntityFrameStore {
@@ -184,17 +185,21 @@ function isPlainRecord(record: unknown): record is EntityRecord {
 }
 
 function entityPullKey(request: EntityPullRequest): string {
+  const extraEntries = Object.entries(request)
+    .filter(([key]) => key !== "family" && key !== "id" && key !== "where")
+    .sort(([left], [right]) => left.localeCompare(right));
+
   return JSON.stringify({
     family: request.family,
     id: request.id ?? null,
-    where: request.where ? Object.entries(request.where).sort(([left], [right]) => left.localeCompare(right)) : []
+    where: request.where ? Object.entries(request.where).sort(([left], [right]) => left.localeCompare(right)) : [],
+    extra: extraEntries
   });
 }
 
 function copyPullRequest(request: EntityPullRequest): EntityPullRequest {
   return {
-    family: request.family,
-    id: request.id,
+    ...request,
     where: request.where ? { ...request.where } : undefined
   };
 }

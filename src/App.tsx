@@ -14,6 +14,7 @@ import {
   IonGrid,
   IonHeader,
   IonIcon,
+  IonInput,
   IonItem,
   IonLabel,
   IonList,
@@ -26,6 +27,7 @@ import {
   IonRow,
   IonSplitPane,
   IonTitle,
+  IonToast,
   IonToolbar,
   setupIonicReact
 } from "@ionic/react";
@@ -86,6 +88,37 @@ const navigationItems: Array<{ label: string; icon: string; view: AppView }> = [
   { label: "Diagnostics", icon: listCircleOutline, view: "diagnostics" }
 ];
 
+const appViewPaths: Record<AppView, string> = {
+  dashboard: "/dashboard",
+  apps: "/apps",
+  diagnostics: "/diagnostics"
+};
+
+function appViewFromPathname(pathname: string): AppView {
+  const normalizedPath = pathname.replace(/\/+$/, "") || "/";
+  if (normalizedPath === appViewPaths.apps || normalizedPath.startsWith(`${appViewPaths.apps}/`)) return "apps";
+  if (normalizedPath === appViewPaths.diagnostics || normalizedPath.startsWith(`${appViewPaths.diagnostics}/`)) return "diagnostics";
+  return "dashboard";
+}
+
+function appViewFromLocation(): AppView {
+  return appViewFromPathname(window.location.pathname);
+}
+
+function appViewUrl(view: AppView): string {
+  const url = new URL(window.location.href);
+  url.pathname = appViewPaths[view];
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function pushAppViewUrl(view: AppView): void {
+  const nextUrl = appViewUrl(view);
+  const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (nextUrl !== currentUrl) {
+    window.history.pushState({ botsterView: view }, "", nextUrl);
+  }
+}
+
 const loadingSnapshot: UiTreeSnapshot = {
   kind: "ui_tree_snapshot",
   surface: "botster-web.dogfood.loading",
@@ -142,6 +175,68 @@ function pluginSurfaceStatus(result: unknown): string | undefined {
     : `${title} rendered (${packageName}/${surfaceId})`;
 }
 
+function packageActionFeedback(result: { accepted: boolean; reason?: string; result?: unknown }): { message: string; color: string } {
+  const payload = readRecord(result.result);
+  const requestType = readString(payload.request_type) ?? "package action";
+  const decision = readRecord(payload.package_decision);
+  const installPlan = readRecord(payload.install_plan);
+  const updateStatus = readRecord(payload.update_status);
+  const diagnostics = Array.isArray(payload.diagnostics) ? payload.diagnostics.map(readDiagnosticMessage).filter(Boolean) : [];
+
+  if (!result.accepted) {
+    return {
+      message: result.reason ?? `${actionLabelFromId(requestType)} failed`,
+      color: "danger"
+    };
+  }
+
+  const decisionPackage = readString(decision.package_name);
+  const decisionAction = readString(decision.action);
+  const decisionState = readString(decision.state);
+  if (decisionPackage) {
+    return {
+      message: `${decisionPackage}: ${actionLabelFromId(decisionAction ?? requestType)}${decisionState ? ` (${decisionState})` : ""}`,
+      color: "success"
+    };
+  }
+
+  const installEntry = readRecord(installPlan.entry);
+  const installPackage = readString(installEntry.package_name);
+  const installEffects = Array.isArray(installPlan.effects)
+    ? installPlan.effects.map((effect) => readString(readRecord(effect).message)).filter(Boolean)
+    : [];
+  if (installPackage) {
+    return {
+      message: `${installPackage}: ${installEffects[0] ?? "Install plan received"}`,
+      color: "success"
+    };
+  }
+
+  const updatePackage = readString(updateStatus.package_name);
+  if (updatePackage) {
+    return {
+      message: `${updatePackage}: ${updateStatus.update_available === true ? "Update available" : "No update available"}`,
+      color: "success"
+    };
+  }
+
+  return {
+    message: diagnostics[0] ?? `${actionLabelFromId(requestType)} accepted`,
+    color: "success"
+  };
+}
+
+function readDiagnosticMessage(value: unknown): string | undefined {
+  const record = readRecord(value);
+  return readString(record.message);
+}
+
+function actionLabelFromId(actionId: string): string {
+  return actionId
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 export default function App() {
   const dogfoodRuntime = useMemo(
     () => {
@@ -177,8 +272,11 @@ export default function App() {
     session: "not_loaded",
     draft: "not_loaded"
   });
-  const [activeView, setActiveView] = useState<AppView>("dashboard");
+  const [activeView, setActiveView] = useState<AppView>(() => appViewFromLocation());
   const [settingsPackageId, setSettingsPackageId] = useState<string | undefined>();
+  const [marketplaceRegistryPath, setMarketplaceRegistryPath] = useState("");
+  const [localPackagePath, setLocalPackagePath] = useState("");
+  const [packageActionToast, setPackageActionToast] = useState<{ message: string; color: string } | undefined>();
   const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
@@ -189,6 +287,23 @@ export default function App() {
   }, []);
   const recordDiagnostics = useCallback((nextDiagnostics: ConnectionDiagnostic[]) => {
     setDiagnostics((current) => nextDiagnostics.reduce(upsertDiagnostic, current));
+  }, []);
+  const navigateToView = useCallback((view: AppView) => {
+    setActiveView(view);
+    pushAppViewUrl(view);
+  }, []);
+
+  useEffect(() => {
+    const syncViewFromLocation = () => {
+      setActiveView(appViewFromLocation());
+    };
+
+    window.history.replaceState({ botsterView: appViewFromLocation() }, "", window.location.href);
+    window.addEventListener("popstate", syncViewFromLocation);
+
+    return () => {
+      window.removeEventListener("popstate", syncViewFromLocation);
+    };
   }, []);
 
   useEffect(() => {
@@ -274,6 +389,12 @@ export default function App() {
         if (result.accepted && isAttachAction && action.target) {
           setSelectedRealHubTerminalSessionId(action.target);
         }
+        const packageFeedback = action.id === "botster.package.daemon_request"
+          ? packageActionFeedback(result)
+          : undefined;
+        if (packageFeedback) {
+          setPackageActionToast(packageFeedback);
+        }
         updateLocalState({
           [statusKey]: result.accepted && isSpawnAction
             ? `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
@@ -289,6 +410,40 @@ export default function App() {
     },
     [recordDiagnostic, runtimeClient, updateLocalState]
   );
+  const loadMarketplaceRegistry = useCallback(() => {
+    const registryPath = marketplaceRegistryPath.trim();
+    if (!registryPath) return;
+
+    setEntityLoadStatus((current) => ({ ...current, availablePackage: "loading" }));
+    void runtimeClient.entities
+      .pull({ family: "botster-web.available_package", registry_path: registryPath })
+      .then(() => {
+        setEntityLoadStatus((current) => ({ ...current, availablePackage: "loaded" }));
+        updateLocalState({ "dogfood.diagnostic_action_status": `Loaded marketplace registry ${registryPath}` });
+      })
+      .catch((error: unknown) => {
+        setEntityLoadStatus((current) => ({ ...current, availablePackage: "error" }));
+        updateLocalState({
+          "dogfood.diagnostic_action_status": error instanceof Error ? error.message : "Marketplace registry load failed"
+        });
+      });
+  }, [marketplaceRegistryPath, runtimeClient, updateLocalState]);
+  const installLocalPackage = useCallback(() => {
+    const packagePath = localPackagePath.trim();
+    if (!packagePath) return;
+
+    dispatchAction({
+      id: "botster.package.daemon_request",
+      target: packagePath,
+      label: "Install local package",
+      params: {
+        daemon_request: {
+          request_type: "install_package_local_path",
+          path: packagePath
+        }
+      }
+    });
+  }, [dispatchAction, localPackagePath]);
   const recordTerminalDiagnostic = useCallback(
     (error: unknown) => {
       recordDiagnostic(terminalUnavailableDiagnostic(error));
@@ -308,22 +463,13 @@ export default function App() {
     },
     [dispatchAction]
   );
-  const openPackageSurface = useCallback(
-    (app: Record<string, unknown>, surface: PackageSurfaceRecord) => {
-      const launchAction = surfaceLaunchAction(surface);
-      if (!launchAction) return;
-      setSettingsPackageId(undefined);
-      dispatchAction(launchAction);
-    },
-    [dispatchAction]
-  );
   const openPackageSettings = useCallback((app: Record<string, unknown>) => {
     setSettingsPackageId(String(app.id));
   }, []);
   const packages = runtimeClient.entities.list("botster-web.package");
   const availablePackages = runtimeClient.entities.list("botster-web.available_package");
   const settingsPackage = settingsPackageId
-    ? packages.find((app) => app.id === settingsPackageId)
+    ? packages.find((app) => app.id === settingsPackageId) ?? availablePackages.find((app) => app.id === settingsPackageId)
     : undefined;
   const packagesWithUi = packages.filter((app) => packageAppSurfaces(app).length > 0);
   const packagesWithoutUi = packages.filter((app) => packageAppSurfaces(app).length === 0);
@@ -436,7 +582,7 @@ export default function App() {
                       type="button"
                       className={activeView === item.view ? "nav-item active" : "nav-item"}
                       aria-current={activeView === item.view ? "page" : undefined}
-                      onClick={() => setActiveView(item.view)}
+                      onClick={() => navigateToView(item.view)}
                     >
                       <IonIcon icon={item.icon} aria-hidden="true" />
                       <span>{item.label}</span>
@@ -452,7 +598,7 @@ export default function App() {
                       type="button"
                       className="nav-item app-shortcut"
                       onClick={() => {
-                        setActiveView("apps");
+                        navigateToView("apps");
                         openPackage(app);
                       }}
                     >
@@ -605,6 +751,35 @@ export default function App() {
                     </div>
                     <IonBadge color="medium">{packages.length + availablePackages.length}</IonBadge>
                   </div>
+                  <IonList lines="full" aria-label="Add packages and marketplaces">
+                    <IonListHeader>
+                      <IonLabel>Add packages</IonLabel>
+                    </IonListHeader>
+                    <IonItem>
+                      <IonInput
+                        label="Marketplace registry path"
+                        labelPlacement="stacked"
+                        value={marketplaceRegistryPath}
+                        placeholder="/path/to/marketplace.json"
+                        onIonInput={(event) => setMarketplaceRegistryPath(String(event.detail.value ?? ""))}
+                      />
+                      <IonButton slot="end" disabled={!marketplaceRegistryPath.trim()} onClick={loadMarketplaceRegistry}>
+                        Load
+                      </IonButton>
+                    </IonItem>
+                    <IonItem>
+                      <IonInput
+                        label="Local package path"
+                        labelPlacement="stacked"
+                        value={localPackagePath}
+                        placeholder="/path/to/plugin"
+                        onIonInput={(event) => setLocalPackagePath(String(event.detail.value ?? ""))}
+                      />
+                      <IonButton slot="end" disabled={!localPackagePath.trim()} onClick={installLocalPackage}>
+                        Install
+                      </IonButton>
+                    </IonItem>
+                  </IonList>
                   {availablePackages.length > 0 || packages.length > 0 ? (
                     <>
                       <IonList lines="full" aria-label="Available marketplace packages">
@@ -616,7 +791,6 @@ export default function App() {
                             app={app}
                             key={app.id}
                             onOpen={openPackage}
-                            onOpenSurface={openPackageSurface}
                             onSettings={openPackageSettings}
                           />
                         )) : (
@@ -636,7 +810,6 @@ export default function App() {
                                 app={app}
                                 key={app.id}
                                 onOpen={openPackage}
-                                onOpenSurface={openPackageSurface}
                                 onSettings={openPackageSettings}
                               />
                             ))}
@@ -652,7 +825,6 @@ export default function App() {
                                 app={app}
                                 key={app.id}
                                 onOpen={openPackage}
-                                onOpenSurface={openPackageSurface}
                                 onSettings={openPackageSettings}
                               />
                             ))}
@@ -835,6 +1007,14 @@ export default function App() {
           {settingsPackage ? <PluginSettingsPanel app={settingsPackage} onAction={dispatchAction} /> : null}
         </IonContent>
       </IonModal>
+      <IonToast
+        isOpen={Boolean(packageActionToast)}
+        message={packageActionToast?.message}
+        color={packageActionToast?.color}
+        duration={5000}
+        position="bottom"
+        onDidDismiss={() => setPackageActionToast(undefined)}
+      />
     </IonApp>
   );
 }
@@ -894,16 +1074,16 @@ function EntityFamilyPanel({ title, records, emptyText, primaryField, secondaryF
 interface PluginListItemProps {
   app: Record<string, unknown>;
   onOpen: (app: Record<string, unknown>) => void;
-  onOpenSurface: (app: Record<string, unknown>, surface: PackageSurfaceRecord) => void;
   onSettings: (app: Record<string, unknown>) => void;
 }
 
-export function PluginListItem({ app, onOpen, onOpenSurface, onSettings }: PluginListItemProps) {
+export function PluginListItem({ app, onOpen, onSettings }: PluginListItemProps) {
   const appSurfaces = packageAppSurfaces(app);
   const settingsSurfaces = packageSettingsSurfaces(app);
   const actions = packageActions(app);
   const hasUi = appSurfaces.length > 0;
   const hasSettings = settingsSurfaces.length > 0;
+  const hasManagement = hasSettings || actions.length > 0;
 
   return (
     <IonItem
@@ -919,53 +1099,14 @@ export function PluginListItem({ app, onOpen, onOpenSurface, onSettings }: Plugi
           {" "}
           <IonIcon icon={keyOutline} aria-hidden="true" /> {capabilityCountLabel(app.capability_summary)}
         </p>
-        {appSurfaces.length > 0 ? (
-          <div className="surface-action-row" aria-label={`${appDisplayName(app.title, String(app.id))} app surfaces`}>
-            {appSurfaces.map((surface) => (
-              <IonButton
-                key={surfaceKey(surface)}
-                fill="outline"
-                size="small"
-                disabled={!surfaceLaunchAction(surface)}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onOpenSurface(app, surface);
-                }}
-              >
-                {surfaceTitle(surface)}
-              </IonButton>
-            ))}
-          </div>
-        ) : null}
-        {actions.length > 0 ? (
-          <div className="surface-action-row" aria-label={`${appDisplayName(app.title, String(app.id))} package actions`}>
-            {actions.map((record) => {
-              const action = packageActionBinding(record);
-              return (
-                <IonButton
-                  key={packageActionKey(record)}
-                  fill="outline"
-                  size="small"
-                  disabled={!action || action.disabled === true}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    if (action) onOpenSurface(app, { launch_action: action, id: packageActionKey(record) });
-                  }}
-                >
-                  {stringValue(action?.label, stringValue(record.action_id, "Action"))}
-                </IonButton>
-              );
-            })}
-          </div>
-        ) : null}
       </IonLabel>
       <IonBadge slot="end" color={hasUi ? "primary" : "medium"}>
-        {hasUi ? `${appSurfaces.length} UI` : hasSettings ? "Settings" : "No UI"}
+        {hasUi ? `${appSurfaces.length} UI` : hasManagement ? "Settings" : "No UI"}
       </IonBadge>
       <IonButton
         slot="end"
         fill="clear"
-        disabled={!hasSettings}
+        disabled={!hasManagement}
         aria-label={`Settings for ${appDisplayName(app.title, String(app.id))}`}
         onClick={(event) => {
           event.stopPropagation();
