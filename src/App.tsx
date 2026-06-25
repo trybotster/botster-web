@@ -266,7 +266,8 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<ConnectionDiagnostic[]>(() =>
     initialConnectionDiagnostics(dogfoodRuntime.mode, dogfoodRuntime.statusText)
   );
-  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"package" | "availablePackage" | "session" | "draft", DogfoodEntityLoadStatus>>({
+  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "package" | "availablePackage" | "session" | "draft", DogfoodEntityLoadStatus>>({
+    app: "not_loaded",
     package: "not_loaded",
     availablePackage: "not_loaded",
     session: "not_loaded",
@@ -329,7 +330,7 @@ export default function App() {
     });
 
     const pullDogfoodEntity = async (
-      key: "package" | "availablePackage" | "session" | "draft",
+      key: "app" | "package" | "availablePackage" | "session" | "draft",
       request: { family: string; id?: string }
     ) => {
       setEntityLoadStatus((current) => ({ ...current, [key]: "loading" }));
@@ -353,6 +354,7 @@ export default function App() {
       })
       .then(() => runtimeClient.hub.subscribe())
       .then(() => runtimeClient.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/local" }))
+      .then(() => pullDogfoodEntity("app", { family: "botster-web.app" }))
       .then(() => pullDogfoodEntity("package", { family: "botster-web.package" }))
       .then(() => pullDogfoodEntity("availablePackage", { family: "botster-web.available_package" }))
       .then(() => pullDogfoodEntity("session", { family: "botster-web.session" }))
@@ -463,16 +465,54 @@ export default function App() {
     },
     [dispatchAction]
   );
+  const openApp = useCallback((app: Record<string, unknown>) => {
+    const title = appDisplayName(app.title, String(app.id));
+    const kind = stringValue(app.kind, "");
+    const targetKind = stringValue(app.launch_target_kind, kind);
+    const localUrl = stringValue(app.local_url, "");
+    const diagnostics = arrayOfStrings(app.diagnostics);
+    const openAction = readRecord(app.open_action);
+    const openDisabled = openAction.disabled === true;
+
+    if (kind === "terminal_app" || targetKind === "terminal_app") {
+      setPackageActionToast({
+        message: `${title} requires local terminal launch.`,
+        color: "medium"
+      });
+      return;
+    }
+
+    if (openDisabled && diagnostics.length > 0) {
+      setPackageActionToast({
+        message: `${title}: ${diagnostics[0]}`,
+        color: "warning"
+      });
+      return;
+    }
+
+    if (!localUrl) {
+      setPackageActionToast({
+        message: `${title} has no hub-provided local URL.`,
+        color: "warning"
+      });
+      return;
+    }
+
+    window.open(localUrl, "_blank", "noopener,noreferrer");
+    setPackageActionToast({
+      message: `Opening ${title}`,
+      color: "success"
+    });
+  }, []);
   const openPackageSettings = useCallback((app: Record<string, unknown>) => {
     setSettingsPackageId(String(app.id));
   }, []);
+  const installedApps = runtimeClient.entities.list("botster-web.app");
   const packages = runtimeClient.entities.list("botster-web.package");
   const availablePackages = runtimeClient.entities.list("botster-web.available_package");
   const settingsPackage = settingsPackageId
     ? packages.find((app) => app.id === settingsPackageId) ?? availablePackages.find((app) => app.id === settingsPackageId)
     : undefined;
-  const packagesWithUi = packages.filter((app) => packageAppSurfaces(app).length > 0);
-  const packagesWithoutUi = packages.filter((app) => packageAppSurfaces(app).length === 0);
   const sessions = runtimeClient.entities.list("botster-web.session");
   const attachableDogfoodSession = sessions.find((session) => session.id === realHubDogfoodSessionId && isAttachableSession(session));
   const selectedRealHubSession = selectedRealHubTerminalSessionId
@@ -527,6 +567,13 @@ export default function App() {
       value: entityLoadStatus.package === "loaded" ? String(packages.length) : loadStatusLabel(entityLoadStatus.package),
       detail: packages.length === 1 ? "1 package record loaded" : `${packages.length} package records loaded`,
       severity: entityLoadStatus.package === "error" ? "danger" : entityLoadStatus.package === "loaded" ? "success" : "info"
+    },
+    {
+      key: "apps",
+      label: "Apps",
+      value: entityLoadStatus.app === "loaded" ? String(installedApps.length) : loadStatusLabel(entityLoadStatus.app),
+      detail: installedApps.length === 1 ? "1 installed app loaded" : `${installedApps.length} installed app records loaded`,
+      severity: entityLoadStatus.app === "error" ? "danger" : entityLoadStatus.app === "loaded" ? "success" : "info"
     },
     {
       key: "sessions",
@@ -592,14 +639,14 @@ export default function App() {
               </IonList>
               <div className="sidebar-section" aria-label="Installed app shortcuts">
                 <p className="sidebar-section-label">Apps</p>
-                {packages.slice(0, 5).map((app) => (
-                  <IonMenuToggle autoHide={false} key={app.id}>
+                      {installedApps.slice(0, 5).map((app) => (
+                        <IonMenuToggle autoHide={false} key={app.id}>
                     <button
                       type="button"
                       className="nav-item app-shortcut"
                       onClick={() => {
                         navigateToView("apps");
-                        openPackage(app);
+                        openApp(app);
                       }}
                     >
                       <IonIcon icon={cubeOutline} aria-hidden="true" />
@@ -686,9 +733,9 @@ export default function App() {
                                 <IonCol size="12" sizeMd="4">
                                   <DashboardWidget
                                     title="Installed apps"
-                                    value={String(packages.length)}
-                                    detail={packages.length > 0 ? "Apps are available from the Apps view." : "No plugin apps are loaded yet."}
-                                    severity={packages.length > 0 ? "success" : "warning"}
+                                    value={String(installedApps.length)}
+                                    detail={installedApps.length > 0 ? "Apps are available from the Apps view." : "No hub-provided apps are loaded yet."}
+                                    severity={installedApps.length > 0 ? "success" : "warning"}
                                   />
                                 </IonCol>
                                 <IonCol size="12" sizeMd="4">
@@ -712,7 +759,7 @@ export default function App() {
                             </div>
                             <IonGrid className="plugin-widget-grid">
                               <IonRow>
-                                {packages.length > 0 ? packages.slice(0, 3).map((app) => (
+                                {installedApps.length > 0 ? installedApps.slice(0, 3).map((app) => (
                                   <IonCol size="12" sizeMd="4" key={app.id}>
                                     <IonCard className="plugin-widget">
                                       <IonCardHeader>
@@ -723,7 +770,7 @@ export default function App() {
                                         <IonCardTitle>{stringValue(app.title, app.id)}</IonCardTitle>
                                       </IonCardHeader>
                                       <IonCardContent>
-                                        {stringValue(app.diagnostics_summary, stringValue(app.status, "Loaded"))}
+                                        {stringValue(app.diagnostics_summary, stringValue(app.lifecycle_state, "Loaded"))}
                                       </IonCardContent>
                                     </IonCard>
                                   </IonCol>
@@ -749,7 +796,7 @@ export default function App() {
                       <p className="eyebrow">Launcher</p>
                       <h1 id="apps-heading">Apps</h1>
                     </div>
-                    <IonBadge color="medium">{packages.length + availablePackages.length}</IonBadge>
+                    <IonBadge color="medium">{installedApps.length}</IonBadge>
                   </div>
                   <IonList lines="full" aria-label="Add packages and marketplaces">
                     <IonListHeader>
@@ -780,8 +827,24 @@ export default function App() {
                       </IonButton>
                     </IonItem>
                   </IonList>
-                  {availablePackages.length > 0 || packages.length > 0 ? (
+                  {availablePackages.length > 0 || packages.length > 0 || installedApps.length > 0 ? (
                     <>
+                      <IonList lines="full" aria-label="Installed apps">
+                        <IonListHeader>
+                          <IonLabel>Installed apps</IonLabel>
+                        </IonListHeader>
+                        {installedApps.length > 0 ? installedApps.map((app) => (
+                          <AppListItem
+                            app={app}
+                            key={app.id}
+                            onOpen={openApp}
+                          />
+                        )) : (
+                          <IonItem disabled>
+                            <IonLabel>No installed apps returned</IonLabel>
+                          </IonItem>
+                        )}
+                      </IonList>
                       <IonList lines="full" aria-label="Available marketplace packages">
                         <IonListHeader>
                           <IonLabel>Available marketplace packages</IonLabel>
@@ -799,37 +862,22 @@ export default function App() {
                           </IonItem>
                         )}
                       </IonList>
-                      <IonList lines="full" aria-label="Installed apps">
-                        {packagesWithUi.length > 0 ? (
-                          <>
-                            <IonListHeader>
-                              <IonLabel>Apps with UI</IonLabel>
-                            </IonListHeader>
-                            {packagesWithUi.map((app) => (
-                              <PluginListItem
-                                app={app}
-                                key={app.id}
-                                onOpen={openPackage}
-                                onSettings={openPackageSettings}
-                              />
-                            ))}
-                          </>
-                        ) : null}
-                        {packagesWithoutUi.length > 0 ? (
-                          <>
-                            <IonListHeader>
-                              <IonLabel>Settings only</IonLabel>
-                            </IonListHeader>
-                            {packagesWithoutUi.map((app) => (
-                              <PluginListItem
-                                app={app}
-                                key={app.id}
-                                onOpen={openPackage}
-                                onSettings={openPackageSettings}
-                              />
-                            ))}
-                          </>
-                        ) : null}
+                      <IonList lines="full" aria-label="Installed packages">
+                        <IonListHeader>
+                          <IonLabel>Installed packages</IonLabel>
+                        </IonListHeader>
+                        {packages.length > 0 ? packages.map((app) => (
+                          <PluginListItem
+                            app={app}
+                            key={app.id}
+                            onOpen={openPackage}
+                            onSettings={openPackageSettings}
+                          />
+                        )) : (
+                          <IonItem disabled>
+                            <IonLabel>No installed packages returned</IonLabel>
+                          </IonItem>
+                        )}
                       </IonList>
                       {pluginSurfaceStatusText ? (
                         <article className="workflow-section" aria-label="Rendered package surface">
@@ -852,7 +900,7 @@ export default function App() {
                           <h2>No apps loaded</h2>
                         </div>
                       </div>
-                      <p className="entity-empty">The package registry has not returned marketplace or installed app records.</p>
+                      <p className="entity-empty">The hub has not returned installed apps, packages, or marketplace rows.</p>
                     </article>
                   )}
                 </section>
@@ -1077,6 +1125,40 @@ interface PluginListItemProps {
   onSettings: (app: Record<string, unknown>) => void;
 }
 
+interface AppListItemProps {
+  app: Record<string, unknown>;
+  onOpen: (app: Record<string, unknown>) => void;
+}
+
+export function AppListItem({ app, onOpen }: AppListItemProps) {
+  const kind = stringValue(app.kind, "unknown");
+  const lifecycle = stringValue(app.lifecycle_state, "unknown");
+  const diagnostics = arrayOfStrings(app.diagnostics);
+  const openAction = readRecord(app.open_action);
+  const disabled = openAction.disabled === true;
+  const title = appDisplayName(app.title, String(app.id));
+
+  return (
+    <IonItem
+      button
+      detail={!disabled}
+      onClick={() => onOpen(app)}
+    >
+      <IonIcon slot="start" icon={kind === "terminal_app" ? constructOutline : cubeOutline} color="primary" aria-hidden="true" />
+      <IonLabel>
+        <h2 title={stringValue(app.title, String(app.id))}>{title}</h2>
+        <p>
+          {kind} · {lifecycle}
+        </p>
+        <p>{stringValue(app.diagnostics_summary, diagnostics[0] ?? "Hub-provided app registry row")}</p>
+      </IonLabel>
+      <IonBadge slot="end" color={kind === "terminal_app" ? "medium" : disabled ? "warning" : "primary"}>
+        {kind === "terminal_app" ? "Terminal" : disabled ? "Unavailable" : "Open"}
+      </IonBadge>
+    </IonItem>
+  );
+}
+
 export function PluginListItem({ app, onOpen, onSettings }: PluginListItemProps) {
   const appSurfaces = packageAppSurfaces(app);
   const settingsSurfaces = packageSettingsSurfaces(app);
@@ -1191,6 +1273,10 @@ function loadStatusLabel(status: DogfoodEntityLoadStatus): string {
 
 function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+function arrayOfStrings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
 }
 
 function appDisplayName(title: unknown, fallback: string): string {

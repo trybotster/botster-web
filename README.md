@@ -146,6 +146,7 @@ Expected proof markers:
 
 - The toolbar mode chip reads `real-hub`.
 - The status list shows the isolated daemon host returned by `DaemonRequest::Status`.
+- The installed apps list is populated by `DaemonRequest::ListApps`. Web apps open only from hub-provided `DaemonApp.launch_target.local_url`; terminal apps and missing or blocked launch targets render diagnostics instead of browser-inferred lifecycle behavior.
 - The installed packages list is populated by `DaemonRequest::ListPackages` and shows the package name, version, enabled/disabled/installed state, classification, requested capability summary, provider-profile admission status, runnable entrypoint process state/diagnostics, hub-provided dependency/feature gates, and hub-provided lifecycle action availability when the current hub exposes package registry records.
 - Marketplace package rows render from hub-returned available package DTOs. The browser does not invent a registry path or infer install/auth/update policy; disabled and blocked controls reflect hub-provided package action descriptors.
 - The connection diagnostics panel starts with the selected bridge mode and adds targeted rows when the bridge is unavailable, the control stream fails, the daemon schema or compatibility descriptor is incompatible, an operator/action error is returned, or terminal streaming cannot attach.
@@ -156,7 +157,7 @@ Expected proof markers:
 - `Local hub bridge unavailable` or `Control stream disconnected` means the browser could not complete a bridge request or the bridge stopped while the dogfood surface was loading. Check that `npm run dogfood:hub` is still running and that Vite was opened with `?dogfood=real-hub`.
 - `Terminal stream unavailable` is scoped to the terminal data-plane seam. The control-plane surface can still render status, sessions, and action errors when the held terminal SSE stream is missing or rejected.
 - `Spawn isolated session` sends `DaemonRequest::Spawn` and updates entity-backed session rows. Package rows expose configuration forms when `DaemonPackage.configuration.schema.fields` is present. Saving sends `DaemonRequest::SetPackageConfiguration` with form values only; required markers and validation messages reflect hub-returned configuration state, and redacted secrets render as blank replacement fields.
-- Descriptor-backed package app and settings surfaces render through `DaemonRequest::PluginSurfaceRender`. The local `botster-web` package declares `dogfood-app` and `dogfood-settings`, and the bridge returns deterministic visible output for those surface ids.
+- Descriptor-backed package settings surfaces render through `DaemonRequest::PluginSurfaceRender`. The local `botster-web` package declares `dogfood-settings`, and the bridge returns deterministic visible output for that surface id. Installed app launcher rows come from `DaemonRequest::ListApps`, not package surface descriptors.
 - Package install, enable, disable, remove, start, stop, restart, update, and retry controls are rendered only when the hub returns corresponding package action descriptors. Botster-web forwards the descriptor's daemon request shape instead of deriving lifecycle legality from package state.
 - A compatible current hub build should stream `botster-web-dogfood-ready` through the terminal SSE path; typing in the terminal sends `DaemonRequest::SendInput` while the held stream receives live terminal output.
 - `Run missing-session diagnostic` sends a deliberately invalid daemon request and surfaces the result as diagnostic/debug state without replacing the primary spawn action status.
@@ -234,7 +235,7 @@ app:      dogfood-app
 settings: dogfood-settings
 ```
 
-When loaded through `cargo run -- dogfood --web-package-path ../botster-web`, the Apps and Settings package launcher entries should list those descriptors. Clicking either entry sends `PluginSurfaceRender` for `package_name: botster-web` and shows deterministic output naming the selected surface id.
+When loaded through `cargo run -- dogfood --web-package-path ../botster-web`, package settings entries should list the settings descriptor. Installed app launcher entries should come from the hub's app registry and use the structured app launch target; clicking a settings descriptor still sends `PluginSurfaceRender` for `package_name: botster-web` and shows deterministic output naming the selected surface id.
 
 When the hub supervises this entrypoint, it should provide `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR`. Either value selects existing-hub attach mode, so the bridge does not require `BOTSTER_HUB_BIN`, does not spawn a second hub, does not shut down the attached hub, and does not remove the attached hub data directory.
 
