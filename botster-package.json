@@ -31,23 +31,33 @@
   "runnable_entrypoints": [
     {
       "id": "web-client",
-      "kind": "web",
+      "kind": "web_app",
+      "launch_mode": "background",
       "command": "node",
       "args": ["scripts/real-hub-dogfood-bridge.mjs"],
       "working_directory": { "policy": "package_root" },
-      "environment": [
+      "injections": [
         {
-          "name": "BOTSTER_HUB_SOCKET",
-          "required": false,
-          "description": "Existing hub daemon socket. Preferred when hub supervises botster-web."
+          "kind": "hub_connection",
+          "target": { "type": "environment", "name": "BOTSTER_HUB_CONNECTION" },
+          "required": true,
+          "description": "Structured hub connection descriptor supplied by hub-supervised package launch."
         },
         {
-          "name": "BOTSTER_HUB_DATA_DIR",
-          "required": false,
-          "description": "Existing hub data directory. The bridge derives botster-hub.sock from this directory."
+          "kind": "data_dir",
+          "target": { "type": "environment", "name": "BOTSTER_HUB_DATA_DIR" },
+          "required": true,
+          "description": "Hub data directory supplied by hub-supervised package launch."
+        },
+        {
+          "kind": "hub_socket",
+          "target": { "type": "environment", "name": "BOTSTER_HUB_SOCKET" },
+          "required": true,
+          "description": "Existing hub daemon socket. Preferred when hub supervises botster-web."
         }
       ],
-      "mode": "dev",
+      "environment": [],
+      "readiness": { "result_fields": ["local_url"] },
       "capabilities": [
         { "surface": "network", "scope": "localhost" }
       ],

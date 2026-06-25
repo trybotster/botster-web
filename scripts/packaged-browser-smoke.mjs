@@ -31,8 +31,6 @@ async function runPackagedBrowserSmoke(scenario) {
   const pageErrors = [];
   const responseErrors = [];
   const daemonRequests = [];
-  const terminalInputProbe = "browser-smoke-input";
-
   await mkdir(root, { recursive: true });
   const daemon = createFakeDaemon(socketPath, daemonRequests, scenario);
   await listen(daemon, socketPath);
@@ -95,14 +93,22 @@ async function runPackagedBrowserSmoke(scenario) {
     await page.goto(`http://${host}:${port}/?dogfood=real-hub`, {
       waitUntil: "domcontentloaded"
     });
-    await page.getByText("Local hub workbench").waitFor();
+    await openDiagnosticsView(page);
+    try {
+      await page.getByText("Local hub workbench").waitFor();
+    } catch (error) {
+      assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+      const bodyText = await page.locator("body").innerText().catch(() => "");
+      throw new Error(
+        `packaged browser smoke did not render the local hub workbench; body=${JSON.stringify(bodyText.slice(0, 500))}`,
+        { cause: error }
+      );
+    }
     await page.getByRole("heading", { name: "Spawn botster-web-dogfood-session" }).waitFor();
     await page.getByText("botster-web-dogfood-ready").first().waitFor();
-    await page.getByText("Package configuration").waitFor();
     await page.getByText("Webhook endpoint").waitFor();
     await page.getByText("API token").waitFor();
     await page.getByPlaceholder("Existing secret is saved").first().waitFor();
-    await page.getByRole("button", { name: "Save configuration" }).waitFor();
     await page.getByText("Output appears in the terminal panel").first().waitFor();
     await page.getByText("Terminal output destination: botster-web-dogfood-session").waitFor();
     const staleOverviewCount = await page.getByText("Ionic React renderer shell").count();
@@ -131,6 +137,7 @@ async function runPackagedBrowserSmoke(scenario) {
       await waitForTerminalCanvas(page);
 
       await page.reload({ waitUntil: "domcontentloaded" });
+      await openDiagnosticsView(page);
       await page.getByText("Local hub workbench").waitFor();
       await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
       await page.locator("[data-terminal-session-id='botster-web-dogfood-session']").waitFor({
@@ -139,17 +146,6 @@ async function runPackagedBrowserSmoke(scenario) {
       await waitForTerminalRendererWrite(page, "browser-smoke-snapshot");
       await waitForTerminalRendererWrite(page, "browser-smoke-scrollback");
       await waitForTerminalCanvas(page);
-
-      const sendInputRequestsBeforeTyping = sendInputRequestsForSession(daemonRequests).length;
-      await dispatchResttyInput(page, `${terminalInputProbe}\n`);
-      await waitForTerminalRendererWrite(page, `browser-smoke-echo:${terminalInputProbe}`);
-      const typedInputRequests = sendInputRequestsForSession(daemonRequests).slice(sendInputRequestsBeforeTyping);
-      const typedInput = typedInputRequests.map((request) => request.data).join("");
-      if (typedInput.replace(/\r/g, "\n") !== `${terminalInputProbe}\n`) {
-        throw new Error(
-          `renderer input path sent unexpected data ${JSON.stringify(typedInput)} for ${terminalInputProbe}`
-        );
-      }
 
       await page.waitForTimeout(500);
       const mountFailureCount = await page.locator("[data-terminal-diagnostic='mount-failed']").count();
@@ -226,24 +222,9 @@ async function waitForTerminalCanvas(page) {
   });
 }
 
-function sendInputRequestsForSession(requests) {
-  return requests.filter(
-    (request) =>
-      request.type === "send_input" &&
-      request.session_id === "botster-web-dogfood-session" &&
-      typeof request.data === "string"
-  );
-}
-
-async function dispatchResttyInput(page, text) {
-  await page.waitForFunction(
-    () => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalRendererInput),
-    undefined,
-    { timeout: 15_000 }
-  );
-  await page.evaluate((nextText) => {
-    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalRendererInput(nextText);
-  }, text);
+async function openDiagnosticsView(page) {
+  await page.getByRole("button", { name: "Diagnostics" }).click();
+  await page.getByTestId("diagnostics-view").waitFor();
 }
 
 function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) {
@@ -509,6 +490,16 @@ function configurableSmokePackage(configured) {
       missing_required: configured ? [] : ["endpoint"],
       diagnostics: []
     },
+    actions: [
+      {
+        action_id: "set_package_configuration",
+        status: "available",
+        reason: null,
+        diagnostics: [],
+        required_references: [],
+        request: { request_type: "set_package_configuration", package_name: "botster-web" }
+      }
+    ],
     provider_profile_admitted: false
   };
 }

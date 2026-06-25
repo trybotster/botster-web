@@ -188,11 +188,15 @@ cargo run -- packages enable --data-dir target/botster-hub-dogfood-data \
 
 Local path installs are recorded by the hub as `local_development` trust. The manifest is first-party-ready for future hub bundling, but a manifest cannot declare genuine `first_party` trust by itself.
 
-The runnable entrypoint launches the existing bridge with:
+The runnable entrypoint uses the core client app contract:
 
 ```text
+kind: web_app
+launch_mode: background
 command: node
 args: scripts/real-hub-dogfood-bridge.mjs
+injections: hub_connection, data_dir, hub_socket
+readiness: local_url
 ```
 
 Build before starting the package runtime:
@@ -233,6 +237,14 @@ settings: dogfood-settings
 When loaded through `cargo run -- dogfood --web-package-path ../botster-web`, the Apps and Settings package launcher entries should list those descriptors. Clicking either entry sends `PluginSurfaceRender` for `package_name: botster-web` and shows deterministic output naming the selected surface id.
 
 When the hub supervises this entrypoint, it should provide `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR`. Either value selects existing-hub attach mode, so the bridge does not require `BOTSTER_HUB_BIN`, does not spawn a second hub, does not shut down the attached hub, and does not remove the attached hub data directory.
+
+`GET /health` returns the actual bound package origin as `local_url`, including non-default or ephemeral ports. That is the structured readiness evidence paired with `readiness.result_fields: ["local_url"]`; future hub launch capture can lift that value into app launch state without clients scraping diagnostic text. The hub-owned app command is intentionally future-facing; once it exists, the intended local path flow is:
+
+```bash
+botster packages install --path /path/to/botster-web
+botster packages enable botster-web
+botster packages open botster-web web-client
+```
 
 ## License
 
