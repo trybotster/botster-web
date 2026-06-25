@@ -166,6 +166,8 @@ assert.doesNotMatch(realHubDaemonDto, /export interface DaemonPackage\s*\{/);
 assert.doesNotMatch(realHubDaemonDto, /export type DaemonEvent\s*=/);
 assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client Rust serde DTOs/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_packages" \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "list_available_packages"; registry_path: string \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "install_package_registry_entry"; registry_path: string; entry_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "set_package_configuration"; package_name: string; values: Record<string, JsonValue> \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "install_package_local_path"; path: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "enable_package"; package_name: string \}/);
@@ -182,6 +184,9 @@ assert.match(generatedDaemonProtocol, /package_name: string/);
 assert.match(generatedDaemonProtocol, /requested_capabilities: DaemonCapability\[\]/);
 assert.match(generatedDaemonProtocol, /runnable_entrypoints: DaemonPackageRunnableEntrypoint\[\]/);
 assert.match(generatedDaemonProtocol, /configuration: DaemonPackageConfiguration;/);
+assert.match(generatedDaemonProtocol, /actions\?: DaemonPackageActionState\[\];/);
+assert.match(generatedDaemonProtocol, /export interface DaemonPackageActionState/);
+assert.match(generatedDaemonProtocol, /request\?: DaemonPackageActionRequest \| null;/);
 assert.match(generatedDaemonProtocol, /export interface DaemonPackageConfiguration/);
 assert.match(generatedDaemonProtocol, /schema\?: JsonValue \| null;/);
 assert.match(generatedDaemonProtocol, /effective_values\?: Record<string, JsonValue>;/);
@@ -200,30 +205,27 @@ assert.match(realHubDogfoodTransport, /recordLiveHarnessEvent\("hub_frame"/);
 assert.match(realHubDogfoodTransport, /daemonResponseFrames/);
 assert.match(realHubDogfoodTransport, /realHubDogfoodUiTreeSnapshot/);
 assert.match(realHubDogfoodTransport, /const packageFamily = "botster-web\.package"/);
+assert.match(realHubDogfoodTransport, /const availablePackageFamily = "botster-web\.available_package"/);
 assert.match(realHubDogfoodTransport, /bridge\.request\(\{ type: "list_packages" \}\)/);
+assert.match(realHubDogfoodTransport, /type: "list_available_packages"/);
 assert.match(realHubDogfoodTransport, /type: "set_package_configuration"/);
 assert.match(realHubDogfoodTransport, /botster\.package\.configuration\.save/);
 assert.match(realHubDogfoodTransport, /botster\.package\.configure/);
 assert.match(realHubDogfoodTransport, /botster\.package\.surface\.render/);
 assert.match(realHubDogfoodTransport, /type: "plugin_surface_render"/);
-assert.match(realHubDogfoodTransport, /botster\.package\.enable/);
+assert.match(realHubDogfoodTransport, /DaemonPackageActionState/);
+assert.match(realHubDogfoodTransport, /botster\.package\.daemon_request/);
+assert.match(realHubDogfoodTransport, /daemonRequestFromDescriptor/);
 assert.match(realHubDogfoodTransport, /type: "enable_package"/);
-assert.match(realHubDogfoodTransport, /botster\.package\.disable/);
 assert.match(realHubDogfoodTransport, /type: "disable_package"/);
-assert.match(realHubDogfoodTransport, /botster\.package\.remove/);
 assert.match(realHubDogfoodTransport, /type: "remove_package"/);
-assert.match(realHubDogfoodTransport, /botster\.package\.entrypoint\.start/);
 assert.match(realHubDogfoodTransport, /type: "start_package_entrypoint"/);
-assert.match(realHubDogfoodTransport, /botster\.package\.entrypoint\.stop/);
 assert.match(realHubDogfoodTransport, /type: "stop_package_entrypoint"/);
-assert.match(realHubDogfoodTransport, /botster\.package\.entrypoint\.restart/);
 assert.match(realHubDogfoodTransport, /type: "restart_package_entrypoint"/);
-assert.match(realHubDogfoodTransport, /botster\.package\.entrypoint\.status/);
 assert.match(realHubDogfoodTransport, /type: "package_entrypoint_status"/);
-assert.match(realHubDogfoodTransport, /botster\.package\.update/);
-assert.match(realHubDogfoodTransport, /botster\.package\.reload/);
-assert.match(realHubDogfoodTransport, /botster\.hub\.restart/);
+assert.doesNotMatch(realHubDogfoodTransport, /function packageManagementRequest|function packageEntrypointRequest|unsupportedPackageAction/);
 assert.match(realHubDogfoodTransport, /family: packageFamily/);
+assert.match(realHubDogfoodTransport, /family: availablePackageFamily/);
 assert.doesNotMatch(realHubDogfoodTransport, /["']view_surface["']|["']settings_surface["']|UpdatePackage|update_package|reload_package|type: "restart_hub"/);
 assert.match(realHubTerminalDataPlane, /streamTerminal/);
 assert.match(realHubTerminalDataPlane, /type: "send_input"/);
@@ -711,6 +713,10 @@ const {
 
 assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), [
   "list_packages",
+  "list_available_packages",
+  "inspect_available_package",
+  "preview_package_install",
+  "install_package_registry_entry",
   "set_package_configuration",
   "install_package_local_path",
   "start_package_entrypoint",
@@ -758,6 +764,12 @@ assert.equal(
     .find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.package")
     .payload.records[0].id,
   "project-pipelines"
+);
+assert.equal(
+  daemonResponseFrames({ ...generatedPackageResponseFixture, kind: "available_packages" }, 12)
+    .find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.available_package")
+    .payload.records[0].id,
+  "github-provider"
 );
 
 const transport = {
@@ -952,6 +964,57 @@ const configuredPackageConfiguration = {
   missing_required: []
 };
 const emptyPackageConfiguration = {};
+const availablePackageAvailability = { state: "available", reasons: [] };
+const blockedGithubAvailability = {
+  state: "blocked",
+  reasons: [
+    {
+      reason: "auth_required",
+      action: "enable_package",
+      requirement: "github"
+    }
+  ]
+};
+
+function daemonAction(action_id, status, request, reason = undefined, diagnostics = []) {
+  return {
+    action_id,
+    status,
+    reason,
+    diagnostics,
+    required_references: [],
+    request
+  };
+}
+
+function packageRequest(request_type, package_name) {
+  return { request_type, package_name };
+}
+
+function entrypointRequest(request_type, package_name, entrypoint_id) {
+  return { request_type, package_name, entrypoint_id };
+}
+
+function installedPackageActions(package_name, enabled = true, configurable = false) {
+  return [
+    daemonAction("enable_package", enabled ? "unavailable" : "available", enabled ? null : packageRequest("enable_package", package_name), enabled ? "already_enabled" : undefined),
+    daemonAction("disable_package", enabled ? "available" : "unavailable", enabled ? packageRequest("disable_package", package_name) : null, enabled ? undefined : "not_enabled"),
+    daemonAction("remove_package", "available", packageRequest("remove_package", package_name)),
+    daemonAction("set_package_configuration", configurable ? "available" : "unavailable", configurable ? packageRequest("set_package_configuration", package_name) : null, configurable ? undefined : "no_configuration_schema"),
+    daemonAction("check_package_update", "available", packageRequest("check_package_update", package_name)),
+    daemonAction("reload_package", "unavailable", null, "unsupported"),
+    daemonAction("restart_hub", "unavailable", null, "unsupported")
+  ];
+}
+
+function entrypointActions(package_name, entrypoint_id) {
+  return [
+    daemonAction("start_package_entrypoint", "available", entrypointRequest("start_package_entrypoint", package_name, entrypoint_id)),
+    daemonAction("stop_package_entrypoint", "available", entrypointRequest("stop_package_entrypoint", package_name, entrypoint_id)),
+    daemonAction("restart_package_entrypoint", "available", entrypointRequest("restart_package_entrypoint", package_name, entrypoint_id)),
+    daemonAction("package_entrypoint_status", "available", entrypointRequest("package_entrypoint_status", package_name, entrypoint_id))
+  ];
+}
 
 const bridgeRequests = [];
 const bridgeTerminalStreams = [];
@@ -1033,10 +1096,15 @@ const bridge = {
                   pid: 41739,
                   started_at: 1781112600,
                   diagnostics: []
-                }
+                },
+                actions: entrypointActions("botster-web", "web-client")
               }
             ],
             configuration: emptyPackageConfiguration,
+            availability: availablePackageAvailability,
+            dependency_availability: [],
+            feature_availability: [],
+            actions: installedPackageActions("botster-web", true, false),
             provider_profile_admitted: false
           },
           {
@@ -1085,7 +1153,8 @@ const bridge = {
                   pid: 4273,
                   started_at: 1781112500,
                   diagnostics: []
-                }
+                },
+                actions: entrypointActions("project-pipelines", "web-client")
               },
               {
                 id: "worker",
@@ -1103,10 +1172,19 @@ const bridge = {
                   exited_at: 1781112460,
                   exit_status: "exit:42",
                   diagnostics: [{ kind: "stderr", message: "fixture failure" }]
-                }
+                },
+                actions: entrypointActions("project-pipelines", "worker")
               }
             ],
             configuration: configurablePackageConfiguration,
+            availability: availablePackageAvailability,
+            dependency_availability: [
+              { id: "botster", package_name: "botster", state: "available", reasons: [] }
+            ],
+            feature_availability: [
+              { id: "pipeline-runs", state: "available", reasons: [] }
+            ],
+            actions: installedPackageActions("project-pipelines", true, true),
             provider_profile_admitted: false
           },
           {
@@ -1141,10 +1219,37 @@ const bridge = {
                   exited_at: 1781112200,
                   exit_status: "signal:term",
                   diagnostics: []
-                }
+                },
+                actions: entrypointActions("github-provider", "poller")
               }
             ],
             configuration: emptyPackageConfiguration,
+            availability: blockedGithubAvailability,
+            dependency_availability: [
+              {
+                id: "project-pipelines",
+                package_name: "project-pipelines",
+                state: "blocked",
+                reasons: [{ reason: "dependency_disabled", action: "enable_package", package_name: "project-pipelines" }]
+              }
+            ],
+            feature_availability: [
+              {
+                id: "github-prs",
+                state: "blocked",
+                reasons: [{ reason: "auth_required", action: "enable_package", requirement: "github" }]
+              }
+            ],
+            actions: [
+              daemonAction(
+                "enable_package",
+                "blocked",
+                null,
+                "auth_required",
+                [{ kind: "auth_required", message: "GitHub auth is required" }]
+              ),
+              ...installedPackageActions("github-provider", false, false).filter((action) => action.action_id !== "enable_package")
+            ],
             provider_profile_admitted: false
           },
           {
@@ -1164,6 +1269,10 @@ const bridge = {
             ],
             runnable_entrypoints: [],
             configuration: emptyPackageConfiguration,
+            availability: availablePackageAvailability,
+            dependency_availability: [],
+            feature_availability: [],
+            actions: installedPackageActions("local-diagnostics", false, false),
             provider_profile_admitted: false
           }
         ],
@@ -1204,6 +1313,10 @@ const bridge = {
             ],
             runnable_entrypoints: [],
             configuration,
+            availability: availablePackageAvailability,
+            dependency_availability: [],
+            feature_availability: [],
+            actions: installedPackageActions(request.package_name, true, true),
             provider_profile_admitted: false
           }
         ],
@@ -1537,28 +1650,54 @@ for (const action of [
     target: "botster-web",
     params: { package_name: "botster-web", surface_id: "dogfood-settings" }
   },
-  { id: "botster.package.enable", target: "project-pipelines", params: { package_name: "project-pipelines" } },
-  { id: "botster.package.disable", target: "project-pipelines", params: { package_name: "project-pipelines" } },
-  { id: "botster.package.remove", target: "project-pipelines", params: { package_name: "project-pipelines" } },
   {
-    id: "botster.package.entrypoint.start",
+    id: "botster.package.daemon_request",
     target: "project-pipelines",
-    params: { package_name: "project-pipelines", entrypoint_id: "web-client" }
+    params: {
+      daemon_request: { request_type: "enable_package", package_name: "project-pipelines" }
+    }
   },
   {
-    id: "botster.package.entrypoint.stop",
+    id: "botster.package.daemon_request",
     target: "project-pipelines",
-    params: { package_name: "project-pipelines", entrypoint_id: "web-client" }
+    params: {
+      daemon_request: { request_type: "disable_package", package_name: "project-pipelines" }
+    }
   },
   {
-    id: "botster.package.entrypoint.restart",
+    id: "botster.package.daemon_request",
     target: "project-pipelines",
-    params: { package_name: "project-pipelines", entrypoint_id: "web-client" }
+    params: {
+      daemon_request: { request_type: "remove_package", package_name: "project-pipelines" }
+    }
   },
   {
-    id: "botster.package.entrypoint.status",
+    id: "botster.package.daemon_request",
     target: "project-pipelines",
-    params: { package_name: "project-pipelines", entrypoint_id: "web-client" }
+    params: {
+      daemon_request: { request_type: "start_package_entrypoint", package_name: "project-pipelines", entrypoint_id: "web-client" }
+    }
+  },
+  {
+    id: "botster.package.daemon_request",
+    target: "project-pipelines",
+    params: {
+      daemon_request: { request_type: "stop_package_entrypoint", package_name: "project-pipelines", entrypoint_id: "web-client" }
+    }
+  },
+  {
+    id: "botster.package.daemon_request",
+    target: "project-pipelines",
+    params: {
+      daemon_request: { request_type: "restart_package_entrypoint", package_name: "project-pipelines", entrypoint_id: "web-client" }
+    }
+  },
+  {
+    id: "botster.package.daemon_request",
+    target: "project-pipelines",
+    params: {
+      daemon_request: { request_type: "package_entrypoint_status", package_name: "project-pipelines", entrypoint_id: "web-client" }
+    }
   }
 ]) {
   await realTransport.send({
@@ -1723,22 +1862,31 @@ assert.deepEqual(realRuntime.entities.get("botster-web.package", "project-pipeli
 });
 assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").view_surface, undefined);
 assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").settings_surface, undefined);
-assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").enable_action.id, "botster.package.enable");
-assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").disable_action.id, "botster.package.disable");
-assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").remove_action.id, "botster.package.remove");
-assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").update_action.disabled, true);
-assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").reload_action.disabled, true);
-assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").hub_restart_action.disabled, true);
+const projectPipelineActions = realRuntime.entities.get("botster-web.package", "project-pipelines").package_actions;
+assert.equal(projectPipelineActions.find((action) => action.action_id === "enable_package").action.disabled, true);
+assert.equal(projectPipelineActions.find((action) => action.action_id === "disable_package").action.id, "botster.package.daemon_request");
+assert.equal(projectPipelineActions.find((action) => action.action_id === "remove_package").action.id, "botster.package.daemon_request");
+assert.equal(projectPipelineActions.find((action) => action.action_id === "check_package_update").action.disabled, false);
+assert.equal(projectPipelineActions.find((action) => action.action_id === "reload_package").action.disabled, true);
+assert.equal(projectPipelineActions.find((action) => action.action_id === "restart_hub").action.disabled, true);
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").availability_summary, /No blocked reasons/);
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").dependency_availability_summary, /botster available/);
+assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").feature_availability_summary, /pipeline-runs available/);
 assert.deepEqual(
-  realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_actions.map((entrypointAction) => entrypointAction.action.id).slice(0, 4),
+  realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_actions.map((entrypointAction) => entrypointAction.action_id).slice(0, 4),
   [
-    "botster.package.entrypoint.start",
-    "botster.package.entrypoint.stop",
-    "botster.package.entrypoint.restart",
-    "botster.package.entrypoint.status"
+    "start_package_entrypoint",
+    "stop_package_entrypoint",
+    "restart_package_entrypoint",
+    "package_entrypoint_status"
   ]
 );
+assert.equal(
+  realRuntime.entities.get("botster-web.package", "project-pipelines").entrypoint_actions.every((entrypointAction) => entrypointAction.action.id === "botster.package.daemon_request"),
+  true
+);
 assert.equal(realRuntime.entities.get("botster-web.package", "github-provider").status, "disabled");
+assert.match(realRuntime.entities.get("botster-web.package", "github-provider").availability_summary, /enable_package: auth_required/);
 assert.equal(realRuntime.entities.get("botster-web.package", "github-provider").app_surface_count, 0);
 assert.equal(realRuntime.entities.get("botster-web.package", "github-provider").settings_surface_count, 1);
 assert.match(realRuntime.entities.get("botster-web.package", "github-provider").entrypoint_process_summary, /poller stopped/);
@@ -2365,11 +2513,43 @@ try {
     return undefined;
   }
 
+  function reactText(node) {
+    if (Array.isArray(node)) return node.map(reactText).join("");
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (!node || typeof node !== "object" || !("props" in node)) return "";
+    return reactText(node.props.children);
+  }
+
+  const descriptorPackageAction = {
+    id: "descriptor-only:disable_package",
+    action_id: "disable_package",
+    status: "available",
+    reason: "",
+    diagnostics: [],
+    required_references: [],
+    action: {
+      id: "botster.package.daemon_request",
+      target: "descriptor-only",
+      label: "Disable Package",
+      params: {
+        package_name: "descriptor-only",
+        action_id: "disable_package",
+        action_status: "available",
+        action_reason: "",
+        daemon_request: {
+          request_type: "disable_package",
+          package_name: "descriptor-only"
+        }
+      }
+    }
+  };
+
   const descriptorApp = {
     id: "descriptor-only",
     title: "Descriptor Only",
     version: "1.0.0",
     capability_summary: "PackageSurfaces:render",
+    package_actions: [descriptorPackageAction],
     app_surfaces: [
       {
         surface_id: "dogfood-app",
@@ -2427,6 +2607,7 @@ try {
   );
   assert.match(descriptorListMarkup, /Descriptor Only/);
   assert.match(descriptorListMarkup, /Descriptor Dogfood/);
+  assert.match(descriptorListMarkup, /Disable Package/);
   assert.match(descriptorListMarkup, /1 UI/);
   assert.match(descriptorListMarkup, /surface-action-row/);
   assert.equal(packageAppSurfaces(descriptorApp).length, 1);
@@ -2448,6 +2629,16 @@ try {
   assert.equal(openedSurfaces.length, 1);
   assert.equal(openedSurfaces[0].appRecord.id, "descriptor-only");
   assert.deepEqual(surfaceLaunchAction(openedSurfaces[0].surface), descriptorApp.app_surfaces[0].launch_action);
+  const descriptorPackageActionButton = findReactElement(
+    descriptorListTree,
+    (element) => element.props?.children === "Disable Package" && typeof element.props?.onClick === "function"
+  );
+  assert.ok(descriptorPackageActionButton);
+  descriptorPackageActionButton.props.onClick({ stopPropagation() {} });
+  assert.equal(openedSurfaces.length, 2);
+  assert.equal(openedSurfaces[1].appRecord.id, "descriptor-only");
+  assert.equal(openedSurfaces[1].surface.id, descriptorPackageAction.id);
+  assert.deepEqual(openedSurfaces[1].surface.launch_action, descriptorPackageAction.action);
 
   const dispatchedSettings = [];
   const descriptorSettingsMarkup = renderToStaticMarkup(
@@ -2458,6 +2649,7 @@ try {
   );
   assert.match(descriptorSettingsMarkup, /Descriptor Settings/);
   assert.match(descriptorSettingsMarkup, /Descriptor-backed settings surface/);
+  assert.match(descriptorSettingsMarkup, /Disable Package/);
   const descriptorSettingsTree = PluginSettingsPanel({
     app: descriptorApp,
     onAction: (action) => dispatchedSettings.push(action)
@@ -2469,6 +2661,13 @@ try {
   assert.ok(descriptorSettingsItem);
   descriptorSettingsItem.props.onClick();
   assert.deepEqual(dispatchedSettings, [descriptorApp.settings_surfaces[0].launch_action]);
+  const descriptorSettingsActionItem = findReactElement(
+    descriptorSettingsTree,
+    (element) => typeof element.props?.onClick === "function" && reactText(element) === "Disable Packageavailable"
+  );
+  assert.ok(descriptorSettingsActionItem);
+  descriptorSettingsActionItem.props.onClick();
+  assert.deepEqual(dispatchedSettings, [descriptorApp.settings_surfaces[0].launch_action, descriptorPackageAction.action]);
 
   const legacyListMarkup = renderToStaticMarkup(
     createElement(PluginListItem, {
@@ -2609,10 +2808,15 @@ try {
               pid: 41739,
               started_at: 1781112600,
               diagnostics: []
-            }
+            },
+            actions: entrypointActions("botster-web", "web-client")
           }
         ],
         configuration: emptyPackageConfiguration,
+        availability: availablePackageAvailability,
+        dependency_availability: [],
+        feature_availability: [],
+        actions: installedPackageActions("botster-web", true, false),
         provider_profile_admitted: false
       },
       {
@@ -2656,10 +2860,19 @@ try {
               pid: 4273,
               started_at: 1781112500,
               diagnostics: []
-            }
+            },
+            actions: entrypointActions("project-pipelines", "web-client")
           }
         ],
         configuration: configurablePackageConfiguration,
+        availability: availablePackageAvailability,
+        dependency_availability: [
+          { id: "botster", package_name: "botster", state: "available", reasons: [] }
+        ],
+        feature_availability: [
+          { id: "pipeline-runs", state: "available", reasons: [] }
+        ],
+        actions: installedPackageActions("project-pipelines", true, true),
         provider_profile_admitted: false
       },
       {
@@ -2685,10 +2898,37 @@ try {
               exited_at: 1781112200,
               exit_status: "signal:term",
               diagnostics: []
-            }
+            },
+            actions: entrypointActions("github-provider", "poller")
           }
         ],
         configuration: emptyPackageConfiguration,
+        availability: blockedGithubAvailability,
+        dependency_availability: [
+          {
+            id: "project-pipelines",
+            package_name: "project-pipelines",
+            state: "blocked",
+            reasons: [{ reason: "dependency_disabled", action: "enable_package", package_name: "project-pipelines" }]
+          }
+        ],
+        feature_availability: [
+          {
+            id: "github-prs",
+            state: "blocked",
+            reasons: [{ reason: "auth_required", action: "enable_package", requirement: "github" }]
+          }
+        ],
+        actions: [
+          daemonAction(
+            "enable_package",
+            "blocked",
+            null,
+            "auth_required",
+            [{ kind: "auth_required", message: "GitHub auth is required" }]
+          ),
+          ...installedPackageActions("github-provider", false, false).filter((action) => action.action_id !== "enable_package")
+        ],
         provider_profile_admitted: false
       },
       {
@@ -2718,6 +2958,10 @@ try {
           }
         ],
         configuration: emptyPackageConfiguration,
+        availability: availablePackageAvailability,
+        dependency_availability: [],
+        feature_availability: [],
+        actions: installedPackageActions("local-diagnostics", false, false),
         provider_profile_admitted: false
       }
     ]
@@ -2788,7 +3032,14 @@ try {
   assert.match(realHubMarkup, /Enabled/);
   assert.match(realHubMarkup, /Required configuration is missing/);
   assert.match(realHubMarkup, /Existing secret is saved/);
-  assert.match(realHubMarkup, /Save configuration/);
+  assert.match(realHubMarkup, /Configure project-pipelines/);
+  assert.match(realHubMarkup, /No blocked reasons/);
+  assert.match(realHubMarkup, /botster available/);
+  assert.match(realHubMarkup, /pipeline-runs available/);
+  assert.match(realHubMarkup, /enable_package: auth_required/);
+  assert.match(realHubMarkup, /Package lifecycle actions/);
+  assert.match(realHubMarkup, /disable_package available/);
+  assert.match(realHubMarkup, /reload_package unavailable \(unsupported\)/);
   assert.match(realHubMarkup, /Package app surfaces/);
   assert.match(realHubMarkup, /Launch app surfaces/);
   assert.match(realHubMarkup, /Open settings surfaces/);
@@ -2798,16 +3049,8 @@ try {
   assert.match(realHubMarkup, /data-action-id="botster\.package\.surface\.render"/);
   assert.match(realHubMarkup, /data-action-id="botster\.package\.configuration\.save"/);
   assert.match(realHubMarkup, /data-action-id="botster\.package\.configure"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.enable"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.disable"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.remove"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.entrypoint\.start"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.entrypoint\.stop"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.entrypoint\.restart"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.entrypoint\.status"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.update"[^>]*disabled=""/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.reload"[^>]*disabled=""/);
-  assert.match(realHubMarkup, /data-action-id="botster\.hub\.restart"[^>]*disabled=""/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.daemon_request"/);
+  assert.match(realHubMarkup, /data-action-id="botster\.package\.daemon_request"[^>]*disabled=""/);
   assert.doesNotMatch(realHubMarkup, /write_only|super-secret-token/);
   assert.doesNotMatch(realHubMarkup, /Legacy View|Legacy Settings/);
   assert.match(realHubMarkup, /Diagnostic action failure/);
@@ -2818,7 +3061,7 @@ try {
   assert.doesNotMatch(realHubMarkup, /Error state/);
   assert.match(realHubMarkup, /Attachable/);
   assert.match(realHubMarkup, /data-action-id="botster\.session\.attach"/);
-  assert.doesNotMatch(realHubMarkup, /install_package|update_package|reload_package|restart_hub|retry_package/);
+  assert.doesNotMatch(realHubMarkup, /install_package|update_package|retry_package/);
 
   const healthyFirstScreenMarkup = renderToStaticMarkup(
     createElement(DogfoodFirstScreen, {
