@@ -5,6 +5,7 @@ import type { HubControlFrame, HubControlFrameHandler, HubControlTransport } fro
 import type {
   DaemonBridgeRequestEnvelope,
   DaemonBridgeResponseEnvelope,
+  DaemonApp,
   DaemonDiagnostic,
   DaemonEvent,
   DaemonOperatorError,
@@ -28,6 +29,7 @@ export const realHubDogfoodSubscriptionId = "botster-web-dogfood-terminal";
 const dogfoodSurface = "botster-web.dogfood.session";
 const sessionFamily = "botster-web.session";
 const draftFamily = "botster-web.session_draft";
+const appFamily = "botster-web.app";
 const packageFamily = "botster-web.package";
 const availablePackageFamily = "botster-web.available_package";
 const statusFamily = hubStatusFamily;
@@ -175,6 +177,8 @@ export function createRealHubDogfoodTransport({
           emitResponse(await bridge.request({ type: "status" }));
         } else if (request.family === sessionFamily) {
           emitResponse(await bridge.request({ type: "list_sessions" }));
+        } else if (request.family === appFamily) {
+          emitResponse(await bridge.request({ type: "list_apps" }));
         } else if (request.family === packageFamily) {
           emitResponse(await bridge.request({ type: "list_packages" }));
         } else if (request.family === availablePackageFamily) {
@@ -236,6 +240,18 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
     });
   }
 
+  if (responseOwnsApps(response)) {
+    frames.push({
+      kind: "entity_snapshot",
+      payload: {
+        operation: "entity_snapshot",
+        family: appFamily,
+        sequence,
+        records: (response.apps ?? []).map(appRecord)
+      } satisfies EntityFrame
+    });
+  }
+
   if (responseOwnsPackages(response) && Array.isArray(response.packages)) {
     frames.push({
       kind: "entity_snapshot",
@@ -282,6 +298,10 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
 
 function responseOwnsSessions(response: DaemonResponse): boolean {
   return response.kind === "sessions" || response.kind === "spawned";
+}
+
+function responseOwnsApps(response: DaemonResponse): boolean {
+  return response.kind === "apps";
 }
 
 function responseOwnsPackages(response: DaemonResponse): boolean {
@@ -376,6 +396,82 @@ function sessionAttachFields(sessionId: string, lifecycle: string) {
       params: { mode: "real_hub_dogfood" }
     } satisfies ActionBinding
   };
+}
+
+function appRecord(app: DaemonApp) {
+  const actions = packageActionRecords(app.actions, app.package_name, app.entrypoint_id);
+  const blockedReasons = app.blocked_reasons ?? [];
+  const diagnostics = [
+    ...blockedReasons,
+    ...(app.diagnostics ?? []).map((diagnostic) => `${diagnostic.kind}: ${diagnostic.message}`),
+    ...actions.flatMap((action) => [
+      action.status === "available" ? "" : `${action.action_id} ${action.status}`,
+      action.reason
+    ]).filter((message): message is string => Boolean(message))
+  ];
+  const localUrl = app.launch_target.local_url ?? "";
+  const isWebApp = app.kind === "web_app" || app.launch_target.kind === "web_app";
+  const isTerminalApp = app.kind === "terminal_app" || app.launch_target.kind === "terminal_app";
+  const missingLocalUrl = isWebApp && localUrl.length === 0;
+  const blockedAction = actions.some((action) => action.status !== "available");
+  const openDisabled = isTerminalApp || missingLocalUrl || blockedReasons.length > 0 || blockedAction;
+  const title = app.app_id === app.package_name ? app.package_name : `${app.package_name} ${app.app_id}`;
+
+  return {
+    id: `${app.package_name}:${app.app_id}`,
+    title,
+    package_name: app.package_name,
+    app_id: app.app_id,
+    entrypoint_id: app.entrypoint_id,
+    kind: app.kind,
+    launch_mode: app.launch_mode,
+    lifecycle_state: app.lifecycle_state,
+    launch_target_kind: app.launch_target.kind,
+    local_url: localUrl,
+    blocked_reasons: blockedReasons,
+    diagnostics,
+    diagnostics_summary: appDiagnosticSummary({
+      isTerminalApp,
+      missingLocalUrl,
+      diagnostics,
+      lifecycleState: app.lifecycle_state
+    }),
+    app_actions: actions,
+    app_action_summary: actionListSummary(actions, "No app actions returned"),
+    open_action: {
+      id: "botster.app.open_url",
+      target: `${app.package_name}:${app.app_id}`,
+      label: isTerminalApp ? "Launch in terminal" : "Open app",
+      disabled: openDisabled,
+      params: {
+        package_name: app.package_name,
+        app_id: app.app_id,
+        entrypoint_id: app.entrypoint_id,
+        kind: app.kind,
+        launch_target_kind: app.launch_target.kind,
+        local_url: localUrl,
+        blocked_reasons: blockedReasons,
+        diagnostics
+      }
+    } satisfies ActionBinding
+  };
+}
+
+function appDiagnosticSummary({
+  isTerminalApp,
+  missingLocalUrl,
+  diagnostics,
+  lifecycleState
+}: {
+  isTerminalApp: boolean;
+  missingLocalUrl: boolean;
+  diagnostics: string[];
+  lifecycleState: string;
+}): string {
+  if (isTerminalApp) return "Requires local terminal launch.";
+  if (missingLocalUrl) return "Web app has no hub-provided local URL.";
+  if (diagnostics.length > 0) return diagnostics.join("; ");
+  return `Lifecycle: ${lifecycleState}`;
 }
 
 function packageRecord(packageRecord: DaemonPackage) {
@@ -1145,51 +1241,42 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
           }
         },
         {
-          id: "real-hub-package-app-surface-list",
+          id: "real-hub-app-list",
           primitive: "list",
-          props: { label: "Package app surfaces" },
-          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items", where: { has_app_surfaces: true } }],
+          props: { label: "Installed apps" },
+          bindings: [{ source: "entity", path: `/${appFamily}`, prop: "items" }],
           slots: {
             item: [
               {
-                id: "real-hub-package-app-surface-table",
-                primitive: "table",
-                bindings: [{ source: "entity", path: "@/app_surfaces", prop: "rows" }],
-                props: {
-                  columns: [
-                    { key: "title", label: "App" },
-                    { key: "surface_id", label: "Surface ID" },
-                    { key: "description", label: "Description" }
+                id: "real-hub-app-row",
+                primitive: "row",
+                slots: {
+                  children: [
+                    { id: "real-hub-app-title", primitive: "text", bindings: [{ source: "entity", path: "@/title", prop: "text" }] },
+                    { id: "real-hub-app-kind", primitive: "badge", bindings: [{ source: "entity", path: "@/kind", prop: "text" }] },
+                    { id: "real-hub-app-lifecycle", primitive: "text", bindings: [{ source: "entity", path: "@/lifecycle_state", prop: "text" }] },
+                    { id: "real-hub-app-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/diagnostics_summary", prop: "text" }] }
                   ]
                 }
               }
             ],
             empty: [
               {
-                id: "real-hub-package-app-surfaces-empty",
+                id: "real-hub-apps-empty",
                 primitive: "empty_state",
-                props: { title: "No app surfaces", body: "Installed packages did not expose descriptor-backed app surfaces." }
+                props: { title: "No installed apps", body: "The daemon returned an empty installed app registry." }
               }
             ]
           }
         },
         {
-          id: "real-hub-package-app-surface-actions",
+          id: "real-hub-app-actions",
           primitive: "list",
-          props: { label: "Launch app surfaces" },
-          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items", where: { has_app_surfaces: true } }],
+          props: { label: "Launch installed apps" },
+          bindings: [{ source: "entity", path: `/${appFamily}`, prop: "items" }],
           slots: {
             item: [
-              {
-                id: "real-hub-package-app-surface-launches",
-                primitive: "list",
-                bindings: [{ source: "entity", path: "@/app_surfaces", prop: "items" }],
-                slots: {
-                  item: [
-                    { id: "real-hub-package-app-surface-launch", primitive: "action", bindings: [{ source: "entity", path: "@/launch_action", prop: "action" }] }
-                  ]
-                }
-              }
+              { id: "real-hub-app-launch", primitive: "action", bindings: [{ source: "entity", path: "@/open_action", prop: "action" }] }
             ]
           }
         },

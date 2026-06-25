@@ -1,6 +1,7 @@
 import type { DaemonRequest, DaemonResponse } from "../realHubDaemonDto";
 
 export const generatedDaemonRequestFixtures = [
+  { type: "list_apps" },
   { type: "list_packages" },
   { type: "list_available_packages", registry_path: "/tmp/botster-registry" },
   { type: "inspect_available_package", registry_path: "/tmp/botster-registry", entry_id: "github-provider" },
@@ -192,5 +193,64 @@ export const generatedPackageResponseFixture = {
   cleanup: null,
   coordination: null,
   error: null,
+  diagnostics: []
+} satisfies DaemonResponse;
+
+export const generatedAppResponseFixture = {
+  kind: "apps",
+  status: null,
+  sessions: [],
+  apps: [
+    {
+      package_name: "botster-web",
+      app_id: "dogfood",
+      entrypoint_id: "web-client",
+      kind: "web_app",
+      launch_mode: "browser",
+      lifecycle_state: "running",
+      diagnostics: [],
+      actions: [
+        {
+          action_id: "start_package_entrypoint",
+          status: "available",
+          diagnostics: [],
+          required_references: [],
+          request: {
+            request_type: "start_package_entrypoint",
+            package_name: "botster-web",
+            entrypoint_id: "web-client"
+          }
+        }
+      ],
+      blocked_reasons: [],
+      launch_target: {
+        kind: "web_app",
+        local_url: "http://127.0.0.1:41739"
+      }
+    },
+    {
+      package_name: "project-pipelines",
+      app_id: "worker",
+      entrypoint_id: "worker",
+      kind: "terminal_app",
+      launch_mode: "terminal",
+      lifecycle_state: "installed",
+      diagnostics: [],
+      actions: [],
+      blocked_reasons: [],
+      launch_target: {
+        kind: "terminal_app"
+      }
+    }
+  ],
+  packages: [],
+  lifecycle: [],
+  plugin_tools: [],
+  plugin_tool_result: null,
+  events: [],
+  cleanup: null,
+  coordination: null,
+  error: null,
+  package_decision: null,
   diagnostics: []
 } satisfies DaemonResponse;
