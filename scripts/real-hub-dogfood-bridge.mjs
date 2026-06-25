@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { connect } from "node:net";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join, normalize, relative, sep } from "node:path";
 import { spawn } from "node:child_process";
@@ -13,6 +13,7 @@ const host = "127.0.0.1";
 const packageRoot = process.cwd();
 const distRoot = join(packageRoot, "dist");
 const indexPath = join(distRoot, "index.html");
+const launchResultPath = process.env.BOTSTER_ENTRYPOINT_LAUNCH_RESULT;
 const existingHubConfigured = Boolean(process.env.BOTSTER_HUB_SOCKET || process.env.BOTSTER_HUB_DATA_DIR);
 const generatedDataDir = existingHubConfigured || process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR
   ? undefined
@@ -145,15 +146,22 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, host, () => {
   localUrl = boundServerOrigin(server);
-  console.log(`botster-web real hub dogfood bridge listening at ${localUrl}/request`);
-  console.log(`botster-web package UI available at ${localUrl}/`);
-  console.log(`botster-web package real-hub UI available at ${localUrl}/?dogfood=real-hub`);
-  console.log(`mode: ${bridgeMode.diagnosticLabel}`);
-  if (bridgeMode.mode === "spawned_hub") {
-    console.log(`isolated data dir: ${bridgeMode.dataDir}`);
-  } else {
-    console.log(`attached socket: configured ${bridgeMode.source}`);
-  }
+  void publishReadyLaunchResult(localUrl)
+    .then(() => {
+      console.log(`botster-web real hub dogfood bridge listening at ${localUrl}/request`);
+      console.log(`botster-web package UI available at ${localUrl}/`);
+      console.log(`botster-web package real-hub UI available at ${localUrl}/?dogfood=real-hub`);
+      console.log(`mode: ${bridgeMode.diagnosticLabel}`);
+      if (bridgeMode.mode === "spawned_hub") {
+        console.log(`isolated data dir: ${bridgeMode.dataDir}`);
+      } else {
+        console.log(`attached socket: configured ${bridgeMode.source}`);
+      }
+    })
+    .catch(() => {
+      console.error("botster-web launch result write failed");
+      server.close(() => process.exit(1));
+    });
 });
 
 function boundServerOrigin(httpServer) {
@@ -163,6 +171,21 @@ function boundServerOrigin(httpServer) {
   }
 
   return `http://${address.address}:${address.port}`;
+}
+
+async function publishReadyLaunchResult(url) {
+  if (!launchResultPath) {
+    return;
+  }
+
+  await writeFile(
+    launchResultPath,
+    `${JSON.stringify({
+      entrypoint_id: "web-client",
+      process_state: "running",
+      local_url: url
+    })}\n`
+  );
 }
 
 const shutdown = async () => {

@@ -586,7 +586,7 @@ const mixedOwnershipBridgeMode = resolveDogfoodBridgeMode({
 assert.equal(mixedOwnershipBridgeMode.ok, false);
 assert.match(mixedOwnershipBridgeMode.error, /cannot be combined/);
 
-const packageBridgeRuntime = await startPackageBridgeRuntime();
+const packageBridgeRuntime = await startPackageBridgeRuntime({ launchResult: true });
 try {
   const rootResponse = await fetch(`${packageBridgeRuntime.origin}/`);
   const rootHtml = await rootResponse.text();
@@ -622,6 +622,11 @@ try {
     mode: "existing_hub",
     source: "socket",
     socket: "configured",
+    local_url: packageBridgeRuntime.origin
+  });
+  assert.deepEqual(await readLaunchResult(packageBridgeRuntime.launchResultPath), {
+    entrypoint_id: "web-client",
+    process_state: "running",
     local_url: packageBridgeRuntime.origin
   });
 
@@ -3513,9 +3518,10 @@ try {
 
 console.log("Renderer seam, runtime behavior, and registry fixture assertions passed.");
 
-async function startPackageBridgeRuntime() {
+async function startPackageBridgeRuntime({ launchResult = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "botster-web-package-runtime-"));
   const socketPath = join(root, "botster-hub.sock");
+  const launchResultPath = join(root, "launch-result.json");
   const port = await findAvailablePort();
   const daemonRequests = [];
   await mkdir(join(root, "dist", "assets"), { recursive: true });
@@ -3579,7 +3585,8 @@ async function startPackageBridgeRuntime() {
       env: {
         ...process.env,
         BOTSTER_HUB_SOCKET: socketPath,
-        BOTSTER_WEB_DOGFOOD_BRIDGE_PORT: String(port)
+        BOTSTER_WEB_DOGFOOD_BRIDGE_PORT: String(port),
+        ...(launchResult ? { BOTSTER_ENTRYPOINT_LAUNCH_RESULT: launchResultPath } : {})
       },
       stdio: ["ignore", "pipe", "pipe"]
     }
@@ -3604,6 +3611,7 @@ async function startPackageBridgeRuntime() {
 
   return {
     origin: `http://127.0.0.1:${port}`,
+    launchResultPath: launchResult ? launchResultPath : undefined,
     daemonRequests,
     async stop() {
       bridgeProcess.kill("SIGTERM");
@@ -3616,6 +3624,20 @@ async function startPackageBridgeRuntime() {
       await rm(root, { recursive: true, force: true });
     }
   };
+}
+
+async function readLaunchResult(path) {
+  const deadline = Date.now() + 2_000;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      return JSON.parse(await readFile(path, "utf8"));
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw lastError ?? new Error("timed out waiting for launch result");
 }
 
 async function findAvailablePort() {
