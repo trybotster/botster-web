@@ -2,6 +2,10 @@ import type { DaemonRequest, DaemonResponse } from "../realHubDaemonDto";
 
 export const generatedDaemonRequestFixtures = [
   { type: "list_packages" },
+  { type: "list_available_packages", registry_path: "/tmp/botster-registry" },
+  { type: "inspect_available_package", registry_path: "/tmp/botster-registry", entry_id: "github-provider" },
+  { type: "preview_package_install", registry_path: "/tmp/botster-registry", entry_id: "github-provider" },
+  { type: "install_package_registry_entry", registry_path: "/tmp/botster-registry", entry_id: "github-provider" },
   {
     type: "set_package_configuration",
     package_name: "project-pipelines",
@@ -96,9 +100,90 @@ export const generatedPackageResponseFixture = {
         missing_required: [],
         diagnostics: []
       },
+      availability: { state: "available", reasons: [] },
+      dependency_availability: [
+        { id: "local-hub", package_name: "botster", state: "available", reasons: [] }
+      ],
+      feature_availability: [
+        { id: "pipeline-runs", state: "available", reasons: [] }
+      ],
+      actions: [
+        {
+          action_id: "enable_package",
+          status: "unavailable",
+          reason: "already_enabled",
+          diagnostics: [{ kind: "already_enabled", message: "package is already enabled" }],
+          required_references: [],
+          request: null
+        },
+        {
+          action_id: "disable_package",
+          status: "available",
+          diagnostics: [],
+          required_references: [],
+          request: { request_type: "disable_package", package_name: "project-pipelines" }
+        },
+        {
+          action_id: "remove_package",
+          status: "available",
+          diagnostics: [],
+          required_references: [],
+          request: { request_type: "remove_package", package_name: "project-pipelines" }
+        },
+        {
+          action_id: "set_package_configuration",
+          status: "available",
+          diagnostics: [],
+          required_references: [],
+          request: { request_type: "set_package_configuration", package_name: "project-pipelines" }
+        },
+        {
+          action_id: "check_package_update",
+          status: "available",
+          diagnostics: [],
+          required_references: [],
+          request: { request_type: "check_package_update", package_name: "project-pipelines" }
+        }
+      ],
       provider_profile_admitted: false
     }
   ],
+  available_packages: [
+    {
+      entry_id: "github-provider",
+      package_name: "github-provider",
+      version: "1.2.3",
+      classification: "provider",
+      source_kind: "git",
+      source_label: "github.invalid/trybotster/github-provider",
+      first_party: true,
+      state: "available",
+      requested_capabilities: [{ surface: "ClientAdmission", scope: "github" }],
+      compatibility: {
+        botster_requirement: ">=0.1.0",
+        hub_version: "0.1.0",
+        result: "compatible",
+        diagnostics: []
+      },
+      pin: {
+        revision: "rev-github-provider",
+        branch: "main",
+        update_policy: "manual"
+      },
+      actions: [
+        {
+          action_id: "install_package_registry_entry",
+          status: "blocked",
+          reason: "auth_required",
+          diagnostics: [{ kind: "auth_required", message: "GitHub auth is required before installing provider features" }],
+          required_references: [{ kind: "auth", key: "github" }],
+          request: null
+        }
+      ]
+    }
+  ],
+  install_plan: null,
+  update_status: null,
   package_decision: null,
   lifecycle: [],
   plugin_tools: [],

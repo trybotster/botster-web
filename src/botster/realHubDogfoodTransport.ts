@@ -8,7 +8,10 @@ import type {
   DaemonDiagnostic,
   DaemonEvent,
   DaemonOperatorError,
+  DaemonAvailablePackage,
   DaemonPackage,
+  DaemonPackageActionRequest,
+  DaemonPackageActionState,
   DaemonPackageConfiguration,
   DaemonPackageRunnableEntrypoint,
   DaemonPackageSurfaceDescriptor,
@@ -26,6 +29,7 @@ const dogfoodSurface = "botster-web.dogfood.session";
 const sessionFamily = "botster-web.session";
 const draftFamily = "botster-web.session_draft";
 const packageFamily = "botster-web.package";
+const availablePackageFamily = "botster-web.available_package";
 const statusFamily = hubStatusFamily;
 
 type HubConnectionDiagnosticPayload = Omit<Partial<DaemonDiagnostic>, "kind"> & { kind: string };
@@ -166,13 +170,28 @@ export function createRealHubDogfoodTransport({
       }
 
       if (frame.kind === "entity_pull") {
-        const request = frame.payload as { family?: unknown };
+        const request = frame.payload as { family?: unknown; registry_path?: unknown };
         if (request.family === statusFamily) {
           emitResponse(await bridge.request({ type: "status" }));
         } else if (request.family === sessionFamily) {
           emitResponse(await bridge.request({ type: "list_sessions" }));
         } else if (request.family === packageFamily) {
           emitResponse(await bridge.request({ type: "list_packages" }));
+        } else if (request.family === availablePackageFamily) {
+          const registryPath = typeof request.registry_path === "string" ? request.registry_path : "";
+          if (registryPath) {
+            emitResponse(await bridge.request({ type: "list_available_packages", registry_path: registryPath }));
+          } else {
+            emit({
+              kind: "entity_snapshot",
+              payload: {
+                operation: "entity_snapshot",
+                family: availablePackageFamily,
+                sequence: sequence++,
+                records: []
+              } satisfies EntityFrame
+            });
+          }
         } else if (request.family === draftFamily) {
           emit({
             kind: "entity_snapshot",
@@ -229,6 +248,18 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
     });
   }
 
+  if (responseOwnsAvailablePackages(response) && Array.isArray(response.available_packages)) {
+    frames.push({
+      kind: "entity_snapshot",
+      payload: {
+        operation: "entity_snapshot",
+        family: availablePackageFamily,
+        sequence,
+        records: response.available_packages.map(availablePackageRecord)
+      } satisfies EntityFrame
+    });
+  }
+
   if (Array.isArray(response.events)) {
     for (const event of response.events) {
       const frame = daemonEventFrame(event, sequence);
@@ -254,7 +285,11 @@ function responseOwnsSessions(response: DaemonResponse): boolean {
 }
 
 function responseOwnsPackages(response: DaemonResponse): boolean {
-  return response.kind === "packages";
+  return response.kind === "packages" || response.kind === "package_update_status";
+}
+
+function responseOwnsAvailablePackages(response: DaemonResponse): boolean {
+  return response.kind === "available_packages" || response.kind === "package_install_plan";
 }
 
 export function daemonEventFrame(event: DaemonEvent, sequence: number): HubControlFrame | undefined {
@@ -360,6 +395,11 @@ function packageRecord(packageRecord: DaemonPackage) {
   const entrypointSummary = entrypointListSummary(runnableEntrypoints);
   const entrypointProcessSummary = entrypointProcessListSummary(runnableEntrypoints);
   const entrypointDiagnosticsSummary = entrypointDiagnosticsListSummary(runnableEntrypoints);
+  const packageActions = packageActionRecords(packageRecord.actions, packageRecord.package_name);
+  const configurationSubmit = packageActionBinding(
+    packageRecord.actions?.find((action) => action.action_id === "set_package_configuration"),
+    packageRecord.package_name
+  );
 
   return {
     id: packageRecord.package_name,
@@ -374,6 +414,12 @@ function packageRecord(packageRecord: DaemonPackage) {
     entrypoint_summary: entrypointSummary,
     entrypoint_process_summary: entrypointProcessSummary,
     entrypoint_diagnostics_summary: entrypointDiagnosticsSummary,
+    availability_state: packageRecord.availability?.state ?? "",
+    availability_summary: availabilitySummary(packageRecord.availability?.reasons),
+    dependency_availability: availabilityMatrixRecords(packageRecord.dependency_availability),
+    dependency_availability_summary: availabilityMatrixSummary(packageRecord.dependency_availability, "No dependency gates"),
+    feature_availability: availabilityMatrixRecords(packageRecord.feature_availability),
+    feature_availability_summary: availabilityMatrixSummary(packageRecord.feature_availability, "No feature gates"),
     has_app_surfaces: appSurfaces.length > 0,
     app_surface_count: appSurfaces.length,
     app_surfaces: appSurfaces,
@@ -383,30 +429,52 @@ function packageRecord(packageRecord: DaemonPackage) {
     settings_surfaces: settingsSurfaces,
     settings_surface_summary: surfaceListSummary(settingsSurfaces, "No settings surfaces"),
     configurable,
-    configure_action: {
-      id: "botster.package.configure",
-      target: packageRecord.package_name,
-      label: configurable ? `Configure ${packageRecord.package_name}` : "No configuration",
-      disabled: !configurable,
-      params: { package_name: packageRecord.package_name }
-    } satisfies ActionBinding,
+    configure_action: configurable && configurationSubmit
+      ? {
+          id: "botster.package.configure",
+          target: packageRecord.package_name,
+          label: `Configure ${packageRecord.package_name}`,
+          params: { package_name: packageRecord.package_name }
+        } satisfies ActionBinding
+      : undefined,
     configuration_title: `${packageRecord.package_name} configuration`,
     configuration_fields: configurationFields,
-    configuration_submit: {
-      id: "botster.package.configuration.save",
-      target: packageRecord.package_name,
-      label: "Save configuration",
-      disabled: !configurable,
-      params: { package_name: packageRecord.package_name }
-    } satisfies ActionBinding,
-    enable_action: packageAction(packageRecord.package_name, "botster.package.enable", "Enable package"),
-    disable_action: packageAction(packageRecord.package_name, "botster.package.disable", "Disable package"),
-    remove_action: packageAction(packageRecord.package_name, "botster.package.remove", "Remove package"),
-    reload_action: unsupportedPackageAction(packageRecord.package_name, "botster.package.reload", "Reload unavailable"),
-    update_action: unsupportedPackageAction(packageRecord.package_name, "botster.package.update", "Update unavailable"),
-    hub_restart_action: unsupportedPackageAction(packageRecord.package_name, "botster.hub.restart", "Hub restart unavailable"),
+    configuration_submit: configurationSubmit
+      ? {
+          ...configurationSubmit,
+          id: "botster.package.configuration.save",
+          label: configurationSubmit.label ?? "Save configuration"
+        } satisfies ActionBinding
+      : undefined,
+    package_actions: packageActions,
+    package_action_summary: actionListSummary(packageActions, "No package actions returned"),
     entrypoint_actions: runnableEntrypoints.flatMap((entrypoint) => entrypointActionRecords(packageRecord.package_name, entrypoint)),
     diagnostics_summary: `${packageRecord.classification} package is ${packageRecord.state}`
+  };
+}
+
+function availablePackageRecord(packageRecord: DaemonAvailablePackage) {
+  const actions = packageActionRecords(packageRecord.actions, packageRecord.package_name);
+
+  return {
+    id: packageRecord.entry_id,
+    entry_id: packageRecord.entry_id,
+    package_name: packageRecord.package_name,
+    title: packageRecord.package_name,
+    version: packageRecord.version,
+    status: packageRecord.state,
+    classification: packageRecord.classification,
+    source_kind: packageRecord.source_kind,
+    source_label: packageRecord.source_label,
+    first_party: packageRecord.first_party,
+    capability_summary: (packageRecord.requested_capabilities ?? []).length === 0
+      ? "No requested capabilities"
+      : packageRecord.requested_capabilities.map(capabilityLabel).join(", "),
+    compatibility_summary: packageRecord.compatibility.diagnostics.length === 0
+      ? packageRecord.compatibility.result
+      : `${packageRecord.compatibility.result}: ${packageRecord.compatibility.diagnostics.join("; ")}`,
+    package_actions: actions,
+    package_action_summary: actionListSummary(actions, "No marketplace actions returned")
   };
 }
 
@@ -447,45 +515,80 @@ function surfaceListSummary(surfaces: ReturnType<typeof packageSurfaceRecords>, 
   return surfaces.length === 0 ? empty : surfaces.map((surface) => `${surface.title} (${surface.surface_id})`).join("; ");
 }
 
-function packageAction(packageName: string, id: string, label: string): ActionBinding {
-  return {
-    id,
-    target: packageName,
-    label,
-    params: { package_name: packageName }
-  };
-}
-
-function unsupportedPackageAction(packageName: string, id: string, label: string): ActionBinding {
-  return {
-    ...packageAction(packageName, id, label),
-    disabled: true
-  };
-}
-
 function entrypointActionRecords(packageName: string, entrypoint: DaemonPackageRunnableEntrypoint) {
-  return [
-    entrypointAction(packageName, entrypoint.id, "botster.package.entrypoint.start", `Start ${entrypoint.id}`),
-    entrypointAction(packageName, entrypoint.id, "botster.package.entrypoint.stop", `Stop ${entrypoint.id}`),
-    entrypointAction(packageName, entrypoint.id, "botster.package.entrypoint.restart", `Restart ${entrypoint.id}`),
-    entrypointAction(packageName, entrypoint.id, "botster.package.entrypoint.status", `Refresh ${entrypoint.id} status`)
-  ];
+  return packageActionRecords(entrypoint.actions, packageName, entrypoint.id);
 }
 
-function entrypointAction(packageName: string, entrypointId: string, id: string, label: string) {
+function packageActionRecords(actions: DaemonPackageActionState[] | undefined, packageName: string, entrypointId?: string) {
+  return (actions ?? []).map((action) => ({
+    id: `${packageName}:${entrypointId ? `${entrypointId}:` : ""}${action.action_id}`,
+    action_id: action.action_id,
+    status: action.status,
+    reason: action.reason ?? "",
+    diagnostics: (action.diagnostics ?? []).map((diagnostic) => `${diagnostic.kind}: ${diagnostic.message}`),
+    required_references: action.required_references ?? [],
+    action: packageActionBinding(action, packageName, entrypointId)
+  }));
+}
+
+function packageActionBinding(action: DaemonPackageActionState | undefined, packageName: string, entrypointId?: string): ActionBinding | undefined {
+  if (!action) return undefined;
+
   return {
-    id: `${packageName}:${entrypointId}:${id}`,
-    entrypoint_id: entrypointId,
-    action: {
-      id,
-      target: packageName,
-      label,
-      params: {
-        package_name: packageName,
-        entrypoint_id: entrypointId
-      }
-    } satisfies ActionBinding
+    id: "botster.package.daemon_request",
+    target: action.request?.package_name ?? packageName,
+    label: actionLabel(action.action_id),
+    disabled: action.status !== "available" || !action.request,
+    params: {
+      package_name: action.request?.package_name ?? packageName,
+      entrypoint_id: action.request?.entrypoint_id ?? entrypointId,
+      action_id: action.action_id,
+      action_status: action.status,
+      action_reason: action.reason ?? "",
+      daemon_request: action.request
+    }
   };
+}
+
+function actionListSummary(actions: ReturnType<typeof packageActionRecords>, empty: string): string {
+  return actions.length === 0
+    ? empty
+    : actions.map((action) => `${action.action_id} ${action.status}${action.reason ? ` (${action.reason})` : ""}`).join("; ");
+}
+
+function actionLabel(actionId: string): string {
+  return actionId
+    .replace(/^set_package_configuration$/, "configure")
+    .replace(/^package_entrypoint_status$/, "refresh entrypoint")
+    .split("_")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function availabilitySummary(reasons: DaemonPackage["availability"]["reasons"] | undefined): string {
+  return reasons && reasons.length > 0
+    ? reasons.map((reason) => `${reason.action}: ${reason.reason}`).join("; ")
+    : "No blocked reasons";
+}
+
+function availabilityMatrixRecords(
+  rows: Array<{ id: string; state: string; package_name?: string; reasons?: DaemonPackage["availability"]["reasons"] }> | undefined
+) {
+  return (rows ?? []).map((row) => ({
+    id: row.id,
+    package_name: row.package_name ?? "",
+    state: row.state,
+    reasons: availabilitySummary(row.reasons)
+  }));
+}
+
+function availabilityMatrixSummary(
+  rows: Array<{ id: string; state: string; package_name?: string; reasons?: DaemonPackage["availability"]["reasons"] }> | undefined,
+  empty: string
+): string {
+  return rows && rows.length > 0
+    ? rows.map((row) => `${row.id} ${row.state}${row.reasons && row.reasons.length > 0 ? ` (${availabilitySummary(row.reasons)})` : ""}`).join("; ")
+    : empty;
 }
 
 function packageConfigurationFields(configuration: DaemonPackageConfiguration | undefined) {
@@ -708,11 +811,7 @@ async function dispatchDaemonAction(
       return;
     }
 
-    const response = await bridge.request({
-      type: "set_package_configuration",
-      package_name: packageName,
-      values: jsonObject(action.params?.values)
-    });
+    const response = await bridge.request(packageConfigurationRequest(packageName, action));
     emitResponse(response);
     emit(actionResultFrame(request, !response.error, response.error?.message, { package_name: packageName, kind: response.kind }));
     return;
@@ -742,67 +841,72 @@ async function dispatchDaemonAction(
     return;
   }
 
-  if (action.id === "botster.package.enable" || action.id === "botster.package.disable" || action.id === "botster.package.remove") {
-    const packageName = action.target ?? readConfigString(action.params?.package_name);
-    if (!packageName) {
-      emit(actionResultFrame(request, false, "Package management action is missing a package target"));
+  if (action.id === "botster.package.daemon_request") {
+    const daemonRequest = daemonRequestFromAction(action);
+    if (!daemonRequest) {
+      emit(actionResultFrame(request, false, "Package action is missing a hub-provided daemon request"));
       return;
     }
 
-    const response = await bridge.request(packageManagementRequest(action.id, packageName));
+    const response = await bridge.request(daemonRequest);
     emitResponse(response);
-    emit(actionResultFrame(request, !response.error, response.error?.message, { package_name: packageName, kind: response.kind }));
-    return;
-  }
-
-  if (
-    action.id === "botster.package.entrypoint.start" ||
-    action.id === "botster.package.entrypoint.stop" ||
-    action.id === "botster.package.entrypoint.restart" ||
-    action.id === "botster.package.entrypoint.status"
-  ) {
-    const packageName = action.target ?? readConfigString(action.params?.package_name);
-    const entrypointId = readConfigString(action.params?.entrypoint_id);
-    if (!packageName || !entrypointId) {
-      emit(actionResultFrame(request, false, "Package entrypoint action is missing a package or entrypoint target"));
-      return;
-    }
-
-    const response = await bridge.request(packageEntrypointRequest(action.id, packageName, entrypointId));
-    emitResponse(response);
-    emit(actionResultFrame(request, !response.error, response.error?.message, { package_name: packageName, entrypoint_id: entrypointId, kind: response.kind }));
+    emit(actionResultFrame(request, !response.error, response.error?.message, { request_type: daemonRequest.type, kind: response.kind }));
     return;
   }
 
   emit(actionResultFrame(request, false, `Unsupported real hub action: ${action.id}`));
 }
 
-function packageManagementRequest(actionId: string, packageName: string): DaemonRequest {
-  if (actionId === "botster.package.enable") {
-    return { type: "enable_package", package_name: packageName };
-  }
-
-  if (actionId === "botster.package.disable") {
-    return { type: "disable_package", package_name: packageName };
-  }
-
-  return { type: "remove_package", package_name: packageName };
+function packageConfigurationRequest(packageName: string, action: ActionBinding): DaemonRequest {
+  const daemonRequest = daemonRequestFromAction(action);
+  return {
+    type: "set_package_configuration",
+    package_name: daemonRequest?.type === "set_package_configuration" ? daemonRequest.package_name : packageName,
+    values: jsonObject(action.params?.values)
+  };
 }
 
-function packageEntrypointRequest(actionId: string, packageName: string, entrypointId: string): DaemonRequest {
-  if (actionId === "botster.package.entrypoint.start") {
+function daemonRequestFromAction(action: ActionBinding): DaemonRequest | undefined {
+  const request = action.params?.daemon_request;
+  if (!isRecord(request)) return undefined;
+  return daemonRequestFromDescriptor(request as unknown as DaemonPackageActionRequest);
+}
+
+function daemonRequestFromDescriptor(request: DaemonPackageActionRequest): DaemonRequest | undefined {
+  const packageName = request.package_name ?? "";
+  const entrypointId = request.entrypoint_id ?? "";
+  const entryId = request.entry_id ?? "";
+  const registryPath = request.registry_path ?? "";
+
+  if (request.request_type === "enable_package" && packageName) return { type: "enable_package", package_name: packageName };
+  if (request.request_type === "disable_package" && packageName) return { type: "disable_package", package_name: packageName };
+  if (request.request_type === "remove_package" && packageName) return { type: "remove_package", package_name: packageName };
+  if (request.request_type === "set_package_configuration" && packageName) {
+    return { type: "set_package_configuration", package_name: packageName, values: {} };
+  }
+  if (request.request_type === "start_package_entrypoint" && packageName && entrypointId) {
     return { type: "start_package_entrypoint", package_name: packageName, entrypoint_id: entrypointId };
   }
-
-  if (actionId === "botster.package.entrypoint.stop") {
+  if (request.request_type === "stop_package_entrypoint" && packageName && entrypointId) {
     return { type: "stop_package_entrypoint", package_name: packageName, entrypoint_id: entrypointId };
   }
-
-  if (actionId === "botster.package.entrypoint.restart") {
+  if (request.request_type === "restart_package_entrypoint" && packageName && entrypointId) {
     return { type: "restart_package_entrypoint", package_name: packageName, entrypoint_id: entrypointId };
   }
-
-  return { type: "package_entrypoint_status", package_name: packageName, entrypoint_id: entrypointId };
+  if (request.request_type === "package_entrypoint_status" && packageName && entrypointId) {
+    return { type: "package_entrypoint_status", package_name: packageName, entrypoint_id: entrypointId };
+  }
+  if (request.request_type === "install_package_registry_entry" && registryPath && entryId) {
+    return { type: "install_package_registry_entry", registry_path: registryPath, entry_id: entryId };
+  }
+  if (request.request_type === "check_package_update" && packageName) return { type: "check_package_update", package_name: packageName };
+  if (request.request_type === "preview_package_update" && packageName && request.pin) {
+    return { type: "preview_package_update", package_name: packageName, pin: request.pin };
+  }
+  if (request.request_type === "apply_package_update" && packageName && request.pin) {
+    return { type: "apply_package_update", package_name: packageName, pin: request.pin };
+  }
+  return undefined;
 }
 
 function actionResultFrame(
@@ -959,15 +1063,13 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                     { id: "real-hub-package-entrypoints", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_summary", prop: "text" }] },
                     { id: "real-hub-package-entrypoint-processes", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_process_summary", prop: "text" }] },
                     { id: "real-hub-package-entrypoint-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_diagnostics_summary", prop: "text" }] },
+                    { id: "real-hub-package-availability", primitive: "text", bindings: [{ source: "entity", path: "@/availability_summary", prop: "text" }] },
+                    { id: "real-hub-package-dependency-gates", primitive: "text", bindings: [{ source: "entity", path: "@/dependency_availability_summary", prop: "text" }] },
+                    { id: "real-hub-package-feature-gates", primitive: "text", bindings: [{ source: "entity", path: "@/feature_availability_summary", prop: "text" }] },
                     { id: "real-hub-package-app-surfaces", primitive: "text", bindings: [{ source: "entity", path: "@/app_surface_summary", prop: "text" }] },
                     { id: "real-hub-package-settings-surfaces", primitive: "text", bindings: [{ source: "entity", path: "@/settings_surface_summary", prop: "text" }] },
                     { id: "real-hub-package-configure-action", primitive: "action", bindings: [{ source: "entity", path: "@/configure_action", prop: "action" }] },
-                    { id: "real-hub-package-enable-action", primitive: "action", bindings: [{ source: "entity", path: "@/enable_action", prop: "action" }] },
-                    { id: "real-hub-package-disable-action", primitive: "action", bindings: [{ source: "entity", path: "@/disable_action", prop: "action" }] },
-                    { id: "real-hub-package-remove-action", primitive: "action", bindings: [{ source: "entity", path: "@/remove_action", prop: "action" }] },
-                    { id: "real-hub-package-update-action", primitive: "action", bindings: [{ source: "entity", path: "@/update_action", prop: "action" }] },
-                    { id: "real-hub-package-reload-action", primitive: "action", bindings: [{ source: "entity", path: "@/reload_action", prop: "action" }] },
-                    { id: "real-hub-package-hub-restart-action", primitive: "action", bindings: [{ source: "entity", path: "@/hub_restart_action", prop: "action" }] },
+                    { id: "real-hub-package-action-summary", primitive: "text", bindings: [{ source: "entity", path: "@/package_action_summary", prop: "text" }] },
                     { id: "real-hub-package-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/diagnostics_summary", prop: "text" }] }
                   ]
                 }
@@ -978,6 +1080,56 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                 id: "real-hub-packages-empty",
                 primitive: "empty_state",
                 props: { title: "No installed packages", body: "This daemon returned an empty package registry." }
+              }
+            ]
+          }
+        },
+        {
+          id: "real-hub-available-package-list",
+          primitive: "list",
+          props: { label: "Available marketplace packages" },
+          bindings: [{ source: "entity", path: `/${availablePackageFamily}`, prop: "items" }],
+          slots: {
+            item: [
+              {
+                id: "real-hub-available-package-row",
+                primitive: "row",
+                slots: {
+                  children: [
+                    { id: "real-hub-available-package-title", primitive: "text", bindings: [{ source: "entity", path: "@/title", prop: "text" }] },
+                    { id: "real-hub-available-package-state", primitive: "badge", bindings: [{ source: "entity", path: "@/status", prop: "text" }] },
+                    { id: "real-hub-available-package-source", primitive: "text", bindings: [{ source: "entity", path: "@/source_label", prop: "text" }] },
+                    { id: "real-hub-available-package-compatibility", primitive: "text", bindings: [{ source: "entity", path: "@/compatibility_summary", prop: "text" }] },
+                    { id: "real-hub-available-package-actions-summary", primitive: "text", bindings: [{ source: "entity", path: "@/package_action_summary", prop: "text" }] }
+                  ]
+                }
+              }
+            ],
+            empty: [
+              {
+                id: "real-hub-available-packages-empty",
+                primitive: "empty_state",
+                props: { title: "No available packages", body: "No marketplace catalog rows have been returned by the daemon." }
+              }
+            ]
+          }
+        },
+        {
+          id: "real-hub-package-action-list",
+          primitive: "list",
+          props: { label: "Package lifecycle actions" },
+          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items" }],
+          slots: {
+            item: [
+              {
+                id: "real-hub-package-action-buttons",
+                primitive: "list",
+                bindings: [{ source: "entity", path: "@/package_actions", prop: "items" }],
+                slots: {
+                  item: [
+                    { id: "real-hub-package-action", primitive: "action", bindings: [{ source: "entity", path: "@/action", prop: "action" }] }
+                  ]
+                }
               }
             ]
           }
