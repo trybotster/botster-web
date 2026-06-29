@@ -23,6 +23,7 @@ import {
   IonMenuButton,
   IonMenuToggle,
   IonModal,
+  IonNote,
   IonPage,
   IonRow,
   IonSplitPane,
@@ -1209,9 +1210,20 @@ interface PluginSettingsPanelProps {
 export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps) {
   const settingsSurfaces = packageSettingsSurfaces(app);
   const actions = packageActions(app);
+  const configurationFields = packageSurfaceRecords(app.configuration_fields);
 
   return (
     <IonList lines="full">
+      {configurationFields.length > 0 ? (
+        <>
+          <IonListHeader>
+            <IonLabel>Package configuration</IonLabel>
+          </IonListHeader>
+          {configurationFields.map((field) => (
+            <ConfigurationMetadataItem field={field} key={configurationFieldKey(field)} />
+          ))}
+        </>
+      ) : null}
       {settingsSurfaces.length > 0 ? (
         settingsSurfaces.map((surface) => {
           const launchAction = surfaceLaunchAction(surface);
@@ -1262,6 +1274,37 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
       })}
     </IonList>
   );
+}
+
+function ConfigurationMetadataItem({ field }: { field: PackageSurfaceRecord }) {
+  const label = firstString(field.label, field.id) ?? "Configuration field";
+  const kind = firstString(field.config_type, field.kind) ?? "string";
+  const helper = firstString(field.helper, field.placeholder);
+  const errors = arrayOfStrings(field.errors);
+  const required = field.required === true;
+
+  return (
+    <IonItem>
+      <IonIcon slot="start" icon={keyOutline} aria-hidden="true" />
+      <IonLabel>
+        <h2>{required ? `${label} *` : label}</h2>
+        <p>{kind}</p>
+        {helper ? <p>{helper}</p> : null}
+        {errors.map((error) => (
+          <IonNote color="danger" key={error}>
+            {error}
+          </IonNote>
+        ))}
+      </IonLabel>
+      {field.placeholder === "Existing secret is saved" ? (
+        <IonBadge slot="end" color="medium">Secret saved</IonBadge>
+      ) : null}
+    </IonItem>
+  );
+}
+
+function configurationFieldKey(field: PackageSurfaceRecord): string {
+  return firstString(field.id, field.label, field.config_type) ?? JSON.stringify(field);
 }
 
 function loadStatusLabel(status: DogfoodEntityLoadStatus): string {

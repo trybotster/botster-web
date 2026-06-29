@@ -828,6 +828,57 @@ assert.equal(
     .payload.records[0].id,
   "project-pipelines"
 );
+const optionalDaemonAppFrames = daemonResponseFrames(
+  {
+    kind: "apps",
+    apps: [
+      {
+        package_name: "optional-web",
+        app_id: "browser",
+        entrypoint_id: "web",
+        kind: "web_app",
+        launch_mode: "browser",
+        lifecycle_state: "running",
+        launch_target: { kind: "web_app" }
+      }
+    ],
+    events: []
+  },
+  13
+);
+const optionalDaemonPackageFrames = daemonResponseFrames(
+  {
+    kind: "packages",
+    packages: [
+      {
+        package_name: "optional-package",
+        version: "0.1.0",
+        classification: "plugin",
+        state: "enabled",
+        requested_capabilities: [],
+        runnable_entrypoints: [],
+        configuration: {},
+        availability: { state: "available" },
+        provider_profile_admitted: false
+      }
+    ],
+    events: []
+  },
+  14
+);
+const optionalDaemonAppRecord = optionalDaemonAppFrames
+  .find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.app")
+  .payload.records[0];
+const optionalDaemonPackageRecord = optionalDaemonPackageFrames
+  .find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.package")
+  .payload.records[0];
+assert.equal(optionalDaemonAppRecord.local_url, "");
+assert.equal(optionalDaemonAppRecord.diagnostics_summary, "Web app has no hub-provided local URL.");
+assert.equal(optionalDaemonAppRecord.app_action_summary, "No app actions returned");
+assert.equal(optionalDaemonPackageRecord.app_surface_summary, "No app surfaces");
+assert.equal(optionalDaemonPackageRecord.settings_surface_summary, "No settings surfaces");
+assert.equal(optionalDaemonPackageRecord.package_action_summary, "No package actions returned");
+assert.deepEqual(optionalDaemonPackageRecord.configuration_fields, []);
 const appSnapshot = daemonResponseFrames(generatedAppResponseFixture, 12)
   .find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.app");
 assert.equal(appSnapshot.payload.records[0].id, "botster-web:dogfood");
@@ -2722,6 +2773,10 @@ try {
     renderToStaticMarkup(createElement(AppListItem, { app: dtoBackedTerminalApp, onOpen: () => undefined })),
     /Terminal/
   );
+  assert.match(
+    renderToStaticMarkup(createElement(AppListItem, { app: optionalDaemonAppRecord, onOpen: () => undefined })),
+    /Web app has no hub-provided local URL/
+  );
 
   const descriptorApp = {
     id: "descriptor-only",
@@ -2812,6 +2867,14 @@ try {
   assert.match(descriptorSettingsMarkup, /Descriptor Settings/);
   assert.match(descriptorSettingsMarkup, /Descriptor-backed settings surface/);
   assert.match(descriptorSettingsMarkup, /Disable Package/);
+  const optionalSettingsMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsPanel, {
+      app: optionalDaemonPackageRecord,
+      onAction: () => undefined
+    })
+  );
+  assert.match(optionalSettingsMarkup, /No settings surface registered/);
+  assert.doesNotMatch(optionalSettingsMarkup, /Package configuration|undefined|null/);
   const descriptorSettingsTree = PluginSettingsPanel({
     app: descriptorApp,
     onAction: (action) => dispatchedSettings.push(action)
