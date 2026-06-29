@@ -106,9 +106,6 @@ async function runPackagedBrowserSmoke(scenario) {
     }
     await page.getByRole("heading", { name: "Spawn botster-web-dogfood-session" }).waitFor();
     await page.getByText("botster-web-dogfood-ready").first().waitFor();
-    await page.getByText("Webhook endpoint").waitFor();
-    await page.getByText("API token").waitFor();
-    await page.getByPlaceholder("Existing secret is saved").first().waitFor();
     await page.getByText("Output appears in the terminal panel").first().waitFor();
     await page.getByText("Terminal output destination: botster-web-dogfood-session").waitFor();
     const staleOverviewCount = await page.getByText("Ionic React renderer shell").count();
@@ -116,6 +113,31 @@ async function runPackagedBrowserSmoke(scenario) {
       throw new Error("packaged browser smoke rendered the stale renderer-shell overview");
     }
 
+    await openAppsView(page);
+    await page.getByRole("heading", { name: "Apps", exact: true }).waitFor();
+    const installedAppsList = page.locator("[aria-label='Installed apps']");
+    const installedPackagesList = page.locator("[aria-label='Installed packages']");
+    await installedAppsList.getByText("botster web dogfood app").waitFor();
+    await installedPackagesList.getByText("botster web").first().waitFor();
+    await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
+    await page.getByText("Package configuration").waitFor();
+    await page.getByText("Webhook endpoint *").waitFor();
+    await page.getByText("API token *").waitFor();
+    await page.getByText("Required configuration is missing.").waitFor();
+    await page.getByText("Secret saved").waitFor();
+    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByText("Package configuration").waitFor({ state: "detached" });
+
+    await installedPackagesList.getByText("botster web").first().click();
+    await page.getByText("Rendered package surface").waitFor();
+    await page.getByText("botster-web Dogfood: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
+
+    await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
+    await page.getByRole("button", { name: "Disable Package" }).click();
+    await page.getByText("botster-web: Disable Package (disabled)").waitFor();
+    await page.getByRole("button", { name: "Close" }).click();
+
+    await openDiagnosticsView(page);
     await page.getByRole("button", { name: "Spawn botster-web-dogfood-session to terminal" }).click();
 
     if (scenario.spawnFails) {
@@ -158,6 +180,11 @@ async function runPackagedBrowserSmoke(scenario) {
     if (!daemonRequests.some((request) => request.type === "spawn")) {
       throw new Error(`packaged browser smoke ${scenario.name} did not dispatch the spawn action through the bridge`);
     }
+    for (const requiredRequest of ["list_apps", "list_packages", "disable_package"]) {
+      if (!daemonRequests.some((request) => request.type === requiredRequest)) {
+        throw new Error(`packaged browser smoke ${scenario.name} did not dispatch ${requiredRequest} through the bridge`);
+      }
+    }
     const secretLeak = JSON.stringify({
       daemonRequests,
       consoleEvents
@@ -176,11 +203,12 @@ async function runPackagedBrowserSmoke(scenario) {
             role: globalThis.document.activeElement.getAttribute("role")
           }
           : null,
-        terminalHtml: globalThis.document.querySelector(".terminal-view-container")?.innerHTML
+        terminalHtml: globalThis.document.querySelector(".terminal-view-container")?.innerHTML,
+        bodyText: globalThis.document.body?.innerText,
+        appsViewHtml: globalThis.document.querySelector("[data-testid='apps-view']")?.innerHTML
       })).catch(() => undefined)
       : undefined;
-    error.message = `${scenario.name}: ${error.message}\nbridge stdout:\n${bridgeStdout}\nbridge stderr:\n${bridgeStderr}\ndaemon requests:\n${JSON.stringify(daemonRequests, null, 2)}\nharness state:\n${JSON.stringify(harnessState, null, 2)}`;
-    throw error;
+    throw new Error(`${scenario.name}: ${error.message}\nbridge stdout:\n${bridgeStdout}\nbridge stderr:\n${bridgeStderr}\ndaemon requests:\n${JSON.stringify(daemonRequests, null, 2)}\nharness state:\n${JSON.stringify(harnessState, null, 2)}`, { cause: error });
   } finally {
     await browser?.close();
     bridgeProcess.kill("SIGTERM");
@@ -225,6 +253,11 @@ async function waitForTerminalCanvas(page) {
 async function openDiagnosticsView(page) {
   await page.getByRole("button", { name: "Diagnostics" }).click();
   await page.getByTestId("diagnostics-view").waitFor();
+}
+
+async function openAppsView(page) {
+  await page.getByRole("button", { name: "Apps" }).click();
+  await page.getByTestId("apps-view").waitFor();
 }
 
 function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) {
@@ -310,6 +343,30 @@ function daemonResponse(request, scenario, state) {
     };
   }
 
+  if (request.type === "list_apps") {
+    return {
+      kind: "apps",
+      apps: [
+        {
+          app_id: "dogfood-app",
+          package_name: "botster-web",
+          entrypoint_id: "web-client",
+          kind: "web_app",
+          launch_mode: "browser",
+          lifecycle_state: "running",
+          launch_target: {
+            kind: "web_app",
+            local_url: "http://127.0.0.1:41739/"
+          },
+          blocked_reasons: [],
+          actions: [],
+          diagnostics: []
+        }
+      ],
+      events: []
+    };
+  }
+
   if (request.type === "list_packages") {
     return {
       kind: "packages",
@@ -321,6 +378,40 @@ function daemonResponse(request, scenario, state) {
   if (request.type === "set_package_configuration") {
     return {
       kind: "packages",
+      packages: [configurableSmokePackage(true)],
+      events: []
+    };
+  }
+
+  if (request.type === "plugin_surface_render") {
+    return {
+      kind: "plugin_surface",
+      plugin_surface: {
+        package_name: request.package_name,
+        surface_id: request.surface_id,
+        title: "Smoke package app",
+        body: "Smoke package surface rendered"
+      },
+      events: []
+    };
+  }
+
+  if (request.type === "disable_package") {
+    return {
+      kind: "package_decision",
+      package_decision: {
+        package_name: request.package_name,
+        action: "disable_package",
+        state: "disabled"
+      },
+      diagnostics: [
+        {
+          kind: "action",
+          operation: "disable_package",
+          feature: "package_registry",
+          message: "botster-web package disabled"
+        }
+      ],
       packages: [configurableSmokePackage(true)],
       events: []
     };
@@ -457,6 +548,24 @@ function configurableSmokePackage(configured) {
     state: "enabled",
     requested_capabilities: [],
     runnable_entrypoints: [],
+    surfaces: [
+      {
+        id: "dogfood-app",
+        kind: "app",
+        title: "Dogfood app",
+        description: "Smoke package app surface",
+        supports: ["web"],
+        order: 1
+      },
+      {
+        id: "dogfood-settings",
+        kind: "settings",
+        title: "Dogfood settings",
+        description: "Smoke package settings surface",
+        supports: ["settings"],
+        order: 2
+      }
+    ],
     configuration: {
       schema: {
         fields: [
@@ -491,6 +600,14 @@ function configurableSmokePackage(configured) {
       diagnostics: []
     },
     actions: [
+      {
+        action_id: "disable_package",
+        status: "available",
+        reason: null,
+        diagnostics: [],
+        required_references: [],
+        request: { request_type: "disable_package", package_name: "botster-web" }
+      },
       {
         action_id: "set_package_configuration",
         status: "available",
