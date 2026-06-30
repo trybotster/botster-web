@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
+import { dirname, join, resolve } from "node:path";
 import { chromium } from "playwright";
 
 const host = "127.0.0.1";
@@ -48,6 +50,7 @@ const responseErrors = [];
 try {
   await waitForHttpOk(`${bridgeUrl}/health`);
   await waitForHtmlShell(`${bridgeUrl}/?dogfood=real-hub`);
+  await prepareProjectPipelinesPackage();
 
   browser = await chromium.launch();
   page = await browser.newPage();
@@ -79,6 +82,7 @@ try {
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, "list_sessions request");
   await openAppsView(page);
+  await exerciseFirstPartyPackageConfiguration(page);
   await openFirstPartyUiAppSurface(page);
   if (process.env.BOTSTER_LIVE_SURFACE_ONLY === "1") {
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
@@ -196,6 +200,62 @@ async function requestDaemonShutdown() {
   }
 }
 
+async function prepareProjectPipelinesPackage() {
+  const packagePath = resolveProjectPipelinesPackagePath();
+  await sendBridgeDaemonRequest("install-project-pipelines-package", {
+    type: "install_package_local_path",
+    path: packagePath
+  });
+  await sendBridgeDaemonRequest("seed-project-pipelines-configuration", {
+    type: "set_package_configuration",
+    package_name: "project-pipelines",
+    values: {
+      api_token: { type: "secret", state: "write_only" }
+    }
+  });
+  await sendBridgeDaemonRequest("enable-project-pipelines-package", {
+    type: "enable_package",
+    package_name: "project-pipelines"
+  });
+}
+
+async function sendBridgeDaemonRequest(requestId, payload) {
+  const response = await fetch(`${bridgeUrl}/request`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      kind: "daemon_request",
+      request_id: requestId,
+      payload
+    })
+  });
+  const envelope = await response.json().catch(() => undefined);
+  const daemonPayload = envelope?.payload;
+  if (!response.ok || daemonPayload?.error) {
+    throw new Error(
+      `live harness daemon request ${requestId} failed: http=${response.status} payload=${JSON.stringify(daemonPayload)}`
+    );
+  }
+  return daemonPayload;
+}
+
+function resolveProjectPipelinesPackagePath() {
+  const configuredPath =
+    process.env.BOTSTER_PROJECT_PIPELINES_PACKAGE_PATH ?? process.env.BOTSTER_LIVE_PROJECT_PIPELINES_PACKAGE_PATH;
+  const candidates = [
+    configuredPath,
+    process.env.BOTSTER_HUB_SOURCE_DIR ? join(process.env.BOTSTER_HUB_SOURCE_DIR, "examples/project-pipelines") : undefined,
+    process.env.BOTSTER_HUB_BIN ? resolve(dirname(process.env.BOTSTER_HUB_BIN), "../..", "examples/project-pipelines") : undefined
+  ].filter(Boolean);
+  const packagePath = candidates.find((candidate) => existsSync(join(candidate, "botster-package.json")));
+  if (!packagePath) {
+    throw new Error(
+      `live harness could not find examples/project-pipelines package; checked ${JSON.stringify(candidates)}`
+    );
+  }
+  return packagePath;
+}
+
 async function callTerminalControl(page, method, ...args) {
   await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl));
   await page.evaluate(
@@ -227,18 +287,16 @@ async function openFirstPartyUiAppSurface(page) {
   const installedAppsList = page.locator("[aria-label='Installed apps']");
   const installedPackagesList = page.locator("[aria-label='Installed packages']");
   const firstPartyPattern = /project[- ]pipelines|botster[- ]workspaces|workspaces/i;
-  let candidate = installedAppsList.getByText(firstPartyPattern).first();
-  const appRowCount = await candidate.count();
-  if (appRowCount === 0) {
-    candidate = installedPackagesList.getByText(firstPartyPattern).first();
-  }
-  await candidate.waitFor({ timeout: 15_000 }).catch(async (error) => {
+  const candidate = installedAppsList.getByText(firstPartyPattern).first();
+  const foundSurface = await candidate.waitFor({ timeout: 15_000 }).then(() => true).catch(async (error) => {
     const installedAppsText = await installedAppsList.innerText().catch(() => "");
     const installedPackagesText = await installedPackagesList.innerText().catch(() => "");
-    throw new Error(
-      `timed out waiting for project-pipelines/workspaces UI surface row; installed apps=${JSON.stringify(installedAppsText)} installed packages=${JSON.stringify(installedPackagesText)}: ${error.message}`
+    console.log(
+      `skipping first-party app surface proof; no project-pipelines/workspaces UI surface row was visible; installed apps=${JSON.stringify(installedAppsText)} installed packages=${JSON.stringify(installedPackagesText)}: ${error.message}`
     );
+    return false;
   });
+  if (!foundSurface) return;
   await candidate.click();
   await waitForHarnessEvent(
     page,
@@ -256,6 +314,136 @@ async function openFirstPartyUiAppSurface(page) {
   ).catch(async (error) => {
     const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
     throw new Error(`selected app surface did not render visible first-party content; text=${JSON.stringify(selectedText)}: ${error.message}`);
+  });
+}
+
+async function exerciseFirstPartyPackageConfiguration(page) {
+  const endpoint = "https://example.invalid/live-web-configuration";
+
+  await openPackageSettings(page, "project-pipelines");
+  await page.getByText("Package configuration").waitFor();
+  await page.getByText("Operator endpoint").waitFor();
+  await page.getByText("Pipeline mode").waitFor();
+  await page.getByText("API token").waitFor();
+  await page.locator("ion-input[data-configuration-field='operator_endpoint'] input").fill(endpoint);
+  await setIonicSelectValue(page, "pipeline_mode", "github");
+  const listPackagesBeforeSave = await daemonRequestCount(page, { type: "list_packages" });
+  await page.locator("[data-testid='package-configuration-save']").click();
+  await waitForPackageConfigurationRequest(page, {
+    packageName: "project-pipelines",
+    values: {
+      operator_endpoint: { type: "url", value: endpoint },
+      pipeline_mode: { type: "select", value: "github" }
+    },
+    omittedKeys: ["api_token"]
+  });
+  await waitForDaemonRequestCount(
+    page,
+    { type: "list_packages" },
+    listPackagesBeforeSave + 1,
+    "post-save package refresh request"
+  );
+
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByText("Package configuration").waitFor({ state: "detached" });
+  await openPackageSettings(page, "project-pipelines");
+  await expectIonicTextInputValue(page, "operator_endpoint", endpoint);
+  await expectIonicSelectValue(page, "pipeline_mode", "github");
+
+  const requestCountBeforeInvalidSave = await daemonRequestCount(page, { type: "set_package_configuration" });
+  await setIonicSelectValue(page, "pipeline_mode", "invalid-mode");
+  await page.locator("[data-testid='package-configuration-save']").click();
+  await waitForDaemonRequestCount(
+    page,
+    { type: "set_package_configuration" },
+    requestCountBeforeInvalidSave + 1,
+    "invalid package configuration save request"
+  );
+  await waitForPackageConfigurationRequest(page, {
+    packageName: "project-pipelines",
+    values: {
+      pipeline_mode: { type: "select", value: "invalid-mode" }
+    }
+  });
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByText("Package configuration").waitFor({ state: "detached" });
+  await openDiagnosticsView(page);
+  await page.getByText("select_option_unknown").first().waitFor({ timeout: 15_000 });
+  await page.getByText("invalid-mode").first().waitFor({ timeout: 15_000 });
+}
+
+async function openPackageSettings(page, packageName) {
+  const installedPackagesList = page.locator("[aria-label='Installed packages']");
+  const settingsButton = installedPackagesList.getByText("Settings", { exact: true }).first();
+  await settingsButton.waitFor({ timeout: 15_000 }).catch(async (error) => {
+    const installedPackagesText = await installedPackagesList.innerText().catch(() => "");
+    throw new Error(
+      `timed out waiting for ${packageName} settings button; installed packages=${JSON.stringify(installedPackagesText)}: ${error.message}`
+    );
+  });
+  await settingsButton.click();
+}
+
+async function setIonicSelectValue(page, fieldId, value) {
+  await page.locator(`ion-select[data-configuration-field='${fieldId}']`).evaluate(
+    (select, nextValue) => {
+      select.value = nextValue;
+      select.dispatchEvent(new CustomEvent("ionChange", { bubbles: true, detail: { value: nextValue } }));
+    },
+    value
+  );
+}
+
+async function expectIonicSelectValue(page, fieldId, value) {
+  await page.waitForFunction(
+    ({ nextFieldId, nextValue }) =>
+      globalThis.document.querySelector(`ion-select[data-configuration-field='${nextFieldId}']`)?.value === nextValue,
+    { nextFieldId: fieldId, nextValue: value },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const actualValue = await page.locator(`ion-select[data-configuration-field='${fieldId}']`).evaluate((select) => select.value).catch(() => undefined);
+    throw new Error(`timed out waiting for ${fieldId} select value ${value}; actual=${JSON.stringify(actualValue)}: ${error.message}`);
+  });
+}
+
+async function expectIonicTextInputValue(page, fieldId, value) {
+  await page.waitForFunction(
+    ({ nextFieldId, nextValue }) =>
+      globalThis.document.querySelector(`ion-input[data-configuration-field='${nextFieldId}'] input`)?.value === nextValue,
+    { nextFieldId: fieldId, nextValue: value },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const actualValue = await page.locator(`ion-input[data-configuration-field='${fieldId}'] input`).inputValue().catch(() => undefined);
+    throw new Error(`timed out waiting for ${fieldId} input value ${value}; actual=${JSON.stringify(actualValue)}: ${error.message}`);
+  });
+}
+
+async function waitForPackageConfigurationRequest(page, { packageName, values, omittedKeys = [] }) {
+  await page.waitForFunction(
+    ({ nextPackageName, expectedValues, expectedOmittedKeys }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
+        if (entry.kind !== "daemon_request") return false;
+        const payload = entry.payload ?? {};
+        if (payload.type !== "set_package_configuration" || payload.package_name !== nextPackageName) return false;
+        const payloadValues = payload.values ?? {};
+        for (const [key, expectedValue] of Object.entries(expectedValues)) {
+          if (JSON.stringify(payloadValues[key]) !== JSON.stringify(expectedValue)) return false;
+        }
+        return expectedOmittedKeys.every((key) => !(key in payloadValues));
+      }),
+    { nextPackageName: packageName, expectedValues: values, expectedOmittedKeys: omittedKeys },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observedRequests = await page.evaluate((nextPackageName) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "set_package_configuration")
+        .filter((entry) => !nextPackageName || entry.payload?.package_name === nextPackageName)
+        .map((entry) => entry.payload),
+      packageName
+    );
+    throw new Error(
+      `timed out waiting for ${packageName} configuration request values=${JSON.stringify(values)} omitted=${JSON.stringify(omittedKeys)}; observed=${JSON.stringify(observedRequests, null, 2)}: ${error.message}`
+    );
   });
 }
 

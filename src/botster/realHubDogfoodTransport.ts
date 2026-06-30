@@ -909,7 +909,11 @@ async function dispatchDaemonAction(
 
     const response = await bridge.request(packageConfigurationRequest(packageName, action));
     emitResponse(response);
-    emit(actionResultFrame(request, !response.error, response.error?.message, { package_name: packageName, kind: response.kind }));
+    emit(actionResultFrame(request, !response.error, response.error?.message, {
+      package_name: packageName,
+      kind: response.kind,
+      diagnostics: responseDiagnostics(response)
+    }));
     return;
   }
 
