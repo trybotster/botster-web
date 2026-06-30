@@ -45,7 +45,13 @@ export type DaemonRequest =
   | { type: "resize"; session_id: string; rows: number; cols: number }
   | { type: "shutdown_session"; session_id: string }
   | { type: "drain"; session_id: string }
+  | { type: "list_session_templates" }
+  | { type: "show_session_template"; template_id: string }
+  | { type: "resolve_session_template"; template_id: string; request: DaemonSessionTemplateRequest }
+  | { type: "spawn_session_template"; template_id: string; session_id: string; request: DaemonSessionTemplateRequest }
+  | { type: "read_session_context"; session_id: string; context_id?: string | null; key?: string | null }
   | { type: "list_apps" }
+  | { type: "resolve_app_launch"; package_name: string; entrypoint_id: string }
   | { type: "list_packages" }
   | { type: "list_available_packages"; registry_path: string }
   | { type: "inspect_available_package"; registry_path: string; entry_id: string }
@@ -57,6 +63,7 @@ export type DaemonRequest =
   | { type: "apply_package_update"; package_name: string; pin: DaemonPackagePin }
   | { type: "show_package"; package_name: string }
   | { type: "set_package_configuration"; package_name: string; values: Record<string, JsonValue> }
+  | { type: "reload_package"; package_name: string }
   | { type: "enable_package_local_path"; path: string }
   | { type: "enable_package"; package_name: string }
   | { type: "disable_package"; package_name: string }
@@ -76,7 +83,11 @@ export interface DaemonResponse {
   kind: DaemonResponseKind;
   status: DaemonStatus | null;
   sessions: DaemonSession[];
+  session_templates?: DaemonSessionTemplate[];
+  resolved_session_template?: DaemonResolvedSessionTemplate | null;
+  session_context?: DaemonSessionContext | null;
   apps?: DaemonApp[];
+  resolved_app_launch?: DaemonResolvedAppLaunch | null;
   packages: DaemonPackage[];
   available_packages?: DaemonAvailablePackage[];
   install_plan?: DaemonPackageInstallPlan | null;
@@ -99,7 +110,11 @@ export type DaemonResponseKind =
   | "sessions"
   | "spawned"
   | "events"
+  | "session_templates"
+  | "resolved_session_template"
+  | "session_context"
   | "apps"
+  | "resolved_app_launch"
   | "packages"
   | "available_packages"
   | "package_install_plan"
@@ -170,6 +185,54 @@ export interface DaemonNotify {
   states: string[];
 }
 
+export interface DaemonSessionTemplateRequest {
+  target_id?: string | null;
+  cwd?: string | null;
+  environment?: Record<string, string>;
+  context: DaemonSessionTemplateContextInput;
+}
+
+export interface DaemonSessionTemplateContextInput {
+  worktree_path?: string | null;
+  repo_path?: string | null;
+  branch_name?: string | null;
+  prompt?: string | null;
+  ticket_id?: string | null;
+  workspace_id?: string | null;
+  metadata?: Record<string, string>;
+}
+
+export interface DaemonSessionTemplate {
+  template_id: string;
+  package_name: string;
+  id: string;
+  source: string;
+  command: string;
+  args?: string[];
+  working_directory_policy: string;
+  allowed_environment_overrides?: string[];
+  context_keys?: string[];
+  target_id: string;
+  available: boolean;
+}
+
+export interface DaemonResolvedSessionTemplate {
+  template: DaemonSessionTemplate;
+  session_id: string;
+  executable: string;
+  arguments?: string[];
+  working_directory: string;
+  environment?: Record<string, string>;
+  context_id: string;
+  context_keys?: string[];
+}
+
+export interface DaemonSessionContext {
+  context_id: string;
+  session_id: string;
+  values: Record<string, string>;
+}
+
 export interface DaemonApp {
   package_name: string;
   app_id: string;
@@ -188,10 +251,23 @@ export interface DaemonAppLaunchTarget {
   local_url?: string | null;
 }
 
+export interface DaemonResolvedAppLaunch {
+  package_name: string;
+  app_id: string;
+  entrypoint_id: string;
+  kind: string;
+  launch_mode: string;
+  command: string;
+  args?: string[];
+  working_directory: string;
+  environment?: Record<string, string>;
+}
+
 export interface DaemonPackage {
   package_name: string;
   version: string;
   classification: string;
+  source_kind: string;
   state: string;
   requested_capabilities: DaemonCapability[];
   surfaces?: DaemonPackageSurfaceDescriptor[];

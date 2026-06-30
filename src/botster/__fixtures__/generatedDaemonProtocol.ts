@@ -52,6 +52,7 @@ export const generatedPackageResponseFixture = {
       package_name: "project-pipelines",
       version: "0.8.0",
       classification: "plugin",
+      source_kind: "local_path",
       state: "enabled",
       requested_capabilities: [{ surface: "McpTools", scope: null }],
       surfaces: [
