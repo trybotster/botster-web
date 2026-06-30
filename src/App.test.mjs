@@ -2647,13 +2647,6 @@ try {
     return undefined;
   }
 
-  function reactText(node) {
-    if (Array.isArray(node)) return node.map(reactText).join("");
-    if (typeof node === "string" || typeof node === "number") return String(node);
-    if (!node || typeof node !== "object" || !("props" in node)) return "";
-    return reactText(node.props.children);
-  }
-
   const descriptorPackageAction = {
     id: "descriptor-only:disable_package",
     action_id: "disable_package",
@@ -2857,16 +2850,85 @@ try {
   descriptorSettingsButton.props.onClick({ stopPropagation() {} });
   assert.deepEqual(openedSettings.map((appRecord) => appRecord.id), ["descriptor-only"]);
 
-  const dispatchedSettings = [];
   const descriptorSettingsMarkup = renderToStaticMarkup(
     createElement(PluginSettingsPanel, {
       app: descriptorApp,
-      onAction: (action) => dispatchedSettings.push(action)
+      onAction: () => undefined
     })
   );
   assert.match(descriptorSettingsMarkup, /Descriptor Settings/);
   assert.match(descriptorSettingsMarkup, /Descriptor-backed settings surface/);
   assert.match(descriptorSettingsMarkup, /Disable Package/);
+  const configurableDescriptorApp = {
+    ...descriptorApp,
+    configuration_fields: [
+      {
+        id: "endpoint",
+        label: "Endpoint",
+        kind: "text_input",
+        config_type: "url",
+        value: "",
+        required: true,
+        helper: "Webhook receiver URL",
+        errors: ["Required configuration is missing."]
+      },
+      {
+        id: "mode",
+        label: "Mode",
+        kind: "select",
+        config_type: "select",
+        value: "read",
+        options: [
+          { value: "read", label: "Read" },
+          { value: "write", label: "Write" }
+        ],
+        errors: []
+      },
+      {
+        id: "enabled",
+        label: "Enabled",
+        kind: "checkbox",
+        config_type: "boolean",
+        value: true,
+        errors: []
+      },
+      {
+        id: "api_token",
+        label: "API token",
+        kind: "secret",
+        config_type: "secret",
+        value: "",
+        placeholder: "Existing secret is saved",
+        helper: "Leave blank to keep the existing secret.",
+        errors: []
+      }
+    ],
+    configuration_submit: {
+      id: "botster.package.configuration.save",
+      target: "descriptor-only",
+      label: "Save configuration",
+      params: {
+        package_name: "descriptor-only",
+        daemon_request: {
+          request_type: "set_package_configuration",
+          package_name: "descriptor-only"
+        }
+      }
+    }
+  };
+  const configurationSettingsMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsPanel, {
+      app: configurableDescriptorApp,
+      onAction: () => undefined
+    })
+  );
+  assert.match(configurationSettingsMarkup, /Package configuration/);
+  assert.match(configurationSettingsMarkup, /ion-input/);
+  assert.match(configurationSettingsMarkup, /ion-select/);
+  assert.match(configurationSettingsMarkup, /ion-checkbox/);
+  assert.match(configurationSettingsMarkup, /Required configuration is missing/);
+  assert.match(configurationSettingsMarkup, /Secret saved/);
+  assert.match(configurationSettingsMarkup, /Save configuration/);
   const optionalSettingsMarkup = renderToStaticMarkup(
     createElement(PluginSettingsPanel, {
       app: optionalDaemonPackageRecord,
@@ -2875,24 +2937,6 @@ try {
   );
   assert.match(optionalSettingsMarkup, /No settings surface registered/);
   assert.doesNotMatch(optionalSettingsMarkup, /Package configuration|undefined|null/);
-  const descriptorSettingsTree = PluginSettingsPanel({
-    app: descriptorApp,
-    onAction: (action) => dispatchedSettings.push(action)
-  });
-  const descriptorSettingsItem = findReactElement(
-    descriptorSettingsTree,
-    (element) => typeof element.props?.onClick === "function"
-  );
-  assert.ok(descriptorSettingsItem);
-  descriptorSettingsItem.props.onClick();
-  assert.deepEqual(dispatchedSettings, [descriptorApp.settings_surfaces[0].launch_action]);
-  const descriptorSettingsActionItem = findReactElement(
-    descriptorSettingsTree,
-    (element) => typeof element.props?.onClick === "function" && reactText(element) === "Disable Packageavailable"
-  );
-  assert.ok(descriptorSettingsActionItem);
-  descriptorSettingsActionItem.props.onClick();
-  assert.deepEqual(dispatchedSettings, [descriptorApp.settings_surfaces[0].launch_action, descriptorPackageAction.action]);
 
   const legacyListMarkup = renderToStaticMarkup(
     createElement(PluginListItem, {

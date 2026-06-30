@@ -125,6 +125,12 @@ async function runPackagedBrowserSmoke(scenario) {
     await page.getByText("API token *").waitFor();
     await page.getByText("Required configuration is missing.").waitFor();
     await page.getByText("Secret saved").waitFor();
+    await page.locator("ion-input[data-configuration-field='endpoint'] input").fill("https://example.invalid/hook");
+    await page.locator("[data-testid='package-configuration-save']").click();
+    await page.getByText("Required configuration is missing.").waitFor({ state: "detached" });
+    await page.locator("ion-input[data-configuration-field='endpoint'] input").fill("");
+    await page.locator("[data-testid='package-configuration-save']").click();
+    await page.getByText("Required configuration is missing.").waitFor();
     await page.getByRole("button", { name: "Close" }).click();
     await page.getByText("Package configuration").waitFor({ state: "detached" });
 
@@ -184,6 +190,22 @@ async function runPackagedBrowserSmoke(scenario) {
       if (!daemonRequests.some((request) => request.type === requiredRequest)) {
         throw new Error(`packaged browser smoke ${scenario.name} did not dispatch ${requiredRequest} through the bridge`);
       }
+    }
+    const configurationRequests = daemonRequests.filter((request) => request.type === "set_package_configuration");
+    if (configurationRequests.length < 2) {
+      throw new Error(`packaged browser smoke ${scenario.name} did not dispatch success and validation package configuration saves through the bridge`);
+    }
+    const successfulConfigurationRequest = configurationRequests.find(
+      (request) => request.values?.endpoint?.value === "https://example.invalid/hook"
+    );
+    if (!successfulConfigurationRequest) {
+      throw new Error(`packaged browser smoke ${scenario.name} did not submit the edited endpoint value through set_package_configuration`);
+    }
+    const invalidConfigurationRequest = configurationRequests.find(
+      (request) => request.values && !request.values.endpoint?.value
+    );
+    if (!invalidConfigurationRequest) {
+      throw new Error(`packaged browser smoke ${scenario.name} did not submit an invalid package configuration round trip`);
     }
     const secretLeak = JSON.stringify({
       daemonRequests,
@@ -288,7 +310,8 @@ function createFakeDaemon(path, requests, scenario) {
   const state = {
     inputBuffers: new Map(),
     latestSubscriptions: new Map(),
-    terminalQueues: new Map()
+    terminalQueues: new Map(),
+    packageConfigured: false
   };
 
   return createNetServer((socket) => {
@@ -370,15 +393,17 @@ function daemonResponse(request, scenario, state) {
   if (request.type === "list_packages") {
     return {
       kind: "packages",
-      packages: [configurableSmokePackage(false)],
+      packages: [configurableSmokePackage(state.packageConfigured)],
       events: []
     };
   }
 
   if (request.type === "set_package_configuration") {
+    const endpoint = request.values?.endpoint;
+    state.packageConfigured = Boolean(endpoint && typeof endpoint === "object" && "value" in endpoint && endpoint.value);
     return {
       kind: "packages",
-      packages: [configurableSmokePackage(true)],
+      packages: [configurableSmokePackage(state.packageConfigured)],
       events: []
     };
   }
