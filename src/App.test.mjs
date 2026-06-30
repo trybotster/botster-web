@@ -2609,6 +2609,7 @@ try {
     { ConnectionDiagnosticsPanel },
     { DogfoodFirstScreen },
     { createInMemoryEntityFrameStore },
+    { configurationFieldType, configurationSaveAction, configurationSubmitValues },
     {
       AppListItem,
       PluginListItem,
@@ -2625,6 +2626,7 @@ try {
     vite.ssrLoadModule("/src/botster/ConnectionDiagnosticsPanel.tsx"),
     vite.ssrLoadModule("/src/botster/dogfoodFirstScreen.tsx"),
     vite.ssrLoadModule("/src/botster/entities.ts"),
+    vite.ssrLoadModule("/src/packageConfigurationForm.ts"),
     vite.ssrLoadModule("/src/App.tsx")
   ]);
 
@@ -2929,6 +2931,52 @@ try {
   assert.match(configurationSettingsMarkup, /Required configuration is missing/);
   assert.match(configurationSettingsMarkup, /Secret saved/);
   assert.match(configurationSettingsMarkup, /Save configuration/);
+  assert.equal(configurationFieldType({ kind: "checkbox", config_type: "boolean" }), "boolean");
+  assert.deepEqual(
+    configurationSubmitValues(configurableDescriptorApp.configuration_fields, {
+      endpoint: "https://example.invalid/hook",
+      mode: "write",
+      enabled: false,
+      api_token: ""
+    }),
+    {
+      endpoint: { type: "url", value: "https://example.invalid/hook" },
+      mode: { type: "select", value: "write" },
+      enabled: { type: "boolean", value: false }
+    }
+  );
+  assert.deepEqual(
+    configurationSubmitValues(configurableDescriptorApp.configuration_fields, {
+      endpoint: "",
+      mode: "read",
+      enabled: true,
+      api_token: ""
+    }),
+    {
+      endpoint: { type: "url", value: "" },
+      mode: { type: "select", value: "read" },
+      enabled: { type: "boolean", value: true }
+    }
+  );
+  assert.deepEqual(
+    configurationSaveAction(configurableDescriptorApp.configuration_submit, configurableDescriptorApp.configuration_fields, {
+      endpoint: "https://example.invalid/hook",
+      mode: "write",
+      enabled: false,
+      api_token: ""
+    }),
+    {
+      ...configurableDescriptorApp.configuration_submit,
+      params: {
+        ...configurableDescriptorApp.configuration_submit.params,
+        values: {
+          endpoint: { type: "url", value: "https://example.invalid/hook" },
+          mode: { type: "select", value: "write" },
+          enabled: { type: "boolean", value: false }
+        }
+      }
+    }
+  );
   const optionalSettingsMarkup = renderToStaticMarkup(
     createElement(PluginSettingsPanel, {
       app: optionalDaemonPackageRecord,

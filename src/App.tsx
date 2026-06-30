@@ -75,6 +75,7 @@ import { realHubDogfoodSessionId } from "./botster/realHubDogfoodTransport";
 import type { ActionBinding } from "./botster/actions";
 import type { TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
+import { configurationFieldType, configurationSaveAction } from "./packageConfigurationForm";
 
 const mobileUserAgentPattern = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
 
@@ -1354,7 +1355,7 @@ function ConfigurationFieldControl({
   onChange: (field: PackageSurfaceRecord, value: unknown) => void;
   value: unknown;
 }) {
-  const kind = firstString(field.kind, field.config_type) ?? "text_input";
+  const kind = formControlKind(field);
   const placeholder = firstString(field.placeholder);
   const label = firstString(field.label, field.id) ?? "Configuration field";
   const fieldId = configurationFieldId(field);
@@ -1430,9 +1431,18 @@ function configurationDraftValues(fields: PackageSurfaceRecord[]): Record<string
 }
 
 function configurationFieldValue(field: PackageSurfaceRecord): unknown {
-  if (field.kind === "checkbox") return field.value === true;
+  if (formControlKind(field) === "checkbox") return field.value === true;
   if (typeof field.value === "string" || typeof field.value === "number" || typeof field.value === "boolean") return field.value;
   return "";
+}
+
+function formControlKind(field: PackageSurfaceRecord): string {
+  const configType = configurationFieldType(field);
+  if (configType === "multiline_text") return "textarea";
+  if (configType === "boolean") return "checkbox";
+  if (configType === "select") return "select";
+  if (configType === "secret") return "secret";
+  return firstString(field.kind) ?? "text_input";
 }
 
 function configurationFieldOptions(field: PackageSurfaceRecord): Array<{ value: string; label: string }> {
@@ -1448,33 +1458,6 @@ function configurationFieldErrors(field: PackageSurfaceRecord): string[] {
 
 function packageActionFromValue(value: unknown): ActionBinding | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as ActionBinding) : undefined;
-}
-
-function configurationSaveAction(
-  submitAction: ActionBinding,
-  fields: PackageSurfaceRecord[],
-  draft: Record<string, unknown>
-): ActionBinding {
-  return {
-    ...submitAction,
-    params: {
-      ...submitAction.params,
-      values: configurationSubmitValues(fields, draft)
-    }
-  };
-}
-
-function configurationSubmitValues(fields: PackageSurfaceRecord[], draft: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(
-    fields.flatMap((field) => {
-      const id = configurationFieldId(field);
-      const value = draft[id];
-      const configType = firstString(field.config_type, field.kind) ?? "string";
-      if (configType === "secret" && (value === undefined || value === "")) return [];
-
-      return [[id, { type: configType, value: configType === "boolean" ? value === true : value }]];
-    })
-  );
 }
 
 function loadStatusLabel(status: DogfoodEntityLoadStatus): string {
