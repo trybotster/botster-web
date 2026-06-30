@@ -18,8 +18,8 @@
 - Reproduce or localize the timeout in the canonical command path:
 
 ```sh
-BOTSTER_HUB_BIN=/Users/jasonconigliari/Projects/botster-hub/target/debug/botster-hub \
-BOTSTER_SESSION_WORKER_BIN=/Users/jasonconigliari/Projects/botster-core/target/debug/botster-session-worker \
+BOTSTER_HUB_BIN=/path/to/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
 npm run smoke:live-packaged-protocol
 ```
 
@@ -78,8 +78,8 @@ npm run smoke:live-packaged-protocol
 - Canonical live command with current compatible local binaries:
 
 ```sh
-BOTSTER_HUB_BIN=/Users/jasonconigliari/Projects/botster-hub/target/debug/botster-hub \
-BOTSTER_SESSION_WORKER_BIN=/Users/jasonconigliari/Projects/botster-core/target/debug/botster-session-worker \
+BOTSTER_HUB_BIN=/path/to/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
 npm run smoke:live-packaged-protocol
 ```
 
