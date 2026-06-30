@@ -78,9 +78,9 @@ try {
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, "list_sessions request");
-  await openAppsView(page);
-  await openFirstPartyUiAppSurface(page);
   if (process.env.BOTSTER_LIVE_SURFACE_ONLY === "1") {
+    await openAppsView(page);
+    await openFirstPartyUiAppSurface(page);
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
     await requestDaemonShutdown();
     console.log("live packaged protocol surface proof passed");
@@ -207,10 +207,11 @@ async function callTerminalControl(page, method, ...args) {
 }
 
 async function dispatchResttyInput(page, text) {
-  await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalRendererInput));
-  await page.evaluate((nextText) => {
-    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalRendererInput(nextText);
-  }, text);
+  const terminalCanvas = page.locator(".terminal-view-container canvas").last();
+  await terminalCanvas.waitFor({ timeout: 15_000 });
+  await callTerminalControl(page, "focus");
+  await terminalCanvas.click();
+  await page.keyboard.insertText(text);
 }
 
 async function openAppsView(page) {

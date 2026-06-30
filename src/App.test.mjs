@@ -315,6 +315,9 @@ assert.match(liveProtocolHarnessScript, /waitForTerminalCanvas/);
 assert.match(liveProtocolHarnessScript, /waitForDaemonRequestCount/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
 assert.match(liveProtocolHarnessScript, /type: "send_input"/);
+assert.match(liveProtocolHarnessScript, /callTerminalControl\(page, "focus"\)/);
+assert.match(liveProtocolHarnessScript, /page\.keyboard\.insertText\(text\)/);
+assert.doesNotMatch(liveProtocolHarnessScript, /terminalRendererInput/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalAttachState\(page, \["attached"\]\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-echo:/);
@@ -367,8 +370,7 @@ assert.match(resttyRenderer, /connectPty\(\)/);
 assert.doesNotMatch(resttyRenderer, /connectPty\(dataPlane\.sessionId\)/);
 assert.match(resttyRenderer, /dataPlane\.resize\(rows, cols\)/);
 assert.doesNotMatch(resttyRenderer, /fontPreset:\s*"none"/);
-assert.match(resttyRenderer, /terminalRendererInput/);
-assert.match(resttyRenderer, /sendInput\(data, "key"\)/);
+assert.doesNotMatch(resttyRenderer, /terminalRendererInput/);
 assert.match(resttyRenderer, /this\.terminal\?\.destroy\(\)/);
 assert.doesNotMatch(terminalHost, /ResizeObserver/);
 assert.doesNotMatch(terminalHost, /requestAnimationFrame/);
@@ -376,6 +378,7 @@ assert.doesNotMatch(terminalHost, /cancelAnimationFrame/);
 assert.match(terminalHost, /data-terminal-attach-state/);
 assert.match(terminalHost, /subscribeStatus/);
 assert.match(terminalHost, /bridge\.attach/);
+assert.match(terminalHost, /focus: \(\) => bridge\.focus\(descriptor\)/);
 assert.match(terminalHost, /bridge\.unmount/);
 assert.match(terminalHost, /delete harness\.terminalControl/);
 assert.match(terminalHost, /terminalMount/);
@@ -399,6 +402,8 @@ assert.match(readme, /BOTSTER_HUB_BIN/);
 assert.match(readme, /BOTSTER_HUB_SOCKET/);
 assert.match(readme, /BOTSTER_HUB_DATA_DIR/);
 assert.match(readme, /smoke:live-packaged-protocol/);
+assert.match(readme, /smoke:live-packaged-surface/);
+assert.match(readme, /canonical terminal echo proof/);
 assert.match(readme, /not prove the production WebRTC data plane/);
 assert.match(readme, /botster-web-dogfood-size:<rows>x<cols>/);
 assert.match(readme, /botster-web-dogfood-exit/);
@@ -427,7 +432,15 @@ assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 assert.equal(
   packageJson.scripts["smoke:live-packaged-protocol"],
+  "npm run smoke:live-packaged-terminal"
+);
+assert.equal(
+  packageJson.scripts["smoke:live-packaged-terminal"],
   "npm run build && node scripts/live-packaged-protocol-harness.mjs"
+);
+assert.equal(
+  packageJson.scripts["smoke:live-packaged-surface"],
+  "npm run build && BOTSTER_LIVE_SURFACE_ONLY=1 node scripts/live-packaged-protocol-harness.mjs"
 );
 assert.equal(packageManifest.kind, "plugin");
 assert.equal(packageManifest.botster, ">=0.1.0");
@@ -703,7 +716,7 @@ await Promise.all([
   writeFile(join(testCompileDir, "terminalSmokeFixture.mjs"), terminalSmokeFixtureJs)
 ]);
 
-const { runTerminalViewBridgeSmokeFixture } = await import(
+const { runRendererDataPlaneAttachFixture, runTerminalViewBridgeSmokeFixture } = await import(
   pathToFileURL(join(testCompileDir, "terminalSmokeFixture.mjs"))
 );
 const smoke = await runTerminalViewBridgeSmokeFixture();
@@ -721,6 +734,28 @@ assert.equal(smoke.lifecycle.filter((event) => event === "input:unsubscribe").le
 assert.doesNotMatch(smoke.firstRenderer.writes.join(""), /stale/);
 assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /stale/);
 assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /premount/);
+
+const rendererAttachSmoke = await runRendererDataPlaneAttachFixture();
+assert.deepEqual(rendererAttachSmoke.dataPlane.inputs, ["renderer-path\n"]);
+assert.equal(
+  rendererAttachSmoke.dataPlane.resizes.some((resize) => resize.rows === 12 && resize.columns === 34),
+  true
+);
+assert.equal(rendererAttachSmoke.dataPlane.outputSubscriptionCount, 1);
+assert.equal(rendererAttachSmoke.dataPlane.outputUnsubscribeCount, 1);
+assert.equal(rendererAttachSmoke.dataPlane.detachCount, 1);
+assert.equal(
+  rendererAttachSmoke.lifecycle.filter((event) => event === "attached:attachDataPlane").length,
+  1
+);
+assert.equal(
+  rendererAttachSmoke.lifecycle.filter((event) => event === "attached:unsubscribe").length,
+  1
+);
+assert.equal(
+  rendererAttachSmoke.lifecycle.some((event) => event === "attached:input:renderer-path\n"),
+  true
+);
 
 const compiledRoot = join(tmpdir(), "botster-web-runtime-test");
 await rm(compiledRoot, { recursive: true, force: true });

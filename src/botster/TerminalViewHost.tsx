@@ -127,6 +127,7 @@ function installLiveHarnessTerminalControls(
   const harness = (window as typeof window & {
     __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
       terminalControl?: {
+        focus(): Promise<void>;
         writeInput(data: string): Promise<void>;
         resize(rows: number, columns: number): Promise<void>;
       };
@@ -136,6 +137,7 @@ function installLiveHarnessTerminalControls(
   if (!harness) return () => undefined;
 
   const terminalControl = {
+    focus: () => bridge.focus(descriptor),
     writeInput: (data: string) => bridge.writeInput(descriptor, data),
     resize: (rows: number, columns: number) => bridge.resize(descriptor, rows, columns)
   };

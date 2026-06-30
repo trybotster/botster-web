@@ -63,6 +63,7 @@ interface TerminalMountState {
   container: HTMLElement;
   dataPlane?: TerminalDataPlaneAttachment;
   rendererDataPlaneSubscription?: TerminalSubscription;
+  rendererDataPlaneAttached?: boolean;
   inputSubscription?: TerminalSubscription;
   outputSubscription?: TerminalSubscription;
   focusing?: boolean;
@@ -112,8 +113,11 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     const state = this.requireMount(descriptor);
     if (
       state.dataPlane === dataPlane &&
-      state.inputSubscription &&
-      state.outputSubscription
+      (
+        state.rendererDataPlaneAttached ||
+        Boolean(state.rendererDataPlaneSubscription) ||
+        Boolean(state.inputSubscription && state.outputSubscription)
+      )
     ) {
       return;
     }
@@ -123,6 +127,7 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
 
     if (state.renderer.attachDataPlane) {
       const subscription = await state.renderer.attachDataPlane(dataPlane);
+      state.rendererDataPlaneAttached = true;
       if (subscription) {
         state.rendererDataPlaneSubscription = subscription;
       }
@@ -152,6 +157,7 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     state.inputSubscription = undefined;
     state.outputSubscription = undefined;
     state.rendererDataPlaneSubscription = undefined;
+    state.rendererDataPlaneAttached = false;
 
     if (state.dataPlane?.detach) {
       await state.dataPlane.detach();

@@ -56,6 +56,62 @@ class FakeTerminalRenderer implements TerminalRendererAdapter {
   }
 }
 
+class AttachedDataPlaneRenderer implements TerminalRendererAdapter {
+  readonly lifecycle: string[];
+  private dataPlane?: MockTerminalDataPlane;
+  private outputSubscription?: TerminalSubscription;
+
+  constructor(lifecycle: string[]) {
+    this.lifecycle = lifecycle;
+    this.lifecycle.push("attached:create");
+  }
+
+  mount(): void {
+    this.lifecycle.push("attached:mount");
+  }
+
+  attachDataPlane(dataPlane: MockTerminalDataPlane): TerminalSubscription {
+    this.lifecycle.push("attached:attachDataPlane");
+    this.dataPlane = dataPlane;
+    this.outputSubscription = dataPlane.subscribeOutput(() => undefined);
+
+    return {
+      unsubscribe: () => {
+        this.lifecycle.push("attached:unsubscribe");
+        this.outputSubscription?.unsubscribe();
+        this.outputSubscription = undefined;
+        this.dataPlane = undefined;
+      }
+    };
+  }
+
+  onInput(): TerminalSubscription {
+    throw new Error("attached data-plane renderer owns input through pty transport");
+  }
+
+  emitRendererInput(data: TerminalInput): void {
+    this.lifecycle.push(`attached:input:${data}`);
+    void this.dataPlane?.writeInput(data);
+  }
+
+  write(): void {
+    throw new Error("attached data-plane renderer owns output through pty transport");
+  }
+
+  resize(rows: number, columns: number): void {
+    this.lifecycle.push(`attached:resize:${rows}x${columns}`);
+    void this.dataPlane?.resize(rows, columns);
+  }
+
+  focus(): void {
+    this.lifecycle.push("attached:focus");
+  }
+
+  destroy(): void {
+    this.lifecycle.push("attached:destroy");
+  }
+}
+
 export async function runTerminalViewBridgeSmokeFixture() {
   const descriptor: TerminalViewDescriptor = {
     sessionId: "terminal_view_smoke_fixture",
@@ -96,6 +152,35 @@ export async function runTerminalViewBridgeSmokeFixture() {
     dataPlane,
     firstRenderer: renderers[0],
     secondRenderer: renderers[1],
+    lifecycle
+  };
+}
+
+export async function runRendererDataPlaneAttachFixture() {
+  const descriptor: TerminalViewDescriptor = {
+    sessionId: "terminal_view_attached_renderer_fixture",
+    renderer: "restty"
+  };
+  const lifecycle: string[] = [];
+  const renderers: AttachedDataPlaneRenderer[] = [];
+  const bridge = new DefaultTerminalViewBridge(() => {
+    const renderer = new AttachedDataPlaneRenderer(lifecycle);
+    renderers.push(renderer);
+    return renderer;
+  });
+  const dataPlane = new MockTerminalDataPlane(descriptor.sessionId, ["ready\r\n"]);
+  const container = {} as HTMLElement;
+
+  await bridge.mount(container, descriptor);
+  await bridge.attach(descriptor, dataPlane);
+  await bridge.attach(descriptor, dataPlane);
+  renderers[0].emitRendererInput("renderer-path\n");
+  await bridge.resize(descriptor, 12, 34);
+  await bridge.unmount(descriptor);
+
+  return {
+    dataPlane,
+    renderer: renderers[0],
     lifecycle
   };
 }
