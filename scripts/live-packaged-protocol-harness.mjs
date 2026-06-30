@@ -71,11 +71,22 @@ try {
   });
 
   await page.goto(`${bridgeUrl}/?dogfood=real-hub`, { waitUntil: "domcontentloaded" });
+  await openDiagnosticsView(page);
   await page.getByText("Local hub workbench").waitFor();
   await page.getByText("real-hub").waitFor();
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "status request");
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, "list_sessions request");
+  await openAppsView(page);
+  await openFirstPartyUiAppSurface(page);
+  if (process.env.BOTSTER_LIVE_SURFACE_ONLY === "1") {
+    assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+    await requestDaemonShutdown();
+    console.log("live packaged protocol surface proof passed");
+    process.exit(0);
+  }
+  await openDiagnosticsView(page);
 
   await page.getByRole("button", { name: "Spawn botster-web-dogfood-session to terminal" }).click();
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "spawn" }, "spawn request");
@@ -202,6 +213,52 @@ async function dispatchResttyInput(page, text) {
   }, text);
 }
 
+async function openAppsView(page) {
+  await page.getByRole("button", { name: "Apps", exact: true }).click();
+  await page.getByTestId("apps-view").waitFor();
+}
+
+async function openDiagnosticsView(page) {
+  await page.getByRole("button", { name: "Diagnostics", exact: true }).click();
+  await page.getByTestId("diagnostics-view").waitFor();
+}
+
+async function openFirstPartyUiAppSurface(page) {
+  const installedAppsList = page.locator("[aria-label='Installed apps']");
+  const installedPackagesList = page.locator("[aria-label='Installed packages']");
+  const firstPartyPattern = /project[- ]pipelines|botster[- ]workspaces|workspaces/i;
+  let candidate = installedAppsList.getByText(firstPartyPattern).first();
+  const appRowCount = await candidate.count();
+  if (appRowCount === 0) {
+    candidate = installedPackagesList.getByText(firstPartyPattern).first();
+  }
+  await candidate.waitFor({ timeout: 15_000 }).catch(async (error) => {
+    const installedAppsText = await installedAppsList.innerText().catch(() => "");
+    const installedPackagesText = await installedPackagesList.innerText().catch(() => "");
+    throw new Error(
+      `timed out waiting for project-pipelines/workspaces UI surface row; installed apps=${JSON.stringify(installedAppsText)} installed packages=${JSON.stringify(installedPackagesText)}: ${error.message}`
+    );
+  });
+  await candidate.click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_render", package_name_pattern: "^(project-pipelines|botster-workspaces)$" },
+    "first-party app plugin_surface_render request"
+  );
+  await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
+  await page.waitForFunction(
+    () => {
+      const text = globalThis.document.querySelector("[data-testid='selected-app-surface']")?.textContent ?? "";
+      return /project-pipelines|botster-workspaces|Pipelines|Workspaces/i.test(text) && /rendered|\//i.test(text);
+    },
+    undefined,
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
+    throw new Error(`selected app surface did not render visible first-party content; text=${JSON.stringify(selectedText)}: ${error.message}`);
+  });
+}
+
 async function waitForHarnessEvent(page, criteria, label) {
   await page.waitForFunction(
     ({ criteria: expectedCriteria }) => {
@@ -227,6 +284,9 @@ async function waitForHarnessEvent(page, criteria, label) {
           !framePayload.records?.some((record) => record.status === expectedCriteria.status)
         ) return false;
         if (expectedCriteria.type && payload.type !== expectedCriteria.type) return false;
+        if (expectedCriteria.package_name && payload.package_name !== expectedCriteria.package_name) return false;
+        if (expectedCriteria.package_name_pattern && !new RegExp(expectedCriteria.package_name_pattern).test(payload.package_name)) return false;
+        if (expectedCriteria.surface_id && payload.surface_id !== expectedCriteria.surface_id) return false;
         if (typeof expectedCriteria.rows === "number" && payload.rows !== expectedCriteria.rows) return false;
         if (typeof expectedCriteria.cols === "number" && payload.cols !== expectedCriteria.cols) return false;
         return true;
