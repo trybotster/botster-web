@@ -122,12 +122,13 @@ assert.match(app, /runtimeClient\.entities\.list\("botster-web\.app"\)/);
 assert.match(app, /pullDogfoodEntity\("app", \{ family: "botster-web\.app" \}\)/);
 assert.match(app, /window\.open\(localUrl, "_blank", "noopener,noreferrer"\)/);
 assert.match(app, /export function AppListItem/);
+assert.match(app, /appSurfacePackages\.get\(stringValue\(app\.package_name, ""\)\)/);
 assert.match(app, /packageAppSurfaces\(app\)/);
 assert.match(app, /packageSettingsSurfaces\(app\)/);
 assert.match(app, /dispatchAction\(launchAction\)/);
 assert.match(app, /surfaceLaunchAction\(surface\)/);
 assert.doesNotMatch(app, /const packagesWithUi|const packagesWithoutUi/);
-assert.match(app, /aria-label="Rendered package surface"/);
+assert.match(app, /aria-label="Rendered app surface"/);
 assert.doesNotMatch(app, /function pluginViewSurface/);
 assert.doesNotMatch(app, /function pluginSettingsSurface/);
 assert.doesNotMatch(app, /app\.view_surface(?!s)|app\.plugin_view_surface|app\.primary_surface|app\.ui_surface/);
@@ -2732,6 +2733,29 @@ try {
       params: {}
     }
   };
+  const dtoBackedUiSurfaceApp = {
+    ...dtoBackedWebApp,
+    id: "project-pipelines:web-client",
+    title: "project-pipelines web client",
+    package_name: "project-pipelines",
+    local_url: ""
+  };
+  const matchedAppSurface = {
+    surface_id: "home",
+    title: "Pipelines",
+    description: "Project Pipelines workbench",
+    launch_action: {
+      id: "botster.package.surface.render",
+      target: "project-pipelines",
+      label: "Pipelines",
+      params: {
+        package_name: "project-pipelines",
+        surface_id: "home",
+        surface_kind: "app",
+        supports: ["render"]
+      }
+    }
+  };
   const openedApps = [];
   const webAppMarkup = renderToStaticMarkup(
     createElement(AppListItem, {
@@ -2751,6 +2775,17 @@ try {
   assert.ok(webAppItem);
   webAppItem.props.onClick();
   assert.deepEqual(openedApps.map((appRecord) => appRecord.id), ["botster-web:dogfood"]);
+  const uiSurfaceMarkup = renderToStaticMarkup(
+    createElement(AppListItem, {
+      app: dtoBackedUiSurfaceApp,
+      surface: matchedAppSurface,
+      onOpen: (appRecord) => openedApps.push(appRecord)
+    })
+  );
+  assert.match(uiSurfaceMarkup, /project pipelines web client/);
+  assert.match(uiSurfaceMarkup, /Project Pipelines workbench/);
+  assert.match(uiSurfaceMarkup, /Open UI/);
+  assert.doesNotMatch(uiSurfaceMarkup, /has no hub-provided local URL/);
 
   assert.match(
     renderToStaticMarkup(createElement(AppListItem, { app: dtoBackedMissingUrlApp, onOpen: () => undefined })),
@@ -3325,7 +3360,7 @@ try {
   assert.match(realHubMarkup, /Requires local terminal launch/);
   assert.match(realHubMarkup, /botster-web Settings/);
   assert.match(realHubMarkup, /dogfood-settings/);
-  assert.match(realHubMarkup, /Rendered package surface/);
+  assert.match(realHubMarkup, /Rendered package surface|Rendered app surface/);
   assert.match(realHubMarkup, /Deterministic app surface rendered by the botster-web dogfood package/);
   assert.match(realHubMarkup, /botster-web\/dogfood-app/);
   assert.match(realHubMarkup, /project-pipelines/);

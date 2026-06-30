@@ -134,9 +134,20 @@ async function runPackagedBrowserSmoke(scenario) {
     await page.getByRole("button", { name: "Close" }).click();
     await page.getByText("Package configuration").waitFor({ state: "detached" });
 
-    await installedPackagesList.getByText("botster web").first().click();
-    await page.getByText("Rendered package surface").waitFor();
+    await installedAppsList.getByText("botster web dogfood app").click();
+    await page.getByText("botster-web Dogfood").waitFor();
     await page.getByText("botster-web Dogfood: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
+    const installedAppSurfaceRequest = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).find((entry) =>
+        entry.kind === "daemon_request" &&
+        entry.payload?.type === "plugin_surface_render" &&
+        entry.payload?.package_name === "botster-web" &&
+        entry.payload?.surface_id === "dogfood-app"
+      )
+    );
+    if (!installedAppSurfaceRequest) {
+      throw new Error("packaged browser smoke did not send plugin_surface_render for botster-web/dogfood-app from the installed app row");
+    }
 
     await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
     await page.getByRole("button", { name: "Disable Package" }).click();

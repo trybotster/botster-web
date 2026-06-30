@@ -181,6 +181,11 @@ function pluginSurfaceStatus(result: unknown): string | undefined {
     : `${title} rendered (${packageName}/${surfaceId})`;
 }
 
+function pluginSurfaceSnapshot(result: unknown): UiTreeSnapshot | undefined {
+  const snapshot = readRecord(readRecord(result).ui_tree_snapshot);
+  return snapshot.kind === "ui_tree_snapshot" ? (snapshot as unknown as UiTreeSnapshot) : undefined;
+}
+
 function packageActionFeedback(result: { accepted: boolean; reason?: string; result?: unknown }): { message: string; color: string } {
   const payload = readRecord(result.result);
   const requestType = readString(payload.request_type) ?? "package action";
@@ -284,6 +289,11 @@ export default function App() {
   const [marketplaceRegistryPath, setMarketplaceRegistryPath] = useState("");
   const [localPackagePath, setLocalPackagePath] = useState("");
   const [packageActionToast, setPackageActionToast] = useState<{ message: string; color: string } | undefined>();
+  const [selectedPluginSurface, setSelectedPluginSurface] = useState<{
+    title: string;
+    status?: string;
+    snapshot?: UiTreeSnapshot;
+  } | undefined>();
   const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
@@ -394,8 +404,18 @@ export default function App() {
         const renderedSurfaceStatus = action.id === "botster.package.surface.render"
           ? pluginSurfaceStatus(result.result)
           : undefined;
+        const renderedSurfaceSnapshot = action.id === "botster.package.surface.render"
+          ? pluginSurfaceSnapshot(result.result)
+          : undefined;
         if (result.accepted && isAttachAction && action.target) {
           setSelectedRealHubTerminalSessionId(action.target);
+        }
+        if (result.accepted && action.id === "botster.package.surface.render") {
+          setSelectedPluginSurface({
+            title: action.label ?? "Plugin surface",
+            status: renderedSurfaceStatus ?? `${action.label ?? "Plugin surface"} rendered`,
+            snapshot: renderedSurfaceSnapshot
+          });
         }
         const packageFeedback = action.id === "botster.package.daemon_request"
           ? packageActionFeedback(result)
@@ -461,6 +481,17 @@ export default function App() {
     },
     [recordDiagnostic]
   );
+  const installedApps = runtimeClient.entities.list("botster-web.app");
+  const packages = runtimeClient.entities.list("botster-web.package");
+  const appSurfacePackages = useMemo(
+    () =>
+      new Map(
+        packages
+          .map((appPackage) => [stringValue(appPackage.package_name, String(appPackage.id)), appPackage] as const)
+          .filter(([, appPackage]) => packageAppSurfaces(appPackage).length > 0)
+      ),
+    [packages]
+  );
   const openPackage = useCallback(
     (app: Record<string, unknown>) => {
       const surface = packageAppSurfaces(app)[0];
@@ -482,6 +513,14 @@ export default function App() {
     const diagnostics = arrayOfStrings(app.diagnostics);
     const openAction = readRecord(app.open_action);
     const openDisabled = openAction.disabled === true;
+    const surfacePackage = appSurfacePackages.get(stringValue(app.package_name, ""));
+    const surface = packageAppSurfaces(surfacePackage ?? {})[0];
+    const launchAction = surfaceLaunchAction(surface);
+
+    if (launchAction) {
+      dispatchAction(launchAction);
+      return;
+    }
 
     if (kind === "terminal_app" || targetKind === "terminal_app") {
       setPackageActionToast({
@@ -512,12 +551,10 @@ export default function App() {
       message: `Opening ${title}`,
       color: "success"
     });
-  }, []);
+  }, [appSurfacePackages, dispatchAction]);
   const openPackageSettings = useCallback((app: Record<string, unknown>) => {
     setSettingsPackageId(String(app.id));
   }, []);
-  const installedApps = runtimeClient.entities.list("botster-web.app");
-  const packages = runtimeClient.entities.list("botster-web.package");
   const availablePackages = runtimeClient.entities.list("botster-web.available_package");
   const settingsPackage = settingsPackageId
     ? packages.find((app) => app.id === settingsPackageId) ?? availablePackages.find((app) => app.id === settingsPackageId)
@@ -846,6 +883,7 @@ export default function App() {
                           <AppListItem
                             app={app}
                             key={app.id}
+                            surface={packageAppSurfaces(appSurfacePackages.get(stringValue(app.package_name, "")) ?? {})[0]}
                             onOpen={openApp}
                           />
                         )) : (
@@ -888,16 +926,29 @@ export default function App() {
                           </IonItem>
                         )}
                       </IonList>
-                      {pluginSurfaceStatusText ? (
-                        <article className="workflow-section" aria-label="Rendered package surface">
+                      {selectedPluginSurface ? (
+                        <article className="workflow-section" aria-label="Rendered app surface" data-testid="selected-app-surface">
                           <div className="section-heading">
                             <div>
                               <p className="eyebrow">Plugin surface</p>
-                              <h2>Rendered package surface</h2>
+                              <h2>{selectedPluginSurface.title}</h2>
                             </div>
                             <IonBadge color="success">Accepted</IonBadge>
                           </div>
-                          <p className="entity-empty">{pluginSurfaceStatusText}</p>
+                          {selectedPluginSurface.snapshot ? (
+                            <UiNodeSurface
+                              snapshot={selectedPluginSurface.snapshot}
+                              entities={runtimeClient.entities}
+                              capabilities={{
+                                ...defaultUiCapabilitySet,
+                                isolated_plugin_asset: false
+                              }}
+                              localState={localState}
+                              onAction={dispatchAction}
+                            />
+                          ) : (
+                            <p className="entity-empty">{selectedPluginSurface.status ?? pluginSurfaceStatusText}</p>
+                          )}
                         </article>
                       ) : null}
                     </>
@@ -1136,21 +1187,27 @@ interface PluginListItemProps {
 
 interface AppListItemProps {
   app: Record<string, unknown>;
+  surface?: PackageSurfaceRecord;
   onOpen: (app: Record<string, unknown>) => void;
 }
 
-export function AppListItem({ app, onOpen }: AppListItemProps) {
+export function AppListItem({ app, surface, onOpen }: AppListItemProps) {
   const kind = stringValue(app.kind, "unknown");
   const lifecycle = stringValue(app.lifecycle_state, "unknown");
   const diagnostics = arrayOfStrings(app.diagnostics);
   const openAction = readRecord(app.open_action);
   const disabled = openAction.disabled === true;
+  const surfaceAction = surfaceLaunchAction(surface);
+  const hasSurface = Boolean(surfaceAction && surface);
   const title = appDisplayName(app.title, String(app.id));
+  const badgeLabel = hasSurface ? "Open UI" : kind === "terminal_app" ? "Terminal" : disabled ? "Unavailable" : "Open";
+  const badgeColor = hasSurface ? "primary" : kind === "terminal_app" ? "medium" : disabled ? "warning" : "primary";
+  const surfaceDetail = surface ? surfaceDescription(surface) ?? `${surfaceTitle(surface)} UI surface` : undefined;
 
   return (
     <IonItem
       button
-      detail={!disabled}
+      detail={hasSurface || !disabled}
       onClick={() => onOpen(app)}
     >
       <IonIcon slot="start" icon={kind === "terminal_app" ? constructOutline : cubeOutline} color="primary" aria-hidden="true" />
@@ -1159,10 +1216,10 @@ export function AppListItem({ app, onOpen }: AppListItemProps) {
         <p>
           {kind} · {lifecycle}
         </p>
-        <p>{stringValue(app.diagnostics_summary, diagnostics[0] ?? "Hub-provided app registry row")}</p>
+        <p>{hasSurface ? surfaceDetail : stringValue(app.diagnostics_summary, diagnostics[0] ?? "Hub-provided app registry row")}</p>
       </IonLabel>
-      <IonBadge slot="end" color={kind === "terminal_app" ? "medium" : disabled ? "warning" : "primary"}>
-        {kind === "terminal_app" ? "Terminal" : disabled ? "Unavailable" : "Open"}
+      <IonBadge slot="end" color={badgeColor}>
+        {badgeLabel}
       </IonBadge>
     </IonItem>
   );
