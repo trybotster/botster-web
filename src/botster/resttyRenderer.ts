@@ -21,7 +21,6 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   private readonly ptyTransport = new BotsterTerminalPtyTransport();
   private readonly inputListeners = new Set<(data: TerminalInput) => void>();
   private terminal?: Restty;
-  private uninstallLiveHarnessRendererInput?: () => void;
   private container?: HTMLElement;
 
   constructor(readonly descriptor: TerminalViewDescriptor) {}
@@ -47,9 +46,6 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
           return text;
         }
       }
-    });
-    this.uninstallLiveHarnessRendererInput = installLiveHarnessRendererInput((data) => {
-      this.terminal?.sendInput(data, "key");
     });
   }
 
@@ -82,8 +78,6 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   destroy(): void {
-    this.uninstallLiveHarnessRendererInput?.();
-    this.uninstallLiveHarnessRendererInput = undefined;
     this.ptyTransport.destroy();
     this.inputListeners.clear();
     this.terminal?.destroy();
@@ -190,23 +184,4 @@ export function createResttyTerminalRenderer(
   descriptor: TerminalViewDescriptor
 ): TerminalRendererAdapter {
   return new ResttyTerminalRenderer(descriptor);
-}
-
-function installLiveHarnessRendererInput(sendInput: (data: string) => void): () => void {
-  if (typeof window === "undefined") return () => undefined;
-
-  const harness = (window as typeof window & {
-    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
-      terminalRendererInput?: (data: string) => void;
-    };
-  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-
-  if (!harness) return () => undefined;
-
-  harness.terminalRendererInput = sendInput;
-  return () => {
-    if (harness.terminalRendererInput === sendInput) {
-      delete harness.terminalRendererInput;
-    }
-  };
 }
