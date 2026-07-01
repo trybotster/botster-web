@@ -23,6 +23,18 @@ type PendingRequest = {
   reject(error: unknown): void;
 };
 
+export type WebrtcDaemonFailureStage = "bootstrap" | "signaling" | "transport" | "encryption" | "data-plane";
+
+export class WebrtcDaemonClientError extends Error {
+  readonly botsterWebrtcStage: WebrtcDaemonFailureStage;
+
+  constructor(stage: WebrtcDaemonFailureStage, message: string) {
+    super(message);
+    this.name = "WebrtcDaemonClientError";
+    this.botsterWebrtcStage = stage;
+  }
+}
+
 const requestTimeoutMs = 10_000;
 const drainIntervalMs = 25;
 
@@ -120,12 +132,21 @@ class WebrtcDaemonTransport {
     const channel = this.dataChannel;
     const key = this.cryptoKey;
     if (!channel || !key || channel.readyState !== "open") {
-      throw new Error("local WebRTC data channel is not open");
+      throw webrtcFailure("transport", "local WebRTC data channel is not open");
     }
 
     recordLiveHarnessEvent("daemon_request", request);
-    const envelope = await encryptDaemonRequest(key, request);
-    channel.send(JSON.stringify(envelope));
+    let envelope: AesGcmEnvelope;
+    try {
+      envelope = await encryptDaemonRequest(key, request);
+    } catch (error) {
+      throw webrtcFailure("encryption", `local WebRTC request encryption failed: ${errorMessage(error)}`);
+    }
+    try {
+      channel.send(JSON.stringify(envelope));
+    } catch (error) {
+      throw webrtcFailure("data-plane", `local WebRTC data-plane send failed for ${request.type}: ${errorMessage(error)}`);
+    }
 
     return new Promise<DaemonResponse>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
@@ -133,7 +154,7 @@ class WebrtcDaemonTransport {
         if (index >= 0) {
           this.pendingRequests.splice(index, 1);
         }
-        reject(new Error(`local WebRTC request timed out: ${request.type}`));
+        reject(webrtcFailure("data-plane", `local WebRTC request timed out: ${request.type}`));
       }, requestTimeoutMs);
 
       this.pendingRequests.push({
@@ -156,14 +177,29 @@ class WebrtcDaemonTransport {
 
   private async open(): Promise<void> {
     const bootstrap = this.options.bootstrap;
-    this.cryptoKey = await importStreamKey(bootstrap.grant_secret);
-    const peerConnection = this.peerConnectionFactory();
+    try {
+      this.cryptoKey = await importStreamKey(bootstrap.grant_secret);
+    } catch (error) {
+      throw webrtcFailure("bootstrap", `local WebRTC bootstrap grant is invalid: ${errorMessage(error)}`);
+    }
+
+    let peerConnection: RTCPeerConnection;
+    try {
+      peerConnection = this.peerConnectionFactory();
+    } catch (error) {
+      throw webrtcFailure("transport", `local WebRTC peer connection failed: ${errorMessage(error)}`);
+    }
     this.peerConnection = peerConnection;
-    const dataChannel = peerConnection.createDataChannel("botster-daemon", {
-      ordered: bootstrap.ordered,
-      maxRetransmits: bootstrap.max_retransmits ?? undefined,
-      maxPacketLifeTime: bootstrap.max_packet_lifetime_ms ?? undefined
-    });
+    let dataChannel: RTCDataChannel;
+    try {
+      dataChannel = peerConnection.createDataChannel("botster-daemon", {
+        ordered: bootstrap.ordered,
+        maxRetransmits: bootstrap.max_retransmits ?? undefined,
+        maxPacketLifeTime: bootstrap.max_packet_lifetime_ms ?? undefined
+      });
+    } catch (error) {
+      throw webrtcFailure("transport", `local WebRTC data channel creation failed: ${errorMessage(error)}`);
+    }
     this.dataChannel = dataChannel;
     dataChannel.addEventListener("message", (event) => {
       void this.handleMessage(event.data).catch((error: unknown) => this.failPending(error));
@@ -171,15 +207,20 @@ class WebrtcDaemonTransport {
     dataChannel.addEventListener("open", () => recordLiveHarnessEvent("webrtc_data_channel", { state: "open" }));
     dataChannel.addEventListener("close", () => {
       recordLiveHarnessEvent("webrtc_data_channel", { state: "closed" });
-      this.failPending(new Error("local WebRTC data channel closed"));
+      this.failPending(webrtcFailure("transport", "local WebRTC data channel closed"));
     });
     dataChannel.addEventListener("error", () => {
       recordLiveHarnessEvent("webrtc_data_channel", { state: "error" });
-      this.failPending(new Error("local WebRTC data channel failed"));
+      this.failPending(webrtcFailure("transport", "local WebRTC data channel failed"));
     });
 
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
+    let offer: RTCSessionDescriptionInit;
+    try {
+      offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+    } catch (error) {
+      throw webrtcFailure("transport", `local WebRTC offer creation failed: ${errorMessage(error)}`);
+    }
     await waitForIceGatheringComplete(peerConnection);
 
     const signalRequest: DaemonRequest = {
@@ -191,17 +232,22 @@ class WebrtcDaemonTransport {
     };
     recordLiveHarnessEvent("daemon_request", signalRequest);
 
-    const response = await this.fetchImpl(bootstrap.signaling_url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        kind: "daemon_request",
-        request_id: `local-webrtc-signal-${Date.now()}`,
-        payload: signalRequest
-      })
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(bootstrap.signaling_url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          kind: "daemon_request",
+          request_id: `local-webrtc-signal-${Date.now()}`,
+          payload: signalRequest
+        })
+      });
+    } catch (error) {
+      throw webrtcFailure("signaling", `local WebRTC signaling request failed: ${errorMessage(error)}`);
+    }
     if (!response.ok) {
-      throw new Error(`local WebRTC signaling failed with HTTP ${response.status}`);
+      throw webrtcFailure("signaling", `local WebRTC signaling failed with HTTP ${response.status}`);
     }
     const reply = await response.json() as { payload?: DaemonResponse };
     const answer = reply.payload?.local_webrtc_answer?.answer;
@@ -211,10 +257,14 @@ class WebrtcDaemonTransport {
       error: reply.payload?.error ?? null
     });
     if (!answer) {
-      throw new Error("local WebRTC signaling response did not include an answer");
+      throw webrtcFailure("signaling", "local WebRTC signaling response did not include an answer");
     }
-    await peerConnection.setRemoteDescription(answer as unknown as RTCSessionDescriptionInit);
-    await waitForDataChannelOpen(dataChannel);
+    try {
+      await peerConnection.setRemoteDescription(answer as unknown as RTCSessionDescriptionInit);
+      await waitForDataChannelOpen(dataChannel);
+    } catch (error) {
+      throw webrtcFailure("transport", `local WebRTC transport failed: ${errorMessage(error)}`);
+    }
   }
 
   private async handleMessage(data: unknown): Promise<void> {
@@ -226,7 +276,7 @@ class WebrtcDaemonTransport {
       const response = await decryptDaemonResponse(key, String(data));
       pending.resolve(response);
     } catch (error) {
-      pending.reject(error);
+      pending.reject(webrtcFailure("encryption", `local WebRTC response decryption failed: ${errorMessage(error)}`));
     }
   }
 
@@ -235,6 +285,16 @@ class WebrtcDaemonTransport {
       pending.reject(error);
     }
   }
+}
+
+function webrtcFailure(stage: WebrtcDaemonFailureStage, message: string): WebrtcDaemonClientError {
+  return new WebrtcDaemonClientError(stage, message);
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error) return error;
+  return "unknown error";
 }
 
 async function encryptDaemonRequest(key: CryptoKey, request: DaemonRequest): Promise<AesGcmEnvelope> {
