@@ -55,13 +55,14 @@ export function hubConnectionDiagnosticFromFrame(frame: HubControlFrame): Connec
 }
 
 export function initialConnectionDiagnostics(mode: string, statusText: string): ConnectionDiagnostic[] {
+  const localHubMode = mode === "real-hub" || mode === "webrtc";
   return [
     {
       id: "bridge-mode",
-      title: mode === "real-hub" ? "Real hub bridge selected" : "Fixture transport selected",
+      title: mode === "webrtc" ? "Local hub WebRTC selected" : mode === "real-hub" ? "Real hub bridge selected" : "Fixture transport selected",
       detail: statusText,
-      severity: mode === "real-hub" ? "info" : "success",
-      source: "bridge"
+      severity: localHubMode ? "info" : "success",
+      source: mode === "webrtc" ? "stream" : "bridge"
     }
   ];
 }
