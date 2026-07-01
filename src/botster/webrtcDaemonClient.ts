@@ -3,7 +3,8 @@ import type {
   DaemonEvent,
   DaemonLocalWebrtcBootstrap,
   DaemonRequest,
-  DaemonResponse
+  DaemonResponse,
+  JsonValue
 } from "./realHubDaemonDto";
 import type { DaemonBridgeClient } from "./realHubDogfoodTransport";
 
@@ -47,6 +48,7 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
 
       const emitEvents = (response: DaemonResponse) => {
         for (const event of response.events ?? []) {
+          recordLiveHarnessEvent("daemon_event", event);
           eventListeners.forEach((listener) => listener(event));
           onEvent(event);
         }
@@ -100,18 +102,28 @@ class WebrtcDaemonTransport {
   private connectPromise: Promise<void> | undefined;
 
   constructor(private readonly options: WebrtcDaemonClientOptions) {
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
     this.peerConnectionFactory = options.peerConnectionFactory ?? (() => new RTCPeerConnection());
   }
 
   async request(request: DaemonRequest): Promise<DaemonResponse> {
-    await this.connect();
+    try {
+      await this.connect();
+    } catch (error) {
+      recordLiveHarnessEvent("webrtc_error", {
+        stage: "connect",
+        request_type: request.type,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
     const channel = this.dataChannel;
     const key = this.cryptoKey;
     if (!channel || !key || channel.readyState !== "open") {
       throw new Error("local WebRTC data channel is not open");
     }
 
+    recordLiveHarnessEvent("daemon_request", request);
     const envelope = await encryptDaemonRequest(key, request);
     channel.send(JSON.stringify(envelope));
 
@@ -156,12 +168,28 @@ class WebrtcDaemonTransport {
     dataChannel.addEventListener("message", (event) => {
       void this.handleMessage(event.data).catch((error: unknown) => this.failPending(error));
     });
-    dataChannel.addEventListener("close", () => this.failPending(new Error("local WebRTC data channel closed")));
-    dataChannel.addEventListener("error", () => this.failPending(new Error("local WebRTC data channel failed")));
+    dataChannel.addEventListener("open", () => recordLiveHarnessEvent("webrtc_data_channel", { state: "open" }));
+    dataChannel.addEventListener("close", () => {
+      recordLiveHarnessEvent("webrtc_data_channel", { state: "closed" });
+      this.failPending(new Error("local WebRTC data channel closed"));
+    });
+    dataChannel.addEventListener("error", () => {
+      recordLiveHarnessEvent("webrtc_data_channel", { state: "error" });
+      this.failPending(new Error("local WebRTC data channel failed"));
+    });
 
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
     await waitForIceGatheringComplete(peerConnection);
+
+    const signalRequest: DaemonRequest = {
+      type: "local_webrtc_signal",
+      grant_id: bootstrap.grant_id,
+      grant_secret: bootstrap.grant_secret,
+      origin: window.location.origin,
+      offer: (peerConnection.localDescription?.toJSON?.() ?? peerConnection.localDescription) as unknown as JsonValue
+    };
+    recordLiveHarnessEvent("daemon_request", signalRequest);
 
     const response = await this.fetchImpl(bootstrap.signaling_url, {
       method: "POST",
@@ -169,13 +197,7 @@ class WebrtcDaemonTransport {
       body: JSON.stringify({
         kind: "daemon_request",
         request_id: `local-webrtc-signal-${Date.now()}`,
-        payload: {
-          type: "local_webrtc_signal",
-          grant_id: bootstrap.grant_id,
-          grant_secret: bootstrap.grant_secret,
-          origin: window.location.origin,
-          offer: peerConnection.localDescription?.toJSON?.() ?? peerConnection.localDescription
-        }
+        payload: signalRequest
       })
     });
     if (!response.ok) {
@@ -183,6 +205,11 @@ class WebrtcDaemonTransport {
     }
     const reply = await response.json() as { payload?: DaemonResponse };
     const answer = reply.payload?.local_webrtc_answer?.answer;
+    recordLiveHarnessEvent("webrtc_signal_response", {
+      has_answer: Boolean(answer),
+      diagnostics: reply.payload?.local_webrtc_answer?.diagnostics ?? reply.payload?.diagnostics ?? [],
+      error: reply.payload?.error ?? null
+    });
     if (!answer) {
       throw new Error("local WebRTC signaling response did not include an answer");
     }
@@ -257,6 +284,17 @@ function base64Encode(bytes: Uint8Array): string {
     binary += String.fromCharCode(byte);
   }
   return btoa(binary);
+}
+
+function recordLiveHarnessEvent(kind: string, payload: unknown): void {
+  if (typeof window === "undefined") return;
+
+  const harness = (window as typeof window & {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
+      events?: Array<{ kind: string; payload: unknown }>;
+    };
+  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  harness?.events?.push({ kind, payload });
 }
 
 function base64Decode(encoded: string): Uint8Array {

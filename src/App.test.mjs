@@ -478,7 +478,10 @@ assert.deepEqual(packageManifest.entrypoints, [
   { runtime: "lua", path: "plugin.lua", bootstrap: false }
 ]);
 assert.equal(packageManifest.runnable_entrypoints.length, 1);
-assert.match(pluginEntrypoint, /botster\.register\(\{\}\)/);
+assert.match(pluginEntrypoint, /kind = "surface_route"/);
+assert.match(pluginEntrypoint, /descriptor_id = "dogfood-app"/);
+assert.match(pluginEntrypoint, /descriptor_id = "dogfood-settings"/);
+assert.match(pluginEntrypoint, /Deterministic app surface rendered by the botster-web dogfood package/);
 assert.doesNotMatch(pluginEntrypoint, /tools|commands|surfaces|entities|mcp/);
 
 const [webClientEntrypoint] = packageManifest.runnable_entrypoints;
