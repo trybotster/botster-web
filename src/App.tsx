@@ -68,6 +68,7 @@ import {
 } from "./botster/connectionDiagnostics";
 import { createDogfoodRuntimeConfig } from "./botster/dogfoodMode";
 import { realHubDogfoodSessionId } from "./botster/realHubDogfoodTransport";
+import type { LocalWebrtcBootstrap } from "./botster/webrtcDaemonClient";
 import type { ActionBinding } from "./botster/actions";
 import type { TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
@@ -146,6 +147,11 @@ const loadingSnapshot: UiTreeSnapshot = {
 
 const terminalRenderer = "restty" as const;
 
+type BotsterPackageWindow = typeof window & {
+  __BOTSTER_PACKAGE_RUNTIME__?: boolean;
+  __BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__?: LocalWebrtcBootstrap;
+};
+
 function isAttachableSession(record: Record<string, unknown> | undefined): record is Record<string, unknown> & { id: string } {
   return Boolean(record && typeof record.id === "string" && record.status === "running" && record.attachable === true);
 }
@@ -158,6 +164,17 @@ function readRecord(value: unknown): Record<string, unknown> {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function normalizeLocalWebrtcBootstrap(bootstrap: LocalWebrtcBootstrap | undefined): LocalWebrtcBootstrap | undefined {
+  if (!bootstrap?.grant_id || !bootstrap.grant_secret || bootstrap.signaling_transport !== "daemon_request") {
+    return undefined;
+  }
+
+  return {
+    ...bootstrap,
+    signaling_url: new URL(bootstrap.signaling_url, window.location.origin).toString()
+  };
 }
 
 function pluginSurfaceStatus(result: unknown): string | undefined {
@@ -247,13 +264,17 @@ export default function App() {
   const dogfoodRuntime = useMemo(
     () => {
       const packageRuntime = Boolean(
-        (window as typeof window & { __BOTSTER_PACKAGE_RUNTIME__?: boolean }).__BOTSTER_PACKAGE_RUNTIME__
+        (window as BotsterPackageWindow).__BOTSTER_PACKAGE_RUNTIME__
       );
+      const localWebrtcBootstrap = packageRuntime
+        ? normalizeLocalWebrtcBootstrap((window as BotsterPackageWindow).__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__)
+        : undefined;
       return createDogfoodRuntimeConfig({
         env: import.meta.env,
         locationHref: window.location.href,
         ...(packageRuntime ? { bridgeUrl: `${window.location.origin}/request` } : {}),
-        packageRuntime
+        packageRuntime,
+        localWebrtcBootstrap
       });
     },
     []
@@ -562,7 +583,7 @@ export default function App() {
   const activeRealHubTerminalSessionId = selectedTerminalSessionId ?? defaultTerminalSessionId;
   const terminalDescriptor: TerminalViewDescriptor | undefined = useMemo(
     () =>
-      dogfoodRuntime.mode === "real-hub"
+      dogfoodRuntime.mode === "real-hub" || dogfoodRuntime.mode === "webrtc"
         ? activeRealHubTerminalSessionId
           ? { sessionId: activeRealHubTerminalSessionId, renderer: terminalRenderer }
           : undefined
@@ -595,7 +616,7 @@ export default function App() {
     {
       key: "connection",
       label: "Connection",
-      value: dogfoodRuntime.mode === "real-hub" ? "Real hub" : "Fixture",
+      value: dogfoodRuntime.mode === "webrtc" ? "WebRTC" : dogfoodRuntime.mode === "real-hub" ? "Real hub" : "Fixture",
       detail: dogfoodRuntime.statusText,
       severity: blockingDiagnostics.length > 0 ? "danger" : warningDiagnostics.length > 0 ? "warning" : "success"
     },
@@ -709,7 +730,7 @@ export default function App() {
                     <IonIcon icon={gitBranchOutline} aria-hidden="true" />
                     <IonLabel>{botsterWebClientContract.label}</IonLabel>
                   </IonChip>
-                  <IonChip color={dogfoodRuntime.mode === "real-hub" ? "success" : "medium"} outline>
+                  <IonChip color={dogfoodRuntime.mode === "fixture" ? "medium" : "success"} outline>
                     <IonLabel>{dogfoodRuntime.mode}</IonLabel>
                   </IonChip>
               </IonButtons>

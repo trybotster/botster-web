@@ -300,7 +300,7 @@ function hasFileExtension(pathname) {
 }
 
 function injectPackageRuntimeMarker(html) {
-  const marker = '<script>window.__BOTSTER_PACKAGE_RUNTIME__ = true;</script>';
+  const marker = `<script>window.__BOTSTER_PACKAGE_RUNTIME__ = true;${localWebrtcBootstrapScript()}</script>`;
   if (html.includes("__BOTSTER_PACKAGE_RUNTIME__")) {
     return html;
   }
@@ -308,6 +308,29 @@ function injectPackageRuntimeMarker(html) {
     return html.replace("</head>", `${marker}</head>`);
   }
   return `${marker}${html}`;
+}
+
+function localWebrtcBootstrapScript() {
+  const grantId = process.env.BOTSTER_LOCAL_WEBRTC_GRANT_ID;
+  const grantSecret = process.env.BOTSTER_LOCAL_WEBRTC_GRANT_SECRET;
+  const signalingTransport = process.env.BOTSTER_LOCAL_WEBRTC_SIGNALING_TRANSPORT;
+  const expectedOrigin = process.env.BOTSTER_LOCAL_WEBRTC_EXPECTED_ORIGIN;
+  if (!grantId || !grantSecret || signalingTransport !== "daemon_request" || !expectedOrigin) {
+    return "";
+  }
+
+  return `window.__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__ = ${JSON.stringify({
+    grant_id: grantId,
+    grant_secret: grantSecret,
+    package_name: "botster-web",
+    entrypoint_id: "web-client",
+    expected_origin: expectedOrigin,
+    expires_at: 0,
+    signaling_transport: signalingTransport,
+    data_plane: "webrtc_data_channel",
+    ordered: true,
+    signaling_url: "/request"
+  })};`;
 }
 
 function contentTypeFor(filePath) {

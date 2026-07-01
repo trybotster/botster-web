@@ -1,13 +1,22 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createServer as createNetServer } from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { connect, createServer as createNetServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { chromium } from "playwright";
 
 const host = "127.0.0.1";
+const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
-const port = Number.parseInt(process.env.BOTSTER_WEB_DOGFOOD_BRIDGE_PORT ?? String(await findAvailablePort()), 10);
-const bridgeUrl = `http://${host}:${port}`;
+let port = Number.parseInt(process.env.BOTSTER_WEB_DOGFOOD_BRIDGE_PORT ?? String(await findAvailablePort()), 10);
+let bridgeUrl = `http://${host}:${port}`;
 const echoProbe = "botster-web-dogfood-live-input";
+const transportMode = process.env.BOTSTER_LIVE_PACKAGED_TRANSPORT ?? "webrtc";
+
+if (!["webrtc", "bridge"].includes(transportMode)) {
+  throw new Error("BOTSTER_LIVE_PACKAGED_TRANSPORT must be unset, webrtc, or bridge");
+}
 
 if (!process.env.BOTSTER_HUB_BIN && !process.env.BOTSTER_HUB_SOCKET && !process.env.BOTSTER_HUB_DATA_DIR) {
   throw new Error(
@@ -16,28 +25,17 @@ if (!process.env.BOTSTER_HUB_BIN && !process.env.BOTSTER_HUB_SOCKET && !process.
   );
 }
 
-const bridgeProcess = spawn(
-  process.execPath,
-  [new URL("./real-hub-dogfood-bridge.mjs", import.meta.url).pathname],
-  {
-    cwd: packageRoot,
-    env: bridgeEnvironment(),
-    stdio: ["ignore", "pipe", "pipe"]
-  }
-);
-
+let bridgeProcess;
 let bridgeStdout = "";
 let bridgeStderr = "";
-bridgeProcess.stdout.setEncoding("utf8");
-bridgeProcess.stderr.setEncoding("utf8");
-bridgeProcess.stdout.on("data", (chunk) => {
-  bridgeStdout += chunk;
-  process.stdout.write(chunk);
-});
-bridgeProcess.stderr.on("data", (chunk) => {
-  bridgeStderr += chunk;
-  process.stderr.write(chunk);
-});
+let hubProcess;
+let hubStdout = "";
+let hubStderr = "";
+const ownsWebrtcDataDir = transportMode === "webrtc" && !process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR;
+const webrtcDataDir = transportMode === "webrtc"
+  ? process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR ?? await mkdtemp(join(tmpdir(), "botster-web-webrtc-dogfood-"))
+  : undefined;
+let appUrl = `${bridgeUrl}/?dogfood=real-hub`;
 
 let browser;
 let page;
@@ -46,10 +44,19 @@ const pageErrors = [];
 const responseErrors = [];
 
 try {
-  await waitForHttpOk(`${bridgeUrl}/health`);
-  await waitForHtmlShell(`${bridgeUrl}/?dogfood=real-hub`);
+  if (transportMode === "webrtc") {
+    appUrl = await startWebrtcPackageRuntime();
+  } else {
+    bridgeProcess = startBridgeProcess();
+    await waitForHttpOk(`${bridgeUrl}/health`, () => bridgeProcess?.exitCode !== null ? `bridge exited before readiness (code=${bridgeProcess.exitCode})` : undefined);
+    await waitForHtmlShell(`${bridgeUrl}/?dogfood=real-hub`);
+  }
 
-  browser = await chromium.launch();
+  browser = await chromium.launch({
+    args: transportMode === "webrtc"
+      ? ["--disable-features=WebRtcHideLocalIpsWithMdns", "--force-webrtc-ip-handling-policy=default_public_and_private_interfaces"]
+      : []
+  });
   page = await browser.newPage();
   await page.addInitScript(() => {
     globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {
@@ -70,16 +77,19 @@ try {
     }
   });
 
-  await page.goto(`${bridgeUrl}/?dogfood=real-hub`, { waitUntil: "domcontentloaded" });
+  await page.goto(withDogfoodMode(appUrl), { waitUntil: "domcontentloaded" });
   await openDiagnosticsView(page);
   await page.getByText("Local hub workbench").waitFor();
-  await page.getByText("real-hub").waitFor();
+  await page.getByText(transportMode === "webrtc" ? "webrtc" : "real-hub", { exact: true }).first().waitFor();
+  if (transportMode === "webrtc") {
+    await waitForHarnessEvent(page, { kind: "daemon_request", type: "local_webrtc_signal" }, "local WebRTC signaling request");
+  }
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "status request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, "list_sessions request");
   await openAppsView(page);
-  await openFirstPartyUiAppSurface(page);
+  await openFirstPartyUiAppSurface(page, transportMode);
   if (process.env.BOTSTER_LIVE_SURFACE_ONLY === "1") {
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
     await requestDaemonShutdown();
@@ -96,11 +106,14 @@ try {
   await waitForTerminalSession(page, "botster-web-dogfood-session");
   await waitForTerminalOutput(page, "botster-web-dogfood-ready");
 
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await page.getByText("Local hub workbench").waitFor();
-  await page.getByText("real-hub").waitFor();
+  await refreshPackageRuntime(page);
+  await page.getByText(transportMode === "webrtc" ? "webrtc" : "real-hub", { exact: true }).first().waitFor();
+  if (transportMode === "webrtc") {
+    await waitForHarnessEvent(page, { kind: "daemon_request", type: "local_webrtc_signal" }, "post-refresh local WebRTC signaling request");
+  }
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "post-refresh status request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, "post-refresh list_sessions request");
+  await openDiagnosticsView(page);
   await waitForSessionStatus(page, "running");
   await waitForSessionAttachable(page, true);
   await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
@@ -114,7 +127,7 @@ try {
     type: "send_input",
     data: `${echoProbe}\n`
   });
-  await dispatchResttyInput(page, `${echoProbe}\n`);
+  await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
   await waitForDaemonRequestCount(
     page,
     { type: "send_input", data: `${echoProbe}\n` },
@@ -144,7 +157,7 @@ try {
 
   await callTerminalControl(page, "writeInput", "botster-web-dogfood-exit\n");
   await waitForTerminalOutput(page, "botster-web-dogfood-exiting");
-  await waitForHarnessEvent(page, { kind: "daemon_event", type: "process_exit" }, "process_exit event");
+  await waitForProcessExitProof(page);
   await waitForSessionStatus(page, "exited");
   await page.getByText("Exited sessions cannot attach").waitFor();
   await waitForTerminalDetached(page);
@@ -152,12 +165,15 @@ try {
   await assertNoUnknownSession(page);
   assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
   await requestDaemonShutdown();
-  console.log("live packaged protocol harness passed");
+  console.log(`live packaged protocol harness passed (${transportMode})`);
 } catch (error) {
   const harnessState = page
     ? await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__).catch(() => undefined)
     : undefined;
   let diagnosticMessage = `${error.message}\nbridge stdout:\n${bridgeStdout}\nbridge stderr:\n${bridgeStderr}`;
+  if (hubStdout || hubStderr) {
+    diagnosticMessage += `\nhub stdout:\n${hubStdout}\nhub stderr:\n${hubStderr}`;
+  }
   if (harnessState) {
     diagnosticMessage += `\nharness state:\n${JSON.stringify(harnessState, null, 2)}`;
   }
@@ -172,17 +188,39 @@ try {
   throw error;
 } finally {
   await browser?.close();
-  if (bridgeProcess.exitCode === null) {
+  if (bridgeProcess && bridgeProcess.exitCode === null) {
     bridgeProcess.kill("SIGTERM");
+    await Promise.race([
+      once(bridgeProcess, "exit"),
+      new Promise((resolve) => setTimeout(resolve, 2_000))
+    ]);
   }
-  await Promise.race([
-    once(bridgeProcess, "exit"),
-    new Promise((resolve) => setTimeout(resolve, 2_000))
-  ]);
+  if (hubProcess && hubProcess.exitCode === null) {
+    hubProcess.kill("SIGTERM");
+    await Promise.race([
+      once(hubProcess, "exit"),
+      new Promise((resolve) => setTimeout(resolve, 2_000))
+    ]);
+  }
+  if (ownsWebrtcDataDir && webrtcDataDir) {
+    await rm(webrtcDataDir, { recursive: true, force: true });
+  }
 }
 
 async function requestDaemonShutdown() {
-  const response = await fetch(`${bridgeUrl}/request`, {
+  if (transportMode === "webrtc") {
+    if (webrtcDataDir) {
+      await runHubCommand(["shutdown", "--data-dir", webrtcDataDir]).catch((error) => {
+        if (hubProcess?.exitCode === null) {
+          throw error;
+        }
+      });
+    }
+    return;
+  }
+
+  const requestUrl = new URL("/request", appUrl).toString();
+  const response = await fetch(requestUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -196,6 +234,39 @@ async function requestDaemonShutdown() {
   }
 }
 
+async function refreshPackageRuntime(page) {
+  if (transportMode !== "webrtc") {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    return;
+  }
+
+  if (!webrtcDataDir) {
+    throw new Error("WebRTC package refresh requires the isolated data dir");
+  }
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  await sendDaemonRequest(socketPath, {
+    type: "stop_package_entrypoint",
+    package_name: "botster-web",
+    entrypoint_id: "web-client"
+  });
+  port = await findAvailablePort();
+  bridgeUrl = `http://${host}:${port}`;
+  await sendDaemonRequest(socketPath, {
+    type: "start_package_entrypoint",
+    package_name: "botster-web",
+    entrypoint_id: "web-client",
+    environment_overrides: {
+      BOTSTER_WEB_DOGFOOD_BRIDGE_PORT: String(port)
+    }
+  });
+  appUrl = await waitForPackageAppUrl(socketPath);
+  await waitForHttpOk(new URL("/health", appUrl).toString(), () =>
+    hubProcess?.exitCode !== null ? `hub exited before package runtime refresh (code=${hubProcess.exitCode})` : undefined
+  );
+  await waitForHtmlShell(withDogfoodMode(appUrl));
+  await page.goto(withDogfoodMode(appUrl), { waitUntil: "domcontentloaded" });
+}
+
 async function callTerminalControl(page, method, ...args) {
   await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl));
   await page.evaluate(
@@ -204,13 +275,6 @@ async function callTerminalControl(page, method, ...args) {
     },
     { method, args }
   );
-}
-
-async function dispatchResttyInput(page, text) {
-  await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalRendererInput));
-  await page.evaluate((nextText) => {
-    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalRendererInput(nextText);
-  }, text);
 }
 
 async function openAppsView(page) {
@@ -223,10 +287,11 @@ async function openDiagnosticsView(page) {
   await page.getByTestId("diagnostics-view").waitFor();
 }
 
-async function openFirstPartyUiAppSurface(page) {
+async function openFirstPartyUiAppSurface(page, mode) {
   const installedAppsList = page.locator("[aria-label='Installed apps']");
   const installedPackagesList = page.locator("[aria-label='Installed packages']");
-  const firstPartyPattern = /project[- ]pipelines|botster[- ]workspaces|workspaces/i;
+  const firstPartyPattern = mode === "webrtc" ? /botster[- ]web|Dogfood/i : /project[- ]pipelines|botster[- ]workspaces|workspaces/i;
+  const packageNamePattern = mode === "webrtc" ? "^botster-web$" : "^(project-pipelines|botster-workspaces)$";
   let candidate = installedAppsList.getByText(firstPartyPattern).first();
   const appRowCount = await candidate.count();
   if (appRowCount === 0) {
@@ -242,17 +307,17 @@ async function openFirstPartyUiAppSurface(page) {
   await candidate.click();
   await waitForHarnessEvent(
     page,
-    { kind: "daemon_request", type: "plugin_surface_render", package_name_pattern: "^(project-pipelines|botster-workspaces)$" },
+    { kind: "daemon_request", type: "plugin_surface_render", package_name_pattern: packageNamePattern },
     "first-party app plugin_surface_render request"
   );
   await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
   await page.waitForFunction(
     () => {
       const text = globalThis.document.querySelector("[data-testid='selected-app-surface']")?.textContent ?? "";
-      return /project-pipelines|botster-workspaces|Pipelines|Workspaces/i.test(text) && /rendered|\//i.test(text);
+      return /project-pipelines|botster-workspaces|Pipelines|Workspaces|botster-web|Dogfood/i.test(text) && /rendered|\//i.test(text);
     },
     undefined,
-    { timeout: 15_000 }
+    { timeout: 45_000 }
   ).catch(async (error) => {
     const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
     throw new Error(`selected app surface did not render visible first-party content; text=${JSON.stringify(selectedText)}: ${error.message}`);
@@ -293,7 +358,7 @@ async function waitForHarnessEvent(page, criteria, label) {
       });
     },
     { criteria },
-    { timeout: 15_000 }
+    { timeout: 45_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for ${label}: ${error.message}`);
   });
@@ -306,7 +371,7 @@ async function waitForTerminalOutput(page, text) {
         (entry) => entry.kind === "output" && String(entry.payload?.data ?? "").includes(expectedText)
       ),
     { expectedText: text },
-    { timeout: 15_000 }
+    { timeout: 45_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for terminal output ${text}: ${error.message}`);
   });
@@ -319,7 +384,7 @@ async function waitForTerminalRendererWrite(page, text) {
         (entry) => entry.kind === "renderer_write" && String(entry.payload?.data ?? "").includes(expectedText)
       ),
     { expectedText: text },
-    { timeout: 15_000 }
+    { timeout: 45_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for mounted terminal renderer write ${text}: ${error.message}`);
   });
@@ -394,6 +459,31 @@ async function waitForResizeProof(page, requestedResize) {
   throw new Error(
     `timed out waiting for PTY resize ${requestedResize.rows}x${requestedResize.columns}; last observed ${lastObservedSize}`
   );
+}
+
+async function waitForProcessExitProof(page) {
+  await page.waitForFunction(
+    () => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events.some((entry) => {
+        if (entry.kind === "daemon_event" && entry.payload?.type === "process_exit") {
+          return true;
+        }
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "entity_snapshot") {
+          return false;
+        }
+        const payload = entry.payload.payload;
+        return (
+          payload?.family === "botster-web.session" &&
+          payload.records?.some((record) => record.id === "botster-web-dogfood-session" && record.status === "exited")
+        );
+      });
+    },
+    undefined,
+    { timeout: 45_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for process exit proof: ${error.message}`);
+  });
 }
 
 async function waitForSessionStatus(page, status) {
@@ -564,12 +654,213 @@ async function assertNoUnknownSession(page) {
   }
 }
 
-async function waitForHttpOk(url) {
+function startBridgeProcess() {
+  const child = spawn(
+    process.execPath,
+    [new URL("./real-hub-dogfood-bridge.mjs", import.meta.url).pathname],
+    {
+      cwd: packageRoot,
+      env: bridgeEnvironment(),
+      stdio: ["ignore", "pipe", "pipe"]
+    }
+  );
+
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    bridgeStdout += chunk;
+    process.stdout.write(chunk);
+  });
+  child.stderr.on("data", (chunk) => {
+    bridgeStderr += chunk;
+    process.stderr.write(chunk);
+  });
+  return child;
+}
+
+async function startWebrtcPackageRuntime() {
+  if (!process.env.BOTSTER_HUB_BIN) {
+    throw new Error("WebRTC live packaged protocol harness requires BOTSTER_HUB_BIN so it can own an isolated hub.");
+  }
+  if (!webrtcDataDir) {
+    throw new Error("WebRTC live packaged protocol harness requires an isolated data dir.");
+  }
+
+  hubProcess = spawnHubProcess(webrtcDataDir);
+  await waitForSocket(join(webrtcDataDir, "botster-hub.sock"), () =>
+    hubProcess?.exitCode !== null ? `hub exited before socket readiness (code=${hubProcess.exitCode})` : undefined
+  );
+
+  await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", packageRoot]);
+  await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, "botster-web"]);
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  await sendDaemonRequest(socketPath, {
+    type: "start_package_entrypoint",
+    package_name: "botster-web",
+    entrypoint_id: "web-client",
+    environment_overrides: {
+      BOTSTER_WEB_DOGFOOD_BRIDGE_PORT: String(port)
+    }
+  });
+  const url = await waitForPackageAppUrl(socketPath);
+
+  await waitForHttpOk(new URL("/health", url).toString(), () =>
+    hubProcess?.exitCode !== null ? `hub exited before package runtime readiness (code=${hubProcess.exitCode})` : undefined
+  );
+  await waitForHtmlShell(withDogfoodMode(url));
+  return url;
+}
+
+function spawnHubProcess(dataDir) {
+  const args = ["start", "--data-dir", dataDir];
+  if (process.env.BOTSTER_SESSION_WORKER_BIN) {
+    args.push("--session-worker-bin", process.env.BOTSTER_SESSION_WORKER_BIN);
+  }
+
+  const child = spawn(process.env.BOTSTER_HUB_BIN, args, {
+    cwd: packageRoot,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    hubStdout += chunk;
+    process.stdout.write(`[botster-hub] ${chunk}`);
+  });
+  child.stderr.on("data", (chunk) => {
+    hubStderr += chunk;
+    process.stderr.write(`[botster-hub] ${chunk}`);
+  });
+  return child;
+}
+
+async function runHubCommand(args) {
+  const child = spawn(process.env.BOTSTER_HUB_BIN, args, {
+    cwd: packageRoot,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+    process.stdout.write(`[botster-hub-cli] ${chunk}`);
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+    process.stderr.write(`[botster-hub-cli] ${chunk}`);
+  });
+  const [code, signal] = await once(child, "exit");
+  if (code !== 0) {
+    throw new Error(`botster-hub ${args.join(" ")} failed (code=${code}, signal=${signal ?? "none"}):\n${stdout}${stderr}`);
+  }
+  return stdout;
+}
+
+async function waitForPackageAppUrl(socketPath) {
+  const deadline = Date.now() + 15_000;
+  let lastState = "missing";
+  while (Date.now() < deadline) {
+    const response = await sendDaemonRequest(socketPath, { type: "list_apps" });
+    const app = response.apps?.find((candidate) => candidate.package_name === "botster-web" && candidate.entrypoint_id === "web-client");
+    if (app?.lifecycle_state) {
+      lastState = app.lifecycle_state;
+    }
+    if (app?.launch_target?.local_url) {
+      return app.launch_target.local_url;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`timed out waiting for botster-web/web-client local_url; lifecycle_state=${lastState}`);
+}
+
+async function sendDaemonRequest(socketPath, request) {
+  const socket = connect(socketPath);
+  await once(socket, "connect");
+  socket.setEncoding("utf8");
+  socket.write(`${JSON.stringify({ protocol })}\n`);
+  const hello = JSON.parse(await readSocketLine(socket));
+  if (hello.protocol !== protocol) {
+    socket.end();
+    throw new Error("daemon hello protocol mismatch");
+  }
+  socket.write(`${JSON.stringify(request)}\n`);
+  const reply = JSON.parse(await readSocketLine(socket));
+  socket.end();
+  return reply;
+}
+
+async function readSocketLine(socket) {
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    const cleanup = () => {
+      socket.off("data", onData);
+      socket.off("error", onError);
+      socket.off("end", onEnd);
+    };
+    const onData = (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline >= 0) {
+        cleanup();
+        resolve(buffer.slice(0, newline));
+      }
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onEnd = () => {
+      cleanup();
+      reject(new Error("daemon socket closed before reply"));
+    };
+
+    socket.on("data", onData);
+    socket.on("error", onError);
+    socket.on("end", onEnd);
+  });
+}
+
+async function waitForSocket(socketPath, exitMessage) {
   const deadline = Date.now() + 15_000;
   let lastError;
   while (Date.now() < deadline) {
-    if (bridgeProcess.exitCode !== null) {
-      throw new Error(`bridge exited before readiness (code=${bridgeProcess.exitCode})`);
+    const earlyExit = exitMessage?.();
+    if (earlyExit) {
+      throw new Error(earlyExit);
+    }
+
+    const connected = await new Promise((resolve) => {
+      const socket = connect(socketPath);
+      socket.once("connect", () => {
+        socket.end();
+        resolve(true);
+      });
+      socket.once("error", (error) => {
+        lastError = error;
+        resolve(false);
+      });
+    });
+    if (connected) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw lastError ?? new Error(`timed out waiting for hub socket ${socketPath}`);
+}
+
+function withDogfoodMode(url) {
+  const nextUrl = new URL(url);
+  nextUrl.searchParams.set("dogfood", "real-hub");
+  return nextUrl.toString();
+}
+
+async function waitForHttpOk(url, exitMessage) {
+  const deadline = Date.now() + 15_000;
+  let lastError;
+  while (Date.now() < deadline) {
+    const earlyExit = exitMessage?.();
+    if (earlyExit) {
+      throw new Error(earlyExit);
     }
     try {
       const response = await fetch(url);

@@ -6,11 +6,12 @@ import {
   type DaemonBridgeClient
 } from "./realHubDogfoodTransport";
 import { createRealHubTerminalDataPlane } from "./realHubTerminalDataPlane";
+import { createWebrtcDaemonClient, type LocalWebrtcBootstrap } from "./webrtcDaemonClient";
 import type { HubControlTransport } from "./protocol";
 import { MockTerminalDataPlane, type TerminalDataPlaneAttachment, type TerminalViewDescriptor } from "./terminal";
 
-export type DogfoodModeName = "fixture" | "real-hub";
-export type TerminalDataPlaneKind = "mock" | "real-hub";
+export type DogfoodModeName = "fixture" | "real-hub" | "webrtc";
+export type TerminalDataPlaneKind = "mock" | "real-hub" | "webrtc";
 
 export interface DogfoodRuntimeConfig {
   mode: DogfoodModeName;
@@ -28,6 +29,7 @@ export interface DogfoodRuntimeConfigOptions {
   bridge?: DaemonBridgeClient;
   bridgeUrl?: string;
   packageRuntime?: boolean;
+  localWebrtcBootstrap?: LocalWebrtcBootstrap;
 }
 
 const realModeQueryValue = "real-hub";
@@ -35,6 +37,23 @@ const defaultBridgeUrl = "http://127.0.0.1:41739/request";
 const fixtureSessionId = "terminal_view_smoke_session";
 
 export function createDogfoodRuntimeConfig(options: DogfoodRuntimeConfigOptions): DogfoodRuntimeConfig {
+  if (options.packageRuntime && options.localWebrtcBootstrap) {
+    const bridge = options.bridge ?? createWebrtcDaemonClient({ bootstrap: options.localWebrtcBootstrap });
+
+    return {
+      mode: "webrtc",
+      statusText: "Connected to local hub over WebRTC",
+      transport: createRealHubDogfoodTransport({ bridge }),
+      terminalDescriptor: {
+        sessionId: realHubDogfoodSessionId,
+        renderer: "restty"
+      },
+      terminalDataPlane: createRealHubTerminalDataPlane({ bridge }),
+      terminalDataPlaneKind: "webrtc",
+      createTerminalDataPlane: (sessionId) => createRealHubTerminalDataPlane({ bridge, sessionId })
+    };
+  }
+
   if (isRealHubDogfoodEnabled(options)) {
     const bridge = options.bridge ?? createHttpDaemonBridgeClient({ url: options.bridgeUrl ?? defaultBridgeUrl });
 

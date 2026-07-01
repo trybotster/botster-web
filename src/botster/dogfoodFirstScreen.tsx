@@ -104,6 +104,7 @@ function dogfoodStatusSummaries({
     actionDiagnostics.find((diagnostic) => diagnostic.title === "Hub action failed") ??
     highestSeverityDiagnostic(actionDiagnostics);
   const runningSession = sessions.find((session) => session.id === realHubDogfoodSessionId && session.status === "running");
+  const localHubMode = mode === "real-hub" || mode === "webrtc";
 
   return [
     {
@@ -113,16 +114,16 @@ function dogfoodStatusSummaries({
         ? stateLabel(hubDiagnostic.severity)
         : bridgeDiagnostic
           ? "Blocked"
-          : mode === "real-hub" ? "Connecting" : "Fixture",
+          : localHubMode ? "Connecting" : "Fixture",
       detail: hubDiagnostic?.detail ?? bridgeDiagnostic?.detail ?? statusText,
       severity: hubDiagnostic?.severity ?? bridgeDiagnostic?.severity ?? "info"
     },
     {
       key: "bridge",
-      label: "Bridge",
-      state: bridgeDiagnostic ? "Blocked" : mode === "real-hub" ? "Ready" : "Fixture",
+      label: mode === "webrtc" ? "Transport" : "Bridge",
+      state: bridgeDiagnostic ? "Blocked" : localHubMode ? "Ready" : "Fixture",
       detail: bridgeDiagnostic?.detail ?? statusText,
-      severity: bridgeDiagnostic?.severity ?? (mode === "real-hub" ? "success" : "info")
+      severity: bridgeDiagnostic?.severity ?? (localHubMode ? "success" : "info")
     },
     packageSummary(packages, packageLoadStatus),
     sessionSummary(sessions, sessionLoadStatus),
