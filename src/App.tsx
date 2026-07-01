@@ -1290,6 +1290,7 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
   const actions = packageActions(app);
   const configurationFields = packageSurfaceRecords(app.configuration_fields);
   const remoteAccessField = configurationFields.find((field) => firstString(field.id) === "remote_browser_rendezvous_enabled");
+  const configurationMetadataFields = configurationFields.filter((field) => firstString(field.id) !== "remote_browser_rendezvous_enabled");
   const configurationSubmit = configurationSubmitAction(app);
 
   return (
@@ -1306,7 +1307,7 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
               onAction={onAction}
             />
           ) : null}
-          {configurationFields.map((field) => (
+          {configurationMetadataFields.map((field) => (
             <ConfigurationMetadataItem field={field} key={configurationFieldKey(field)} />
           ))}
         </>
@@ -1375,6 +1376,7 @@ function RemoteAccessConfigurationItem({
   const enabled = field.value === true;
   const nextEnabled = !enabled;
   const disabled = !submit || submit.disabled === true;
+  const errors = arrayOfStrings(field.errors);
 
   return (
     <IonItem>
@@ -1383,6 +1385,11 @@ function RemoteAccessConfigurationItem({
         <h2>Remote browser access</h2>
         <p>{enabled ? "Remote browser rendezvous is opted in." : "Remote browser rendezvous is off."}</p>
         <p>Local installed access stays available. Remote access requires opt-in, pairing, and device approval.</p>
+        {errors.map((error) => (
+          <IonNote color="danger" key={error}>
+            {error}
+          </IonNote>
+        ))}
       </IonLabel>
       <IonBadge slot="end" color={enabled ? "success" : "medium"}>
         {enabled ? "Opted in" : "Off"}

@@ -3219,6 +3219,42 @@ try {
   assert.match(descriptorSettingsMarkup, /Descriptor Settings/);
   assert.match(descriptorSettingsMarkup, /Descriptor-backed settings surface/);
   assert.match(descriptorSettingsMarkup, /Disable Package/);
+  const remoteAccessSettingsMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsPanel, {
+      app: {
+        id: "botster-web",
+        title: "botster-web",
+        configuration_fields: [
+          {
+            id: "remote_browser_rendezvous_enabled",
+            label: "Remote browser access",
+            kind: "checkbox",
+            config_type: "boolean",
+            value: false,
+            helper: "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
+            errors: ["Remote access configuration failed"]
+          }
+        ],
+        configuration_submit: {
+          id: "botster.package.configuration.save",
+          target: "botster-web",
+          label: "Configure",
+          disabled: false,
+          params: {
+            package_name: "botster-web",
+            daemon_request: { request_type: "set_package_configuration", package_name: "botster-web" }
+          }
+        },
+        settings_surfaces: [],
+        package_actions: []
+      },
+      onAction: () => undefined
+    })
+  );
+  assert.equal((remoteAccessSettingsMarkup.match(/Remote browser access/g) ?? []).length, 1);
+  assert.match(remoteAccessSettingsMarkup, /Remote browser rendezvous is off/);
+  assert.match(remoteAccessSettingsMarkup, /Remote access configuration failed/);
+  assert.doesNotMatch(remoteAccessSettingsMarkup, /Remote browser access[\\s\\S]*boolean[\\s\\S]*Remote browser access/);
   const optionalSettingsMarkup = renderToStaticMarkup(
     createElement(PluginSettingsPanel, {
       app: optionalDaemonPackageRecord,

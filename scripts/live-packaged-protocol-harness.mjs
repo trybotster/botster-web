@@ -403,6 +403,10 @@ async function assertRemoteAccessSettingsDispatch(page) {
   await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
   await page.getByText("Package configuration").waitFor();
   await page.getByText("Remote browser access").first().waitFor();
+  const remoteAccessLabelCount = await page.getByText("Remote browser access").count();
+  if (remoteAccessLabelCount !== 1) {
+    throw new Error(`live packaged protocol expected one Remote browser access label, observed ${remoteAccessLabelCount}`);
+  }
   await page.getByText("Remote browser rendezvous is off.").waitFor();
   await page.getByText("Local installed access stays available. Remote access requires opt-in, pairing, and device approval.").waitFor();
   await page.getByRole("button", { name: "Opt in" }).click();
