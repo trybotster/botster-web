@@ -433,7 +433,7 @@ export default function App() {
             snapshot: renderedSurfaceSnapshot
           });
         }
-        const packageFeedback = action.id === "botster.package.daemon_request"
+        const packageFeedback = action.id === "botster.package.daemon_request" || action.id === "botster.package.configuration.save"
           ? packageActionFeedback(result)
           : undefined;
         if (packageFeedback) {
@@ -1289,6 +1289,9 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
   const settingsSurfaces = packageSettingsSurfaces(app);
   const actions = packageActions(app);
   const configurationFields = packageSurfaceRecords(app.configuration_fields);
+  const remoteAccessField = configurationFields.find((field) => firstString(field.id) === "remote_browser_rendezvous_enabled");
+  const configurationMetadataFields = configurationFields.filter((field) => firstString(field.id) !== "remote_browser_rendezvous_enabled");
+  const configurationSubmit = configurationSubmitAction(app);
 
   return (
     <IonList lines="full">
@@ -1297,7 +1300,14 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
           <IonListHeader>
             <IonLabel>Package configuration</IonLabel>
           </IonListHeader>
-          {configurationFields.map((field) => (
+          {remoteAccessField ? (
+            <RemoteAccessConfigurationItem
+              field={remoteAccessField}
+              submit={configurationSubmit}
+              onAction={onAction}
+            />
+          ) : null}
+          {configurationMetadataFields.map((field) => (
             <ConfigurationMetadataItem field={field} key={configurationFieldKey(field)} />
           ))}
         </>
@@ -1351,6 +1361,62 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
         );
       })}
     </IonList>
+  );
+}
+
+function RemoteAccessConfigurationItem({
+  field,
+  submit,
+  onAction
+}: {
+  field: PackageSurfaceRecord;
+  submit: ActionBinding | undefined;
+  onAction: (action: ActionBinding) => void;
+}) {
+  const enabled = field.value === true;
+  const nextEnabled = !enabled;
+  const disabled = !submit || submit.disabled === true;
+  const errors = arrayOfStrings(field.errors);
+
+  return (
+    <IonItem>
+      <IonIcon slot="start" icon={serverOutline} aria-hidden="true" />
+      <IonLabel>
+        <h2>Remote browser access</h2>
+        <p>{enabled ? "Remote browser rendezvous is opted in." : "Remote browser rendezvous is off."}</p>
+        <p>Local installed access stays available. Remote access requires opt-in, pairing, and device approval.</p>
+        {errors.map((error) => (
+          <IonNote color="danger" key={error}>
+            {error}
+          </IonNote>
+        ))}
+      </IonLabel>
+      <IonBadge slot="end" color={enabled ? "success" : "medium"}>
+        {enabled ? "Opted in" : "Off"}
+      </IonBadge>
+      <IonButton
+        slot="end"
+        fill={enabled ? "outline" : "solid"}
+        disabled={disabled}
+        onClick={() => {
+          if (!submit) return;
+          onAction({
+            ...submit,
+            params: {
+              ...submit.params,
+              values: {
+                remote_browser_rendezvous_enabled: {
+                  type: "boolean",
+                  value: nextEnabled
+                }
+              }
+            }
+          });
+        }}
+      >
+        {enabled ? "Opt out" : "Opt in"}
+      </IonButton>
+    </IonItem>
   );
 }
 
@@ -1440,6 +1506,11 @@ export function surfaceLaunchAction(surface: PackageSurfaceRecord | undefined): 
 
 function packageActionBinding(record: PackageSurfaceRecord | undefined): ActionBinding | undefined {
   return record?.action && typeof record.action === "object" ? (record.action as ActionBinding) : undefined;
+}
+
+function configurationSubmitAction(app: Record<string, unknown>): ActionBinding | undefined {
+  const submit = app.configuration_submit;
+  return submit && typeof submit === "object" ? (submit as ActionBinding) : undefined;
 }
 
 function packageActionKey(record: PackageSurfaceRecord): string {

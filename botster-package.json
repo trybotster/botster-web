@@ -5,6 +5,17 @@
   "botster": ">=0.1.0",
   "source": { "type": "path", "path": "." },
   "capabilities": [],
+  "configuration": {
+    "fields": [
+      {
+        "key": "remote_browser_rendezvous_enabled",
+        "type": "boolean",
+        "label": "Remote browser access",
+        "description": "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
+        "default": { "type": "boolean", "value": false }
+      }
+    ]
+  },
   "surfaces": [
     {
       "id": "dogfood-app",

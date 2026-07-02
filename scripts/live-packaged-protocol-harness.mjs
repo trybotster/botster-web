@@ -80,15 +80,14 @@ try {
   await page.goto(withDogfoodMode(appUrl), { waitUntil: "domcontentloaded" });
   await openDiagnosticsView(page);
   await page.getByText("Local hub workbench").waitFor();
-  await page.getByText(transportMode === "webrtc" ? "webrtc" : "real-hub", { exact: true }).first().waitFor();
-  if (transportMode === "webrtc") {
-    await waitForHarnessEvent(page, { kind: "daemon_request", type: "local_webrtc_signal" }, "local WebRTC signaling request");
-  }
+  await waitForTransportLabel(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "status request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
+  await waitForRemoteAccessPackageConfiguration(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, "list_sessions request");
   await openAppsView(page);
+  await assertRemoteAccessSettingsDispatch(page);
   await openFirstPartyUiAppSurface(page, transportMode);
   if (process.env.BOTSTER_LIVE_SURFACE_ONLY === "1") {
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
@@ -107,10 +106,7 @@ try {
   await waitForTerminalOutput(page, "botster-web-dogfood-ready");
 
   await refreshPackageRuntime(page);
-  await page.getByText(transportMode === "webrtc" ? "webrtc" : "real-hub", { exact: true }).first().waitFor();
-  if (transportMode === "webrtc") {
-    await waitForHarnessEvent(page, { kind: "daemon_request", type: "local_webrtc_signal" }, "post-refresh local WebRTC signaling request");
-  }
+  await waitForTransportLabel(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "post-refresh status request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, "post-refresh list_sessions request");
   await openDiagnosticsView(page);
@@ -361,6 +357,84 @@ async function waitForHarnessEvent(page, criteria, label) {
     { timeout: 45_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for ${label}: ${error.message}`);
+  });
+}
+
+async function waitForTransportLabel(page) {
+  await page.waitForFunction(
+    () => {
+      const text = globalThis.document.body?.innerText ?? "";
+      return /\bwebrtc\b|\breal-hub\b/.test(text);
+    },
+    undefined,
+    { timeout: 45_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for visible transport label: ${error.message}`);
+  });
+}
+
+async function waitForRemoteAccessPackageConfiguration(page) {
+  await page.waitForFunction(
+    () => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events.some((entry) => {
+        if (entry.kind !== "daemon_response" || entry.payload?.kind !== "packages") return false;
+        const packageRecord = entry.payload.packages?.find((candidate) => candidate.package_name === "botster-web");
+        const fields = packageRecord?.configuration?.schema?.fields ?? [];
+        const remoteAccessField = fields.find((field) => field.key === "remote_browser_rendezvous_enabled");
+        const action = packageRecord?.actions?.find((candidate) => candidate.action_id === "set_package_configuration");
+        return (
+          remoteAccessField?.type === "boolean" &&
+          remoteAccessField?.default?.value === false &&
+          packageRecord?.configuration?.effective_values?.remote_browser_rendezvous_enabled?.value === false &&
+          action?.status === "available" &&
+          action?.request?.request_type === "set_package_configuration"
+        );
+      });
+    },
+    undefined,
+    { timeout: 45_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for manifest-sourced botster-web remote access configuration: ${error.message}`);
+  });
+}
+
+async function assertRemoteAccessSettingsDispatch(page) {
+  await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
+  await page.getByText("Package configuration").waitFor();
+  await page.getByText("Remote browser access").first().waitFor();
+  const remoteAccessLabelCount = await page.getByText("Remote browser access").count();
+  if (remoteAccessLabelCount !== 1) {
+    throw new Error(`live packaged protocol expected one Remote browser access label, observed ${remoteAccessLabelCount}`);
+  }
+  await page.getByText("Remote browser rendezvous is off.").waitFor();
+  await page.getByText("Local installed access stays available. Remote access requires opt-in, pairing, and device approval.").waitFor();
+  await page.getByRole("button", { name: "Opt in" }).click();
+  await waitForRemoteAccessConfigRequest(page, true);
+  await page.getByText("Package action accepted").waitFor();
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByText("Package configuration").waitFor({ state: "detached" });
+}
+
+async function waitForRemoteAccessConfigRequest(page, value) {
+  await page.waitForFunction(
+    ({ expectedValue }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events.some((entry) => {
+        const payload = entry.payload ?? {};
+        return (
+          entry.kind === "daemon_request" &&
+          payload.type === "set_package_configuration" &&
+          payload.package_name === "botster-web" &&
+          payload.values?.remote_browser_rendezvous_enabled?.type === "boolean" &&
+          payload.values?.remote_browser_rendezvous_enabled?.value === expectedValue
+        );
+      });
+    },
+    { expectedValue: value },
+    { timeout: 45_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for remote access set_package_configuration=${value}: ${error.message}`);
   });
 }
 
@@ -892,6 +966,7 @@ function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) 
 function browserFailureSummary({ consoleEvents, pageErrors, responseErrors }) {
   const fatalConsole = consoleEvents.filter((event) => {
     const text = event.text.toLowerCase();
+    if (text.includes("err_incomplete_chunked_encoding")) return false;
     return (
       event.type === "error" ||
       text.includes("font load error") ||

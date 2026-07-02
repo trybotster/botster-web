@@ -452,6 +452,17 @@ assert.equal(packageManifest.kind, "plugin");
 assert.equal(packageManifest.botster, ">=0.1.0");
 assert.deepEqual(packageManifest.source, { type: "path", path: "." });
 assert.deepEqual(packageManifest.capabilities, []);
+assert.deepEqual(packageManifest.configuration, {
+  fields: [
+    {
+      key: "remote_browser_rendezvous_enabled",
+      type: "boolean",
+      label: "Remote browser access",
+      description: "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
+      default: { type: "boolean", value: false }
+    }
+  ]
+});
 assert.deepEqual(packageManifest.surfaces, [
   {
     id: "dogfood-app",
@@ -808,6 +819,7 @@ assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), 
   "preview_package_install",
   "install_package_registry_entry",
   "set_package_configuration",
+  "set_package_configuration",
   "install_package_local_path",
   "start_package_entrypoint",
   "stop_package_entrypoint",
@@ -820,13 +832,23 @@ assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), 
   "plugin_surface_action"
 ]);
 assert.deepEqual(
-  generatedDaemonRequestFixtures.find((request) => request.type === "set_package_configuration"),
+  generatedDaemonRequestFixtures.find((request) => request.type === "set_package_configuration" && request.package_name === "project-pipelines"),
   {
     type: "set_package_configuration",
     package_name: "project-pipelines",
     values: {
       endpoint: { type: "url", value: "https://example.invalid/hook" },
       api_token: { type: "secret", state: "write_only" }
+    }
+  }
+);
+assert.deepEqual(
+  generatedDaemonRequestFixtures.find((request) => request.type === "set_package_configuration" && request.package_name === "botster-web"),
+  {
+    type: "set_package_configuration",
+    package_name: "botster-web",
+    values: {
+      remote_browser_rendezvous_enabled: { type: "boolean", value: true }
     }
   }
 );
@@ -1112,6 +1134,14 @@ const configuredPackageConfiguration = {
   },
   missing_required: []
 };
+const botsterWebRemoteAccessConfiguration = {
+  schema: packageManifest.configuration,
+  effective_values: {
+    remote_browser_rendezvous_enabled: { type: "boolean", value: false }
+  },
+  missing_required: [],
+  diagnostics: []
+};
 const emptyPackageConfiguration = {};
 const availablePackageAvailability = { state: "available", reasons: [] };
 const blockedGithubAvailability = {
@@ -1253,11 +1283,11 @@ const bridge = {
                 actions: entrypointActions("botster-web", "web-client")
               }
             ],
-            configuration: emptyPackageConfiguration,
+            configuration: botsterWebRemoteAccessConfiguration,
             availability: availablePackageAvailability,
             dependency_availability: [],
             feature_availability: [],
-            actions: installedPackageActions("botster-web", true, false),
+            actions: installedPackageActions("botster-web", true, true),
             provider_profile_admitted: false
           },
           {
@@ -1999,6 +2029,23 @@ await realTransport.send({
   }
 });
 await flushMicrotasks();
+await realTransport.send({
+  kind: "action_request",
+  payload: {
+    request_id: "real-config-save-remote-access",
+    origin: "ui_node",
+    action: {
+      id: "botster.package.configuration.save",
+      target: "botster-web",
+      params: {
+        values: {
+          remote_browser_rendezvous_enabled: { type: "boolean", value: true }
+        }
+      }
+    }
+  }
+});
+await flushMicrotasks();
 for (const action of [
   {
     id: "botster.package.surface.render",
@@ -2080,7 +2127,7 @@ assert.equal(bridgeRequests.some((request) => request.type === "list_sessions"),
 assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "spawn" && request.session_id === realHubDogfoodSessionId), true);
 const configSaveRequests = bridgeRequests.filter((request) => request.type === "set_package_configuration");
-assert.equal(configSaveRequests.length, 2);
+assert.equal(configSaveRequests.length, 3);
 assert.deepEqual(configSaveRequests[0], {
   type: "set_package_configuration",
   package_name: "project-pipelines",
@@ -2097,6 +2144,13 @@ assert.deepEqual(configSaveRequest, {
   }
 });
 assert.doesNotMatch(JSON.stringify(configSaveRequest), /api_token|redacted|write_only|super-secret-token/);
+assert.deepEqual(configSaveRequests[2], {
+  type: "set_package_configuration",
+  package_name: "botster-web",
+  values: {
+    remote_browser_rendezvous_enabled: { type: "boolean", value: true }
+  }
+});
 assert.deepEqual(
   bridgeRequests.find((request) => request.type === "plugin_surface_render"),
   {
@@ -3165,6 +3219,42 @@ try {
   assert.match(descriptorSettingsMarkup, /Descriptor Settings/);
   assert.match(descriptorSettingsMarkup, /Descriptor-backed settings surface/);
   assert.match(descriptorSettingsMarkup, /Disable Package/);
+  const remoteAccessSettingsMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsPanel, {
+      app: {
+        id: "botster-web",
+        title: "botster-web",
+        configuration_fields: [
+          {
+            id: "remote_browser_rendezvous_enabled",
+            label: "Remote browser access",
+            kind: "checkbox",
+            config_type: "boolean",
+            value: false,
+            helper: "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
+            errors: ["Remote access configuration failed"]
+          }
+        ],
+        configuration_submit: {
+          id: "botster.package.configuration.save",
+          target: "botster-web",
+          label: "Configure",
+          disabled: false,
+          params: {
+            package_name: "botster-web",
+            daemon_request: { request_type: "set_package_configuration", package_name: "botster-web" }
+          }
+        },
+        settings_surfaces: [],
+        package_actions: []
+      },
+      onAction: () => undefined
+    })
+  );
+  assert.equal((remoteAccessSettingsMarkup.match(/Remote browser access/g) ?? []).length, 1);
+  assert.match(remoteAccessSettingsMarkup, /Remote browser rendezvous is off/);
+  assert.match(remoteAccessSettingsMarkup, /Remote access configuration failed/);
+  assert.doesNotMatch(remoteAccessSettingsMarkup, /Remote browser access[\\s\\S]*boolean[\\s\\S]*Remote browser access/);
   const optionalSettingsMarkup = renderToStaticMarkup(
     createElement(PluginSettingsPanel, {
       app: optionalDaemonPackageRecord,
@@ -3334,11 +3424,11 @@ try {
             actions: entrypointActions("botster-web", "web-client")
           }
         ],
-        configuration: emptyPackageConfiguration,
+        configuration: botsterWebRemoteAccessConfiguration,
         availability: availablePackageAvailability,
         dependency_availability: [],
         feature_availability: [],
-        actions: installedPackageActions("botster-web", true, false),
+        actions: installedPackageActions("botster-web", true, true),
         provider_profile_admitted: false
       },
       {
@@ -3531,6 +3621,7 @@ try {
   assert.match(realHubMarkup, /Requires local terminal launch/);
   assert.match(realHubMarkup, /botster-web Settings/);
   assert.match(realHubMarkup, /dogfood-settings/);
+  assert.match(realHubMarkup, /Remote browser access/);
   assert.match(realHubMarkup, /Rendered package surface|Rendered app surface/);
   assert.match(realHubMarkup, /Deterministic app surface rendered by the botster-web dogfood package/);
   assert.match(realHubMarkup, /botster-web\/dogfood-app/);
