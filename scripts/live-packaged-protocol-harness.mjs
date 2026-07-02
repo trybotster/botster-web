@@ -123,7 +123,7 @@ try {
     type: "send_input",
     data: `${echoProbe}\n`
   });
-  await callTerminalControl(page, "writeInput", `${echoProbe}\n`);
+  await typeThroughMountedTerminal(page, `${echoProbe}\n`);
   await waitForDaemonRequestCount(
     page,
     { type: "send_input", data: `${echoProbe}\n` },
@@ -271,6 +271,14 @@ async function callTerminalControl(page, method, ...args) {
     },
     { method, args }
   );
+}
+
+async function typeThroughMountedTerminal(page, data) {
+  await waitForTerminalCanvas(page);
+  await callTerminalControl(page, "focus");
+  const canvas = page.locator(".terminal-view-container canvas").first();
+  await canvas.click({ position: { x: 10, y: 10 } });
+  await page.keyboard.insertText(data);
 }
 
 async function openAppsView(page) {
