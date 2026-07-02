@@ -57,7 +57,15 @@ BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
 npm run smoke:live-packaged-protocol
 ```
 
-This command builds the app, starts the package bridge in real-hub mode, starts an isolated local hub when `BOTSTER_HUB_BIN` is supplied, opens the compiled packaged UI in Playwright Chromium, and drives the mounted terminal data-plane path. It proves status/schema compatibility, package listing, session listing, spawn of `botster-web-dogfood-session`, terminal attach output containing `botster-web-dogfood-ready`, browser refresh plus explicit Attach rendering historical output from `snapshot.data` or `scrollback.data`, input echo output containing `botster-web-dogfood-echo:<input>`, resize output containing `botster-web-dogfood-size:<rows>x<cols>`, deterministic exit through `botster-web-dogfood-exit`, observed `process_exit`, and clean shutdown.
+This command builds the app, starts the package bridge in real-hub mode, starts an isolated local hub when `BOTSTER_HUB_BIN` is supplied, opens the compiled packaged UI in Playwright Chromium, and drives the mounted terminal data-plane path. It proves status/schema compatibility, package listing, session listing, spawn of `botster-web-dogfood-session`, terminal attach output containing `botster-web-dogfood-ready`, browser refresh plus explicit Attach rendering historical output from `snapshot.data` or `scrollback.data`, browser keyboard input through the mounted Restty renderer producing exactly one `send_input` and echo output containing `botster-web-dogfood-echo:<input>`, resize output containing `botster-web-dogfood-size:<rows>x<cols>`, deterministic exit through `botster-web-dogfood-exit`, observed `process_exit`, and clean shutdown.
+
+When a compatible live hub/session-worker pair is not available, the focused mounted-keyboard fallback proves the browser renderer side of the same input path without claiming daemon/session coverage:
+
+```bash
+npm run smoke:mounted-terminal-keyboard
+```
+
+That smoke mounts the real `TerminalViewHost` and Restty renderer in Playwright Chromium, focuses the mounted bridge, clicks the canvas, dispatches a browser text-insertion `input` event against the focused Restty textarea, asserts exactly one data-plane input write, and requires the echoed output to render through the mounted renderer.
 
 The live harness can also attach to an explicitly isolated existing hub with `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR`. Existing-hub mode does not shut down or remove the attached hub. The harness must not use fake daemon responses, and it fails on browser console/page errors, packaged asset 404s, terminal mount failure, stack overflow, unhandled promise rejection, missing Playwright Chromium, missing hub binaries, or missing live resize/process-exit evidence. The bridge mode proves the packaged UI + real hub control loop + harness terminal egress; package runtime uses local WebRTC when the hub injects a bootstrap grant.
 
