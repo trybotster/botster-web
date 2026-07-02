@@ -99,7 +99,6 @@ class BotsterTerminalPtyTransport implements PtyTransport {
   private outputSubscription?: TerminalSubscription;
   private onRender?: (data: string) => void;
   private connected = false;
-  private inputWriteQueue: Promise<void> = Promise.resolve();
 
   setRenderObserver(onRender: (data: string) => void): void {
     this.onRender = onRender;
@@ -142,14 +141,9 @@ class BotsterTerminalPtyTransport implements PtyTransport {
   }
 
   sendInput(data: string): boolean {
-    const dataPlane = this.dataPlane;
-    if (!dataPlane) return false;
-    recordLiveHarnessTerminal("pty_send_input", { data, sessionId: dataPlane.sessionId });
-    this.inputWriteQueue = this.inputWriteQueue
-      .then(() => dataPlane.writeInput(data))
-      .catch((error: unknown) => {
-        console.error("[botster-web] terminal input write failed", error);
-      });
+    if (!this.dataPlane) return false;
+    recordLiveHarnessTerminal("pty_send_input", { data, sessionId: this.dataPlane.sessionId });
+    void this.dataPlane.writeInput(data);
     return true;
   }
 
@@ -176,7 +170,6 @@ class BotsterTerminalPtyTransport implements PtyTransport {
       this.callbacks?.onDisconnect?.();
     }
     this.dataPlane = undefined;
-    this.inputWriteQueue = Promise.resolve();
   }
 }
 
