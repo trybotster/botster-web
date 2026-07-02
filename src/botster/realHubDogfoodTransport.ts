@@ -713,6 +713,7 @@ function packageConfigurationFields(configuration: DaemonPackageConfiguration | 
       config_type: configType,
       required: field.required === true,
       value: redactedSecret ? "" : configurationValue(value),
+      secret_state: redactedSecret ? "redacted" : undefined,
       placeholder: redactedSecret ? "Existing secret is saved" : undefined,
       helper: redactedSecret ? "Leave blank to keep the existing secret." : readConfigString(field.description, undefined),
       options: readConfigOptions(field.options),
@@ -909,7 +910,11 @@ async function dispatchDaemonAction(
 
     const response = await bridge.request(packageConfigurationRequest(packageName, action));
     emitResponse(response);
-    emit(actionResultFrame(request, !response.error, response.error?.message, { package_name: packageName, kind: response.kind }));
+    emit(actionResultFrame(request, !response.error, response.error?.message, {
+      package_name: packageName,
+      kind: response.kind,
+      diagnostics: responseDiagnostics(response)
+    }));
     return;
   }
 

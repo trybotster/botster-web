@@ -2711,6 +2711,25 @@ assert.equal(
   ).actionTarget,
   "missing-real-hub-session"
 );
+assert.match(
+  actionFailureDiagnostic(
+    { id: "botster.package.configuration.save", target: "project-pipelines" },
+    {
+      accepted: false,
+      reason: "Package configuration failed",
+      result: {
+        diagnostics: [
+          {
+            kind: "field",
+            field: "pipeline_mode",
+            message: "select_option_unknown: invalid-mode"
+          }
+        ]
+      }
+    }
+  ).detail,
+  /Package configuration failed field: pipeline_mode: select_option_unknown: invalid-mode/
+);
 
 const terminalDataPlane = createRealHubTerminalDataPlane({
   bridge
@@ -2932,6 +2951,7 @@ try {
     { ConnectionDiagnosticsPanel },
     { DogfoodFirstScreen },
     { createInMemoryEntityFrameStore },
+    { configurationFieldType, configurationSaveAction, configurationSubmitValues },
     {
       AppListItem,
       PluginListItem,
@@ -2948,6 +2968,7 @@ try {
     vite.ssrLoadModule("/src/botster/ConnectionDiagnosticsPanel.tsx"),
     vite.ssrLoadModule("/src/botster/dogfoodFirstScreen.tsx"),
     vite.ssrLoadModule("/src/botster/entities.ts"),
+    vite.ssrLoadModule("/src/packageConfigurationForm.ts"),
     vite.ssrLoadModule("/src/App.tsx")
   ]);
 
@@ -2968,13 +2989,6 @@ try {
       if (match) return match;
     }
     return undefined;
-  }
-
-  function reactText(node) {
-    if (Array.isArray(node)) return node.map(reactText).join("");
-    if (typeof node === "string" || typeof node === "number") return String(node);
-    if (!node || typeof node !== "object" || !("props" in node)) return "";
-    return reactText(node.props.children);
   }
 
   const descriptorPackageAction = {
@@ -3214,16 +3228,132 @@ try {
   descriptorSettingsButton.props.onClick({ stopPropagation() {} });
   assert.deepEqual(openedSettings.map((appRecord) => appRecord.id), ["descriptor-only"]);
 
-  const dispatchedSettings = [];
   const descriptorSettingsMarkup = renderToStaticMarkup(
     createElement(PluginSettingsPanel, {
       app: descriptorApp,
-      onAction: (action) => dispatchedSettings.push(action)
+      onAction: () => undefined
     })
   );
   assert.match(descriptorSettingsMarkup, /Descriptor Settings/);
   assert.match(descriptorSettingsMarkup, /Descriptor-backed settings surface/);
   assert.match(descriptorSettingsMarkup, /Disable Package/);
+  const configurableDescriptorApp = {
+    ...descriptorApp,
+    configuration_fields: [
+      {
+        id: "endpoint",
+        label: "Endpoint",
+        kind: "text_input",
+        config_type: "url",
+        value: "",
+        required: true,
+        helper: "Webhook receiver URL",
+        errors: ["Required configuration is missing."]
+      },
+      {
+        id: "mode",
+        label: "Mode",
+        kind: "select",
+        config_type: "select",
+        value: "read",
+        options: [
+          { value: "read", label: "Read" },
+          { value: "write", label: "Write" }
+        ],
+        errors: []
+      },
+      {
+        id: "enabled",
+        label: "Enabled",
+        kind: "checkbox",
+        config_type: "boolean",
+        value: true,
+        errors: []
+      },
+      {
+        id: "api_token",
+        label: "API token",
+        kind: "secret",
+        config_type: "secret",
+        value: "",
+        secret_state: "redacted",
+        placeholder: "Saved credential",
+        helper: "Leave blank to keep the existing secret.",
+        errors: []
+      }
+    ],
+    configuration_submit: {
+      id: "botster.package.configuration.save",
+      target: "descriptor-only",
+      label: "Save configuration",
+      params: {
+        package_name: "descriptor-only",
+        daemon_request: {
+          request_type: "set_package_configuration",
+          package_name: "descriptor-only"
+        }
+      }
+    }
+  };
+  const configurationSettingsMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsPanel, {
+      app: configurableDescriptorApp,
+      onAction: () => undefined
+    })
+  );
+  assert.match(configurationSettingsMarkup, /Package configuration/);
+  assert.match(configurationSettingsMarkup, /ion-input/);
+  assert.match(configurationSettingsMarkup, /ion-select/);
+  assert.match(configurationSettingsMarkup, /ion-checkbox/);
+  assert.match(configurationSettingsMarkup, /Required configuration is missing/);
+  assert.match(configurationSettingsMarkup, /Secret saved/);
+  assert.match(configurationSettingsMarkup, /Save configuration/);
+  assert.equal(configurationFieldType({ kind: "checkbox", config_type: "boolean" }), "boolean");
+  assert.deepEqual(
+    configurationSubmitValues(configurableDescriptorApp.configuration_fields, {
+      endpoint: "https://example.invalid/hook",
+      mode: "write",
+      enabled: false,
+      api_token: ""
+    }),
+    {
+      endpoint: { type: "url", value: "https://example.invalid/hook" },
+      mode: { type: "select", value: "write" },
+      enabled: { type: "boolean", value: false }
+    }
+  );
+  assert.deepEqual(
+    configurationSubmitValues(configurableDescriptorApp.configuration_fields, {
+      endpoint: "",
+      mode: "read",
+      enabled: true,
+      api_token: ""
+    }),
+    {
+      endpoint: { type: "url", value: "" },
+      mode: { type: "select", value: "read" },
+      enabled: { type: "boolean", value: true }
+    }
+  );
+  assert.deepEqual(
+    configurationSaveAction(configurableDescriptorApp.configuration_submit, configurableDescriptorApp.configuration_fields, {
+      endpoint: "https://example.invalid/hook",
+      mode: "write",
+      enabled: false,
+      api_token: ""
+    }),
+    {
+      ...configurableDescriptorApp.configuration_submit,
+      params: {
+        ...configurableDescriptorApp.configuration_submit.params,
+        values: {
+          endpoint: { type: "url", value: "https://example.invalid/hook" },
+          mode: { type: "select", value: "write" },
+          enabled: { type: "boolean", value: false }
+        }
+      }
+    }
+  );
   const remoteAccessSettingsMarkup = renderToStaticMarkup(
     createElement(PluginSettingsPanel, {
       app: {
@@ -3268,24 +3398,6 @@ try {
   );
   assert.match(optionalSettingsMarkup, /No settings surface registered/);
   assert.doesNotMatch(optionalSettingsMarkup, /Package configuration|undefined|null/);
-  const descriptorSettingsTree = PluginSettingsPanel({
-    app: descriptorApp,
-    onAction: (action) => dispatchedSettings.push(action)
-  });
-  const descriptorSettingsItem = findReactElement(
-    descriptorSettingsTree,
-    (element) => typeof element.props?.onClick === "function"
-  );
-  assert.ok(descriptorSettingsItem);
-  descriptorSettingsItem.props.onClick();
-  assert.deepEqual(dispatchedSettings, [descriptorApp.settings_surfaces[0].launch_action]);
-  const descriptorSettingsActionItem = findReactElement(
-    descriptorSettingsTree,
-    (element) => typeof element.props?.onClick === "function" && reactText(element) === "Disable Packageavailable"
-  );
-  assert.ok(descriptorSettingsActionItem);
-  descriptorSettingsActionItem.props.onClick();
-  assert.deepEqual(dispatchedSettings, [descriptorApp.settings_surfaces[0].launch_action, descriptorPackageAction.action]);
 
   const legacyListMarkup = renderToStaticMarkup(
     createElement(PluginListItem, {

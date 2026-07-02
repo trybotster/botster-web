@@ -177,15 +177,30 @@ export function actionFailureDiagnostic(action: ActionBinding, result: ActionDis
     return undefined;
   }
 
+  const diagnostics = actionResultDiagnostics(result.result);
+  const detail = [result.reason ?? `The hub rejected ${action.id}.`, ...diagnostics].join(" ");
+
   return {
     id: `action-failure-${action.id}`,
     title: "Action failed",
-    detail: result.reason ?? `The hub rejected ${action.id}.`,
+    detail,
     severity: "warning",
     source: "action",
     actionId: action.id,
     actionTarget: action.target
   };
+}
+
+function actionResultDiagnostics(result: unknown): string[] {
+  if (!isRecord(result) || !Array.isArray(result.diagnostics)) return [];
+  return result.diagnostics.map((diagnostic) => {
+    if (typeof diagnostic === "string") return diagnostic;
+    if (!isRecord(diagnostic)) return "";
+    const kind = typeof diagnostic.kind === "string" ? diagnostic.kind : "";
+    const message = typeof diagnostic.message === "string" ? diagnostic.message : "";
+    const field = typeof diagnostic.field === "string" ? diagnostic.field : "";
+    return [kind, field, message].filter(Boolean).join(": ");
+  }).filter((diagnostic) => diagnostic.length > 0);
 }
 
 export function operatorErrorDiagnostic(frame: HubControlFrame): ConnectionDiagnostic | undefined {

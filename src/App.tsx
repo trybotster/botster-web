@@ -8,6 +8,7 @@ import {
   IonCardHeader,
   IonCardSubtitle,
   IonCardTitle,
+  IonCheckbox,
   IonChip,
   IonCol,
   IonContent,
@@ -26,7 +27,10 @@ import {
   IonNote,
   IonPage,
   IonRow,
+  IonSelect,
+  IonSelectOption,
   IonSplitPane,
+  IonTextarea,
   IonTitle,
   IonToast,
   IonToolbar,
@@ -72,6 +76,7 @@ import type { LocalWebrtcBootstrap } from "./botster/webrtcDaemonClient";
 import type { ActionBinding } from "./botster/actions";
 import type { TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
+import { configurationFieldType, configurationSaveAction } from "./packageConfigurationForm";
 
 const mobileUserAgentPattern = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
 
@@ -438,6 +443,9 @@ export default function App() {
           : undefined;
         if (packageFeedback) {
           setPackageActionToast(packageFeedback);
+        }
+        if (action.id === "botster.package.configuration.save") {
+          void runtimeClient.entities.pull({ family: "botster-web.package" });
         }
         updateLocalState({
           [statusKey]: result.accepted && isSpawnAction
@@ -1125,7 +1133,7 @@ export default function App() {
           </IonToolbar>
         </IonHeader>
         <IonContent>
-          {settingsPackage ? <PluginSettingsPanel app={settingsPackage} onAction={dispatchAction} /> : null}
+          {settingsPackage ? <PluginSettingsPanel app={settingsPackage} key={String(settingsPackage.id)} onAction={dispatchAction} /> : null}
         </IonContent>
       </IonModal>
       <IonToast
@@ -1288,10 +1296,21 @@ interface PluginSettingsPanelProps {
 export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps) {
   const settingsSurfaces = packageSettingsSurfaces(app);
   const actions = packageActions(app);
-  const configurationFields = packageSurfaceRecords(app.configuration_fields);
-  const remoteAccessField = configurationFields.find((field) => firstString(field.id) === "remote_browser_rendezvous_enabled");
-  const configurationMetadataFields = configurationFields.filter((field) => firstString(field.id) !== "remote_browser_rendezvous_enabled");
-  const configurationSubmit = configurationSubmitAction(app);
+  const configurationFields = useMemo(() => packageSurfaceRecords(app.configuration_fields), [app.configuration_fields]);
+  const remoteAccessField = useMemo(
+    () => configurationFields.find((field) => firstString(field.id) === "remote_browser_rendezvous_enabled"),
+    [configurationFields]
+  );
+  const genericConfigurationFields = useMemo(
+    () => configurationFields.filter((field) => firstString(field.id) !== "remote_browser_rendezvous_enabled"),
+    [configurationFields]
+  );
+  const configurationSubmit = packageActionFromValue(app.configuration_submit);
+  const configurationDraftBaseline = useMemo(
+    () => configurationDraftValues(genericConfigurationFields),
+    [genericConfigurationFields]
+  );
+  const configurationDraftBaselineKey = JSON.stringify(configurationDraftBaseline);
 
   return (
     <IonList lines="full">
@@ -1307,9 +1326,14 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
               onAction={onAction}
             />
           ) : null}
-          {configurationMetadataFields.map((field) => (
-            <ConfigurationMetadataItem field={field} key={configurationFieldKey(field)} />
-          ))}
+          {genericConfigurationFields.length > 0 ? (
+            <GenericConfigurationForm
+              fields={genericConfigurationFields}
+              key={configurationDraftBaselineKey}
+              onAction={onAction}
+              submit={configurationSubmit}
+            />
+          ) : null}
         </>
       ) : null}
       {settingsSurfaces.length > 0 ? (
@@ -1361,6 +1385,52 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
         );
       })}
     </IonList>
+  );
+}
+
+function GenericConfigurationForm({
+  fields,
+  submit,
+  onAction
+}: {
+  fields: PackageSurfaceRecord[];
+  submit: ActionBinding | undefined;
+  onAction: (action: ActionBinding) => void;
+}) {
+  const [configurationDraft, setConfigurationDraft] = useState<Record<string, unknown>>(() => configurationDraftValues(fields));
+
+  const updateConfigurationField = useCallback((field: PackageSurfaceRecord, value: unknown) => {
+    const id = configurationFieldId(field);
+    setConfigurationDraft((currentValues) => ({ ...currentValues, [id]: value }));
+  }, []);
+
+  const saveConfiguration = useCallback(() => {
+    if (!submit) return;
+
+    onAction(configurationSaveAction(submit, fields, configurationDraft));
+  }, [submit, fields, configurationDraft, onAction]);
+
+  return (
+    <>
+      {fields.map((field) => (
+        <ConfigurationFieldItem
+          field={field}
+          key={configurationFieldKey(field)}
+          onChange={updateConfigurationField}
+          value={configurationDraft[configurationFieldId(field)]}
+        />
+      ))}
+      <IonItem>
+        <IonButton
+          data-testid="package-configuration-save"
+          disabled={!submit || submit.disabled === true}
+          onClick={saveConfiguration}
+          slot="end"
+        >
+          {submit?.label ?? "Save configuration"}
+        </IonButton>
+      </IonItem>
+    </>
   );
 }
 
@@ -1420,11 +1490,19 @@ function RemoteAccessConfigurationItem({
   );
 }
 
-function ConfigurationMetadataItem({ field }: { field: PackageSurfaceRecord }) {
+function ConfigurationFieldItem({
+  field,
+  onChange,
+  value
+}: {
+  field: PackageSurfaceRecord;
+  onChange: (field: PackageSurfaceRecord, value: unknown) => void;
+  value: unknown;
+}) {
   const label = firstString(field.label, field.id) ?? "Configuration field";
   const kind = firstString(field.config_type, field.kind) ?? "string";
   const helper = firstString(field.helper, field.placeholder);
-  const errors = arrayOfStrings(field.errors);
+  const errors = configurationFieldErrors(field);
   const required = field.required === true;
 
   return (
@@ -1440,15 +1518,128 @@ function ConfigurationMetadataItem({ field }: { field: PackageSurfaceRecord }) {
           </IonNote>
         ))}
       </IonLabel>
-      {field.placeholder === "Existing secret is saved" ? (
-        <IonBadge slot="end" color="medium">Secret saved</IonBadge>
-      ) : null}
+      <ConfigurationFieldControl field={field} onChange={onChange} value={value} />
+      {configurationFieldSecretRedacted(field) && !value ? <IonBadge slot="end" color="medium">Secret saved</IonBadge> : null}
     </IonItem>
+  );
+}
+
+function ConfigurationFieldControl({
+  field,
+  onChange,
+  value
+}: {
+  field: PackageSurfaceRecord;
+  onChange: (field: PackageSurfaceRecord, value: unknown) => void;
+  value: unknown;
+}) {
+  const kind = formControlKind(field);
+  const placeholder = firstString(field.placeholder);
+  const label = firstString(field.label, field.id) ?? "Configuration field";
+  const fieldId = configurationFieldId(field);
+
+  if (kind === "checkbox") {
+    return (
+      <IonCheckbox
+        aria-label={label}
+        checked={value === true}
+        data-configuration-field={fieldId}
+        onIonChange={(event) => onChange(field, event.detail.checked === true)}
+        slot="end"
+      />
+    );
+  }
+
+  if (kind === "select") {
+    return (
+      <IonSelect
+        aria-label={label}
+        data-configuration-field={fieldId}
+        interface="popover"
+        onIonChange={(event) => onChange(field, event.detail.value ?? "")}
+        placeholder={placeholder}
+        slot="end"
+        value={value}
+      >
+        {configurationFieldOptions(field).map((option) => (
+          <IonSelectOption key={option.value} value={option.value}>
+            {option.label}
+          </IonSelectOption>
+        ))}
+      </IonSelect>
+    );
+  }
+
+  if (kind === "textarea") {
+    return (
+      <IonTextarea
+        aria-label={label}
+        data-configuration-field={fieldId}
+        onIonInput={(event) => onChange(field, event.detail.value ?? "")}
+        placeholder={placeholder}
+        slot="end"
+        value={typeof value === "string" ? value : ""}
+      />
+    );
+  }
+
+  return (
+    <IonInput
+      aria-label={label}
+      data-configuration-field={fieldId}
+      onIonInput={(event) => onChange(field, event.detail.value ?? "")}
+      placeholder={placeholder}
+      slot="end"
+      type={kind === "secret" ? "password" : "text"}
+      value={typeof value === "string" || typeof value === "number" ? String(value) : ""}
+    />
   );
 }
 
 function configurationFieldKey(field: PackageSurfaceRecord): string {
   return firstString(field.id, field.label, field.config_type) ?? JSON.stringify(field);
+}
+
+function configurationFieldId(field: PackageSurfaceRecord): string {
+  return firstString(field.id, field.label, field.config_type) ?? JSON.stringify(field);
+}
+
+function configurationDraftValues(fields: PackageSurfaceRecord[]): Record<string, unknown> {
+  return Object.fromEntries(fields.map((field) => [configurationFieldId(field), configurationFieldValue(field)]));
+}
+
+function configurationFieldValue(field: PackageSurfaceRecord): unknown {
+  if (formControlKind(field) === "checkbox") return field.value === true;
+  if (typeof field.value === "string" || typeof field.value === "number" || typeof field.value === "boolean") return field.value;
+  return "";
+}
+
+function formControlKind(field: PackageSurfaceRecord): string {
+  const configType = configurationFieldType(field);
+  if (configType === "multiline_text") return "textarea";
+  if (configType === "boolean") return "checkbox";
+  if (configType === "select") return "select";
+  if (configType === "secret") return "secret";
+  return firstString(field.kind) ?? "text_input";
+}
+
+function configurationFieldOptions(field: PackageSurfaceRecord): Array<{ value: string; label: string }> {
+  return packageSurfaceRecords(field.options).map((option) => ({
+    value: stringValue(option.value, ""),
+    label: stringValue(option.label, stringValue(option.value, ""))
+  })).filter((option) => option.value.length > 0);
+}
+
+function configurationFieldErrors(field: PackageSurfaceRecord): string[] {
+  return arrayOfStrings(field.errors);
+}
+
+function configurationFieldSecretRedacted(field: PackageSurfaceRecord): boolean {
+  return configurationFieldType(field) === "secret" && field.secret_state === "redacted";
+}
+
+function packageActionFromValue(value: unknown): ActionBinding | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as ActionBinding) : undefined;
 }
 
 function loadStatusLabel(status: DogfoodEntityLoadStatus): string {
@@ -1506,11 +1697,6 @@ export function surfaceLaunchAction(surface: PackageSurfaceRecord | undefined): 
 
 function packageActionBinding(record: PackageSurfaceRecord | undefined): ActionBinding | undefined {
   return record?.action && typeof record.action === "object" ? (record.action as ActionBinding) : undefined;
-}
-
-function configurationSubmitAction(app: Record<string, unknown>): ActionBinding | undefined {
-  const submit = app.configuration_submit;
-  return submit && typeof submit === "object" ? (submit as ActionBinding) : undefined;
 }
 
 function packageActionKey(record: PackageSurfaceRecord): string {

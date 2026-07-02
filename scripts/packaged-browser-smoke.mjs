@@ -128,6 +128,16 @@ async function runPackagedBrowserSmoke(scenario) {
     }
     await page.getByText("Remote browser rendezvous is off.").waitFor();
     await page.getByText("Local installed access stays available. Remote access requires opt-in, pairing, and device approval.").waitFor();
+    await page.getByText("Webhook endpoint *").waitFor();
+    await page.getByText("API token *").waitFor();
+    await page.getByText("Required configuration is missing.").waitFor();
+    await page.getByText("Secret saved").waitFor();
+    await page.locator("ion-input[data-configuration-field='endpoint'] input").fill("https://example.invalid/hook");
+    await page.locator("[data-testid='package-configuration-save']").click();
+    await page.getByText("Required configuration is missing.").waitFor({ state: "detached" });
+    await page.locator("ion-input[data-configuration-field='endpoint'] input").fill("");
+    await page.locator("[data-testid='package-configuration-save']").click();
+    await page.getByText("Required configuration is missing.").waitFor();
     await page.getByRole("button", { name: "Opt in" }).click();
     await page.getByText("Package action accepted").waitFor();
     await page.getByText("Remote browser rendezvous is opted in.").waitFor();
@@ -203,6 +213,22 @@ async function runPackagedBrowserSmoke(scenario) {
       if (!daemonRequests.some((request) => request.type === requiredRequest)) {
         throw new Error(`packaged browser smoke ${scenario.name} did not dispatch ${requiredRequest} through the bridge`);
       }
+    }
+    const configurationRequests = daemonRequests.filter((request) => request.type === "set_package_configuration");
+    if (configurationRequests.length < 2) {
+      throw new Error(`packaged browser smoke ${scenario.name} did not dispatch success and validation package configuration saves through the bridge`);
+    }
+    const successfulConfigurationRequest = configurationRequests.find(
+      (request) => request.values?.endpoint?.value === "https://example.invalid/hook"
+    );
+    if (!successfulConfigurationRequest) {
+      throw new Error(`packaged browser smoke ${scenario.name} did not submit the edited endpoint value through set_package_configuration`);
+    }
+    const invalidConfigurationRequest = configurationRequests.find(
+      (request) => request.values && !request.values.endpoint?.value
+    );
+    if (!invalidConfigurationRequest) {
+      throw new Error(`packaged browser smoke ${scenario.name} did not submit an invalid package configuration round trip`);
     }
     const remoteAccessRequests = daemonRequests.filter((request) =>
       request.type === "set_package_configuration" &&
@@ -321,7 +347,9 @@ function createFakeDaemon(path, requests, scenario) {
   const state = {
     inputBuffers: new Map(),
     latestSubscriptions: new Map(),
-    terminalQueues: new Map()
+    terminalQueues: new Map(),
+    packageConfigured: false,
+    remoteAccessEnabled: false
   };
 
   return createNetServer((socket) => {
@@ -403,16 +431,22 @@ function daemonResponse(request, scenario, state) {
   if (request.type === "list_packages") {
     return {
       kind: "packages",
-      packages: [configurableSmokePackage(false)],
+      packages: [configurableSmokePackage(state.packageConfigured, state.remoteAccessEnabled)],
       events: []
     };
   }
 
   if (request.type === "set_package_configuration") {
-    const remoteAccessValue = request.values?.remote_browser_rendezvous_enabled?.value === true;
+    const endpoint = request.values?.endpoint;
+    if (endpoint && typeof endpoint === "object" && "value" in endpoint) {
+      state.packageConfigured = Boolean(endpoint.value);
+    }
+    if (Object.hasOwn(request.values ?? {}, "remote_browser_rendezvous_enabled")) {
+      state.remoteAccessEnabled = request.values?.remote_browser_rendezvous_enabled?.value === true;
+    }
     return {
       kind: "packages",
-      packages: [configurableSmokePackage(remoteAccessValue)],
+      packages: [configurableSmokePackage(state.packageConfigured, state.remoteAccessEnabled)],
       events: []
     };
   }
@@ -446,7 +480,7 @@ function daemonResponse(request, scenario, state) {
           message: "botster-web package disabled"
         }
       ],
-      packages: [configurableSmokePackage(true)],
+      packages: [configurableSmokePackage(state.packageConfigured, state.remoteAccessEnabled)],
       events: []
     };
   }
@@ -574,7 +608,7 @@ function daemonResponse(request, scenario, state) {
   };
 }
 
-function configurableSmokePackage(remoteAccessEnabled) {
+function configurableSmokePackage(packageConfigured, remoteAccessEnabled) {
   return {
     package_name: "botster-web",
     version: "0.1.0",
@@ -604,6 +638,20 @@ function configurableSmokePackage(remoteAccessEnabled) {
       schema: {
         fields: [
           {
+            key: "endpoint",
+            type: "url",
+            label: "Webhook endpoint",
+            description: "Endpoint for package callbacks.",
+            required: true
+          },
+          {
+            key: "api_token",
+            type: "secret",
+            label: "API token",
+            description: "Token used by the package.",
+            required: true
+          },
+          {
             key: "remote_browser_rendezvous_enabled",
             type: "boolean",
             label: "Remote browser access",
@@ -613,9 +661,11 @@ function configurableSmokePackage(remoteAccessEnabled) {
         ]
       },
       effective_values: {
+        ...(packageConfigured ? { endpoint: { type: "string", value: "https://example.invalid/hook" } } : {}),
+        api_token: { type: "secret", state: "redacted" },
         remote_browser_rendezvous_enabled: { type: "boolean", value: remoteAccessEnabled }
       },
-      missing_required: [],
+      missing_required: packageConfigured ? [] : ["endpoint"],
       diagnostics: []
     },
     actions: [
