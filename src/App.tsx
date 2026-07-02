@@ -71,7 +71,7 @@ import {
   webRtcLifecycleDiagnostic,
   type ConnectionDiagnostic
 } from "./botster/connectionDiagnostics";
-import { createDogfoodRuntimeConfig, type TerminalDataPlaneKind } from "./botster/dogfoodMode";
+import { createDogfoodRuntimeConfig, terminalDataPlaneLabel } from "./botster/dogfoodMode";
 import { realHubDogfoodSessionId } from "./botster/realHubDogfoodTransport";
 import { webRtcDaemonLifecycleEventName, type LocalWebrtcBootstrap, type WebrtcDaemonLifecycleEvent } from "./botster/webrtcDaemonClient";
 import type { ActionBinding } from "./botster/actions";
@@ -117,17 +117,6 @@ function appViewUrl(view: AppView): string {
   const url = new URL(window.location.href);
   url.pathname = appViewPaths[view];
   return `${url.pathname}${url.search}${url.hash}`;
-}
-
-export function terminalDataPlaneLabel(kind: TerminalDataPlaneKind): string {
-  switch (kind) {
-    case "webrtc":
-      return "WebRTC DataChannel";
-    case "real-hub":
-      return "Bridge/SSE";
-    case "mock":
-      return "Fixture";
-  }
 }
 
 function pushAppViewUrl(view: AppView): void {

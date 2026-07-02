@@ -100,6 +100,7 @@ assert.match(app, /packageRuntime \? \{ bridgeUrl: `\$\{window\.location\.origin
 assert.match(app, /__BOTSTER_PACKAGE_RUNTIME__/);
 assert.match(app, /initialConnectionDiagnostics\(dogfoodRuntime\.mode, dogfoodRuntime\.statusText, dogfoodRuntime\.terminalDataPlaneKind\)/);
 assert.match(app, /terminalDataPlaneLabel\(dogfoodRuntime\.terminalDataPlaneKind\)/);
+assert.match(app, /window\.addEventListener\(webRtcDaemonLifecycleEventName, recordWebRtcLifecycle\)/);
 assert.match(app, /runtimeClient\.hub\.subscribeSurface/);
 assert.match(app, /runtimeClient\.entities\.pull/);
 assert.match(app, /const appViewPaths: Record<AppView, string>/);
@@ -319,9 +320,14 @@ assert.match(liveProtocolHarnessScript, /waitForTerminalCanvas/);
 assert.match(liveProtocolHarnessScript, /waitForDaemonRequestCount/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
 assert.match(liveProtocolHarnessScript, /type: "send_input"/);
-assert.match(liveProtocolHarnessScript, /typeThroughMountedTerminal\(page, `\$\{echoProbe\}\\n`\)/);
+assert.match(liveProtocolHarnessScript, /typeThroughMountedTerminal\(page, typedEchoInput\)/);
 assert.match(liveProtocolHarnessScript, /callTerminalControl\(page, "focus"\)/);
-assert.match(liveProtocolHarnessScript, /page\.keyboard\.insertText\(data\)/);
+assert.match(liveProtocolHarnessScript, /new globalThis\.KeyboardEvent\("keydown"/);
+assert.match(liveProtocolHarnessScript, /new globalThis\.KeyboardEvent\("keyup"/);
+assert.match(liveProtocolHarnessScript, /keyboard echo send_input requests/);
+assert.doesNotMatch(liveProtocolHarnessScript, /terminalRendererInput/);
+assert.match(resttyRenderer, /inputWriteQueue: Promise<void> = Promise\.resolve\(\)/);
+assert.match(resttyRenderer, /\.then\(\(\) => dataPlane\.writeInput\(data\)\)/);
 assert.doesNotMatch(liveProtocolHarnessScript, /callTerminalControl\(page, "writeInput", `\$\{echoProbe\}\\n`\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalAttachState\(page, \["attached"\]\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/);
@@ -787,7 +793,7 @@ await Promise.all([
 const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
 const { createBotsterWebClient } = requireRuntime("./botster/client.js");
 const { createLocalDogfoodTransport } = requireRuntime("./botster/localDogfoodTransport.js");
-const { createDogfoodRuntimeConfig } = requireRuntime("./botster/dogfoodMode.js");
+const { createDogfoodRuntimeConfig, terminalDataPlaneLabel } = requireRuntime("./botster/dogfoodMode.js");
 const {
   createHttpDaemonBridgeClient,
   createRealHubDogfoodTransport,
@@ -796,7 +802,11 @@ const {
   realHubDogfoodSessionId
 } = requireRuntime("./botster/realHubDogfoodTransport.js");
 const { createRealHubTerminalDataPlane } = requireRuntime("./botster/realHubTerminalDataPlane.js");
-const { createWebrtcDaemonClient, WebrtcDaemonClientError } = requireRuntime("./botster/webrtcDaemonClient.js");
+const {
+  createWebrtcDaemonClient,
+  WebrtcDaemonClientError,
+  webRtcDaemonLifecycleEventName
+} = requireRuntime("./botster/webrtcDaemonClient.js");
 const { DefaultTerminalViewBridge } = requireRuntime("./botster/terminal.js");
 const {
   generatedDaemonRequestFixtures,
@@ -1733,20 +1743,32 @@ assert.equal(
   webRtcModeDiagnostics.find((diagnostic) => diagnostic.id === "package-asset-revision").title,
   "Package asset revision unknown"
 );
+const mismatchedModeDiagnostics = initialConnectionDiagnostics("real-hub", realMode.statusText, "webrtc");
+assert.equal(
+  mismatchedModeDiagnostics.some((diagnostic) => diagnostic.id === "webrtc-signaling-bridge"),
+  true
+);
+assert.equal(
+  mismatchedModeDiagnostics.some((diagnostic) => diagnostic.id === "bridge-sse-data-transport"),
+  false
+);
 const originalWindow = globalThis.window;
+const lifecycleEvents = [];
 globalThis.window = {
   location: { origin: "http://127.0.0.1:41739" },
   setTimeout,
-  clearTimeout
+  clearTimeout,
+  dispatchEvent(event) {
+    lifecycleEvents.push({ name: event.type, detail: event.detail });
+    return true;
+  }
 };
 try {
   const dataChannel = createFakeDataChannel();
   const peerConnection = createFakePeerConnection(dataChannel);
   const signalingRequests = [];
-  const lifecycleEvents = [];
   const webrtcClient = createWebrtcDaemonClient({
     bootstrap: localWebrtcBootstrapFixture,
-    onLifecycle: (event) => lifecycleEvents.push(event),
     peerConnectionFactory: () => peerConnection,
     fetchImpl: async (_url, init) => {
       const envelope = JSON.parse(init.body);
@@ -1768,18 +1790,19 @@ try {
   await waitForTestCondition(() => signalingRequests.length > 0);
   assert.equal(signalingRequests[0].type, "local_webrtc_signal");
   assert.equal(signalingRequests[0].grant_id, "grant-test");
-  await waitForTestCondition(() => lifecycleEvents.some((event) => event.type === "data-channel-open"));
+  await waitForTestCondition(() => lifecycleEvents.some((event) => event.detail.type === "data-channel-open"));
+  assert.equal(lifecycleEvents.find((event) => event.detail.type === "data-channel-open").name, webRtcDaemonLifecycleEventName);
   assert.equal(
-    webRtcLifecycleDiagnostic(lifecycleEvents.find((event) => event.type === "data-channel-open")).title,
+    webRtcLifecycleDiagnostic(lifecycleEvents.find((event) => event.detail.type === "data-channel-open").detail).title,
     "WebRTC DataChannel open"
   );
   await waitForTestCondition(() => dataChannel.sent.length > 0);
   assert.equal(
-    lifecycleEvents.some((event) => event.type === "encrypted-stream-ready" && event.requestType === "status"),
+    lifecycleEvents.some((event) => event.detail.type === "encrypted-stream-ready" && event.detail.requestType === "status"),
     true
   );
   assert.equal(
-    webRtcLifecycleDiagnostic(lifecycleEvents.find((event) => event.type === "encrypted-stream-ready")).title,
+    webRtcLifecycleDiagnostic(lifecycleEvents.find((event) => event.detail.type === "encrypted-stream-ready").detail).title,
     "Encrypted client stream ready"
   );
   assert.equal(dataChannel.sent.length, 1);
@@ -1791,6 +1814,17 @@ try {
     { kind: "status", status: null, sessions: [], packages: [], package_decision: null, lifecycle: [], plugin_tools: [], plugin_tool_result: null, events: [], cleanup: null, coordination: null, error: null }
   ));
   assert.equal((await responsePromise).kind, "status");
+  const secondResponsePromise = webrtcClient.request({ type: "list_sessions" });
+  await waitForTestCondition(() => dataChannel.sent.length > 1);
+  dataChannel.emitMessage(await encryptTestEnvelope(
+    "secret-0000000000000000000000000000000000000000000000000000000000000000",
+    { kind: "sessions", sessions: [], events: [], diagnostics: [] }
+  ));
+  assert.equal((await secondResponsePromise).kind, "sessions");
+  assert.equal(
+    lifecycleEvents.filter((event) => event.detail.type === "encrypted-stream-ready").length,
+    1
+  );
 
   const invalidBootstrapClient = createWebrtcDaemonClient({
     bootstrap: {
@@ -3007,8 +3041,7 @@ try {
       PluginSettingsPanel,
       packageAppSurfaces,
       packageSettingsSurfaces,
-      surfaceLaunchAction,
-      terminalDataPlaneLabel
+      surfaceLaunchAction
     }
   ] = await Promise.all([
     vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),

@@ -121,6 +121,7 @@ class WebrtcDaemonTransport {
   private dataChannel: RTCDataChannel | undefined;
   private cryptoKey: CryptoKey | undefined;
   private connectPromise: Promise<void> | undefined;
+  private encryptedStreamReady = false;
 
   constructor(private readonly options: WebrtcDaemonClientOptions) {
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
@@ -153,7 +154,10 @@ class WebrtcDaemonTransport {
     }
     try {
       channel.send(JSON.stringify(envelope));
-      this.emitLifecycle({ type: "encrypted-stream-ready", requestType: request.type });
+      if (!this.encryptedStreamReady) {
+        this.encryptedStreamReady = true;
+        this.emitLifecycle({ type: "encrypted-stream-ready", requestType: request.type });
+      }
     } catch (error) {
       throw webrtcFailure("data-plane", `local WebRTC data-plane send failed for ${request.type}: ${errorMessage(error)}`);
     }

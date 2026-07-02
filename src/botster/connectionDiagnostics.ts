@@ -71,7 +71,7 @@ export function initialConnectionDiagnostics(
   statusText: string,
   terminalDataPlaneKind: TerminalDataPlaneKind = mode === "real-hub" ? "real-hub" : mode === "webrtc" ? "webrtc" : "mock"
 ): ConnectionDiagnostic[] {
-  const localHubMode = mode === "real-hub" || mode === "webrtc";
+  const localHubMode = terminalDataPlaneKind === "real-hub" || terminalDataPlaneKind === "webrtc";
   const diagnostics: ConnectionDiagnostic[] = [
     dataPlaneDiagnostic(terminalDataPlaneKind),
     {
@@ -83,7 +83,7 @@ export function initialConnectionDiagnostics(
     }
   ];
 
-  if (mode === "webrtc") {
+  if (terminalDataPlaneKind === "webrtc") {
     diagnostics.push(
       {
         id: "packaged-ui-bridge",
@@ -107,7 +107,7 @@ export function initialConnectionDiagnostics(
         source: "signaling"
       }
     );
-  } else if (mode === "real-hub") {
+  } else if (terminalDataPlaneKind === "real-hub") {
     diagnostics.push({
       id: "bridge-sse-data-transport",
       title: "Bridge/SSE terminal transport active",

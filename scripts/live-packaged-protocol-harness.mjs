@@ -124,26 +124,25 @@ try {
   await waitForTerminalOutput(page, "botster-web-dogfood-ready");
   await waitForTerminalRendererWrite(page, "botster-web-dogfood-ready");
 
+  const typedEchoInput = `${echoProbe}\n`;
   const sendInputRequestsBeforeEcho = await daemonRequestCount(page, {
-    type: "send_input",
-    data: `${echoProbe}\n`
+    type: "send_input"
   });
-  await typeThroughMountedTerminal(page, `${echoProbe}\n`);
+  await typeThroughMountedTerminal(page, typedEchoInput);
   await waitForDaemonRequestCount(
     page,
-    { type: "send_input", data: `${echoProbe}\n` },
-    sendInputRequestsBeforeEcho + 1,
-    "single echo send_input request"
+    { type: "send_input" },
+    sendInputRequestsBeforeEcho + typedEchoInput.length,
+    "keyboard echo send_input requests"
   );
   await waitForTerminalOutput(page, `botster-web-dogfood-echo:${echoProbe}`);
   await waitForTerminalRendererWrite(page, `botster-web-dogfood-echo:${echoProbe}`);
   const sendInputRequestsAfterEcho = await daemonRequestCount(page, {
-    type: "send_input",
-    data: `${echoProbe}\n`
+    type: "send_input"
   });
-  if (sendInputRequestsAfterEcho !== sendInputRequestsBeforeEcho + 1) {
+  if (sendInputRequestsAfterEcho !== sendInputRequestsBeforeEcho + typedEchoInput.length) {
     throw new Error(
-      `expected one send_input for ${echoProbe}, observed ${sendInputRequestsAfterEcho - sendInputRequestsBeforeEcho}`
+      `expected ${typedEchoInput.length} keyboard send_input requests for ${echoProbe}, observed ${sendInputRequestsAfterEcho - sendInputRequestsBeforeEcho}`
     );
   }
   await waitForTerminalAttachState(page, ["attached"]);
@@ -337,9 +336,36 @@ async function callTerminalControl(page, method, ...args) {
 async function typeThroughMountedTerminal(page, data) {
   await waitForTerminalCanvas(page);
   await callTerminalControl(page, "focus");
-  const canvas = page.locator(".terminal-view-container canvas").first();
-  await canvas.click({ position: { x: 10, y: 10 } });
-  await page.keyboard.insertText(data);
+  await page.evaluate(async (nextText) => {
+    const keyDescriptor = (character) => {
+      if (character === "\n") return { key: "Enter", code: "Enter" };
+      if (character === "-") return { key: "-", code: "Minus" };
+      if (/^[a-z]$/.test(character)) return { key: character, code: `Key${character.toUpperCase()}` };
+      if (/^[0-9]$/.test(character)) return { key: character, code: `Digit${character}` };
+      return { key: character, code: "" };
+    };
+
+    for (const character of nextText) {
+      const descriptor = keyDescriptor(character);
+      globalThis.dispatchEvent(
+        new globalThis.KeyboardEvent("keydown", {
+          key: descriptor.key,
+          code: descriptor.code,
+          bubbles: true,
+          cancelable: true
+        })
+      );
+      globalThis.dispatchEvent(
+        new globalThis.KeyboardEvent("keyup", {
+          key: descriptor.key,
+          code: descriptor.code,
+          bubbles: true,
+          cancelable: true
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }, data);
 }
 
 async function openAppsView(page) {

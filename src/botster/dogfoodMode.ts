@@ -13,6 +13,17 @@ import { MockTerminalDataPlane, type TerminalDataPlaneAttachment, type TerminalV
 export type DogfoodModeName = "fixture" | "real-hub" | "webrtc";
 export type TerminalDataPlaneKind = "mock" | "real-hub" | "webrtc";
 
+export function terminalDataPlaneLabel(kind: TerminalDataPlaneKind): string {
+  switch (kind) {
+    case "webrtc":
+      return "WebRTC DataChannel";
+    case "real-hub":
+      return "Bridge/SSE";
+    case "mock":
+      return "Fixture";
+  }
+}
+
 export interface DogfoodRuntimeConfig {
   mode: DogfoodModeName;
   statusText: string;
