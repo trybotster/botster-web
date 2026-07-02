@@ -98,6 +98,8 @@ assert.match(app, /createDogfoodRuntimeConfig/);
 assert.match(app, /platform:\s*\{\s*desktop:/);
 assert.match(app, /packageRuntime \? \{ bridgeUrl: `\$\{window\.location\.origin\}\/request` \} : \{\}/);
 assert.match(app, /__BOTSTER_PACKAGE_RUNTIME__/);
+assert.match(app, /initialConnectionDiagnostics\(dogfoodRuntime\.mode, dogfoodRuntime\.statusText, dogfoodRuntime\.terminalDataPlaneKind\)/);
+assert.match(app, /terminalDataPlaneLabel\(dogfoodRuntime\.terminalDataPlaneKind\)/);
 assert.match(app, /runtimeClient\.hub\.subscribeSurface/);
 assert.match(app, /runtimeClient\.entities\.pull/);
 assert.match(app, /const appViewPaths: Record<AppView, string>/);
@@ -808,11 +810,13 @@ const {
   connectionFailureDiagnostic,
   hubConnectionDiagnosticFromFrame,
   hubStatusFamily,
+  initialConnectionDiagnostics,
   operatorErrorDiagnostic,
   schemaVersionDiagnosticFromFrame,
   streamDisconnectedDiagnostic,
   terminalUnavailableDiagnostic,
   upsertDiagnostic,
+  webRtcLifecycleDiagnostic,
   webRtcFailureDiagnostic
 } = requireRuntime("./botster/connectionDiagnostics.js");
 
@@ -1699,6 +1703,36 @@ const packageWebrtcMode = createDogfoodRuntimeConfig({
 assert.equal(packageWebrtcMode.mode, "webrtc");
 assert.equal(packageWebrtcMode.terminalDataPlaneKind, "webrtc");
 assert.equal(packageWebrtcMode.statusText, "Connected to local hub over WebRTC");
+const realModeDiagnostics = initialConnectionDiagnostics(realMode.mode, realMode.statusText, realMode.terminalDataPlaneKind);
+assert.equal(
+  realModeDiagnostics.find((diagnostic) => diagnostic.id === "terminal-data-plane").title,
+  "Terminal data plane: bridge/SSE"
+);
+assert.equal(
+  realModeDiagnostics.find((diagnostic) => diagnostic.id === "bridge-sse-data-transport").source,
+  "data-plane"
+);
+assert.equal(
+  realModeDiagnostics.some((diagnostic) => /bootstrap\/signaling only/.test(diagnostic.detail)),
+  false
+);
+const webRtcModeDiagnostics = initialConnectionDiagnostics(packageWebrtcMode.mode, packageWebrtcMode.statusText, packageWebrtcMode.terminalDataPlaneKind);
+assert.equal(
+  webRtcModeDiagnostics.find((diagnostic) => diagnostic.id === "terminal-data-plane").title,
+  "Terminal data plane: WebRTC DataChannel"
+);
+assert.equal(
+  webRtcModeDiagnostics.find((diagnostic) => diagnostic.id === "webrtc-signaling-bridge").source,
+  "signaling"
+);
+assert.match(
+  webRtcModeDiagnostics.find((diagnostic) => diagnostic.id === "packaged-ui-bridge").detail,
+  /terminal bytes use the WebRTC data plane/
+);
+assert.equal(
+  webRtcModeDiagnostics.find((diagnostic) => diagnostic.id === "package-asset-revision").title,
+  "Package asset revision unknown"
+);
 const originalWindow = globalThis.window;
 globalThis.window = {
   location: { origin: "http://127.0.0.1:41739" },
@@ -1709,8 +1743,10 @@ try {
   const dataChannel = createFakeDataChannel();
   const peerConnection = createFakePeerConnection(dataChannel);
   const signalingRequests = [];
+  const lifecycleEvents = [];
   const webrtcClient = createWebrtcDaemonClient({
     bootstrap: localWebrtcBootstrapFixture,
+    onLifecycle: (event) => lifecycleEvents.push(event),
     peerConnectionFactory: () => peerConnection,
     fetchImpl: async (_url, init) => {
       const envelope = JSON.parse(init.body);
@@ -1732,7 +1768,20 @@ try {
   await waitForTestCondition(() => signalingRequests.length > 0);
   assert.equal(signalingRequests[0].type, "local_webrtc_signal");
   assert.equal(signalingRequests[0].grant_id, "grant-test");
+  await waitForTestCondition(() => lifecycleEvents.some((event) => event.type === "data-channel-open"));
+  assert.equal(
+    webRtcLifecycleDiagnostic(lifecycleEvents.find((event) => event.type === "data-channel-open")).title,
+    "WebRTC DataChannel open"
+  );
   await waitForTestCondition(() => dataChannel.sent.length > 0);
+  assert.equal(
+    lifecycleEvents.some((event) => event.type === "encrypted-stream-ready" && event.requestType === "status"),
+    true
+  );
+  assert.equal(
+    webRtcLifecycleDiagnostic(lifecycleEvents.find((event) => event.type === "encrypted-stream-ready")).title,
+    "Encrypted client stream ready"
+  );
   assert.equal(dataChannel.sent.length, 1);
   assert.doesNotMatch(dataChannel.sent[0], /"type":"status"/);
   const outboundEnvelope = JSON.parse(dataChannel.sent[0]);
@@ -2958,7 +3007,8 @@ try {
       PluginSettingsPanel,
       packageAppSurfaces,
       packageSettingsSurfaces,
-      surfaceLaunchAction
+      surfaceLaunchAction,
+      terminalDataPlaneLabel
     }
   ] = await Promise.all([
     vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
@@ -2990,6 +3040,10 @@ try {
     }
     return undefined;
   }
+
+  assert.equal(terminalDataPlaneLabel("webrtc"), "WebRTC DataChannel");
+  assert.equal(terminalDataPlaneLabel("real-hub"), "Bridge/SSE");
+  assert.equal(terminalDataPlaneLabel("mock"), "Fixture");
 
   const descriptorPackageAction = {
     id: "descriptor-only:disable_package",

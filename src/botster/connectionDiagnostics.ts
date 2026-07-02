@@ -1,5 +1,7 @@
 import type { ActionBinding, ActionDispatchResult } from "./actions";
+import type { TerminalDataPlaneKind } from "./dogfoodMode";
 import type { HubControlFrame } from "./protocol";
+import type { WebrtcDaemonLifecycleEvent } from "./webrtcDaemonClient";
 
 export const expectedDaemonSchemaVersion = 1;
 export const hubStatusFamily = "botster-web.hub_status";
@@ -64,9 +66,59 @@ export function hubConnectionDiagnosticFromFrame(frame: HubControlFrame): Connec
   };
 }
 
-export function initialConnectionDiagnostics(mode: string, statusText: string): ConnectionDiagnostic[] {
+export function initialConnectionDiagnostics(
+  mode: string,
+  statusText: string,
+  terminalDataPlaneKind: TerminalDataPlaneKind = mode === "real-hub" ? "real-hub" : mode === "webrtc" ? "webrtc" : "mock"
+): ConnectionDiagnostic[] {
   const localHubMode = mode === "real-hub" || mode === "webrtc";
+  const diagnostics: ConnectionDiagnostic[] = [
+    dataPlaneDiagnostic(terminalDataPlaneKind),
+    {
+      id: "package-asset-revision",
+      title: "Package asset revision unknown",
+      detail: "No package build timestamp or asset revision was provided to the browser runtime.",
+      severity: "info",
+      source: "compatibility"
+    }
+  ];
+
+  if (mode === "webrtc") {
+    diagnostics.push(
+      {
+        id: "packaged-ui-bridge",
+        title: "Packaged UI bridge serving",
+        detail: "The local bridge served the packaged botster-web UI and bootstrap metadata; terminal bytes use the WebRTC data plane after signaling.",
+        severity: "success",
+        source: "bridge"
+      },
+      {
+        id: "webrtc-bootstrap-ready",
+        title: "Local WebRTC bootstrap ready",
+        detail: "A local WebRTC bootstrap grant is present for same-device daemon signaling.",
+        severity: "success",
+        source: "pairing"
+      },
+      {
+        id: "webrtc-signaling-bridge",
+        title: "Local WebRTC signaling via bridge",
+        detail: "The bridge is used for local signaling/bootstrap; it is not labeled as the terminal data transport in WebRTC mode.",
+        severity: "info",
+        source: "signaling"
+      }
+    );
+  } else if (mode === "real-hub") {
+    diagnostics.push({
+      id: "bridge-sse-data-transport",
+      title: "Bridge/SSE terminal transport active",
+      detail: "WebRTC bootstrap is unavailable in this runtime, so the real-hub bridge/SSE stream carries terminal data.",
+      severity: "info",
+      source: "data-plane"
+    });
+  }
+
   return [
+    ...diagnostics,
     {
       id: "bridge-mode",
       title: mode === "webrtc" ? "Local hub WebRTC selected" : mode === "real-hub" ? "Real hub bridge selected" : "Fixture transport selected",
@@ -75,6 +127,72 @@ export function initialConnectionDiagnostics(mode: string, statusText: string): 
       source: mode === "webrtc" ? "stream" : "bridge"
     }
   ];
+}
+
+export function dataPlaneDiagnostic(kind: TerminalDataPlaneKind): ConnectionDiagnostic {
+  switch (kind) {
+    case "webrtc":
+      return {
+        id: "terminal-data-plane",
+        title: "Terminal data plane: WebRTC DataChannel",
+        detail: "Terminal requests and terminal stream polling use the encrypted local WebRTC DataChannel after bootstrap/signaling.",
+        severity: "success",
+        source: "data-plane"
+      };
+    case "real-hub":
+      return {
+        id: "terminal-data-plane",
+        title: "Terminal data plane: bridge/SSE",
+        detail: "Terminal traffic uses the real-hub bridge request and SSE stream fallback.",
+        severity: "info",
+        source: "data-plane"
+      };
+    case "mock":
+      return {
+        id: "terminal-data-plane",
+        title: "Terminal data plane: fixture",
+        detail: "Terminal traffic is served by the local fixture data plane.",
+        severity: "success",
+        source: "data-plane"
+      };
+  }
+}
+
+export function webRtcLifecycleDiagnostic(event: WebrtcDaemonLifecycleEvent): ConnectionDiagnostic {
+  switch (event.type) {
+    case "data-channel-open":
+      return {
+        id: "webrtc-data-channel-state",
+        title: "WebRTC DataChannel open",
+        detail: "The local daemon WebRTC DataChannel is open for encrypted request/response traffic.",
+        severity: "success",
+        source: "webrtc"
+      };
+    case "data-channel-closed":
+      return {
+        id: "webrtc-data-channel-state",
+        title: "WebRTC DataChannel closed",
+        detail: "The local daemon WebRTC DataChannel closed; terminal data-plane requests cannot continue until reconnect.",
+        severity: "danger",
+        source: "webrtc"
+      };
+    case "data-channel-error":
+      return {
+        id: "webrtc-data-channel-state",
+        title: "WebRTC DataChannel error",
+        detail: "The local daemon WebRTC DataChannel reported an error.",
+        severity: "danger",
+        source: "webrtc"
+      };
+    case "encrypted-stream-ready":
+      return {
+        id: "webrtc-encrypted-stream",
+        title: "Encrypted client stream ready",
+        detail: `Encrypted WebRTC request/response traffic is active for ${event.requestType}.`,
+        severity: "success",
+        source: "encryption"
+      };
+  }
 }
 
 export function bridgeUnavailableDiagnostic(error: unknown): ConnectionDiagnostic {
