@@ -28,6 +28,7 @@ const [
   generatedDaemonProtocol,
   realHubDogfoodTransport,
   realHubTerminalDataPlane,
+  webrtcDaemonClient,
   connectionDiagnostics,
   connectionDiagnosticsPanel,
   dogfoodFirstScreen,
@@ -60,6 +61,7 @@ const [
   readFile(new URL("./botster/generated/daemon-protocol.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/realHubDogfoodTransport.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/realHubTerminalDataPlane.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/webrtcDaemonClient.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/connectionDiagnostics.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/ConnectionDiagnosticsPanel.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/dogfoodFirstScreen.tsx", import.meta.url), "utf8"),
@@ -315,6 +317,10 @@ assert.match(liveProtocolHarnessScript, /waitForTerminalCanvas/);
 assert.match(liveProtocolHarnessScript, /waitForDaemonRequestCount/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
 assert.match(liveProtocolHarnessScript, /type: "send_input"/);
+assert.match(liveProtocolHarnessScript, /typeThroughMountedTerminal\(page, `\$\{echoProbe\}\\n`\)/);
+assert.match(liveProtocolHarnessScript, /callTerminalControl\(page, "focus"\)/);
+assert.match(liveProtocolHarnessScript, /page\.keyboard\.insertText\(data\)/);
+assert.doesNotMatch(liveProtocolHarnessScript, /callTerminalControl\(page, "writeInput", `\$\{echoProbe\}\\n`\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalAttachState\(page, \["attached"\]\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-echo:/);
@@ -367,8 +373,8 @@ assert.match(resttyRenderer, /connectPty\(\)/);
 assert.doesNotMatch(resttyRenderer, /connectPty\(dataPlane\.sessionId\)/);
 assert.match(resttyRenderer, /dataPlane\.resize\(rows, cols\)/);
 assert.doesNotMatch(resttyRenderer, /fontPreset:\s*"none"/);
-assert.match(resttyRenderer, /terminalRendererInput/);
-assert.match(resttyRenderer, /sendInput\(data, "key"\)/);
+assert.doesNotMatch(resttyRenderer, /terminalRendererInput/);
+assert.doesNotMatch(resttyRenderer, /sendInput\(data, "key"\)/);
 assert.match(resttyRenderer, /this\.terminal\?\.destroy\(\)/);
 assert.doesNotMatch(terminalHost, /ResizeObserver/);
 assert.doesNotMatch(terminalHost, /requestAnimationFrame/);
@@ -376,6 +382,7 @@ assert.doesNotMatch(terminalHost, /cancelAnimationFrame/);
 assert.match(terminalHost, /data-terminal-attach-state/);
 assert.match(terminalHost, /subscribeStatus/);
 assert.match(terminalHost, /bridge\.attach/);
+assert.match(terminalHost, /focus: \(\) => bridge\.focus\(descriptor\)/);
 assert.match(terminalHost, /bridge\.unmount/);
 assert.match(terminalHost, /delete harness\.terminalControl/);
 assert.match(terminalHost, /terminalMount/);
@@ -399,7 +406,24 @@ assert.match(readme, /BOTSTER_HUB_BIN/);
 assert.match(readme, /BOTSTER_HUB_SOCKET/);
 assert.match(readme, /BOTSTER_HUB_DATA_DIR/);
 assert.match(readme, /smoke:live-packaged-protocol/);
-assert.match(readme, /not prove the production WebRTC data plane/);
+assert.match(readme, /Installed package runtime prefers the hub-issued local WebRTC bootstrap grant/);
+assert.match(architecture, /src\/botster\/webrtcDaemonClient\.ts/);
+assert.match(architecture, /AesGcmEnvelope/);
+assert.match(generatedDaemonProtocol, /export interface AesGcmEnvelope/);
+assert.match(generatedDaemonProtocol, /type: "local_webrtc_signal"/);
+assert.match(generatedDaemonProtocol, /DaemonLocalWebrtcBootstrap/);
+assert.match(generatedDaemonProtocol, /DaemonLocalWebrtcAnswer/);
+assert.match(generatedDaemonProtocol, /local_webrtc_bootstrap/);
+assert.match(generatedDaemonProtocol, /local_webrtc_answer/);
+assert.match(dogfoodBridgeScript, /BOTSTER_LOCAL_WEBRTC_GRANT_ID/);
+assert.match(dogfoodBridgeScript, /__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__/);
+assert.match(app, /normalizeLocalWebrtcBootstrap/);
+assert.match(webrtcDaemonClient, /createWebrtcDaemonClient/);
+assert.match(webrtcDaemonClient, /createDataChannel\("botster-daemon"/);
+assert.match(webrtcDaemonClient, /type: "local_webrtc_signal"/);
+assert.match(webrtcDaemonClient, /crypto\.subtle\.encrypt/);
+assert.match(webrtcDaemonClient, /crypto\.subtle\.decrypt/);
+assert.match(webrtcDaemonClient, /AesGcmEnvelope/);
 assert.match(readme, /botster-web-dogfood-size:<rows>x<cols>/);
 assert.match(readme, /botster-web-dogfood-exit/);
 assert.match(readme, /botster-package\.json/);
@@ -433,6 +457,17 @@ assert.equal(packageManifest.kind, "plugin");
 assert.equal(packageManifest.botster, ">=0.1.0");
 assert.deepEqual(packageManifest.source, { type: "path", path: "." });
 assert.deepEqual(packageManifest.capabilities, []);
+assert.deepEqual(packageManifest.configuration, {
+  fields: [
+    {
+      key: "remote_browser_rendezvous_enabled",
+      type: "boolean",
+      label: "Remote browser access",
+      description: "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
+      default: { type: "boolean", value: false }
+    }
+  ]
+});
 assert.deepEqual(packageManifest.surfaces, [
   {
     id: "dogfood-app",
@@ -459,7 +494,10 @@ assert.deepEqual(packageManifest.entrypoints, [
   { runtime: "lua", path: "plugin.lua", bootstrap: false }
 ]);
 assert.equal(packageManifest.runnable_entrypoints.length, 1);
-assert.match(pluginEntrypoint, /botster\.register\(\{\}\)/);
+assert.match(pluginEntrypoint, /kind = "surface_route"/);
+assert.match(pluginEntrypoint, /descriptor_id = "dogfood-app"/);
+assert.match(pluginEntrypoint, /descriptor_id = "dogfood-settings"/);
+assert.match(pluginEntrypoint, /Deterministic app surface rendered by the botster-web dogfood package/);
 assert.doesNotMatch(pluginEntrypoint, /tools|commands|surfaces|entities|mcp/);
 
 const [webClientEntrypoint] = packageManifest.runnable_entrypoints;
@@ -740,6 +778,7 @@ await Promise.all([
   compileTsModule("botster/realHubDaemonDto.ts", join(compiledRoot, "botster/realHubDaemonDto.js")),
   compileTsModule("botster/realHubDogfoodTransport.ts", join(compiledRoot, "botster/realHubDogfoodTransport.js")),
   compileTsModule("botster/realHubTerminalDataPlane.ts", join(compiledRoot, "botster/realHubTerminalDataPlane.js")),
+  compileTsModule("botster/webrtcDaemonClient.ts", join(compiledRoot, "botster/webrtcDaemonClient.js")),
   compileTsModule("botster/terminal.ts", join(compiledRoot, "botster/terminal.js"))
 ]);
 
@@ -755,6 +794,8 @@ const {
   realHubDogfoodSessionId
 } = requireRuntime("./botster/realHubDogfoodTransport.js");
 const { createRealHubTerminalDataPlane } = requireRuntime("./botster/realHubTerminalDataPlane.js");
+const { createWebrtcDaemonClient, WebrtcDaemonClientError } = requireRuntime("./botster/webrtcDaemonClient.js");
+const { DefaultTerminalViewBridge } = requireRuntime("./botster/terminal.js");
 const {
   generatedDaemonRequestFixtures,
   generatedAppResponseFixture,
@@ -771,7 +812,8 @@ const {
   schemaVersionDiagnosticFromFrame,
   streamDisconnectedDiagnostic,
   terminalUnavailableDiagnostic,
-  upsertDiagnostic
+  upsertDiagnostic,
+  webRtcFailureDiagnostic
 } = requireRuntime("./botster/connectionDiagnostics.js");
 
 assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), [
@@ -781,6 +823,7 @@ assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), 
   "inspect_available_package",
   "preview_package_install",
   "install_package_registry_entry",
+  "set_package_configuration",
   "set_package_configuration",
   "install_package_local_path",
   "start_package_entrypoint",
@@ -794,13 +837,23 @@ assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), 
   "plugin_surface_action"
 ]);
 assert.deepEqual(
-  generatedDaemonRequestFixtures.find((request) => request.type === "set_package_configuration"),
+  generatedDaemonRequestFixtures.find((request) => request.type === "set_package_configuration" && request.package_name === "project-pipelines"),
   {
     type: "set_package_configuration",
     package_name: "project-pipelines",
     values: {
       endpoint: { type: "url", value: "https://example.invalid/hook" },
       api_token: { type: "secret", state: "write_only" }
+    }
+  }
+);
+assert.deepEqual(
+  generatedDaemonRequestFixtures.find((request) => request.type === "set_package_configuration" && request.package_name === "botster-web"),
+  {
+    type: "set_package_configuration",
+    package_name: "botster-web",
+    values: {
+      remote_browser_rendezvous_enabled: { type: "boolean", value: true }
     }
   }
 );
@@ -1086,6 +1139,14 @@ const configuredPackageConfiguration = {
   },
   missing_required: []
 };
+const botsterWebRemoteAccessConfiguration = {
+  schema: packageManifest.configuration,
+  effective_values: {
+    remote_browser_rendezvous_enabled: { type: "boolean", value: false }
+  },
+  missing_required: [],
+  diagnostics: []
+};
 const emptyPackageConfiguration = {};
 const availablePackageAvailability = { state: "available", reasons: [] };
 const blockedGithubAvailability = {
@@ -1227,11 +1288,11 @@ const bridge = {
                 actions: entrypointActions("botster-web", "web-client")
               }
             ],
-            configuration: emptyPackageConfiguration,
+            configuration: botsterWebRemoteAccessConfiguration,
             availability: availablePackageAvailability,
             dependency_availability: [],
             feature_availability: [],
-            actions: installedPackageActions("botster-web", true, false),
+            actions: installedPackageActions("botster-web", true, true),
             provider_profile_admitted: false
           },
           {
@@ -1616,6 +1677,216 @@ const packageRuntimeMode = createDogfoodRuntimeConfig({
 assert.equal(packageRuntimeMode.mode, "real-hub");
 assert.equal(packageRuntimeMode.terminalDataPlaneKind, "real-hub");
 
+const localWebrtcBootstrapFixture = {
+  grant_id: "grant-test",
+  grant_secret: "secret-0000000000000000000000000000000000000000000000000000000000000000",
+  package_name: "botster-web",
+  entrypoint_id: "web-client",
+  expected_origin: "http://127.0.0.1:41739",
+  expires_at: 0,
+  signaling_transport: "daemon_request",
+  data_plane: "webrtc_data_channel",
+  ordered: true,
+  signaling_url: "http://127.0.0.1:41739/request"
+};
+const packageWebrtcMode = createDogfoodRuntimeConfig({
+  env: {},
+  locationHref: "http://127.0.0.1:41739/",
+  bridge,
+  packageRuntime: true,
+  localWebrtcBootstrap: localWebrtcBootstrapFixture
+});
+assert.equal(packageWebrtcMode.mode, "webrtc");
+assert.equal(packageWebrtcMode.terminalDataPlaneKind, "webrtc");
+assert.equal(packageWebrtcMode.statusText, "Connected to local hub over WebRTC");
+const originalWindow = globalThis.window;
+globalThis.window = {
+  location: { origin: "http://127.0.0.1:41739" },
+  setTimeout,
+  clearTimeout
+};
+try {
+  const dataChannel = createFakeDataChannel();
+  const peerConnection = createFakePeerConnection(dataChannel);
+  const signalingRequests = [];
+  const webrtcClient = createWebrtcDaemonClient({
+    bootstrap: localWebrtcBootstrapFixture,
+    peerConnectionFactory: () => peerConnection,
+    fetchImpl: async (_url, init) => {
+      const envelope = JSON.parse(init.body);
+      signalingRequests.push(envelope.payload);
+      return {
+        ok: true,
+        json: async () => ({
+          payload: {
+            local_webrtc_answer: {
+              grant_id: "grant-test",
+              answer: { type: "answer", sdp: "answer-sdp" }
+            }
+          }
+        })
+      };
+    }
+  });
+  const responsePromise = webrtcClient.request({ type: "status" });
+  await waitForTestCondition(() => signalingRequests.length > 0);
+  assert.equal(signalingRequests[0].type, "local_webrtc_signal");
+  assert.equal(signalingRequests[0].grant_id, "grant-test");
+  await waitForTestCondition(() => dataChannel.sent.length > 0);
+  assert.equal(dataChannel.sent.length, 1);
+  assert.doesNotMatch(dataChannel.sent[0], /"type":"status"/);
+  const outboundEnvelope = JSON.parse(dataChannel.sent[0]);
+  assert.deepEqual(Object.keys(outboundEnvelope).sort(), ["ciphertext", "nonce", "version"]);
+  dataChannel.emitMessage(await encryptTestEnvelope(
+    "secret-0000000000000000000000000000000000000000000000000000000000000000",
+    { kind: "status", status: null, sessions: [], packages: [], package_decision: null, lifecycle: [], plugin_tools: [], plugin_tool_result: null, events: [], cleanup: null, coordination: null, error: null }
+  ));
+  assert.equal((await responsePromise).kind, "status");
+
+  const invalidBootstrapClient = createWebrtcDaemonClient({
+    bootstrap: {
+      ...localWebrtcBootstrapFixture,
+      grant_secret: "secret-invalid"
+    },
+    peerConnectionFactory: () => createFakePeerConnection(createFakeDataChannel()),
+    fetchImpl: async () => {
+      throw new Error("signaling should not be called for invalid bootstrap");
+    }
+  });
+  await assert.rejects(
+    invalidBootstrapClient.request({ type: "status" }),
+    (error) => connectionFailureDiagnostic(false, error).id === "webrtc-bootstrap-failed"
+  );
+
+  const signalingFailureClient = createWebrtcDaemonClient({
+    bootstrap: localWebrtcBootstrapFixture,
+    peerConnectionFactory: () => createFakePeerConnection(createFakeDataChannel()),
+    fetchImpl: async () => ({
+      ok: false,
+      status: 503,
+      json: async () => ({})
+    })
+  });
+  await assert.rejects(
+    signalingFailureClient.request({ type: "status" }),
+    (error) => connectionFailureDiagnostic(false, error).id === "webrtc-signaling-failed"
+  );
+} finally {
+  globalThis.window = originalWindow;
+}
+const mountedWebrtcInputs = [];
+const mountedWebrtcDataPlane = {
+  sessionId: realHubDogfoodSessionId,
+  writeInput(data) {
+    mountedWebrtcInputs.push(data);
+  },
+  subscribeOutput() {
+    return { unsubscribe() {} };
+  },
+  detach() {}
+};
+let mountedInputListener;
+const mountedWebrtcBridge = new DefaultTerminalViewBridge(() => ({
+  mount() {},
+  onInput(listener) {
+    mountedInputListener = listener;
+    return { unsubscribe() {} };
+  },
+  write() {},
+  resize() {},
+  focus() {},
+  destroy() {}
+}));
+await mountedWebrtcBridge.mount(
+  { dataset: {} },
+  { sessionId: realHubDogfoodSessionId, renderer: "restty" }
+);
+await mountedWebrtcBridge.attach(
+  { sessionId: realHubDogfoodSessionId, renderer: "restty" },
+  mountedWebrtcDataPlane
+);
+mountedInputListener("webrtc-mounted-input\n");
+assert.deepEqual(mountedWebrtcInputs, ["webrtc-mounted-input\n"]);
+
+globalThis.window = {
+  location: { origin: "http://127.0.0.1:41739" },
+  setTimeout,
+  clearTimeout
+};
+try {
+  const mountedRealWebrtcDataChannel = createFakeDataChannel();
+  const mountedRealWebrtcBridgeClient = createWebrtcDaemonClient({
+    bootstrap: localWebrtcBootstrapFixture,
+    peerConnectionFactory: () => createFakePeerConnection(mountedRealWebrtcDataChannel),
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        payload: {
+          local_webrtc_answer: {
+            grant_id: "grant-test",
+            answer: { type: "answer", sdp: "answer-sdp" }
+          }
+        }
+      })
+    })
+  });
+  let mountedRealWebrtcWritePromise;
+  const mountedRealWebrtcDataPlane = {
+    sessionId: realHubDogfoodSessionId,
+    writeInput(data) {
+      mountedRealWebrtcWritePromise = mountedRealWebrtcBridgeClient.request({
+        type: "send_input",
+        session_id: realHubDogfoodSessionId,
+        data
+      });
+      return mountedRealWebrtcWritePromise;
+    },
+    subscribeOutput() {
+      return { unsubscribe() {} };
+    },
+    detach() {}
+  };
+  let mountedRealWebrtcInputListener;
+  const mountedRealWebrtcBridge = new DefaultTerminalViewBridge(() => ({
+    mount() {},
+    onInput(listener) {
+      mountedRealWebrtcInputListener = listener;
+      return { unsubscribe() {} };
+    },
+    write() {},
+    resize() {},
+    focus() {},
+    destroy() {}
+  }));
+  await mountedRealWebrtcBridge.mount(
+    { dataset: {} },
+    { sessionId: realHubDogfoodSessionId, renderer: "restty" }
+  );
+  await mountedRealWebrtcBridge.attach(
+    { sessionId: realHubDogfoodSessionId, renderer: "restty" },
+    mountedRealWebrtcDataPlane
+  );
+  mountedRealWebrtcInputListener("webrtc-mounted-input\n");
+  const mountedRealWebrtcInputRequest = await waitForEncryptedRequest(
+    mountedRealWebrtcDataChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    (request) => request.type === "send_input" && request.data === "webrtc-mounted-input\n"
+  );
+  assert.deepEqual(mountedRealWebrtcInputRequest, {
+    type: "send_input",
+    session_id: realHubDogfoodSessionId,
+    data: "webrtc-mounted-input\n"
+  });
+  mountedRealWebrtcDataChannel.emitMessage(await encryptTestEnvelope(
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "events", events: [] }
+  ));
+  await mountedRealWebrtcWritePromise;
+  await mountedRealWebrtcBridge.detach({ sessionId: realHubDogfoodSessionId, renderer: "restty" });
+} finally {
+  globalThis.window = originalWindow;
+}
+
 const bridgeResolutionFetchUrls = [];
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (url, init) => {
@@ -1763,6 +2034,23 @@ await realTransport.send({
   }
 });
 await flushMicrotasks();
+await realTransport.send({
+  kind: "action_request",
+  payload: {
+    request_id: "real-config-save-remote-access",
+    origin: "ui_node",
+    action: {
+      id: "botster.package.configuration.save",
+      target: "botster-web",
+      params: {
+        values: {
+          remote_browser_rendezvous_enabled: { type: "boolean", value: true }
+        }
+      }
+    }
+  }
+});
+await flushMicrotasks();
 for (const action of [
   {
     id: "botster.package.surface.render",
@@ -1844,7 +2132,7 @@ assert.equal(bridgeRequests.some((request) => request.type === "list_sessions"),
 assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "spawn" && request.session_id === realHubDogfoodSessionId), true);
 const configSaveRequests = bridgeRequests.filter((request) => request.type === "set_package_configuration");
-assert.equal(configSaveRequests.length, 2);
+assert.equal(configSaveRequests.length, 3);
 assert.deepEqual(configSaveRequests[0], {
   type: "set_package_configuration",
   package_name: "project-pipelines",
@@ -1861,6 +2149,13 @@ assert.deepEqual(configSaveRequest, {
   }
 });
 assert.doesNotMatch(JSON.stringify(configSaveRequest), /api_token|redacted|write_only|super-secret-token/);
+assert.deepEqual(configSaveRequests[2], {
+  type: "set_package_configuration",
+  package_name: "botster-web",
+  values: {
+    remote_browser_rendezvous_enabled: { type: "boolean", value: true }
+  }
+});
 assert.deepEqual(
   bridgeRequests.find((request) => request.type === "plugin_surface_render"),
   {
@@ -2375,6 +2670,33 @@ assert.equal(streamDisconnectedDiagnostic(new Error("SSE closed")).title, "Contr
 assert.equal(connectionFailureDiagnostic(false, new Error("connect ECONNREFUSED")).id, "bridge-unavailable");
 assert.notEqual(connectionFailureDiagnostic(false, new Error("connect ECONNREFUSED")).id, "stream-disconnected");
 assert.equal(connectionFailureDiagnostic(true, new Error("SSE closed")).id, "stream-disconnected");
+const webRtcDiagnosticCases = [
+  ["bootstrap", "webrtc-bootstrap-failed", "Local WebRTC bootstrap failed", "pairing"],
+  ["signaling", "webrtc-signaling-failed", "Local WebRTC signaling failed", "signaling"],
+  ["transport", "webrtc-transport-failed", "Local WebRTC transport failed", "webrtc"],
+  ["encryption", "webrtc-encryption-failed", "Local WebRTC encryption failed", "encryption"],
+  ["data-plane", "webrtc-data-plane-failed", "Local WebRTC data plane failed", "data-plane"]
+];
+for (const [stage, id, title, source] of webRtcDiagnosticCases) {
+  const diagnostic = webRtcFailureDiagnostic(new WebrtcDaemonClientError(stage, `${stage} reachable failure`));
+  assert.equal(diagnostic.id, id);
+  assert.equal(diagnostic.title, title);
+  assert.equal(diagnostic.source, source);
+  assert.match(diagnostic.detail, new RegExp(`${stage} reachable failure`));
+
+  const connectionDiagnostic = connectionFailureDiagnostic(false, new WebrtcDaemonClientError(stage, `${stage} connect failure`));
+  assert.equal(connectionDiagnostic.id, id);
+  assert.notEqual(connectionDiagnostic.id, "bridge-unavailable");
+  assert.notEqual(connectionDiagnostic.id, "stream-disconnected");
+}
+assert.equal(
+  terminalUnavailableDiagnostic(new WebrtcDaemonClientError("data-plane", "attach drain failed")).id,
+  "webrtc-data-plane-failed"
+);
+assert.notEqual(
+  terminalUnavailableDiagnostic(new WebrtcDaemonClientError("encryption", "decrypt failed")).id,
+  "terminal-unavailable"
+);
 assert.equal(
   actionFailureDiagnostic(
     { id: "botster.session.rename", target: "missing-real-hub-session" },
@@ -3012,6 +3334,42 @@ try {
       }
     }
   );
+  const remoteAccessSettingsMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsPanel, {
+      app: {
+        id: "botster-web",
+        title: "botster-web",
+        configuration_fields: [
+          {
+            id: "remote_browser_rendezvous_enabled",
+            label: "Remote browser access",
+            kind: "checkbox",
+            config_type: "boolean",
+            value: false,
+            helper: "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
+            errors: ["Remote access configuration failed"]
+          }
+        ],
+        configuration_submit: {
+          id: "botster.package.configuration.save",
+          target: "botster-web",
+          label: "Configure",
+          disabled: false,
+          params: {
+            package_name: "botster-web",
+            daemon_request: { request_type: "set_package_configuration", package_name: "botster-web" }
+          }
+        },
+        settings_surfaces: [],
+        package_actions: []
+      },
+      onAction: () => undefined
+    })
+  );
+  assert.equal((remoteAccessSettingsMarkup.match(/Remote browser access/g) ?? []).length, 1);
+  assert.match(remoteAccessSettingsMarkup, /Remote browser rendezvous is off/);
+  assert.match(remoteAccessSettingsMarkup, /Remote access configuration failed/);
+  assert.doesNotMatch(remoteAccessSettingsMarkup, /Remote browser access[\\s\\S]*boolean[\\s\\S]*Remote browser access/);
   const optionalSettingsMarkup = renderToStaticMarkup(
     createElement(PluginSettingsPanel, {
       app: optionalDaemonPackageRecord,
@@ -3163,11 +3521,11 @@ try {
             actions: entrypointActions("botster-web", "web-client")
           }
         ],
-        configuration: emptyPackageConfiguration,
+        configuration: botsterWebRemoteAccessConfiguration,
         availability: availablePackageAvailability,
         dependency_availability: [],
         feature_availability: [],
-        actions: installedPackageActions("botster-web", true, false),
+        actions: installedPackageActions("botster-web", true, true),
         provider_profile_admitted: false
       },
       {
@@ -3360,6 +3718,7 @@ try {
   assert.match(realHubMarkup, /Requires local terminal launch/);
   assert.match(realHubMarkup, /botster-web Settings/);
   assert.match(realHubMarkup, /dogfood-settings/);
+  assert.match(realHubMarkup, /Remote browser access/);
   assert.match(realHubMarkup, /Rendered package surface|Rendered app surface/);
   assert.match(realHubMarkup, /Deterministic app surface rendered by the botster-web dogfood package/);
   assert.match(realHubMarkup, /botster-web\/dogfood-app/);
@@ -3896,6 +4255,128 @@ function deterministicIds(prefix) {
 async function flushMicrotasks() {
   await Promise.resolve();
   await Promise.resolve();
+}
+
+async function waitForTestCondition(predicate) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail("timed out waiting for test condition");
+}
+
+function createFakeDataChannel() {
+  const listeners = new Map();
+  return {
+    readyState: "connecting",
+    sent: [],
+    addEventListener(type, listener) {
+      const entries = listeners.get(type) ?? [];
+      entries.push(listener);
+      listeners.set(type, entries);
+    },
+    removeEventListener(type, listener) {
+      listeners.set(
+        type,
+        (listeners.get(type) ?? []).filter((entry) => entry !== listener)
+      );
+    },
+    send(data) {
+      this.sent.push(data);
+    },
+    open() {
+      this.readyState = "open";
+      for (const listener of listeners.get("open") ?? []) listener({});
+    },
+    emitMessage(data) {
+      for (const listener of listeners.get("message") ?? []) listener({ data });
+    }
+  };
+}
+
+function createFakePeerConnection(dataChannel) {
+  return {
+    iceGatheringState: "complete",
+    localDescription: { type: "offer", sdp: "offer-sdp", toJSON: () => ({ type: "offer", sdp: "offer-sdp" }) },
+    createDataChannel() {
+      return dataChannel;
+    },
+    async createOffer() {
+      return this.localDescription;
+    },
+    async setLocalDescription(description) {
+      this.localDescription = description;
+    },
+    async setRemoteDescription() {
+      dataChannel.open();
+    },
+    addEventListener() {},
+    removeEventListener() {}
+  };
+}
+
+async function encryptTestEnvelope(secret, payload) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    hexToArrayBuffer(secret.slice("secret-".length)),
+    "AES-GCM",
+    false,
+    ["encrypt"]
+  );
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: nonce.buffer.slice(nonce.byteOffset, nonce.byteOffset + nonce.byteLength) },
+    key,
+    new TextEncoder().encode(JSON.stringify(payload))
+  );
+  return JSON.stringify({
+    nonce: Buffer.from(nonce).toString("base64"),
+    ciphertext: Buffer.from(ciphertext).toString("base64"),
+    version: 1
+  });
+}
+
+async function decryptTestEnvelope(secret, envelopeJson) {
+  const envelope = JSON.parse(envelopeJson);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    hexToArrayBuffer(secret.slice("secret-".length)),
+    "AES-GCM",
+    false,
+    ["decrypt"]
+  );
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64ToArrayBuffer(envelope.nonce) },
+    key,
+    base64ToArrayBuffer(envelope.ciphertext)
+  );
+  return JSON.parse(new TextDecoder().decode(plaintext));
+}
+
+async function waitForEncryptedRequest(dataChannel, secret, predicate) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    for (const envelope of dataChannel.sent) {
+      const request = await decryptTestEnvelope(secret, envelope);
+      if (predicate(request)) {
+        return request;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail("timed out waiting for encrypted WebRTC request");
+}
+
+function hexToArrayBuffer(encoded) {
+  const bytes = new Uint8Array(encoded.length / 2);
+  for (let index = 0; index < encoded.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(encoded.slice(index, index + 2), 16);
+  }
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
+function base64ToArrayBuffer(encoded) {
+  const bytes = Buffer.from(encoded, "base64");
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
 
 function extractTopLevelCssRule(source, selector) {

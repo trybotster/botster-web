@@ -21,7 +21,6 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   private readonly ptyTransport = new BotsterTerminalPtyTransport();
   private readonly inputListeners = new Set<(data: TerminalInput) => void>();
   private terminal?: Restty;
-  private uninstallLiveHarnessRendererInput?: () => void;
   private container?: HTMLElement;
 
   constructor(readonly descriptor: TerminalViewDescriptor) {}
@@ -41,15 +40,13 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       appOptions: {
         ptyTransport: this.ptyTransport,
         beforeInput: ({ text, source }) => {
+          recordLiveHarnessTerminal("before_input", { text, source, sessionId: this.descriptor.sessionId });
           if (source !== "pty" && text) {
             this.emitInput(text);
           }
           return text;
         }
       }
-    });
-    this.uninstallLiveHarnessRendererInput = installLiveHarnessRendererInput((data) => {
-      this.terminal?.sendInput(data, "key");
     });
   }
 
@@ -82,8 +79,6 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   destroy(): void {
-    this.uninstallLiveHarnessRendererInput?.();
-    this.uninstallLiveHarnessRendererInput = undefined;
     this.ptyTransport.destroy();
     this.inputListeners.clear();
     this.terminal?.destroy();
@@ -119,6 +114,7 @@ class BotsterTerminalPtyTransport implements PtyTransport {
     if (this.callbacks) {
       this.connected = true;
       this.callbacks.onConnect?.();
+      recordLiveHarnessTerminal("pty_connected", { sessionId: this.dataPlane.sessionId });
     }
 
     return {
@@ -133,6 +129,7 @@ class BotsterTerminalPtyTransport implements PtyTransport {
     if (this.dataPlane) {
       this.connected = true;
       this.callbacks.onConnect?.();
+      recordLiveHarnessTerminal("pty_connected", { sessionId: this.dataPlane.sessionId });
     }
   }
 
@@ -145,6 +142,7 @@ class BotsterTerminalPtyTransport implements PtyTransport {
 
   sendInput(data: string): boolean {
     if (!this.dataPlane) return false;
+    recordLiveHarnessTerminal("pty_send_input", { data, sessionId: this.dataPlane.sessionId });
     void this.dataPlane.writeInput(data);
     return true;
   }
@@ -190,23 +188,4 @@ export function createResttyTerminalRenderer(
   descriptor: TerminalViewDescriptor
 ): TerminalRendererAdapter {
   return new ResttyTerminalRenderer(descriptor);
-}
-
-function installLiveHarnessRendererInput(sendInput: (data: string) => void): () => void {
-  if (typeof window === "undefined") return () => undefined;
-
-  const harness = (window as typeof window & {
-    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
-      terminalRendererInput?: (data: string) => void;
-    };
-  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-
-  if (!harness) return () => undefined;
-
-  harness.terminalRendererInput = sendInput;
-  return () => {
-    if (harness.terminalRendererInput === sendInput) {
-      delete harness.terminalRendererInput;
-    }
-  };
 }

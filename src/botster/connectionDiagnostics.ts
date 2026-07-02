@@ -22,7 +22,17 @@ export interface ConnectionDiagnostic {
   title: string;
   detail: string;
   severity: ConnectionDiagnosticSeverity;
-  source: "bridge" | "compatibility" | "stream" | "action" | "terminal";
+  source:
+    | "bridge"
+    | "compatibility"
+    | "stream"
+    | "action"
+    | "terminal"
+    | "pairing"
+    | "signaling"
+    | "webrtc"
+    | "encryption"
+    | "data-plane";
   operation?: string;
   actionId?: string;
   actionTarget?: string;
@@ -55,13 +65,14 @@ export function hubConnectionDiagnosticFromFrame(frame: HubControlFrame): Connec
 }
 
 export function initialConnectionDiagnostics(mode: string, statusText: string): ConnectionDiagnostic[] {
+  const localHubMode = mode === "real-hub" || mode === "webrtc";
   return [
     {
       id: "bridge-mode",
-      title: mode === "real-hub" ? "Real hub bridge selected" : "Fixture transport selected",
+      title: mode === "webrtc" ? "Local hub WebRTC selected" : mode === "real-hub" ? "Real hub bridge selected" : "Fixture transport selected",
       detail: statusText,
-      severity: mode === "real-hub" ? "info" : "success",
-      source: "bridge"
+      severity: localHubMode ? "info" : "success",
+      source: mode === "webrtc" ? "stream" : "bridge"
     }
   ];
 }
@@ -87,10 +98,20 @@ export function streamDisconnectedDiagnostic(error: unknown): ConnectionDiagnost
 }
 
 export function connectionFailureDiagnostic(controlStreamEstablished: boolean, error: unknown): ConnectionDiagnostic {
+  const webRtcDiagnostic = webRtcFailureDiagnostic(error);
+  if (webRtcDiagnostic) {
+    return webRtcDiagnostic;
+  }
+
   return controlStreamEstablished ? streamDisconnectedDiagnostic(error) : bridgeUnavailableDiagnostic(error);
 }
 
 export function terminalUnavailableDiagnostic(error: unknown): ConnectionDiagnostic {
+  const webRtcDiagnostic = webRtcFailureDiagnostic(error);
+  if (webRtcDiagnostic) {
+    return webRtcDiagnostic;
+  }
+
   return {
     id: "terminal-unavailable",
     title: "Terminal stream unavailable",
@@ -98,6 +119,57 @@ export function terminalUnavailableDiagnostic(error: unknown): ConnectionDiagnos
     severity: "danger",
     source: "terminal"
   };
+}
+
+export function webRtcFailureDiagnostic(error: unknown): ConnectionDiagnostic | undefined {
+  const stage = webRtcFailureStage(error);
+  if (!stage) {
+    return undefined;
+  }
+
+  const detail = errorMessage(error, "The local WebRTC transport failed.");
+  switch (stage) {
+    case "bootstrap":
+      return {
+        id: "webrtc-bootstrap-failed",
+        title: "Local WebRTC bootstrap failed",
+        detail,
+        severity: "danger",
+        source: "pairing"
+      };
+    case "signaling":
+      return {
+        id: "webrtc-signaling-failed",
+        title: "Local WebRTC signaling failed",
+        detail,
+        severity: "danger",
+        source: "signaling"
+      };
+    case "transport":
+      return {
+        id: "webrtc-transport-failed",
+        title: "Local WebRTC transport failed",
+        detail,
+        severity: "danger",
+        source: "webrtc"
+      };
+    case "encryption":
+      return {
+        id: "webrtc-encryption-failed",
+        title: "Local WebRTC encryption failed",
+        detail,
+        severity: "danger",
+        source: "encryption"
+      };
+    case "data-plane":
+      return {
+        id: "webrtc-data-plane-failed",
+        title: "Local WebRTC data plane failed",
+        detail,
+        severity: "danger",
+        source: "data-plane"
+      };
+  }
 }
 
 export function actionFailureDiagnostic(action: ActionBinding, result: ActionDispatchResult): ConnectionDiagnostic | undefined {
@@ -319,6 +391,15 @@ function errorMessage(error: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+function webRtcFailureStage(error: unknown): string | undefined {
+  if (!isRecord(error)) {
+    return undefined;
+  }
+
+  const stage = error.botsterWebrtcStage;
+  return typeof stage === "string" ? stage : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

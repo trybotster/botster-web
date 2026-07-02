@@ -72,6 +72,7 @@ import {
 } from "./botster/connectionDiagnostics";
 import { createDogfoodRuntimeConfig } from "./botster/dogfoodMode";
 import { realHubDogfoodSessionId } from "./botster/realHubDogfoodTransport";
+import type { LocalWebrtcBootstrap } from "./botster/webrtcDaemonClient";
 import type { ActionBinding } from "./botster/actions";
 import type { TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
@@ -151,6 +152,11 @@ const loadingSnapshot: UiTreeSnapshot = {
 
 const terminalRenderer = "restty" as const;
 
+type BotsterPackageWindow = typeof window & {
+  __BOTSTER_PACKAGE_RUNTIME__?: boolean;
+  __BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__?: LocalWebrtcBootstrap;
+};
+
 function isAttachableSession(record: Record<string, unknown> | undefined): record is Record<string, unknown> & { id: string } {
   return Boolean(record && typeof record.id === "string" && record.status === "running" && record.attachable === true);
 }
@@ -163,6 +169,17 @@ function readRecord(value: unknown): Record<string, unknown> {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function normalizeLocalWebrtcBootstrap(bootstrap: LocalWebrtcBootstrap | undefined): LocalWebrtcBootstrap | undefined {
+  if (!bootstrap?.grant_id || !bootstrap.grant_secret || bootstrap.signaling_transport !== "daemon_request") {
+    return undefined;
+  }
+
+  return {
+    ...bootstrap,
+    signaling_url: new URL(bootstrap.signaling_url, window.location.origin).toString()
+  };
 }
 
 function pluginSurfaceStatus(result: unknown): string | undefined {
@@ -252,13 +269,17 @@ export default function App() {
   const dogfoodRuntime = useMemo(
     () => {
       const packageRuntime = Boolean(
-        (window as typeof window & { __BOTSTER_PACKAGE_RUNTIME__?: boolean }).__BOTSTER_PACKAGE_RUNTIME__
+        (window as BotsterPackageWindow).__BOTSTER_PACKAGE_RUNTIME__
       );
+      const localWebrtcBootstrap = packageRuntime
+        ? normalizeLocalWebrtcBootstrap((window as BotsterPackageWindow).__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__)
+        : undefined;
       return createDogfoodRuntimeConfig({
         env: import.meta.env,
         locationHref: window.location.href,
         ...(packageRuntime ? { bridgeUrl: `${window.location.origin}/request` } : {}),
-        packageRuntime
+        packageRuntime,
+        localWebrtcBootstrap
       });
     },
     []
@@ -417,7 +438,7 @@ export default function App() {
             snapshot: renderedSurfaceSnapshot
           });
         }
-        const packageFeedback = action.id === "botster.package.daemon_request"
+        const packageFeedback = action.id === "botster.package.daemon_request" || action.id === "botster.package.configuration.save"
           ? packageActionFeedback(result)
           : undefined;
         if (packageFeedback) {
@@ -570,7 +591,7 @@ export default function App() {
   const activeRealHubTerminalSessionId = selectedTerminalSessionId ?? defaultTerminalSessionId;
   const terminalDescriptor: TerminalViewDescriptor | undefined = useMemo(
     () =>
-      dogfoodRuntime.mode === "real-hub"
+      dogfoodRuntime.mode === "real-hub" || dogfoodRuntime.mode === "webrtc"
         ? activeRealHubTerminalSessionId
           ? { sessionId: activeRealHubTerminalSessionId, renderer: terminalRenderer }
           : undefined
@@ -603,7 +624,7 @@ export default function App() {
     {
       key: "connection",
       label: "Connection",
-      value: dogfoodRuntime.mode === "real-hub" ? "Real hub" : "Fixture",
+      value: dogfoodRuntime.mode === "webrtc" ? "WebRTC" : dogfoodRuntime.mode === "real-hub" ? "Real hub" : "Fixture",
       detail: dogfoodRuntime.statusText,
       severity: blockingDiagnostics.length > 0 ? "danger" : warningDiagnostics.length > 0 ? "warning" : "success"
     },
@@ -717,7 +738,7 @@ export default function App() {
                     <IonIcon icon={gitBranchOutline} aria-hidden="true" />
                     <IonLabel>{botsterWebClientContract.label}</IonLabel>
                   </IonChip>
-                  <IonChip color={dogfoodRuntime.mode === "real-hub" ? "success" : "medium"} outline>
+                  <IonChip color={dogfoodRuntime.mode === "fixture" ? "medium" : "success"} outline>
                     <IonLabel>{dogfoodRuntime.mode}</IonLabel>
                   </IonChip>
               </IonButtons>
@@ -1276,8 +1297,10 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
   const settingsSurfaces = packageSettingsSurfaces(app);
   const actions = packageActions(app);
   const configurationFields = packageSurfaceRecords(app.configuration_fields);
+  const remoteAccessField = configurationFields.find((field) => firstString(field.id) === "remote_browser_rendezvous_enabled");
+  const genericConfigurationFields = configurationFields.filter((field) => firstString(field.id) !== "remote_browser_rendezvous_enabled");
   const configurationSubmit = packageActionFromValue(app.configuration_submit);
-  const [configurationDraft, setConfigurationDraft] = useState<Record<string, unknown>>(() => configurationDraftValues(configurationFields));
+  const [configurationDraft, setConfigurationDraft] = useState<Record<string, unknown>>(() => configurationDraftValues(genericConfigurationFields));
 
   const updateConfigurationField = useCallback((field: PackageSurfaceRecord, value: unknown) => {
     const id = configurationFieldId(field);
@@ -1287,8 +1310,8 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
   const saveConfiguration = useCallback(() => {
     if (!configurationSubmit) return;
 
-    onAction(configurationSaveAction(configurationSubmit, configurationFields, configurationDraft));
-  }, [configurationSubmit, configurationFields, configurationDraft, onAction]);
+    onAction(configurationSaveAction(configurationSubmit, genericConfigurationFields, configurationDraft));
+  }, [configurationSubmit, genericConfigurationFields, configurationDraft, onAction]);
 
   return (
     <IonList lines="full">
@@ -1297,7 +1320,14 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
           <IonListHeader>
             <IonLabel>Package configuration</IonLabel>
           </IonListHeader>
-          {configurationFields.map((field) => (
+          {remoteAccessField ? (
+            <RemoteAccessConfigurationItem
+              field={remoteAccessField}
+              submit={configurationSubmit}
+              onAction={onAction}
+            />
+          ) : null}
+          {genericConfigurationFields.map((field) => (
             <ConfigurationFieldItem
               field={field}
               key={configurationFieldKey(field)}
@@ -1305,16 +1335,18 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
               value={configurationDraft[configurationFieldId(field)]}
             />
           ))}
-          <IonItem>
-            <IonButton
-              data-testid="package-configuration-save"
-              disabled={!configurationSubmit || configurationSubmit.disabled === true}
-              onClick={saveConfiguration}
-              slot="end"
-            >
-              {configurationSubmit?.label ?? "Save configuration"}
-            </IonButton>
-          </IonItem>
+          {genericConfigurationFields.length > 0 ? (
+            <IonItem>
+              <IonButton
+                data-testid="package-configuration-save"
+                disabled={!configurationSubmit || configurationSubmit.disabled === true}
+                onClick={saveConfiguration}
+                slot="end"
+              >
+                {configurationSubmit?.label ?? "Save configuration"}
+              </IonButton>
+            </IonItem>
+          ) : null}
         </>
       ) : null}
       {settingsSurfaces.length > 0 ? (
@@ -1366,6 +1398,62 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
         );
       })}
     </IonList>
+  );
+}
+
+function RemoteAccessConfigurationItem({
+  field,
+  submit,
+  onAction
+}: {
+  field: PackageSurfaceRecord;
+  submit: ActionBinding | undefined;
+  onAction: (action: ActionBinding) => void;
+}) {
+  const enabled = field.value === true;
+  const nextEnabled = !enabled;
+  const disabled = !submit || submit.disabled === true;
+  const errors = arrayOfStrings(field.errors);
+
+  return (
+    <IonItem>
+      <IonIcon slot="start" icon={serverOutline} aria-hidden="true" />
+      <IonLabel>
+        <h2>Remote browser access</h2>
+        <p>{enabled ? "Remote browser rendezvous is opted in." : "Remote browser rendezvous is off."}</p>
+        <p>Local installed access stays available. Remote access requires opt-in, pairing, and device approval.</p>
+        {errors.map((error) => (
+          <IonNote color="danger" key={error}>
+            {error}
+          </IonNote>
+        ))}
+      </IonLabel>
+      <IonBadge slot="end" color={enabled ? "success" : "medium"}>
+        {enabled ? "Opted in" : "Off"}
+      </IonBadge>
+      <IonButton
+        slot="end"
+        fill={enabled ? "outline" : "solid"}
+        disabled={disabled}
+        onClick={() => {
+          if (!submit) return;
+          onAction({
+            ...submit,
+            params: {
+              ...submit.params,
+              values: {
+                remote_browser_rendezvous_enabled: {
+                  type: "boolean",
+                  value: nextEnabled
+                }
+              }
+            }
+          });
+        }}
+      >
+        {enabled ? "Opt out" : "Opt in"}
+      </IonButton>
+    </IonItem>
   );
 }
 

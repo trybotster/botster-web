@@ -15,6 +15,13 @@ export const generatedDaemonRequestFixtures = [
       api_token: { type: "secret", state: "write_only" }
     }
   },
+  {
+    type: "set_package_configuration",
+    package_name: "botster-web",
+    values: {
+      remote_browser_rendezvous_enabled: { type: "boolean", value: true }
+    }
+  },
   { type: "install_package_local_path", path: "/tmp/botster-package" },
   {
     type: "start_package_entrypoint",
@@ -145,6 +152,56 @@ export const generatedPackageResponseFixture = {
           diagnostics: [],
           required_references: [],
           request: { request_type: "check_package_update", package_name: "project-pipelines" }
+        }
+      ],
+      provider_profile_admitted: false
+    },
+    {
+      package_name: "botster-web",
+      version: "0.1.0",
+      classification: "plugin",
+      source_kind: "local_path",
+      state: "enabled",
+      requested_capabilities: [],
+      surfaces: [
+        {
+          id: "dogfood-settings",
+          kind: "settings",
+          title: "botster-web Settings",
+          description: "Descriptor-backed settings surface for package launcher dogfood.",
+          order: 2,
+          supports: ["render"]
+        }
+      ],
+      runnable_entrypoints: [],
+      configuration: {
+        schema: {
+          fields: [
+            {
+              key: "remote_browser_rendezvous_enabled",
+              type: "boolean",
+              label: "Remote browser access",
+              description: "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
+              default: { type: "boolean", value: false }
+            }
+          ]
+        },
+        effective_values: {
+          remote_browser_rendezvous_enabled: { type: "boolean", value: false }
+        },
+        missing_required: [],
+        diagnostics: []
+      },
+      availability: { state: "available", reasons: [] },
+      dependency_availability: [],
+      feature_availability: [],
+      actions: [
+        {
+          action_id: "set_package_configuration",
+          status: "available",
+          diagnostics: [],
+          required_references: [],
+          request: { request_type: "set_package_configuration", package_name: "botster-web" }
         }
       ],
       provider_profile_admitted: false

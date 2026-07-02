@@ -4,6 +4,12 @@
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
+export interface AesGcmEnvelope {
+  nonce: string;
+  ciphertext: string;
+  version: number;
+}
+
 export interface DaemonHello {
   protocol: string;
   compatibility: DaemonCompatibilityRequirement;
@@ -77,6 +83,7 @@ export type DaemonRequest =
   | { type: "plugin_mcp_call_tool"; name: string; arguments: JsonValue }
   | { type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue }
   | { type: "plugin_surface_action"; package_name: string; surface_id: string; action_id: string; payload: JsonValue }
+  | { type: "local_webrtc_signal"; grant_id: string; grant_secret: string; origin: string; offer: JsonValue }
   | { type: "daemon_shutdown" };
 
 export interface DaemonResponse {
@@ -98,6 +105,8 @@ export interface DaemonResponse {
   plugin_tool_result: JsonValue;
   plugin_surface?: JsonValue;
   plugin_action_result?: JsonValue;
+  local_webrtc_bootstrap?: DaemonLocalWebrtcBootstrap | null;
+  local_webrtc_answer?: DaemonLocalWebrtcAnswer | null;
   events: DaemonEvent[];
   cleanup: DaemonSessionCleanup | null;
   coordination: DaemonCoordination | null;
@@ -125,6 +134,8 @@ export type DaemonResponseKind =
   | "plugin_mcp_tool_result"
   | "plugin_surface"
   | "plugin_action_result"
+  | "local_webrtc_bootstrap"
+  | "local_webrtc_answer"
   | "session_cleanup"
   | "identity"
   | "message_posted"
@@ -261,6 +272,26 @@ export interface DaemonResolvedAppLaunch {
   args?: string[];
   working_directory: string;
   environment?: Record<string, string>;
+}
+
+export interface DaemonLocalWebrtcBootstrap {
+  grant_id: string;
+  grant_secret: string;
+  package_name: string;
+  entrypoint_id: string;
+  expected_origin: string;
+  expires_at: number;
+  signaling_transport: string;
+  data_plane: string;
+  ordered: boolean;
+  max_retransmits?: number | null;
+  max_packet_lifetime_ms?: number | null;
+}
+
+export interface DaemonLocalWebrtcAnswer {
+  grant_id: string;
+  answer: JsonValue;
+  diagnostics?: DaemonDiagnostic[];
 }
 
 export interface DaemonPackage {
@@ -519,7 +550,8 @@ export type DaemonDiagnosticKind =
   | "unsupported_feature"
   | "terminal_stream_unavailable"
   | "action_failure"
-  | "daemon_startup_failure";
+  | "daemon_startup_failure"
+  | "backpressure";
 
 export type DaemonEvent =
   | { type: "session_lifecycle"; session_id: string; state: string }

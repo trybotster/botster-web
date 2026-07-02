@@ -57,9 +57,17 @@ BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
 npm run smoke:live-packaged-protocol
 ```
 
-This command builds the app, starts the package bridge in real-hub mode, starts an isolated local hub when `BOTSTER_HUB_BIN` is supplied, opens the compiled packaged UI in Playwright Chromium, and drives the mounted terminal data-plane path. It proves status/schema compatibility, package listing, session listing, spawn of `botster-web-dogfood-session`, terminal attach output containing `botster-web-dogfood-ready`, browser refresh plus explicit Attach rendering historical output from `snapshot.data` or `scrollback.data`, input echo output containing `botster-web-dogfood-echo:<input>`, resize output containing `botster-web-dogfood-size:<rows>x<cols>`, deterministic exit through `botster-web-dogfood-exit`, observed `process_exit`, and clean shutdown.
+This command builds the app, starts the package bridge in real-hub mode, starts an isolated local hub when `BOTSTER_HUB_BIN` is supplied, opens the compiled packaged UI in Playwright Chromium, and drives the mounted terminal data-plane path. It proves status/schema compatibility, package listing, session listing, spawn of `botster-web-dogfood-session`, terminal attach output containing `botster-web-dogfood-ready`, browser refresh plus explicit Attach rendering historical output from `snapshot.data` or `scrollback.data`, browser keyboard input through the mounted Restty renderer producing exactly one `send_input` and echo output containing `botster-web-dogfood-echo:<input>`, resize output containing `botster-web-dogfood-size:<rows>x<cols>`, deterministic exit through `botster-web-dogfood-exit`, observed `process_exit`, and clean shutdown.
 
-The live harness can also attach to an explicitly isolated existing hub with `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR`. Existing-hub mode does not shut down or remove the attached hub. The harness must not use fake daemon responses, and it fails on browser console/page errors, packaged asset 404s, terminal mount failure, stack overflow, unhandled promise rejection, missing Playwright Chromium, missing hub binaries, or missing live resize/process-exit evidence. It proves the packaged UI + real hub control loop + dogfood bridge terminal egress; it does not prove the production WebRTC data plane.
+When a compatible live hub/session-worker pair is not available, the focused mounted-keyboard fallback proves the browser renderer side of the same input path without claiming daemon/session coverage:
+
+```bash
+npm run smoke:mounted-terminal-keyboard
+```
+
+That smoke mounts the real `TerminalViewHost` and Restty renderer in Playwright Chromium, focuses the mounted bridge, clicks the canvas, dispatches a browser text-insertion `input` event against the focused Restty textarea, asserts exactly one data-plane input write, and requires the echoed output to render through the mounted renderer.
+
+The live harness can also attach to an explicitly isolated existing hub with `BOTSTER_HUB_SOCKET` or `BOTSTER_HUB_DATA_DIR`. Existing-hub mode does not shut down or remove the attached hub. The harness must not use fake daemon responses, and it fails on browser console/page errors, packaged asset 404s, terminal mount failure, stack overflow, unhandled promise rejection, missing Playwright Chromium, missing hub binaries, or missing live resize/process-exit evidence. The bridge mode proves the packaged UI + real hub control loop + harness terminal egress; package runtime uses local WebRTC when the hub injects a bootstrap grant.
 
 The harness reloads the packaged UI after the browser-dispatched spawn before asserting terminal output. That keeps this smoke focused on proving the live protocol loop against an existing real session while a separate follow-up tracks the product race where immediate terminal attach after spawn can briefly hit `UnknownSession`.
 
@@ -149,7 +157,7 @@ Expected proof markers:
 - The installed apps list is populated by `DaemonRequest::ListApps`. Web apps open only from hub-provided `DaemonApp.launch_target.local_url`; terminal apps and missing or blocked launch targets render diagnostics instead of browser-inferred lifecycle behavior.
 - The installed packages list is populated by `DaemonRequest::ListPackages` and shows the package name, version, enabled/disabled/installed state, classification, requested capability summary, provider-profile admission status, runnable entrypoint process state/diagnostics, hub-provided dependency/feature gates, and hub-provided lifecycle action availability when the current hub exposes package registry records.
 - Marketplace package rows render from hub-returned available package DTOs. The browser does not invent a registry path or infer install/auth/update policy; disabled and blocked controls reflect hub-provided package action descriptors.
-- The connection diagnostics panel starts with the selected bridge mode and adds targeted rows when the bridge is unavailable, the control stream fails, the daemon schema or compatibility descriptor is incompatible, an operator/action error is returned, or terminal streaming cannot attach.
+- The connection diagnostics panel starts with the selected transport mode and adds targeted rows when the local WebRTC bootstrap grant, signaling request, RTCDataChannel transport, encrypted envelope handling, data-plane request, bridge fallback, control stream, daemon schema, compatibility descriptor, operator/action response, or terminal stream fails.
 - Hub-provided `DaemonDiagnostic` rows from the public hub-client response/status path render as connection diagnostics with the daemon's `kind`, optional `message`, optional `feature`, and optional `operation` detail. Hub-provided compatibility or feature diagnostics suppress the matching web-inferred compatibility row for the same status response.
 - `Daemon schema mismatch` means the bridge returned `DaemonStatus.schema_version` that does not match the schema expected by this web build. Use a matching botster-hub binary before treating UI behavior as a product bug.
 - `Hub protocol mismatch` or `Hub capability missing` means the bridge returned `DaemonStatus.compatibility` and the descriptor does not satisfy this web build's public hub-client requirements.
@@ -165,7 +173,7 @@ Expected proof markers:
 
 Known limitation: the control-plane round trip (status/list/spawn/input/resize/operator-error/teardown) has been verified end-to-end through this bridge. Terminal output depends on the hub's streaming attach path; older local hub binaries may not emit the ready marker even though control-plane daemon DTOs succeed.
 
-The bridge is a dev/test harness, not the production browser transport. Production browser parity over WebRTC remains outside this repo. The harness uses an explicit temporary data directory and neutral ids; it must not use or mutate the user's real Botster home state.
+The bridge is a dev/test harness and local signaling helper, not the production browser data plane. Installed package runtime prefers the hub-issued local WebRTC bootstrap grant and carries encrypted `DaemonRequest` / `DaemonResponse` envelopes over `RTCDataChannel`; the bridge remains available as the harness fallback. The harness uses an explicit temporary data directory and neutral ids; it must not use or mutate the user's real Botster home state.
 
 ## Local Botster Package
 

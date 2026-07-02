@@ -19,7 +19,19 @@ async function fileExists(path) {
   }
 }
 
+const vendoredProtocol = await readFile(vendoredPath, "utf8");
+
 if (!(await fileExists(sourcePath))) {
+  if (vendoredProtocol.includes("local_webrtc_signal")) {
+    throw new Error(
+      [
+        "Daemon protocol drift check requires the authoritative hub artifact for WebRTC protocol verification.",
+        `hub source: ${sourcePath}`,
+        "Set BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL or check out ../botster-hub before accepting browser WebRTC changes."
+      ].join("\n")
+    );
+  }
+
   console.warn(
     [
       "Skipping daemon protocol drift check: source botster-hub-client artifact is missing.",
@@ -30,10 +42,7 @@ if (!(await fileExists(sourcePath))) {
   process.exit(0);
 }
 
-const [vendoredProtocol, sourceProtocol] = await Promise.all([
-  readFile(vendoredPath, "utf8"),
-  readFile(sourcePath, "utf8")
-]);
+const sourceProtocol = await readFile(sourcePath, "utf8");
 
 if (vendoredProtocol !== sourceProtocol) {
   throw new Error(
