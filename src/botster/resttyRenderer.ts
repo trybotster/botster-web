@@ -40,6 +40,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       appOptions: {
         ptyTransport: this.ptyTransport,
         beforeInput: ({ text, source }) => {
+          recordLiveHarnessTerminal("before_input", { text, source, sessionId: this.descriptor.sessionId });
           if (source !== "pty" && text) {
             this.emitInput(text);
           }
@@ -113,6 +114,7 @@ class BotsterTerminalPtyTransport implements PtyTransport {
     if (this.callbacks) {
       this.connected = true;
       this.callbacks.onConnect?.();
+      recordLiveHarnessTerminal("pty_connected", { sessionId: this.dataPlane.sessionId });
     }
 
     return {
@@ -127,6 +129,7 @@ class BotsterTerminalPtyTransport implements PtyTransport {
     if (this.dataPlane) {
       this.connected = true;
       this.callbacks.onConnect?.();
+      recordLiveHarnessTerminal("pty_connected", { sessionId: this.dataPlane.sessionId });
     }
   }
 
@@ -139,6 +142,7 @@ class BotsterTerminalPtyTransport implements PtyTransport {
 
   sendInput(data: string): boolean {
     if (!this.dataPlane) return false;
+    recordLiveHarnessTerminal("pty_send_input", { data, sessionId: this.dataPlane.sessionId });
     void this.dataPlane.writeInput(data);
     return true;
   }
