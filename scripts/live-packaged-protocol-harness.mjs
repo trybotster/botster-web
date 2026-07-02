@@ -117,7 +117,6 @@ try {
   await waitForHistoricalTerminalRestore(page);
   await waitForTerminalOutput(page, "botster-web-dogfood-ready");
   await waitForTerminalRendererWrite(page, "botster-web-dogfood-ready");
-  await waitForTerminalCanvas(page);
 
   const sendInputRequestsBeforeEcho = await daemonRequestCount(page, {
     type: "send_input",
