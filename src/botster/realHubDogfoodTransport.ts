@@ -713,6 +713,7 @@ function packageConfigurationFields(configuration: DaemonPackageConfiguration | 
       config_type: configType,
       required: field.required === true,
       value: redactedSecret ? "" : configurationValue(value),
+      secret_state: redactedSecret ? "redacted" : undefined,
       placeholder: redactedSecret ? "Existing secret is saved" : undefined,
       helper: redactedSecret ? "Leave blank to keep the existing secret." : readConfigString(field.description, undefined),
       options: readConfigOptions(field.options),

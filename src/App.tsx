@@ -1296,22 +1296,21 @@ interface PluginSettingsPanelProps {
 export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps) {
   const settingsSurfaces = packageSettingsSurfaces(app);
   const actions = packageActions(app);
-  const configurationFields = packageSurfaceRecords(app.configuration_fields);
-  const remoteAccessField = configurationFields.find((field) => firstString(field.id) === "remote_browser_rendezvous_enabled");
-  const genericConfigurationFields = configurationFields.filter((field) => firstString(field.id) !== "remote_browser_rendezvous_enabled");
+  const configurationFields = useMemo(() => packageSurfaceRecords(app.configuration_fields), [app.configuration_fields]);
+  const remoteAccessField = useMemo(
+    () => configurationFields.find((field) => firstString(field.id) === "remote_browser_rendezvous_enabled"),
+    [configurationFields]
+  );
+  const genericConfigurationFields = useMemo(
+    () => configurationFields.filter((field) => firstString(field.id) !== "remote_browser_rendezvous_enabled"),
+    [configurationFields]
+  );
   const configurationSubmit = packageActionFromValue(app.configuration_submit);
-  const [configurationDraft, setConfigurationDraft] = useState<Record<string, unknown>>(() => configurationDraftValues(genericConfigurationFields));
-
-  const updateConfigurationField = useCallback((field: PackageSurfaceRecord, value: unknown) => {
-    const id = configurationFieldId(field);
-    setConfigurationDraft((currentValues) => ({ ...currentValues, [id]: value }));
-  }, []);
-
-  const saveConfiguration = useCallback(() => {
-    if (!configurationSubmit) return;
-
-    onAction(configurationSaveAction(configurationSubmit, genericConfigurationFields, configurationDraft));
-  }, [configurationSubmit, genericConfigurationFields, configurationDraft, onAction]);
+  const configurationDraftBaseline = useMemo(
+    () => configurationDraftValues(genericConfigurationFields),
+    [genericConfigurationFields]
+  );
+  const configurationDraftBaselineKey = JSON.stringify(configurationDraftBaseline);
 
   return (
     <IonList lines="full">
@@ -1327,25 +1326,13 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
               onAction={onAction}
             />
           ) : null}
-          {genericConfigurationFields.map((field) => (
-            <ConfigurationFieldItem
-              field={field}
-              key={configurationFieldKey(field)}
-              onChange={updateConfigurationField}
-              value={configurationDraft[configurationFieldId(field)]}
-            />
-          ))}
           {genericConfigurationFields.length > 0 ? (
-            <IonItem>
-              <IonButton
-                data-testid="package-configuration-save"
-                disabled={!configurationSubmit || configurationSubmit.disabled === true}
-                onClick={saveConfiguration}
-                slot="end"
-              >
-                {configurationSubmit?.label ?? "Save configuration"}
-              </IonButton>
-            </IonItem>
+            <GenericConfigurationForm
+              fields={genericConfigurationFields}
+              key={configurationDraftBaselineKey}
+              onAction={onAction}
+              submit={configurationSubmit}
+            />
           ) : null}
         </>
       ) : null}
@@ -1398,6 +1385,52 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
         );
       })}
     </IonList>
+  );
+}
+
+function GenericConfigurationForm({
+  fields,
+  submit,
+  onAction
+}: {
+  fields: PackageSurfaceRecord[];
+  submit: ActionBinding | undefined;
+  onAction: (action: ActionBinding) => void;
+}) {
+  const [configurationDraft, setConfigurationDraft] = useState<Record<string, unknown>>(() => configurationDraftValues(fields));
+
+  const updateConfigurationField = useCallback((field: PackageSurfaceRecord, value: unknown) => {
+    const id = configurationFieldId(field);
+    setConfigurationDraft((currentValues) => ({ ...currentValues, [id]: value }));
+  }, []);
+
+  const saveConfiguration = useCallback(() => {
+    if (!submit) return;
+
+    onAction(configurationSaveAction(submit, fields, configurationDraft));
+  }, [submit, fields, configurationDraft, onAction]);
+
+  return (
+    <>
+      {fields.map((field) => (
+        <ConfigurationFieldItem
+          field={field}
+          key={configurationFieldKey(field)}
+          onChange={updateConfigurationField}
+          value={configurationDraft[configurationFieldId(field)]}
+        />
+      ))}
+      <IonItem>
+        <IonButton
+          data-testid="package-configuration-save"
+          disabled={!submit || submit.disabled === true}
+          onClick={saveConfiguration}
+          slot="end"
+        >
+          {submit?.label ?? "Save configuration"}
+        </IonButton>
+      </IonItem>
+    </>
   );
 }
 
@@ -1486,7 +1519,7 @@ function ConfigurationFieldItem({
         ))}
       </IonLabel>
       <ConfigurationFieldControl field={field} onChange={onChange} value={value} />
-      {field.placeholder === "Existing secret is saved" && !value ? <IonBadge slot="end" color="medium">Secret saved</IonBadge> : null}
+      {configurationFieldSecretRedacted(field) && !value ? <IonBadge slot="end" color="medium">Secret saved</IonBadge> : null}
     </IonItem>
   );
 }
@@ -1599,6 +1632,10 @@ function configurationFieldOptions(field: PackageSurfaceRecord): Array<{ value: 
 
 function configurationFieldErrors(field: PackageSurfaceRecord): string[] {
   return arrayOfStrings(field.errors);
+}
+
+function configurationFieldSecretRedacted(field: PackageSurfaceRecord): boolean {
+  return configurationFieldType(field) === "secret" && field.secret_state === "redacted";
 }
 
 function packageActionFromValue(value: unknown): ActionBinding | undefined {

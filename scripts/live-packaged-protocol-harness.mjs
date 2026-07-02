@@ -365,10 +365,12 @@ async function openFirstPartyUiAppSurface(page, mode) {
   const foundSurface = await candidate.waitFor({ timeout: 15_000 }).then(() => true).catch(async (error) => {
     const installedAppsText = await installedAppsList.innerText().catch(() => "");
     const installedPackagesText = await installedPackagesList.innerText().catch(() => "");
-    console.log(
-      `skipping first-party app surface proof; no first-party UI surface row was visible; installed apps=${JSON.stringify(installedAppsText)} installed packages=${JSON.stringify(installedPackagesText)}: ${error.message}`
-    );
-    return false;
+    const message = `no first-party UI surface row was visible; installed apps=${JSON.stringify(installedAppsText)} installed packages=${JSON.stringify(installedPackagesText)}: ${error.message}`;
+    if (process.env.BOTSTER_LIVE_ALLOW_SURFACE_SKIP === "1") {
+      console.log(`skipping first-party app surface proof; ${message}`);
+      return false;
+    }
+    throw new Error(`timed out waiting for first-party app surface proof; ${message}`);
   });
   if (!foundSurface) return;
   await candidate.click();

@@ -2711,6 +2711,25 @@ assert.equal(
   ).actionTarget,
   "missing-real-hub-session"
 );
+assert.match(
+  actionFailureDiagnostic(
+    { id: "botster.package.configuration.save", target: "project-pipelines" },
+    {
+      accepted: false,
+      reason: "Package configuration failed",
+      result: {
+        diagnostics: [
+          {
+            kind: "field",
+            field: "pipeline_mode",
+            message: "select_option_unknown: invalid-mode"
+          }
+        ]
+      }
+    }
+  ).detail,
+  /Package configuration failed field: pipeline_mode: select_option_unknown: invalid-mode/
+);
 
 const terminalDataPlane = createRealHubTerminalDataPlane({
   bridge
@@ -3257,7 +3276,8 @@ try {
         kind: "secret",
         config_type: "secret",
         value: "",
-        placeholder: "Existing secret is saved",
+        secret_state: "redacted",
+        placeholder: "Saved credential",
         helper: "Leave blank to keep the existing secret.",
         errors: []
       }
