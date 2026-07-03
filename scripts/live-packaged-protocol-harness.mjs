@@ -567,15 +567,17 @@ async function waitForHarnessEvent(page, criteria, label) {
 }
 
 async function waitForTransportLabel(page) {
+  const expectedDataPlane = transportMode === "webrtc" ? "WebRTC DataChannel" : "Bridge/SSE";
+  const expectedLayer = transportMode === "webrtc" ? "Local WebRTC signaling via bridge" : "Bridge/SSE terminal transport active";
   await page.waitForFunction(
-    () => {
+    ({ expectedDataPlane, expectedLayer }) => {
       const text = globalThis.document.body?.innerText ?? "";
-      return /\bwebrtc\b|\breal-hub\b/.test(text);
+      return text.includes(expectedDataPlane) && text.includes(expectedLayer);
     },
-    undefined,
+    { expectedDataPlane, expectedLayer },
     { timeout: 45_000 }
   ).catch((error) => {
-    throw new Error(`timed out waiting for visible transport label: ${error.message}`);
+    throw new Error(`timed out waiting for visible ${expectedDataPlane} transport label: ${error.message}`);
   });
 }
 

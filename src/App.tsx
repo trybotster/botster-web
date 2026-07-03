@@ -68,11 +68,12 @@ import {
   schemaVersionDiagnosticFromFrame,
   terminalUnavailableDiagnostic,
   upsertDiagnostic,
+  webRtcLifecycleDiagnostic,
   type ConnectionDiagnostic
 } from "./botster/connectionDiagnostics";
-import { createDogfoodRuntimeConfig } from "./botster/dogfoodMode";
+import { createDogfoodRuntimeConfig, terminalDataPlaneLabel } from "./botster/dogfoodMode";
 import { realHubDogfoodSessionId } from "./botster/realHubDogfoodTransport";
-import type { LocalWebrtcBootstrap } from "./botster/webrtcDaemonClient";
+import { webRtcDaemonLifecycleEventName, type LocalWebrtcBootstrap, type WebrtcDaemonLifecycleEvent } from "./botster/webrtcDaemonClient";
 import type { ActionBinding } from "./botster/actions";
 import type { TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
@@ -296,7 +297,7 @@ export default function App() {
     "dogfood.action_status": dogfoodRuntime.statusText
   });
   const [diagnostics, setDiagnostics] = useState<ConnectionDiagnostic[]>(() =>
-    initialConnectionDiagnostics(dogfoodRuntime.mode, dogfoodRuntime.statusText)
+    initialConnectionDiagnostics(dogfoodRuntime.mode, dogfoodRuntime.statusText, dogfoodRuntime.terminalDataPlaneKind)
   );
   const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "package" | "availablePackage" | "session" | "draft", DogfoodEntityLoadStatus>>({
     app: "not_loaded",
@@ -319,17 +320,29 @@ export default function App() {
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
     setLocalState((current) => ({ ...current, ...patch }));
-  }, []);
+  }, [setLocalState]);
   const recordDiagnostic = useCallback((diagnostic: ConnectionDiagnostic | undefined) => {
     setDiagnostics((current) => upsertDiagnostic(current, diagnostic));
-  }, []);
+  }, [setDiagnostics]);
   const recordDiagnostics = useCallback((nextDiagnostics: ConnectionDiagnostic[]) => {
     setDiagnostics((current) => nextDiagnostics.reduce(upsertDiagnostic, current));
-  }, []);
+  }, [setDiagnostics]);
   const navigateToView = useCallback((view: AppView) => {
     setActiveView(view);
     pushAppViewUrl(view);
   }, []);
+
+  useEffect(() => {
+    const recordWebRtcLifecycle = (event: Event) => {
+      recordDiagnostic(webRtcLifecycleDiagnostic((event as CustomEvent<WebrtcDaemonLifecycleEvent>).detail));
+    };
+
+    window.addEventListener(webRtcDaemonLifecycleEventName, recordWebRtcLifecycle);
+
+    return () => {
+      window.removeEventListener(webRtcDaemonLifecycleEventName, recordWebRtcLifecycle);
+    };
+  }, [recordDiagnostic]);
 
   useEffect(() => {
     const syncViewFromLocation = () => {
@@ -624,7 +637,7 @@ export default function App() {
     {
       key: "connection",
       label: "Connection",
-      value: dogfoodRuntime.mode === "webrtc" ? "WebRTC" : dogfoodRuntime.mode === "real-hub" ? "Real hub" : "Fixture",
+      value: terminalDataPlaneLabel(dogfoodRuntime.terminalDataPlaneKind),
       detail: dogfoodRuntime.statusText,
       severity: blockingDiagnostics.length > 0 ? "danger" : warningDiagnostics.length > 0 ? "warning" : "success"
     },

@@ -16,7 +16,16 @@ export interface WebrtcDaemonClientOptions {
   bootstrap: LocalWebrtcBootstrap;
   fetchImpl?: typeof fetch;
   peerConnectionFactory?: () => RTCPeerConnection;
+  onLifecycle?: (event: WebrtcDaemonLifecycleEvent) => void;
 }
+
+export type WebrtcDaemonLifecycleEvent =
+  | { type: "data-channel-open" }
+  | { type: "data-channel-closed" }
+  | { type: "data-channel-error" }
+  | { type: "encrypted-stream-ready"; requestType: string };
+
+export const webRtcDaemonLifecycleEventName = "botster:webrtc-daemon-lifecycle";
 
 type PendingRequest = {
   resolve(response: DaemonResponse): void;
@@ -112,6 +121,7 @@ class WebrtcDaemonTransport {
   private dataChannel: RTCDataChannel | undefined;
   private cryptoKey: CryptoKey | undefined;
   private connectPromise: Promise<void> | undefined;
+  private encryptedStreamReady = false;
 
   constructor(private readonly options: WebrtcDaemonClientOptions) {
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
@@ -144,6 +154,10 @@ class WebrtcDaemonTransport {
     }
     try {
       channel.send(JSON.stringify(envelope));
+      if (!this.encryptedStreamReady) {
+        this.encryptedStreamReady = true;
+        this.emitLifecycle({ type: "encrypted-stream-ready", requestType: request.type });
+      }
     } catch (error) {
       throw webrtcFailure("data-plane", `local WebRTC data-plane send failed for ${request.type}: ${errorMessage(error)}`);
     }
@@ -204,13 +218,18 @@ class WebrtcDaemonTransport {
     dataChannel.addEventListener("message", (event) => {
       void this.handleMessage(event.data).catch((error: unknown) => this.failPending(error));
     });
-    dataChannel.addEventListener("open", () => recordLiveHarnessEvent("webrtc_data_channel", { state: "open" }));
+    dataChannel.addEventListener("open", () => {
+      recordLiveHarnessEvent("webrtc_data_channel", { state: "open" });
+      this.emitLifecycle({ type: "data-channel-open" });
+    });
     dataChannel.addEventListener("close", () => {
       recordLiveHarnessEvent("webrtc_data_channel", { state: "closed" });
+      this.emitLifecycle({ type: "data-channel-closed" });
       this.failPending(webrtcFailure("transport", "local WebRTC data channel closed"));
     });
     dataChannel.addEventListener("error", () => {
       recordLiveHarnessEvent("webrtc_data_channel", { state: "error" });
+      this.emitLifecycle({ type: "data-channel-error" });
       this.failPending(webrtcFailure("transport", "local WebRTC data channel failed"));
     });
 
@@ -283,6 +302,13 @@ class WebrtcDaemonTransport {
   private failPending(error: unknown): void {
     for (const pending of this.pendingRequests.splice(0)) {
       pending.reject(error);
+    }
+  }
+
+  private emitLifecycle(event: WebrtcDaemonLifecycleEvent): void {
+    this.options.onLifecycle?.(event);
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
+      window.dispatchEvent(new CustomEvent(webRtcDaemonLifecycleEventName, { detail: event }));
     }
   }
 }
