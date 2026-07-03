@@ -313,6 +313,9 @@ assert.match(liveProtocolHarnessScript, /chromium\.launch/);
 assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-ready/);
 assert.match(liveProtocolHarnessScript, /page\.reload/);
+assert.match(liveProtocolHarnessScript, /reloadSamePackageUrlAndAssertWebrtc/);
+assert.match(liveProtocolHarnessScript, /latestLocalWebrtcGrantId/);
+assert.doesNotMatch(liveProtocolHarnessScript, /type: "stop_package_entrypoint"/);
 assert.match(liveProtocolHarnessScript, /waitForSessionAttachable\(page, true\)/);
 assert.match(liveProtocolHarnessScript, /waitForHistoricalTerminalRestore/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalRendererWrite/);
@@ -424,6 +427,7 @@ assert.match(app, /normalizeLocalWebrtcBootstrap/);
 assert.match(webrtcDaemonClient, /createWebrtcDaemonClient/);
 assert.match(webrtcDaemonClient, /createDataChannel\("botster-daemon"/);
 assert.match(webrtcDaemonClient, /type: "local_webrtc_signal"/);
+assert.match(webrtcDaemonClient, /grant_secret: "\[redacted\]"/);
 assert.match(webrtcDaemonClient, /crypto\.subtle\.encrypt/);
 assert.match(webrtcDaemonClient, /crypto\.subtle\.decrypt/);
 assert.match(webrtcDaemonClient, /AesGcmEnvelope/);
@@ -1759,12 +1763,13 @@ globalThis.window = {
   }
 };
 try {
-  const dataChannel = createFakeDataChannel();
-  const peerConnection = createFakePeerConnection(dataChannel);
+  const dataChannels = [createFakeDataChannel(), createFakeDataChannel()];
+  let nextPeerConnectionIndex = 0;
+  const dataChannel = dataChannels[0];
   const signalingRequests = [];
   const webrtcClient = createWebrtcDaemonClient({
     bootstrap: localWebrtcBootstrapFixture,
-    peerConnectionFactory: () => peerConnection,
+    peerConnectionFactory: () => createFakePeerConnection(dataChannels[nextPeerConnectionIndex++]),
     fetchImpl: async (_url, init) => {
       const envelope = JSON.parse(init.body);
       signalingRequests.push(envelope.payload);
@@ -1819,6 +1824,26 @@ try {
   assert.equal(
     lifecycleEvents.filter((event) => event.detail.type === "encrypted-stream-ready").length,
     1
+  );
+  dataChannel.close();
+  await waitForTestCondition(() => lifecycleEvents.some((event) => event.detail.type === "data-channel-closed"));
+  const reconnectResponsePromise = webrtcClient.request({ type: "list_apps" });
+  await waitForTestCondition(() => signalingRequests.length === 2);
+  assert.equal(signalingRequests[1].type, "local_webrtc_signal");
+  assert.equal(signalingRequests[1].grant_id, "grant-test");
+  await waitForTestCondition(() => dataChannels[1].sent.length > 0);
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, dataChannels[1].sent[0]),
+    { type: "list_apps" }
+  );
+  dataChannels[1].emitMessage(await encryptTestEnvelope(
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "apps", apps: [], events: [], diagnostics: [] }
+  ));
+  assert.equal((await reconnectResponsePromise).kind, "apps");
+  assert.equal(
+    lifecycleEvents.filter((event) => event.detail.type === "encrypted-stream-ready").length,
+    2
   );
 
   const invalidBootstrapClient = createWebrtcDaemonClient({
@@ -4390,6 +4415,11 @@ function createFakeDataChannel() {
       this.readyState = "open";
       for (const listener of listeners.get("open") ?? []) listener({});
     },
+    close() {
+      if (this.readyState === "closed") return;
+      this.readyState = "closed";
+      for (const listener of listeners.get("close") ?? []) listener({});
+    },
     emitMessage(data) {
       for (const listener of listeners.get("message") ?? []) listener({ data });
     }
@@ -4412,6 +4442,7 @@ function createFakePeerConnection(dataChannel) {
     async setRemoteDescription() {
       dataChannel.open();
     },
+    close() {},
     addEventListener() {},
     removeEventListener() {}
   };

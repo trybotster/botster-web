@@ -65,6 +65,12 @@ try {
       events: [],
       terminal: []
     };
+    globalThis.window.addEventListener("botster:webrtc-daemon-lifecycle", (event) => {
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events?.push({
+        kind: "webrtc_lifecycle",
+        payload: event.detail
+      });
+    });
   });
 
   page.on("console", (message) => {
@@ -111,18 +117,18 @@ try {
   await waitForTerminalSession(page, "botster-web-dogfood-session");
   await waitForTerminalOutput(page, "botster-web-dogfood-ready");
 
-  await refreshPackageRuntime(page);
-  await waitForTransportLabel(page);
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "post-refresh status request");
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, "post-refresh list_sessions request");
-  await openDiagnosticsView(page);
-  await waitForSessionStatus(page, "running");
-  await waitForSessionAttachable(page, true);
-  await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
-  await waitForTerminalSession(page, "botster-web-dogfood-session");
-  await waitForHistoricalTerminalRestore(page);
-  await waitForTerminalOutput(page, "botster-web-dogfood-ready");
-  await waitForTerminalRendererWrite(page, "botster-web-dogfood-ready");
+  let previousGrantId = await latestLocalWebrtcGrantId(page);
+  for (const cycle of [1, 2]) {
+    previousGrantId = await reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId);
+    await openDiagnosticsView(page);
+    await waitForSessionStatus(page, "running");
+    await waitForSessionAttachable(page, true);
+    await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
+    await waitForTerminalSession(page, "botster-web-dogfood-session");
+    await waitForHistoricalTerminalRestore(page);
+    await waitForTerminalOutput(page, "botster-web-dogfood-ready");
+    await waitForTerminalRendererWrite(page, "botster-web-dogfood-ready");
+  }
 
   const sendInputRequestsBeforeEcho = await daemonRequestCount(page, {
     type: "send_input",
@@ -297,31 +303,53 @@ async function refreshPackageRuntime(page) {
     return;
   }
 
-  if (!webrtcDataDir) {
-    throw new Error("WebRTC package refresh requires the isolated data dir");
-  }
-  const socketPath = join(webrtcDataDir, "botster-hub.sock");
-  await sendDaemonRequest(socketPath, {
-    type: "stop_package_entrypoint",
-    package_name: "botster-web",
-    entrypoint_id: "web-client"
-  });
-  port = await findAvailablePort();
-  bridgeUrl = `http://${host}:${port}`;
-  await sendDaemonRequest(socketPath, {
-    type: "start_package_entrypoint",
-    package_name: "botster-web",
-    entrypoint_id: "web-client",
-    environment_overrides: {
-      BOTSTER_WEB_DOGFOOD_BRIDGE_PORT: String(port)
-    }
-  });
-  appUrl = await waitForPackageAppUrl(socketPath);
-  await waitForHttpOk(new URL("/health", appUrl).toString(), () =>
-    hubProcess?.exitCode !== null ? `hub exited before package runtime refresh (code=${hubProcess.exitCode})` : undefined
-  );
-  await waitForHtmlShell(withDogfoodMode(appUrl));
+  await page.reload({ waitUntil: "domcontentloaded" });
+}
+
+async function revisitPackageRuntime(page) {
   await page.goto(withDogfoodMode(appUrl), { waitUntil: "domcontentloaded" });
+}
+
+async function reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId) {
+  const expectedUrl = withDogfoodMode(appUrl);
+  const beforeUrl = page.url();
+  if (new URL(beforeUrl).origin !== new URL(expectedUrl).origin) {
+    throw new Error(`same-URL reload cycle ${cycle} started on unexpected origin: page=${beforeUrl} app=${expectedUrl}`);
+  }
+
+  if (cycle === 1) {
+    await refreshPackageRuntime(page);
+  } else {
+    await revisitPackageRuntime(page);
+  }
+
+  const afterUrl = page.url();
+  if (new URL(afterUrl).origin !== new URL(expectedUrl).origin) {
+    throw new Error(`same-URL reload cycle ${cycle} changed package origin: before=${beforeUrl} after=${afterUrl} app=${expectedUrl}`);
+  }
+
+  await waitForTransportLabel(page);
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "local_webrtc_signal" }, `reload ${cycle} local_webrtc_signal request`);
+  await waitForHarnessEvent(page, { kind: "webrtc_data_channel", state: "open" }, `reload ${cycle} data channel open`);
+  await waitForHarnessEvent(page, { kind: "webrtc_lifecycle", type: "data-channel-open" }, `reload ${cycle} lifecycle data-channel-open`);
+  await waitForHarnessEvent(page, { kind: "webrtc_lifecycle", type: "encrypted-stream-ready" }, `reload ${cycle} encrypted stream ready`);
+  await assertNoGrantSecretLeak(page, cycle);
+
+  const grantId = await latestLocalWebrtcGrantId(page);
+  if (!grantId) {
+    throw new Error(`same-URL reload cycle ${cycle} did not expose a redacted local WebRTC grant_id`);
+  }
+  if (previousGrantId && grantId === previousGrantId) {
+    throw new Error(`same-URL reload cycle ${cycle} reused local WebRTC grant_id ${grantId}`);
+  }
+
+  await openDiagnosticsView(page);
+  await page.getByText("WebRTC DataChannel open").waitFor({ timeout: 15_000 });
+  await page.getByText("Encrypted client stream ready").waitFor({ timeout: 15_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, `reload ${cycle} status request`);
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, `reload ${cycle} list_packages request`);
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, `reload ${cycle} list_sessions request`);
+  return grantId;
 }
 
 async function callTerminalControl(page, method, ...args) {
@@ -556,6 +584,8 @@ async function waitForHarnessEvent(page, criteria, label) {
         if (expectedCriteria.surface_id && payload.surface_id !== expectedCriteria.surface_id) return false;
         if (typeof expectedCriteria.rows === "number" && payload.rows !== expectedCriteria.rows) return false;
         if (typeof expectedCriteria.cols === "number" && payload.cols !== expectedCriteria.cols) return false;
+        if (expectedCriteria.state && payload.state !== expectedCriteria.state) return false;
+        if (expectedCriteria.requestType && payload.requestType !== expectedCriteria.requestType) return false;
         return true;
       });
     },
@@ -564,6 +594,29 @@ async function waitForHarnessEvent(page, criteria, label) {
   ).catch((error) => {
     throw new Error(`timed out waiting for ${label}: ${error.message}`);
   });
+}
+
+async function latestLocalWebrtcGrantId(page) {
+  return page.evaluate(() => {
+    const requests = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "local_webrtc_signal")
+      .map((entry) => entry.payload?.grant_id)
+      .filter((grantId) => typeof grantId === "string");
+    return requests.at(-1) ?? null;
+  });
+}
+
+async function assertNoGrantSecretLeak(page, cycle) {
+  const leakedRequests = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "local_webrtc_signal")
+      .filter((entry) => entry.payload?.grant_secret !== "[redacted]")
+      .map((entry) => entry.payload)
+  );
+
+  if (leakedRequests.length > 0) {
+    throw new Error(`same-URL reload cycle ${cycle} leaked local WebRTC grant_secret in harness events`);
+  }
 }
 
 async function waitForTransportLabel(page) {
@@ -586,19 +639,45 @@ async function waitForRemoteAccessPackageConfiguration(page) {
     () => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events.some((entry) => {
-        if (entry.kind !== "daemon_response" || entry.payload?.kind !== "packages") return false;
-        const packageRecord = entry.payload.packages?.find((candidate) => candidate.package_name === "botster-web");
-        const fields = packageRecord?.configuration?.schema?.fields ?? [];
-        const remoteAccessField = fields.find((field) => field.key === "remote_browser_rendezvous_enabled");
-        const action = packageRecord?.actions?.find((candidate) => candidate.action_id === "set_package_configuration");
-        return (
-          remoteAccessField?.type === "boolean" &&
-          remoteAccessField?.default?.value === false &&
-          packageRecord?.configuration?.effective_values?.remote_browser_rendezvous_enabled?.value === false &&
-          action?.status === "available" &&
-          action?.request?.request_type === "set_package_configuration"
+        const packageRecords = [];
+        if (entry.kind === "daemon_response" && entry.payload?.kind === "packages") {
+          packageRecords.push(...(entry.payload.packages ?? []));
+        }
+        if (entry.kind === "hub_frame" && entry.payload?.kind === "entity_snapshot") {
+          const payload = entry.payload.payload;
+          if (payload?.family === "botster-web.package") {
+            packageRecords.push(...(payload.records ?? []));
+          }
+        }
+
+        return packageRecords.some((packageRecord) =>
+          (packageRecord?.package_name === "botster-web" || packageRecord?.id === "botster-web") &&
+            hasRemoteAccessConfiguration(packageRecord)
         );
       });
+
+      function hasRemoteAccessConfiguration(packageRecord) {
+        const rawFields = packageRecord?.configuration?.schema?.fields ?? [];
+        const projectedFields = packageRecord?.configuration_fields ?? [];
+        const remoteAccessField = [...rawFields, ...projectedFields].find(
+          (field) => field.key === "remote_browser_rendezvous_enabled" || field.id === "remote_browser_rendezvous_enabled"
+        );
+        const action = [...(packageRecord?.actions ?? []), ...(packageRecord?.package_actions ?? [])].find(
+          (candidate) => candidate.action_id === "set_package_configuration"
+        );
+        const effectiveValue = packageRecord?.configuration?.effective_values?.remote_browser_rendezvous_enabled?.value ??
+          remoteAccessField?.value;
+        const defaultValue = remoteAccessField?.default?.value ?? remoteAccessField?.default ?? false;
+        const request = action?.request ?? action?.action?.params?.daemon_request ?? packageRecord?.configuration_submit?.params?.daemon_request;
+
+        return (
+          (remoteAccessField?.type === "boolean" || remoteAccessField?.config_type === "boolean" || remoteAccessField?.kind === "checkbox") &&
+          defaultValue === false &&
+          effectiveValue === false &&
+          (action?.status === "available" || packageRecord?.configuration_submit?.disabled === false) &&
+          request?.request_type === "set_package_configuration"
+        );
+      }
     },
     undefined,
     { timeout: 45_000 }

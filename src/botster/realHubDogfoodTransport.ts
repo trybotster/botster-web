@@ -38,6 +38,7 @@ type HubConnectionDiagnosticPayload = Omit<Partial<DaemonDiagnostic>, "kind"> & 
 
 export interface DaemonBridgeClient {
   request(request: DaemonRequest): Promise<DaemonResponse>;
+  disconnect?(): void;
   subscribeEvents?(onEvent: (event: DaemonEvent) => void): { unsubscribe(): void };
   streamTerminal?(
     sessionId: string,
@@ -157,6 +158,7 @@ export function createRealHubDogfoodTransport({
       daemonEventSubscription?.unsubscribe();
       daemonEventSubscription = undefined;
       ingress = undefined;
+      bridge.disconnect?.();
     },
     async send(frame) {
       if (frame.kind === "subscribe") {
