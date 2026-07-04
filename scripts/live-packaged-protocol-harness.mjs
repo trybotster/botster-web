@@ -328,6 +328,7 @@ async function reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId)
     throw new Error(`same-URL reload cycle ${cycle} changed package origin: before=${beforeUrl} after=${afterUrl} app=${expectedUrl}`);
   }
 
+  await openDiagnosticsView(page);
   await waitForTransportLabel(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "local_webrtc_signal" }, `reload ${cycle} local_webrtc_signal request`);
   await waitForHarnessEvent(page, { kind: "webrtc_data_channel", state: "open" }, `reload ${cycle} data channel open`);
@@ -343,7 +344,6 @@ async function reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId)
     throw new Error(`same-URL reload cycle ${cycle} reused local WebRTC grant_id ${grantId}`);
   }
 
-  await openDiagnosticsView(page);
   await page.getByText("WebRTC DataChannel open").waitFor({ timeout: 15_000 });
   await page.getByText("Encrypted client stream ready").waitFor({ timeout: 15_000 });
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, `reload ${cycle} status request`);

@@ -1,5 +1,7 @@
 import type {
   AesGcmEnvelope,
+  DaemonBridgeRequestEnvelope,
+  DaemonBridgeResponseEnvelope,
   DaemonEvent,
   DaemonLocalWebrtcBootstrap,
   DaemonRequest,
@@ -15,8 +17,16 @@ export interface LocalWebrtcBootstrap extends DaemonLocalWebrtcBootstrap {
 export interface WebrtcDaemonClientOptions {
   bootstrap: LocalWebrtcBootstrap;
   fetchImpl?: typeof fetch;
+  refreshBootstrap?: () => Promise<LocalWebrtcBootstrap | undefined>;
   peerConnectionFactory?: () => RTCPeerConnection;
   onLifecycle?: (event: WebrtcDaemonLifecycleEvent) => void;
+}
+
+export interface LocalWebrtcBootstrapRefreshOptions {
+  bootstrap: LocalWebrtcBootstrap;
+  bridgeUrl: string;
+  fetchImpl?: typeof fetch;
+  requestIdGenerator?: () => string;
 }
 
 export type WebrtcDaemonLifecycleEvent =
@@ -46,6 +56,50 @@ export class WebrtcDaemonClientError extends Error {
 
 const requestTimeoutMs = 10_000;
 const drainIntervalMs = 25;
+
+function createRequestIdGenerator(prefix: string) {
+  let counter = 0;
+  return () => `${prefix}-${++counter}`;
+}
+
+export function createLocalWebrtcBootstrapRefresher({
+  bootstrap,
+  bridgeUrl,
+  fetchImpl = fetch,
+  requestIdGenerator = createRequestIdGenerator("local-webrtc-bootstrap")
+}: LocalWebrtcBootstrapRefreshOptions): () => Promise<LocalWebrtcBootstrap | undefined> {
+  return async () => {
+    const request: DaemonRequest = {
+      type: "issue_local_webrtc_bootstrap",
+      package_name: bootstrap.package_name,
+      entrypoint_id: bootstrap.entrypoint_id,
+      origin: new URL(bridgeUrl, window.location.href).origin
+    };
+    recordLiveHarnessEvent("daemon_request", request);
+    const envelope: DaemonBridgeRequestEnvelope = {
+      kind: "daemon_request",
+      request_id: requestIdGenerator(),
+      payload: request
+    };
+    const response = await fetchImpl(bridgeUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(envelope)
+    });
+    if (!response.ok) {
+      throw webrtcFailure("bootstrap", `local WebRTC bootstrap refresh failed with HTTP ${response.status}`);
+    }
+
+    const reply = (await response.json()) as DaemonBridgeResponseEnvelope;
+    if (reply.kind !== "daemon_response") {
+      throw webrtcFailure("bootstrap", "local WebRTC bootstrap refresh returned an unexpected transport envelope");
+    }
+    recordLiveHarnessEvent("daemon_response", reply.payload);
+    return reply.payload.local_webrtc_bootstrap
+      ? { ...reply.payload.local_webrtc_bootstrap, signaling_url: bootstrap.signaling_url }
+      : undefined;
+  };
+}
 
 export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): DaemonBridgeClient {
   const transport = new WebrtcDaemonTransport(options);
@@ -217,7 +271,7 @@ class WebrtcDaemonTransport {
 
   private async open(): Promise<void> {
     this.resetPeerState();
-    const bootstrap = this.options.bootstrap;
+    const bootstrap = await this.resolveBootstrap();
     try {
       this.cryptoKey = await importStreamKey(bootstrap.grant_secret);
     } catch (error) {
@@ -311,6 +365,21 @@ class WebrtcDaemonTransport {
     } catch (error) {
       throw webrtcFailure("transport", `local WebRTC transport failed: ${errorMessage(error)}`);
     }
+  }
+
+  private async resolveBootstrap(): Promise<LocalWebrtcBootstrap> {
+    if (this.options.refreshBootstrap) {
+      try {
+        return (await this.options.refreshBootstrap()) ?? this.options.bootstrap;
+      } catch (error) {
+        recordLiveHarnessEvent("webrtc_error", {
+          stage: "bootstrap",
+          request_type: "issue_local_webrtc_bootstrap",
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return this.options.bootstrap;
   }
 
   private async handleMessage(data: unknown): Promise<void> {

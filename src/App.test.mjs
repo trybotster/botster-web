@@ -417,6 +417,7 @@ assert.match(architecture, /src\/botster\/webrtcDaemonClient\.ts/);
 assert.match(architecture, /AesGcmEnvelope/);
 assert.match(generatedDaemonProtocol, /export interface AesGcmEnvelope/);
 assert.match(generatedDaemonProtocol, /type: "local_webrtc_signal"/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "issue_local_webrtc_bootstrap"; package_name: string; entrypoint_id: string; origin: string \}/);
 assert.match(generatedDaemonProtocol, /DaemonLocalWebrtcBootstrap/);
 assert.match(generatedDaemonProtocol, /DaemonLocalWebrtcAnswer/);
 assert.match(generatedDaemonProtocol, /local_webrtc_bootstrap/);
@@ -425,6 +426,7 @@ assert.match(dogfoodBridgeScript, /BOTSTER_LOCAL_WEBRTC_GRANT_ID/);
 assert.match(dogfoodBridgeScript, /__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__/);
 assert.match(app, /normalizeLocalWebrtcBootstrap/);
 assert.match(webrtcDaemonClient, /createWebrtcDaemonClient/);
+assert.match(webrtcDaemonClient, /createLocalWebrtcBootstrapRefresher/);
 assert.match(webrtcDaemonClient, /createDataChannel\("botster-daemon"/);
 assert.match(webrtcDaemonClient, /type: "local_webrtc_signal"/);
 assert.match(webrtcDaemonClient, /grant_secret: "\[redacted\]"/);
@@ -802,6 +804,7 @@ const {
 } = requireRuntime("./botster/realHubDogfoodTransport.js");
 const { createRealHubTerminalDataPlane } = requireRuntime("./botster/realHubTerminalDataPlane.js");
 const {
+  createLocalWebrtcBootstrapRefresher,
   createWebrtcDaemonClient,
   WebrtcDaemonClientError,
   webRtcDaemonLifecycleEventName
@@ -1763,12 +1766,62 @@ globalThis.window = {
   }
 };
 try {
+  const bootstrapRefreshRequests = [];
+  const refreshedBootstrapFixture = {
+    ...localWebrtcBootstrapFixture,
+    grant_id: "grant-refresh",
+    grant_secret: localWebrtcBootstrapFixture.grant_secret.replace(/0/g, "1")
+  };
+  const refreshedBootstrap = await createLocalWebrtcBootstrapRefresher({
+    bootstrap: localWebrtcBootstrapFixture,
+    bridgeUrl: "http://127.0.0.1:41739/request",
+    requestIdGenerator: () => "bootstrap-refresh-test",
+    fetchImpl: async (url, init) => {
+      const envelope = JSON.parse(init.body);
+      bootstrapRefreshRequests.push({ url, envelope });
+      return {
+        ok: true,
+        json: async () => ({
+          kind: "daemon_response",
+          request_id: envelope.request_id,
+          payload: {
+            kind: "local_webrtc_bootstrap",
+            local_webrtc_bootstrap: refreshedBootstrapFixture
+          }
+        })
+      };
+    }
+  })();
+  assert.equal(bootstrapRefreshRequests[0].url, "http://127.0.0.1:41739/request");
+  assert.deepEqual(bootstrapRefreshRequests[0].envelope, {
+    kind: "daemon_request",
+    request_id: "bootstrap-refresh-test",
+    payload: {
+      type: "issue_local_webrtc_bootstrap",
+      package_name: "botster-web",
+      entrypoint_id: "web-client",
+      origin: "http://127.0.0.1:41739"
+    }
+  });
+  assert.equal(refreshedBootstrap.grant_id, "grant-refresh");
+  assert.equal(refreshedBootstrap.signaling_url, localWebrtcBootstrapFixture.signaling_url);
+
   const dataChannels = [createFakeDataChannel(), createFakeDataChannel()];
   let nextPeerConnectionIndex = 0;
   const dataChannel = dataChannels[0];
   const signalingRequests = [];
+  const refreshedBootstraps = [
+    refreshedBootstrapFixture,
+    {
+      ...localWebrtcBootstrapFixture,
+      grant_id: "grant-refresh-2",
+      grant_secret: localWebrtcBootstrapFixture.grant_secret.replace(/0/g, "2")
+    }
+  ];
+  let refreshBootstrapCalls = 0;
   const webrtcClient = createWebrtcDaemonClient({
     bootstrap: localWebrtcBootstrapFixture,
+    refreshBootstrap: async () => refreshedBootstraps[refreshBootstrapCalls++],
     peerConnectionFactory: () => createFakePeerConnection(dataChannels[nextPeerConnectionIndex++]),
     fetchImpl: async (_url, init) => {
       const envelope = JSON.parse(init.body);
@@ -1789,7 +1842,7 @@ try {
   const responsePromise = webrtcClient.request({ type: "status" });
   await waitForTestCondition(() => signalingRequests.length > 0);
   assert.equal(signalingRequests[0].type, "local_webrtc_signal");
-  assert.equal(signalingRequests[0].grant_id, "grant-test");
+  assert.equal(signalingRequests[0].grant_id, "grant-refresh");
   await waitForTestCondition(() => lifecycleEvents.some((event) => event.detail.type === "data-channel-open"));
   assert.equal(lifecycleEvents.find((event) => event.detail.type === "data-channel-open").name, webRtcDaemonLifecycleEventName);
   assert.equal(
@@ -1810,14 +1863,14 @@ try {
   const outboundEnvelope = JSON.parse(dataChannel.sent[0]);
   assert.deepEqual(Object.keys(outboundEnvelope).sort(), ["ciphertext", "nonce", "version"]);
   dataChannel.emitMessage(await encryptTestEnvelope(
-    "secret-0000000000000000000000000000000000000000000000000000000000000000",
+    refreshedBootstraps[0].grant_secret,
     { kind: "status", status: null, sessions: [], packages: [], package_decision: null, lifecycle: [], plugin_tools: [], plugin_tool_result: null, events: [], cleanup: null, coordination: null, error: null }
   ));
   assert.equal((await responsePromise).kind, "status");
   const secondResponsePromise = webrtcClient.request({ type: "list_sessions" });
   await waitForTestCondition(() => dataChannel.sent.length > 1);
   dataChannel.emitMessage(await encryptTestEnvelope(
-    "secret-0000000000000000000000000000000000000000000000000000000000000000",
+    refreshedBootstraps[0].grant_secret,
     { kind: "sessions", sessions: [], events: [], diagnostics: [] }
   ));
   assert.equal((await secondResponsePromise).kind, "sessions");
@@ -1830,14 +1883,14 @@ try {
   const reconnectResponsePromise = webrtcClient.request({ type: "list_apps" });
   await waitForTestCondition(() => signalingRequests.length === 2);
   assert.equal(signalingRequests[1].type, "local_webrtc_signal");
-  assert.equal(signalingRequests[1].grant_id, "grant-test");
+  assert.equal(signalingRequests[1].grant_id, "grant-refresh-2");
   await waitForTestCondition(() => dataChannels[1].sent.length > 0);
   assert.deepEqual(
-    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, dataChannels[1].sent[0]),
+    await decryptTestEnvelope(refreshedBootstraps[1].grant_secret, dataChannels[1].sent[0]),
     { type: "list_apps" }
   );
   dataChannels[1].emitMessage(await encryptTestEnvelope(
-    localWebrtcBootstrapFixture.grant_secret,
+    refreshedBootstraps[1].grant_secret,
     { kind: "apps", apps: [], events: [], diagnostics: [] }
   ));
   assert.equal((await reconnectResponsePromise).kind, "apps");

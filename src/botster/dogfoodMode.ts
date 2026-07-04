@@ -6,7 +6,11 @@ import {
   type DaemonBridgeClient
 } from "./realHubDogfoodTransport";
 import { createRealHubTerminalDataPlane } from "./realHubTerminalDataPlane";
-import { createWebrtcDaemonClient, type LocalWebrtcBootstrap } from "./webrtcDaemonClient";
+import {
+  createLocalWebrtcBootstrapRefresher,
+  createWebrtcDaemonClient,
+  type LocalWebrtcBootstrap
+} from "./webrtcDaemonClient";
 import type { HubControlTransport } from "./protocol";
 import { MockTerminalDataPlane, type TerminalDataPlaneAttachment, type TerminalViewDescriptor } from "./terminal";
 
@@ -49,7 +53,14 @@ const fixtureSessionId = "terminal_view_smoke_session";
 
 export function createDogfoodRuntimeConfig(options: DogfoodRuntimeConfigOptions): DogfoodRuntimeConfig {
   if (options.packageRuntime && options.localWebrtcBootstrap) {
-    const bridge = options.bridge ?? createWebrtcDaemonClient({ bootstrap: options.localWebrtcBootstrap });
+    const bridgeUrl = options.bridgeUrl ?? `${new URL(options.locationHref, "http://botster-web.local/").origin}/request`;
+    const bridge = options.bridge ?? createWebrtcDaemonClient({
+      bootstrap: options.localWebrtcBootstrap,
+      refreshBootstrap: createLocalWebrtcBootstrapRefresher({
+        bootstrap: options.localWebrtcBootstrap,
+        bridgeUrl
+      })
+    });
 
     return {
       mode: "webrtc",
