@@ -23,7 +23,6 @@ import {
   IonMenu,
   IonMenuButton,
   IonMenuToggle,
-  IonModal,
   IonNote,
   IonPage,
   IonRow,
@@ -36,7 +35,7 @@ import {
   IonToolbar,
   setupIonicReact
 } from "@ionic/react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cogOutline,
   constructOutline,
@@ -89,6 +88,11 @@ setupIonicReact({
 });
 
 type AppView = "dashboard" | "apps" | "diagnostics";
+type AppRoute =
+  | { view: "dashboard" }
+  | { view: "apps"; packageName?: string; surfaceId?: string; settings?: false }
+  | { view: "apps"; packageName: string; settings: true; surfaceId?: string }
+  | { view: "diagnostics" };
 
 const navigationItems: Array<{ label: string; icon: string; view: AppView }> = [
   { label: "Dashboard", icon: layersOutline, view: "dashboard" },
@@ -102,28 +106,59 @@ const appViewPaths: Record<AppView, string> = {
   diagnostics: "/diagnostics"
 };
 
-function appViewFromPathname(pathname: string): AppView {
+function appRouteFromPathname(pathname: string): AppRoute {
   const normalizedPath = pathname.replace(/\/+$/, "") || "/";
-  if (normalizedPath === appViewPaths.apps || normalizedPath.startsWith(`${appViewPaths.apps}/`)) return "apps";
-  if (normalizedPath === appViewPaths.diagnostics || normalizedPath.startsWith(`${appViewPaths.diagnostics}/`)) return "diagnostics";
-  return "dashboard";
+  if (normalizedPath === appViewPaths.diagnostics || normalizedPath.startsWith(`${appViewPaths.diagnostics}/`)) return { view: "diagnostics" };
+  if (normalizedPath === appViewPaths.apps) return { view: "apps" };
+  if (normalizedPath.startsWith(`${appViewPaths.apps}/`)) {
+    const segments = normalizedPath
+      .slice(appViewPaths.apps.length + 1)
+      .split("/")
+      .filter((segment) => segment.length > 0)
+      .map((segment) => decodeURIComponent(segment));
+    const [packageName, secondSegment, thirdSegment] = segments;
+    if (!packageName) return { view: "apps" };
+    if (secondSegment === "settings") {
+      return { view: "apps", packageName, settings: true, surfaceId: thirdSegment };
+    }
+    return { view: "apps", packageName, surfaceId: secondSegment, settings: false };
+  }
+  return { view: "dashboard" };
 }
 
-function appViewFromLocation(): AppView {
-  return appViewFromPathname(window.location.pathname);
+function appViewFromRoute(route: AppRoute): AppView {
+  return route.view;
 }
 
-function appViewUrl(view: AppView): string {
+function appRouteFromLocation(): AppRoute {
+  return appRouteFromPathname(window.location.pathname);
+}
+
+function appRoutePath(route: AppRoute): string {
+  if (route.view !== "apps") return appViewPaths[route.view];
+  if (!route.packageName) return appViewPaths.apps;
+  const packageSegment = encodeURIComponent(route.packageName);
+  if (route.settings) {
+    return route.surfaceId
+      ? `${appViewPaths.apps}/${packageSegment}/settings/${encodeURIComponent(route.surfaceId)}`
+      : `${appViewPaths.apps}/${packageSegment}/settings`;
+  }
+  return route.surfaceId
+    ? `${appViewPaths.apps}/${packageSegment}/${encodeURIComponent(route.surfaceId)}`
+    : appViewPaths.apps;
+}
+
+function appRouteUrl(route: AppRoute): string {
   const url = new URL(window.location.href);
-  url.pathname = appViewPaths[view];
+  url.pathname = appRoutePath(route);
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
-function pushAppViewUrl(view: AppView): void {
-  const nextUrl = appViewUrl(view);
+function pushAppRouteUrl(route: AppRoute): void {
+  const nextUrl = appRouteUrl(route);
   const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (nextUrl !== currentUrl) {
-    window.history.pushState({ botsterView: view }, "", nextUrl);
+    window.history.pushState({ botsterRoute: route }, "", nextUrl);
   }
 }
 
@@ -306,16 +341,17 @@ export default function App() {
     session: "not_loaded",
     draft: "not_loaded"
   });
-  const [activeView, setActiveView] = useState<AppView>(() => appViewFromLocation());
-  const [settingsPackageId, setSettingsPackageId] = useState<string | undefined>();
+  const [activeRoute, setActiveRoute] = useState<AppRoute>(() => appRouteFromLocation());
   const [marketplaceRegistryPath, setMarketplaceRegistryPath] = useState("");
   const [localPackagePath, setLocalPackagePath] = useState("");
   const [packageActionToast, setPackageActionToast] = useState<{ message: string; color: string } | undefined>();
   const [selectedPluginSurface, setSelectedPluginSurface] = useState<{
+    routeKey?: string;
     title: string;
     status?: string;
     snapshot?: UiTreeSnapshot;
   } | undefined>();
+  const lastPluginRouteRenderKey = useRef<string | undefined>(undefined);
   const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
@@ -327,10 +363,51 @@ export default function App() {
   const recordDiagnostics = useCallback((nextDiagnostics: ConnectionDiagnostic[]) => {
     setDiagnostics((current) => nextDiagnostics.reduce(upsertDiagnostic, current));
   }, [setDiagnostics]);
-  const navigateToView = useCallback((view: AppView) => {
-    setActiveView(view);
-    pushAppViewUrl(view);
+  const navigateToRoute = useCallback((route: AppRoute) => {
+    setActiveRoute(route);
+    pushAppRouteUrl(route);
   }, []);
+  const navigateToView = useCallback((view: AppView) => {
+    if (view === "apps") {
+      navigateToRoute({ view: "apps" });
+    } else if (view === "diagnostics") {
+      navigateToRoute({ view: "diagnostics" });
+    } else {
+      navigateToRoute({ view: "dashboard" });
+    }
+  }, [navigateToRoute]);
+  const activeView = appViewFromRoute(activeRoute);
+  const routePluginSurface = activeRoute.view === "apps" && !activeRoute.settings && activeRoute.packageName && activeRoute.surfaceId
+    ? { packageName: activeRoute.packageName, surfaceId: activeRoute.surfaceId }
+    : undefined;
+  const routeSettingsPackageName = activeRoute.view === "apps" && activeRoute.settings ? activeRoute.packageName : undefined;
+  const routePluginSurfaceKey = routePluginSurface
+    ? `${routePluginSurface.packageName}/${routePluginSurface.surfaceId}`
+    : undefined;
+
+  useEffect(() => {
+    if (!routePluginSurfaceKey) {
+      lastPluginRouteRenderKey.current = undefined;
+    }
+  }, [routePluginSurfaceKey]);
+
+  const navigateToPluginSurface = useCallback((packageName: string, surfaceId: string) => {
+    navigateToRoute({ view: "apps", packageName, surfaceId, settings: false });
+  }, [navigateToRoute]);
+  const navigateToPluginSurfaceRecord = useCallback((packageName: string, surface: PackageSurfaceRecord) => {
+    const routePath = firstString(surface.route_path);
+    const route = routePath ? appRouteFromPathname(routePath) : undefined;
+    if (route?.view === "apps" && route.packageName) {
+      navigateToRoute(route);
+      return;
+    }
+
+    const surfaceId = firstString(surface.surface_id, surface.id);
+    if (surfaceId) navigateToPluginSurface(packageName, surfaceId);
+  }, [navigateToPluginSurface, navigateToRoute]);
+  const navigateToPackageSettings = useCallback((packageName: string) => {
+    navigateToRoute({ view: "apps", packageName, settings: true });
+  }, [navigateToRoute]);
 
   useEffect(() => {
     const recordWebRtcLifecycle = (event: Event) => {
@@ -346,10 +423,10 @@ export default function App() {
 
   useEffect(() => {
     const syncViewFromLocation = () => {
-      setActiveView(appViewFromLocation());
+      setActiveRoute(appRouteFromLocation());
     };
 
-    window.history.replaceState({ botsterView: appViewFromLocation() }, "", window.location.href);
+    window.history.replaceState({ botsterRoute: appRouteFromLocation() }, "", window.location.href);
     window.addEventListener("popstate", syncViewFromLocation);
 
     return () => {
@@ -526,18 +603,92 @@ export default function App() {
       ),
     [packages]
   );
+  const routePluginPackage = routePluginSurface
+    ? packages.find((appPackage) => stringValue(appPackage.package_name, String(appPackage.id)) === routePluginSurface.packageName)
+    : undefined;
+  const routePluginSurfaceRecord = routePluginPackage && routePluginSurface
+    ? packageAppSurfaces(routePluginPackage).find((surface) => firstString(surface.surface_id, surface.id) === routePluginSurface.surfaceId)
+    : undefined;
+  const routePluginLaunchAction = surfaceLaunchAction(routePluginSurfaceRecord);
+  const routePluginSurfaceDiagnostic = routePluginSurface
+    ? entityLoadStatus.package !== "loaded"
+      ? "Loading package surfaces from the hub."
+      : !routePluginPackage
+        ? `No package named ${routePluginSurface.packageName} is loaded from the hub.`
+        : !routePluginSurfaceRecord
+          ? `Package ${routePluginSurface.packageName} does not expose app surface ${routePluginSurface.surfaceId}.`
+          : routePluginSurfaceRecord.route_enabled === false
+            ? `Surface ${routePluginSurface.surfaceId} is disabled by the hub route descriptor.`
+          : routePluginSurfaceRecord.route_blocked === true
+            ? `Surface ${routePluginSurface.surfaceId} is blocked by the hub route descriptor.`
+          : !routePluginLaunchAction
+            ? `Surface ${routePluginSurface.surfaceId} has no hub-provided render action.`
+            : undefined
+    : undefined;
+  const availablePackages = runtimeClient.entities.list("botster-web.available_package");
+  const settingsPackage = routeSettingsPackageName
+    ? packages.find((app) => stringValue(app.package_name, String(app.id)) === routeSettingsPackageName)
+      ?? availablePackages.find((app) => stringValue(app.package_name, String(app.id)) === routeSettingsPackageName)
+    : undefined;
+  const settingsPackageDiagnostic = routeSettingsPackageName
+    ? entityLoadStatus.package !== "loaded"
+      ? "Loading package settings from the hub."
+      : !settingsPackage
+        ? `No package named ${routeSettingsPackageName} is loaded from the hub.`
+        : undefined
+    : undefined;
+
+  useEffect(() => {
+    if (routePluginSurfaceDiagnostic) return;
+    if (!routePluginSurfaceKey || !routePluginSurfaceRecord || !routePluginLaunchAction) return;
+    if (lastPluginRouteRenderKey.current === routePluginSurfaceKey) return;
+
+    lastPluginRouteRenderKey.current = routePluginSurfaceKey;
+    setSelectedPluginSurface({
+      routeKey: routePluginSurfaceKey,
+      title: surfaceTitle(routePluginSurfaceRecord),
+      status: `Rendering ${surfaceTitle(routePluginSurfaceRecord)}`
+    });
+    void runtimeClient.actions.dispatch({ origin: "ui_node", action: routePluginLaunchAction }).then((result) => {
+      const renderedSurfaceStatus = pluginSurfaceStatus(result.result);
+      const renderedSurfaceSnapshot = pluginSurfaceSnapshot(result.result);
+      setSelectedPluginSurface({
+        routeKey: routePluginSurfaceKey,
+        title: routePluginLaunchAction.label ?? surfaceTitle(routePluginSurfaceRecord),
+        status: result.accepted
+          ? renderedSurfaceStatus ?? `${routePluginLaunchAction.label ?? surfaceTitle(routePluginSurfaceRecord)} rendered`
+          : result.reason ?? `Rejected ${routePluginLaunchAction.id}`,
+        snapshot: renderedSurfaceSnapshot
+      });
+      updateLocalState({
+        "dogfood.plugin_surface_status": result.accepted
+          ? renderedSurfaceStatus ?? `${routePluginLaunchAction.label ?? surfaceTitle(routePluginSurfaceRecord)} rendered`
+          : result.reason ?? `Rejected ${routePluginLaunchAction.id}`
+      });
+      recordDiagnostic(actionFailureDiagnostic(routePluginLaunchAction, result));
+    });
+  }, [
+    recordDiagnostic,
+    routePluginLaunchAction,
+    routePluginSurfaceDiagnostic,
+    routePluginSurfaceKey,
+    routePluginSurfaceRecord,
+    runtimeClient,
+    updateLocalState
+  ]);
+
   const openPackage = useCallback(
     (app: Record<string, unknown>) => {
       const surface = packageAppSurfaces(app)[0];
       const launchAction = surfaceLaunchAction(surface);
-      if (launchAction) {
-        setSettingsPackageId(undefined);
-        dispatchAction(launchAction);
+      const packageName = stringValue(app.package_name, String(app.id));
+      if (launchAction && surface) {
+        navigateToPluginSurfaceRecord(packageName, surface);
       } else {
-        setSettingsPackageId(String(app.id));
+        navigateToPackageSettings(packageName);
       }
     },
-    [dispatchAction]
+    [navigateToPackageSettings, navigateToPluginSurfaceRecord]
   );
   const openApp = useCallback((app: Record<string, unknown>) => {
     const title = appDisplayName(app.title, String(app.id));
@@ -551,8 +702,10 @@ export default function App() {
     const surface = packageAppSurfaces(surfacePackage ?? {})[0];
     const launchAction = surfaceLaunchAction(surface);
 
-    if (launchAction) {
-      dispatchAction(launchAction);
+    const surfaceId = firstString(surface?.surface_id, surface?.id);
+    const packageName = stringValue(app.package_name, "");
+    if (launchAction && surface && surfaceId && packageName) {
+      navigateToPluginSurfaceRecord(packageName, surface);
       return;
     }
 
@@ -585,14 +738,10 @@ export default function App() {
       message: `Opening ${title}`,
       color: "success"
     });
-  }, [appSurfacePackages, dispatchAction]);
+  }, [appSurfacePackages, navigateToPluginSurfaceRecord]);
   const openPackageSettings = useCallback((app: Record<string, unknown>) => {
-    setSettingsPackageId(String(app.id));
-  }, []);
-  const availablePackages = runtimeClient.entities.list("botster-web.available_package");
-  const settingsPackage = settingsPackageId
-    ? packages.find((app) => app.id === settingsPackageId) ?? availablePackages.find((app) => app.id === settingsPackageId)
-    : undefined;
+    navigateToPackageSettings(stringValue(app.package_name, String(app.id)));
+  }, [navigateToPackageSettings]);
   const sessions = runtimeClient.entities.list("botster-web.session");
   const attachableDogfoodSession = sessions.find((session) => session.id === realHubDogfoodSessionId && isAttachableSession(session));
   const selectedRealHubSession = selectedRealHubTerminalSessionId
@@ -626,10 +775,6 @@ export default function App() {
     typeof localState["dogfood.diagnostic_action_status"] === "string"
       ? localState["dogfood.diagnostic_action_status"]
       : "No diagnostic action has been dispatched.";
-  const pluginSurfaceStatusText =
-    typeof localState["dogfood.plugin_surface_status"] === "string"
-      ? localState["dogfood.plugin_surface_status"]
-      : undefined;
   const runningSessions = sessions.filter((session) => session.status === "running");
   const blockingDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "danger");
   const warningDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "warning");
@@ -878,37 +1023,57 @@ export default function App() {
                     </div>
                     <IonBadge color="medium">{installedApps.length}</IonBadge>
                   </div>
-                  <IonList lines="full" aria-label="Add packages and marketplaces">
-                    <IonListHeader>
-                      <IonLabel>Add packages</IonLabel>
-                    </IonListHeader>
-                    <IonItem>
-                      <IonInput
-                        label="Marketplace registry path"
-                        labelPlacement="stacked"
-                        value={marketplaceRegistryPath}
-                        placeholder="/path/to/marketplace.json"
-                        onIonInput={(event) => setMarketplaceRegistryPath(String(event.detail.value ?? ""))}
-                      />
-                      <IonButton slot="end" disabled={!marketplaceRegistryPath.trim()} onClick={loadMarketplaceRegistry}>
-                        Load
-                      </IonButton>
-                    </IonItem>
-                    <IonItem>
-                      <IonInput
-                        label="Local package path"
-                        labelPlacement="stacked"
-                        value={localPackagePath}
-                        placeholder="/path/to/plugin"
-                        onIonInput={(event) => setLocalPackagePath(String(event.detail.value ?? ""))}
-                      />
-                      <IonButton slot="end" disabled={!localPackagePath.trim()} onClick={installLocalPackage}>
-                        Install
-                      </IonButton>
-                    </IonItem>
-                  </IonList>
-                  {availablePackages.length > 0 || packages.length > 0 || installedApps.length > 0 ? (
+                  {routePluginSurface ? (
+                    <PluginSurfaceRoutePage
+                      diagnostic={routePluginSurfaceDiagnostic}
+                      packageName={routePluginSurface.packageName}
+                      selectedSurface={selectedPluginSurface?.routeKey === routePluginSurfaceKey ? selectedPluginSurface : undefined}
+                      surfaceId={routePluginSurface.surfaceId}
+                      localState={localState}
+                      entities={runtimeClient.entities}
+                      onAction={dispatchAction}
+                    />
+                  ) : routeSettingsPackageName ? (
+                    <PluginSettingsRoutePage
+                      diagnostic={settingsPackageDiagnostic}
+                      packageName={routeSettingsPackageName}
+                      packageRecord={settingsPackage}
+                      onAction={dispatchAction}
+                      onBack={() => navigateToView("apps")}
+                    />
+                  ) : (
                     <>
+                      <IonList lines="full" aria-label="Add packages and marketplaces">
+                        <IonListHeader>
+                          <IonLabel>Add packages</IonLabel>
+                        </IonListHeader>
+                        <IonItem>
+                          <IonInput
+                            label="Marketplace registry path"
+                            labelPlacement="stacked"
+                            value={marketplaceRegistryPath}
+                            placeholder="/path/to/marketplace.json"
+                            onIonInput={(event) => setMarketplaceRegistryPath(String(event.detail.value ?? ""))}
+                          />
+                          <IonButton slot="end" disabled={!marketplaceRegistryPath.trim()} onClick={loadMarketplaceRegistry}>
+                            Load
+                          </IonButton>
+                        </IonItem>
+                        <IonItem>
+                          <IonInput
+                            label="Local package path"
+                            labelPlacement="stacked"
+                            value={localPackagePath}
+                            placeholder="/path/to/plugin"
+                            onIonInput={(event) => setLocalPackagePath(String(event.detail.value ?? ""))}
+                          />
+                          <IonButton slot="end" disabled={!localPackagePath.trim()} onClick={installLocalPackage}>
+                            Install
+                          </IonButton>
+                        </IonItem>
+                      </IonList>
+                      {availablePackages.length > 0 || packages.length > 0 || installedApps.length > 0 ? (
+                        <>
                       <IonList lines="full" aria-label="Installed apps">
                         <IonListHeader>
                           <IonLabel>Installed apps</IonLabel>
@@ -960,42 +1125,19 @@ export default function App() {
                           </IonItem>
                         )}
                       </IonList>
-                      {selectedPluginSurface ? (
-                        <article className="workflow-section" aria-label="Rendered app surface" data-testid="selected-app-surface">
+                        </>
+                      ) : (
+                        <article className="workflow-section">
                           <div className="section-heading">
                             <div>
-                              <p className="eyebrow">Plugin surface</p>
-                              <h2>{selectedPluginSurface.title}</h2>
+                              <p className="eyebrow">Apps</p>
+                              <h2>No apps loaded</h2>
                             </div>
-                            <IonBadge color="success">Accepted</IonBadge>
                           </div>
-                          {selectedPluginSurface.snapshot ? (
-                            <UiNodeSurface
-                              snapshot={selectedPluginSurface.snapshot}
-                              entities={runtimeClient.entities}
-                              capabilities={{
-                                ...defaultUiCapabilitySet,
-                                isolated_plugin_asset: false
-                              }}
-                              localState={localState}
-                              onAction={dispatchAction}
-                            />
-                          ) : (
-                            <p className="entity-empty">{selectedPluginSurface.status ?? pluginSurfaceStatusText}</p>
-                          )}
+                          <p className="entity-empty">The hub has not returned installed apps, packages, or marketplace rows.</p>
                         </article>
-                      ) : null}
+                      )}
                     </>
-                  ) : (
-                    <article className="workflow-section">
-                      <div className="section-heading">
-                        <div>
-                          <p className="eyebrow">Apps</p>
-                          <h2>No apps loaded</h2>
-                        </div>
-                      </div>
-                      <p className="entity-empty">The hub has not returned installed apps, packages, or marketplace rows.</p>
-                    </article>
                   )}
                 </section>
               ) : null}
@@ -1130,25 +1272,6 @@ export default function App() {
           </IonContent>
         </IonPage>
       </IonSplitPane>
-      <IonModal
-        isOpen={Boolean(settingsPackage)}
-        initialBreakpoint={0.85}
-        breakpoints={[0.5, 0.85, 1]}
-        handle
-        onDidDismiss={() => setSettingsPackageId(undefined)}
-      >
-        <IonHeader>
-          <IonToolbar>
-            <IonTitle>{settingsPackage ? appDisplayName(settingsPackage.title, String(settingsPackage.id)) : "Plugin"}</IonTitle>
-            <IonButtons slot="end">
-              <IonButton onClick={() => setSettingsPackageId(undefined)}>Close</IonButton>
-            </IonButtons>
-          </IonToolbar>
-        </IonHeader>
-        <IonContent>
-          {settingsPackage ? <PluginSettingsPanel app={settingsPackage} key={String(settingsPackage.id)} onAction={dispatchAction} /> : null}
-        </IonContent>
-      </IonModal>
       <IonToast
         isOpen={Boolean(packageActionToast)}
         message={packageActionToast?.message}
@@ -1158,6 +1281,89 @@ export default function App() {
         onDidDismiss={() => setPackageActionToast(undefined)}
       />
     </IonApp>
+  );
+}
+
+interface PluginSurfaceRoutePageProps {
+  packageName: string;
+  surfaceId: string;
+  diagnostic?: string;
+  selectedSurface?: {
+    title: string;
+    status?: string;
+    snapshot?: UiTreeSnapshot;
+  };
+  localState: Record<string, unknown>;
+  entities: ReturnType<typeof createBotsterWebClient>["entities"];
+  onAction: (action: ActionBinding) => void;
+}
+
+function PluginSurfaceRoutePage({
+  packageName,
+  surfaceId,
+  diagnostic,
+  selectedSurface,
+  localState,
+  entities,
+  onAction
+}: PluginSurfaceRoutePageProps) {
+  return (
+    <article className="workflow-section" aria-label="Rendered app surface" data-testid="selected-app-surface">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Plugin surface</p>
+          <h2>{selectedSurface?.title ?? `${packageName}/${surfaceId}`}</h2>
+        </div>
+        <IonBadge color={diagnostic ? "warning" : selectedSurface?.snapshot ? "success" : "medium"}>
+          {diagnostic ? "Diagnostic" : selectedSurface?.snapshot ? "Rendered" : "Loading"}
+        </IonBadge>
+      </div>
+      {diagnostic ? (
+        <p className="entity-empty" data-testid="plugin-route-diagnostic">{diagnostic}</p>
+      ) : selectedSurface?.snapshot ? (
+        <UiNodeSurface
+          snapshot={selectedSurface.snapshot}
+          entities={entities}
+          capabilities={{
+            ...defaultUiCapabilitySet,
+            isolated_plugin_asset: false
+          }}
+          localState={localState}
+          onAction={onAction}
+        />
+      ) : (
+        <p className="entity-empty">{selectedSurface?.status ?? "Rendering plugin surface from the hub."}</p>
+      )}
+    </article>
+  );
+}
+
+interface PluginSettingsRoutePageProps {
+  packageName: string;
+  packageRecord?: Record<string, unknown>;
+  diagnostic?: string;
+  onAction: (action: ActionBinding) => void;
+  onBack: () => void;
+}
+
+function PluginSettingsRoutePage({ packageName, packageRecord, diagnostic, onAction, onBack }: PluginSettingsRoutePageProps) {
+  return (
+    <article className="workflow-section" aria-label="Plugin settings" data-testid="plugin-settings-route">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Plugin settings</p>
+          <h2>{packageRecord ? appDisplayName(packageRecord.title, String(packageRecord.id)) : packageName}</h2>
+        </div>
+        <IonButton fill="clear" onClick={onBack}>Apps</IonButton>
+      </div>
+      {diagnostic ? (
+        <p className="entity-empty" data-testid="plugin-settings-route-diagnostic">{diagnostic}</p>
+      ) : packageRecord ? (
+        <PluginSettingsPanel app={packageRecord} key={String(packageRecord.id)} onAction={onAction} />
+      ) : (
+        <p className="entity-empty">Loading package settings from the hub.</p>
+      )}
+    </article>
   );
 }
 

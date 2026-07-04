@@ -449,9 +449,11 @@ async function exerciseFirstPartyPackageConfiguration(page) {
     "post-save package refresh request"
   );
 
-  await page.getByRole("button", { name: "Close" }).click();
+  await closePackageSettingsRoute(page);
   await page.getByText("Package configuration").waitFor({ state: "detached" });
   await openPackageSettings(page, "project-pipelines");
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByTestId("plugin-settings-route").waitFor();
   await expectIonicTextInputValue(page, "operator_endpoint", endpoint);
   await expectIonicSelectValue(page, "pipeline_mode", "github");
 
@@ -470,7 +472,7 @@ async function exerciseFirstPartyPackageConfiguration(page) {
       pipeline_mode: { type: "select", value: "invalid-mode" }
     }
   });
-  await page.getByRole("button", { name: "Close" }).click();
+  await closePackageSettingsRoute(page);
   await page.getByText("Package configuration").waitFor({ state: "detached" });
   await openDiagnosticsView(page);
   await page.getByText("select_option_unknown").first().waitFor({ timeout: 15_000 });
@@ -490,6 +492,13 @@ async function openPackageSettings(page, packageName) {
     );
   });
   await settingsButton.click();
+  await page.waitForURL(new RegExp(`/apps/${packageName}/settings`));
+  await page.getByTestId("plugin-settings-route").waitFor();
+}
+
+async function closePackageSettingsRoute(page) {
+  await page.getByTestId("plugin-settings-route").getByRole("button", { name: "Apps", exact: true }).click();
+  await page.waitForURL(/\/apps(?:[?#]|$)/);
 }
 
 async function setIonicSelectValue(page, fieldId, value) {
@@ -713,7 +722,7 @@ async function assertRemoteAccessSettingsDispatch(page) {
   await page.getByRole("button", { name: "Opt in" }).click();
   await waitForRemoteAccessConfigRequest(page, true);
   await page.getByText("Package action accepted").waitFor();
-  await page.getByRole("button", { name: "Close" }).click();
+  await closePackageSettingsRoute(page);
   await page.getByText("Package configuration").waitFor({ state: "detached" });
 }
 
