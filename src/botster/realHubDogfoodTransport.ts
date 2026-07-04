@@ -38,6 +38,7 @@ type HubConnectionDiagnosticPayload = Omit<Partial<DaemonDiagnostic>, "kind"> & 
 
 export interface DaemonBridgeClient {
   request(request: DaemonRequest): Promise<DaemonResponse>;
+  disconnect?(): void;
   subscribeEvents?(onEvent: (event: DaemonEvent) => void): { unsubscribe(): void };
   streamTerminal?(
     sessionId: string,
@@ -157,6 +158,7 @@ export function createRealHubDogfoodTransport({
       daemonEventSubscription?.unsubscribe();
       daemonEventSubscription = undefined;
       ingress = undefined;
+      bridge.disconnect?.();
     },
     async send(frame) {
       if (frame.kind === "subscribe") {
@@ -1082,7 +1084,23 @@ function recordLiveHarnessEvent(kind: string, payload: unknown): void {
       events?: Array<{ kind: string; payload: unknown }>;
     };
   }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-  harness?.events?.push({ kind, payload });
+  harness?.events?.push({ kind, payload: redactedHarnessPayload(payload) });
+}
+
+function redactedHarnessPayload(payload: unknown): unknown {
+  if (Array.isArray(payload)) {
+    return payload.map((entry) => redactedHarnessPayload(entry));
+  }
+  if (!payload || typeof payload !== "object") {
+    return payload;
+  }
+
+  return Object.fromEntries(
+    Object.entries(payload as Record<string, unknown>).map(([key, value]) => [
+      key,
+      key === "grant_secret" ? "[redacted]" : redactedHarnessPayload(value)
+    ])
+  );
 }
 
 export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {

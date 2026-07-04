@@ -1,5 +1,7 @@
 import type {
   AesGcmEnvelope,
+  DaemonBridgeRequestEnvelope,
+  DaemonBridgeResponseEnvelope,
   DaemonEvent,
   DaemonLocalWebrtcBootstrap,
   DaemonRequest,
@@ -15,8 +17,16 @@ export interface LocalWebrtcBootstrap extends DaemonLocalWebrtcBootstrap {
 export interface WebrtcDaemonClientOptions {
   bootstrap: LocalWebrtcBootstrap;
   fetchImpl?: typeof fetch;
+  refreshBootstrap?: () => Promise<LocalWebrtcBootstrap | undefined>;
   peerConnectionFactory?: () => RTCPeerConnection;
   onLifecycle?: (event: WebrtcDaemonLifecycleEvent) => void;
+}
+
+export interface LocalWebrtcBootstrapRefreshOptions {
+  bootstrap: LocalWebrtcBootstrap;
+  bridgeUrl: string;
+  fetchImpl?: typeof fetch;
+  requestIdGenerator?: () => string;
 }
 
 export type WebrtcDaemonLifecycleEvent =
@@ -47,6 +57,50 @@ export class WebrtcDaemonClientError extends Error {
 const requestTimeoutMs = 10_000;
 const drainIntervalMs = 25;
 
+function createRequestIdGenerator(prefix: string) {
+  let counter = 0;
+  return () => `${prefix}-${++counter}`;
+}
+
+export function createLocalWebrtcBootstrapRefresher({
+  bootstrap,
+  bridgeUrl,
+  fetchImpl = fetch,
+  requestIdGenerator = createRequestIdGenerator("local-webrtc-bootstrap")
+}: LocalWebrtcBootstrapRefreshOptions): () => Promise<LocalWebrtcBootstrap | undefined> {
+  return async () => {
+    const request: DaemonRequest = {
+      type: "issue_local_webrtc_bootstrap",
+      package_name: bootstrap.package_name,
+      entrypoint_id: bootstrap.entrypoint_id,
+      origin: new URL(bridgeUrl, window.location.href).origin
+    };
+    recordLiveHarnessEvent("daemon_request", request);
+    const envelope: DaemonBridgeRequestEnvelope = {
+      kind: "daemon_request",
+      request_id: requestIdGenerator(),
+      payload: request
+    };
+    const response = await fetchImpl(bridgeUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(envelope)
+    });
+    if (!response.ok) {
+      throw webrtcFailure("bootstrap", `local WebRTC bootstrap refresh failed with HTTP ${response.status}`);
+    }
+
+    const reply = (await response.json()) as DaemonBridgeResponseEnvelope;
+    if (reply.kind !== "daemon_response") {
+      throw webrtcFailure("bootstrap", "local WebRTC bootstrap refresh returned an unexpected transport envelope");
+    }
+    recordLiveHarnessEvent("daemon_response", reply.payload);
+    return reply.payload.local_webrtc_bootstrap
+      ? { ...reply.payload.local_webrtc_bootstrap, signaling_url: bootstrap.signaling_url }
+      : undefined;
+  };
+}
+
 export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): DaemonBridgeClient {
   const transport = new WebrtcDaemonTransport(options);
   const eventListeners = new Set<(event: DaemonEvent) => void>();
@@ -54,6 +108,9 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
   return {
     async request(request) {
       return transport.request(request);
+    },
+    disconnect() {
+      transport.disconnect();
     },
     subscribeEvents(onEvent) {
       eventListeners.add(onEvent);
@@ -116,16 +173,23 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
 class WebrtcDaemonTransport {
   private readonly fetchImpl: typeof fetch;
   private readonly peerConnectionFactory: () => RTCPeerConnection;
+  private readonly pageHideHandler: (() => void) | undefined;
   private readonly pendingRequests: PendingRequest[] = [];
   private peerConnection: RTCPeerConnection | undefined;
   private dataChannel: RTCDataChannel | undefined;
   private cryptoKey: CryptoKey | undefined;
   private connectPromise: Promise<void> | undefined;
   private encryptedStreamReady = false;
+  private disconnected = false;
+  private closing = false;
 
   constructor(private readonly options: WebrtcDaemonClientOptions) {
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
     this.peerConnectionFactory = options.peerConnectionFactory ?? (() => new RTCPeerConnection());
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      this.pageHideHandler = () => this.disconnect();
+      window.addEventListener("pagehide", this.pageHideHandler);
+    }
   }
 
   async request(request: DaemonRequest): Promise<DaemonResponse> {
@@ -185,12 +249,29 @@ class WebrtcDaemonTransport {
   }
 
   private connect(): Promise<void> {
-    this.connectPromise ??= this.open();
+    if (this.disconnected) {
+      throw webrtcFailure("transport", "local WebRTC transport is disconnected");
+    }
+
+    this.connectPromise ??= this.open().catch((error: unknown) => {
+      this.resetPeerState();
+      throw error;
+    });
     return this.connectPromise;
   }
 
+  disconnect(): void {
+    this.disconnected = true;
+    if (typeof window !== "undefined" && this.pageHideHandler && typeof window.removeEventListener === "function") {
+      window.removeEventListener("pagehide", this.pageHideHandler);
+    }
+    this.resetPeerState();
+    this.failPending(webrtcFailure("transport", "local WebRTC transport disconnected"));
+  }
+
   private async open(): Promise<void> {
-    const bootstrap = this.options.bootstrap;
+    this.resetPeerState();
+    const bootstrap = await this.resolveBootstrap();
     try {
       this.cryptoKey = await importStreamKey(bootstrap.grant_secret);
     } catch (error) {
@@ -225,12 +306,12 @@ class WebrtcDaemonTransport {
     dataChannel.addEventListener("close", () => {
       recordLiveHarnessEvent("webrtc_data_channel", { state: "closed" });
       this.emitLifecycle({ type: "data-channel-closed" });
-      this.failPending(webrtcFailure("transport", "local WebRTC data channel closed"));
+      this.handleTransportClosed(webrtcFailure("transport", "local WebRTC data channel closed"));
     });
     dataChannel.addEventListener("error", () => {
       recordLiveHarnessEvent("webrtc_data_channel", { state: "error" });
       this.emitLifecycle({ type: "data-channel-error" });
-      this.failPending(webrtcFailure("transport", "local WebRTC data channel failed"));
+      this.handleTransportClosed(webrtcFailure("transport", "local WebRTC data channel failed"));
     });
 
     let offer: RTCSessionDescriptionInit;
@@ -286,6 +367,21 @@ class WebrtcDaemonTransport {
     }
   }
 
+  private async resolveBootstrap(): Promise<LocalWebrtcBootstrap> {
+    if (this.options.refreshBootstrap) {
+      try {
+        return (await this.options.refreshBootstrap()) ?? this.options.bootstrap;
+      } catch (error) {
+        recordLiveHarnessEvent("webrtc_error", {
+          stage: "bootstrap",
+          request_type: "issue_local_webrtc_bootstrap",
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return this.options.bootstrap;
+  }
+
   private async handleMessage(data: unknown): Promise<void> {
     const key = this.cryptoKey;
     const pending = this.pendingRequests.shift();
@@ -302,6 +398,32 @@ class WebrtcDaemonTransport {
   private failPending(error: unknown): void {
     for (const pending of this.pendingRequests.splice(0)) {
       pending.reject(error);
+    }
+  }
+
+  private handleTransportClosed(error: unknown): void {
+    this.resetPeerState();
+    this.failPending(error);
+  }
+
+  private resetPeerState(): void {
+    const dataChannel = this.dataChannel;
+    const peerConnection = this.peerConnection;
+    this.dataChannel = undefined;
+    this.peerConnection = undefined;
+    this.connectPromise = undefined;
+    this.cryptoKey = undefined;
+    this.encryptedStreamReady = false;
+
+    if (this.closing) return;
+    this.closing = true;
+    try {
+      if (dataChannel && dataChannel.readyState !== "closed") {
+        dataChannel.close?.();
+      }
+      peerConnection?.close?.();
+    } finally {
+      this.closing = false;
     }
   }
 
@@ -380,7 +502,32 @@ function recordLiveHarnessEvent(kind: string, payload: unknown): void {
       events?: Array<{ kind: string; payload: unknown }>;
     };
   }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-  harness?.events?.push({ kind, payload });
+  harness?.events?.push({ kind, payload: redactedHarnessPayload(payload) });
+}
+
+function redactedHarnessPayload(payload: unknown): unknown {
+  if (Array.isArray(payload)) {
+    return payload.map((entry) => redactedHarnessPayload(entry));
+  }
+  if (!payload || typeof payload !== "object") {
+    return payload;
+  }
+
+  const record = payload as Record<string, unknown>;
+  const safePayload = Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [
+      key,
+      key === "grant_secret" ? "[redacted]" : redactedHarnessPayload(value)
+    ])
+  );
+  if (record.type === "local_webrtc_signal") {
+    return {
+      ...safePayload,
+      grant_secret: "[redacted]"
+    };
+  }
+
+  return safePayload;
 }
 
 function base64Decode(encoded: string): Uint8Array {
