@@ -506,21 +506,28 @@ function recordLiveHarnessEvent(kind: string, payload: unknown): void {
 }
 
 function redactedHarnessPayload(payload: unknown): unknown {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+  if (Array.isArray(payload)) {
+    return payload.map((entry) => redactedHarnessPayload(entry));
+  }
+  if (!payload || typeof payload !== "object") {
     return payload;
   }
 
   const record = payload as Record<string, unknown>;
-  if (record.type !== "local_webrtc_signal") {
-    return payload;
+  const safePayload = Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [
+      key,
+      key === "grant_secret" ? "[redacted]" : redactedHarnessPayload(value)
+    ])
+  );
+  if (record.type === "local_webrtc_signal") {
+    return {
+      ...safePayload,
+      grant_secret: "[redacted]"
+    };
   }
 
-  const safePayload = { ...record };
-  delete safePayload.grant_secret;
-  return {
-    ...safePayload,
-    grant_secret: "[redacted]"
-  };
+  return safePayload;
 }
 
 function base64Decode(encoded: string): Uint8Array {

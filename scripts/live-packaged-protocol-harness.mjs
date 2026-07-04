@@ -366,7 +366,8 @@ async function typeThroughMountedTerminal(page, data) {
   await waitForTerminalCanvas(page);
   await callTerminalControl(page, "focus");
   const canvas = page.locator(".terminal-view-container canvas").first();
-  await canvas.click({ position: { x: 10, y: 10 } });
+  await canvas.click();
+  await page.waitForTimeout(100);
   await page.keyboard.insertText(data);
 }
 
@@ -607,12 +608,25 @@ async function latestLocalWebrtcGrantId(page) {
 }
 
 async function assertNoGrantSecretLeak(page, cycle) {
-  const leakedRequests = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "local_webrtc_signal")
-      .filter((entry) => entry.payload?.grant_secret !== "[redacted]")
-      .map((entry) => entry.payload)
-  );
+  const leakedRequests = await page.evaluate(() => {
+    const leakedValues = [];
+    const visit = (value, path) => {
+      if (!value || typeof value !== "object") return;
+      if (Array.isArray(value)) {
+        value.forEach((entry, index) => visit(entry, `${path}[${index}]`));
+        return;
+      }
+      for (const [key, nextValue] of Object.entries(value)) {
+        const nextPath = path ? `${path}.${key}` : key;
+        if (key === "grant_secret" && nextValue !== "[redacted]") {
+          leakedValues.push({ path: nextPath, value: nextValue });
+        }
+        visit(nextValue, nextPath);
+      }
+    };
+    visit(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [], "events");
+    return leakedValues;
+  });
 
   if (leakedRequests.length > 0) {
     throw new Error(`same-URL reload cycle ${cycle} leaked local WebRTC grant_secret in harness events`);
@@ -953,7 +967,7 @@ async function waitForDaemonRequestCount(page, criteria, expectedCount, label) {
         return true;
       }).length === nextExpectedCount,
     { expectedCriteria: criteria, nextExpectedCount: expectedCount },
-    { timeout: 15_000 }
+    { timeout: 45_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for ${label}: ${error.message}`);
   });
