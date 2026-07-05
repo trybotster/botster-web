@@ -254,7 +254,9 @@ interface SelectedPluginSurface {
   snapshot?: UiTreeSnapshot;
 }
 
-function renderedPluginSurfaceState(
+// Exported for focused regression coverage of route render terminal-state derivation.
+// eslint-disable-next-line react-refresh/only-export-components
+export function renderedPluginSurfaceState(
   result: { accepted: boolean; reason?: string; result?: unknown },
   title: string,
   expectedSurface?: { packageName: string; surfaceId: string },
