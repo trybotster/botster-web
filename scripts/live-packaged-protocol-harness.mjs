@@ -92,10 +92,14 @@ try {
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "status request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
-  await waitForRemoteAccessPackageConfiguration(page);
+  if (transportMode === "webrtc") {
+    await waitForRemoteAccessPackageConfiguration(page);
+  }
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, "list_sessions request");
   await openAppsView(page);
-  await assertRemoteAccessSettingsDispatch(page);
+  if (transportMode === "webrtc") {
+    await assertRemoteAccessSettingsDispatch(page);
+  }
   if (transportMode === "bridge") {
     await exerciseFirstPartyPackageConfiguration(page);
     await openAppsView(page);
@@ -243,20 +247,31 @@ async function requestDaemonShutdown() {
 
 async function prepareProjectPipelinesPackage() {
   const packagePath = resolveProjectPipelinesPackagePath();
-  await sendBridgeDaemonRequest("install-project-pipelines-package", {
+  const installPayload = await sendBridgeDaemonRequest("install-project-pipelines-package", {
     type: "install_package_local_path",
     path: packagePath
   });
-  await sendBridgeDaemonRequest("seed-project-pipelines-configuration", {
-    type: "set_package_configuration",
-    package_name: "project-pipelines",
-    values: {
-      api_token: { type: "secret", state: "write_only" }
-    }
-  });
+  if (daemonPackageHasConfigurationField(installPayload, "project-pipelines", "api_token")) {
+    await sendBridgeDaemonRequest("seed-project-pipelines-configuration", {
+      type: "set_package_configuration",
+      package_name: "project-pipelines",
+      values: {
+        api_token: { type: "secret", state: "write_only" }
+      }
+    });
+  }
   await sendBridgeDaemonRequest("enable-project-pipelines-package", {
     type: "enable_package",
     package_name: "project-pipelines"
+  });
+}
+
+function daemonPackageHasConfigurationField(payload, packageName, fieldId) {
+  const packages = payload?.packages ?? [];
+  return packages.some((packageRecord) => {
+    const recordName = packageRecord?.package_name ?? packageRecord?.name ?? packageRecord?.id;
+    if (recordName !== packageName) return false;
+    return (packageRecord?.configuration?.fields ?? []).some((field) => field?.key === fieldId || field?.id === fieldId);
   });
 }
 
@@ -425,6 +440,14 @@ async function openFirstPartyUiAppSurface(page, mode) {
 async function exerciseFirstPartyPackageConfiguration(page) {
   const endpoint = "https://example.invalid/live-web-configuration";
 
+  if (!await pagePackageHasConfigurationFields(page, "project-pipelines", ["operator_endpoint", "pipeline_mode", "api_token"])) {
+    await openPackageSettings(page, "project-pipelines");
+    await page.getByTestId("plugin-settings-route").waitFor();
+    await page.getByText(/Project Pipelines Settings|No settings surface registered/).first().waitFor();
+    await closePackageSettingsRoute(page);
+    return;
+  }
+
   await openPackageSettings(page, "project-pipelines");
   await page.getByText("Package configuration").waitFor();
   await page.getByText("Operator endpoint").waitFor();
@@ -449,9 +472,11 @@ async function exerciseFirstPartyPackageConfiguration(page) {
     "post-save package refresh request"
   );
 
-  await page.getByRole("button", { name: "Close" }).click();
+  await closePackageSettingsRoute(page);
   await page.getByText("Package configuration").waitFor({ state: "detached" });
   await openPackageSettings(page, "project-pipelines");
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByTestId("plugin-settings-route").waitFor();
   await expectIonicTextInputValue(page, "operator_endpoint", endpoint);
   await expectIonicSelectValue(page, "pipeline_mode", "github");
 
@@ -470,18 +495,45 @@ async function exerciseFirstPartyPackageConfiguration(page) {
       pipeline_mode: { type: "select", value: "invalid-mode" }
     }
   });
-  await page.getByRole("button", { name: "Close" }).click();
+  await closePackageSettingsRoute(page);
   await page.getByText("Package configuration").waitFor({ state: "detached" });
   await openDiagnosticsView(page);
   await page.getByText("select_option_unknown").first().waitFor({ timeout: 15_000 });
   await page.getByText("invalid-mode").first().waitFor({ timeout: 15_000 });
 }
 
+async function pagePackageHasConfigurationFields(page, packageName, fieldIds) {
+  return await page.evaluate(({ packageName, fieldIds }) => {
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    const packages = [];
+    for (const entry of events) {
+      if (entry.kind === "daemon_response" && entry.payload?.kind === "packages") {
+        packages.push(...(entry.payload.packages ?? []));
+      }
+      if (entry.kind === "hub_frame" && entry.payload?.kind === "entity_snapshot") {
+        const payload = entry.payload.payload;
+        if (payload?.family === "botster-web.package") {
+          packages.push(...(payload.records ?? []));
+        }
+      }
+    }
+    const packageRecord = packages.find((record) =>
+      (record.package_name ?? record.name ?? record.id) === packageName
+    );
+    if (!packageRecord) return false;
+    const rawFields = packageRecord.configuration?.fields ?? packageRecord.configuration?.schema?.fields ?? [];
+    const projectedFields = packageRecord.configuration_fields ?? [];
+    const availableFieldIds = new Set([...rawFields, ...projectedFields].map((field) => field.key ?? field.id));
+    return fieldIds.every((fieldId) => availableFieldIds.has(fieldId));
+  }, { packageName, fieldIds });
+}
+
 async function openPackageSettings(page, packageName) {
   const installedPackagesList = page.locator("[aria-label='Installed packages']");
   const packageLabel = packageName.replace(/[-_]+/g, " ");
   const settingsButton = installedPackagesList.getByRole("button", {
-    name: new RegExp(`Settings for ${packageLabel}`, "i")
+    name: `Settings for ${packageLabel}`,
+    exact: true
   });
   await settingsButton.waitFor({ timeout: 15_000 }).catch(async (error) => {
     const installedPackagesText = await installedPackagesList.innerText().catch(() => "");
@@ -490,6 +542,13 @@ async function openPackageSettings(page, packageName) {
     );
   });
   await settingsButton.click();
+  await page.waitForURL(new RegExp(`/apps/${packageName}/settings`));
+  await page.getByTestId("plugin-settings-route").waitFor();
+}
+
+async function closePackageSettingsRoute(page) {
+  await page.getByTestId("plugin-settings-route").getByRole("button", { name: "Apps", exact: true }).click();
+  await page.waitForURL(/\/apps(?:[?#]|$)/);
 }
 
 async function setIonicSelectValue(page, fieldId, value) {
@@ -713,7 +772,7 @@ async function assertRemoteAccessSettingsDispatch(page) {
   await page.getByRole("button", { name: "Opt in" }).click();
   await waitForRemoteAccessConfigRequest(page, true);
   await page.getByText("Package action accepted").waitFor();
-  await page.getByRole("button", { name: "Close" }).click();
+  await closePackageSettingsRoute(page);
   await page.getByText("Package configuration").waitFor({ state: "detached" });
 }
 

@@ -14,6 +14,7 @@ import type {
   DaemonPackageActionRequest,
   DaemonPackageActionState,
   DaemonPackageConfiguration,
+  DaemonPackageRouteDescriptor,
   DaemonPackageRunnableEntrypoint,
   DaemonPackageSurfaceDescriptor,
   DaemonRequest,
@@ -402,6 +403,7 @@ function sessionAttachFields(sessionId: string, lifecycle: string) {
 
 function appRecord(app: DaemonApp) {
   const actions = packageActionRecords(app.actions, app.package_name, app.entrypoint_id);
+  const route = app.route ? packageRouteRecord(app.route) : undefined;
   const blockedReasons = app.blocked_reasons ?? [];
   const diagnostics = [
     ...blockedReasons,
@@ -440,6 +442,8 @@ function appRecord(app: DaemonApp) {
     }),
     app_actions: actions,
     app_action_summary: actionListSummary(actions, "No app actions returned"),
+    route,
+    route_path: route?.route_path,
     open_action: {
       id: "botster.app.open_url",
       target: `${app.package_name}:${app.app_id}`,
@@ -479,8 +483,9 @@ function appDiagnosticSummary({
 function packageRecord(packageRecord: DaemonPackage) {
   const capabilities = packageRecord.requested_capabilities ?? [];
   const runnableEntrypoints = packageRecord.runnable_entrypoints ?? [];
-  const appSurfaces = packageSurfaceRecords(packageRecord, "app");
-  const settingsSurfaces = packageSurfaceRecords(packageRecord, "settings");
+  const routes = packageRouteRecords(packageRecord.routes);
+  const appSurfaces = packageSurfaceRecords(packageRecord, "app", routes);
+  const settingsSurfaces = packageSurfaceRecords(packageRecord, "settings", routes);
   const configurationFields = packageConfigurationFields(packageRecord.configuration);
   const configurable = configurationFields.length > 0;
   const capabilitySummary =
@@ -508,6 +513,7 @@ function packageRecord(packageRecord: DaemonPackage) {
     capability_summary: capabilitySummary,
     compatibility_summary: providerProfile,
     runnable_entrypoints: runnableEntrypoints,
+    routes,
     entrypoint_count: runnableEntrypoints.length,
     entrypoint_summary: entrypointSummary,
     entrypoint_process_summary: entrypointProcessSummary,
@@ -576,31 +582,75 @@ function availablePackageRecord(packageRecord: DaemonAvailablePackage) {
   };
 }
 
-function packageSurfaceRecords(packageRecord: DaemonPackage, kind: "app" | "settings") {
+function packageSurfaceRecords(packageRecord: DaemonPackage, kind: "app" | "settings", routes: PackageRouteRecord[] = []) {
   return [...(packageRecord.surfaces ?? [])]
     .filter((surface) => surface.kind === kind)
     .sort(compareSurfaceDescriptors)
-    .map((surface) => ({
-      id: `${packageRecord.package_name}:${surface.id}`,
-      surface_id: surface.id,
-      kind: surface.kind,
-      title: surface.title,
-      description: surface.description ?? "",
-      icon: surface.icon ?? "",
-      category: surface.category ?? "",
-      supports: surface.supports ?? [],
-      launch_action: {
-        id: "botster.package.surface.render",
-        target: packageRecord.package_name,
-        label: surface.title,
-        params: {
-          package_name: packageRecord.package_name,
-          surface_id: surface.id,
-          surface_kind: surface.kind,
-          supports: surface.supports ?? []
-        }
-      } satisfies ActionBinding
-    }));
+    .map((surface) => {
+      const route = routes.find((candidate) => candidate.surface_id === surface.id);
+      return {
+        id: `${packageRecord.package_name}:${surface.id}`,
+        surface_id: surface.id,
+        kind: surface.kind,
+        title: surface.title,
+        description: surface.description ?? "",
+        icon: surface.icon ?? "",
+        category: surface.category ?? "",
+        supports: surface.supports ?? [],
+        route,
+        route_id: route?.route_id,
+        route_path: route?.route_path,
+        route_enabled: route?.enabled,
+        route_blocked: route?.blocked,
+        route_diagnostics: route?.diagnostics ?? [],
+        launch_action: {
+          id: "botster.package.surface.render",
+          target: packageRecord.package_name,
+          label: surface.title,
+          ...(route?.enabled === false || route?.blocked === true ? { disabled: true } : {}),
+          params: {
+            package_name: packageRecord.package_name,
+            surface_id: surface.id,
+            surface_kind: surface.kind,
+            supports: surface.supports ?? []
+          }
+        } satisfies ActionBinding
+      };
+    });
+}
+
+type PackageRouteRecord = ReturnType<typeof packageRouteRecord>;
+
+function packageRouteRecords(routes: DaemonPackageRouteDescriptor[] | undefined): PackageRouteRecord[] {
+  return [...(routes ?? [])]
+    .sort(comparePackageRouteDescriptors)
+    .map(packageRouteRecord);
+}
+
+function packageRouteRecord(route: DaemonPackageRouteDescriptor) {
+  return {
+    package_name: route.package_name,
+    route_id: route.route_id,
+    route_path: route.route_path,
+    target_kind: route.target.kind,
+    entrypoint_id: route.target.entrypoint_id ?? "",
+    surface_id: route.surface_id ?? route.target.surface_id ?? "",
+    title: route.title,
+    label: route.label,
+    app_id: route.app_id ?? "",
+    icon: route.icon ?? "",
+    category: route.category ?? "",
+    layout_mode: route.layout_mode,
+    required_capabilities: route.required_capabilities ?? [],
+    enabled: route.enabled,
+    blocked: route.blocked,
+    diagnostics: route.diagnostics ?? [],
+    supports_settings: route.supports_settings
+  };
+}
+
+function comparePackageRouteDescriptors(left: DaemonPackageRouteDescriptor, right: DaemonPackageRouteDescriptor): number {
+  return left.route_path.localeCompare(right.route_path) || left.route_id.localeCompare(right.route_id);
 }
 
 function compareSurfaceDescriptors(left: DaemonPackageSurfaceDescriptor, right: DaemonPackageSurfaceDescriptor): number {

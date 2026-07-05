@@ -120,6 +120,8 @@ async function runPackagedBrowserSmoke(scenario) {
     await installedAppsList.getByText("botster web dogfood app").waitFor();
     await installedPackagesList.getByText("botster web").first().waitFor();
     await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
+    await page.waitForURL(/\/apps\/botster-web\/settings/);
+    await page.getByTestId("plugin-settings-route").waitFor();
     await page.getByText("Package configuration").waitFor();
     await page.getByText("Remote browser access").first().waitFor();
     const remoteAccessLabelCount = await page.getByText("Remote browser access").count();
@@ -143,11 +145,20 @@ async function runPackagedBrowserSmoke(scenario) {
     await page.getByText("Remote browser rendezvous is opted in.").waitFor();
     await page.getByRole("button", { name: "Opt out" }).click();
     await page.getByText("Remote browser rendezvous is off.").waitFor();
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByTestId("plugin-settings-route").waitFor();
+    await page.getByText("Package configuration").waitFor();
+    await page.getByTestId("plugin-settings-route").getByRole("button", { name: "Apps", exact: true }).click();
+    await page.waitForURL(/\/apps(?:[?#]|$)/);
     await page.getByText("Package configuration").waitFor({ state: "detached" });
 
     await installedAppsList.getByText("botster web dogfood app").click();
+    await page.waitForURL(/\/apps\/botster-web\/dogfood-app/);
+    await page.getByTestId("selected-app-surface").waitFor();
     await page.getByText("botster-web Dogfood").waitFor();
+    await page.getByText("botster-web Dogfood: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByTestId("selected-app-surface").waitFor();
     await page.getByText("botster-web Dogfood: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
     const installedAppSurfaceRequest = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).find((entry) =>
@@ -161,10 +172,12 @@ async function runPackagedBrowserSmoke(scenario) {
       throw new Error("packaged browser smoke did not send plugin_surface_render for botster-web/dogfood-app from the installed app row");
     }
 
+    await openAppsView(page);
     await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
+    await page.waitForURL(/\/apps\/botster-web\/settings/);
     await page.getByRole("button", { name: "Disable Package" }).click();
     await page.getByText("botster-web: Disable Package (disabled)").waitFor();
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByTestId("plugin-settings-route").getByRole("button", { name: "Apps", exact: true }).click();
 
     await openDiagnosticsView(page);
     await page.getByRole("button", { name: "Spawn botster-web-dogfood-session to terminal" }).click();
