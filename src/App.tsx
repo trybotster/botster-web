@@ -74,6 +74,7 @@ import { createDogfoodRuntimeConfig, terminalDataPlaneLabel } from "./botster/do
 import { realHubDogfoodSessionId } from "./botster/realHubDogfoodTransport";
 import { webRtcDaemonLifecycleEventName, type LocalWebrtcBootstrap, type WebrtcDaemonLifecycleEvent } from "./botster/webrtcDaemonClient";
 import type { ActionBinding } from "./botster/actions";
+import type { EntityFrameStore } from "./botster/entities";
 import type { TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
 import { configurationFieldType, configurationSaveAction } from "./packageConfigurationForm";
@@ -235,7 +236,19 @@ function pluginSurfaceBodyText(body: unknown): string | undefined {
     ?? readString(bodyRecord.body)
     ?? readString(bodyRecord.message)
     ?? readString(bodyRecord.label)
-    ?? readString(bodyRecord.title);
+    ?? readString(bodyRecord.title)
+    ?? readString(readRecord(bodyRecord.props).text)
+    ?? readString(readRecord(bodyRecord.props).title)
+    ?? pluginSurfaceChildBodyText(bodyRecord);
+}
+
+function pluginSurfaceChildBodyText(body: Record<string, unknown>): string | undefined {
+  const children = Array.isArray(body.children) ? body.children : [];
+  for (const child of children) {
+    const childText = pluginSurfaceBodyText(child);
+    if (childText) return childText;
+  }
+  return undefined;
 }
 
 function pluginSurfaceStatus(result: unknown, title = "Plugin surface"): string | undefined {
@@ -264,7 +277,62 @@ function pluginSurfaceMatches(result: unknown, packageName: string, surfaceId: s
 
 function pluginSurfaceSnapshot(result: unknown): UiTreeSnapshot | undefined {
   const snapshot = readRecord(readRecord(result).ui_tree_snapshot);
-  return snapshot.kind === "ui_tree_snapshot" ? (snapshot as unknown as UiTreeSnapshot) : undefined;
+  if (snapshot.kind === "ui_tree_snapshot") return snapshot as unknown as UiTreeSnapshot;
+
+  const pluginSurface = pluginSurfaceRecord(result);
+  const bodySnapshot = pluginSurfaceBodySnapshot(pluginSurface);
+  return bodySnapshot;
+}
+
+function pluginSurfaceBodySnapshot(pluginSurface: Record<string, unknown>): UiTreeSnapshot | undefined {
+  const packageName = readString(pluginSurface.package_name);
+  const surfaceId = readString(pluginSurface.surface_id);
+  if (!packageName || !surfaceId) return undefined;
+
+  const root = normalizePluginSurfaceNode(pluginSurface.body, packageName, surfaceId);
+  if (!root) return undefined;
+
+  return {
+    kind: "ui_tree_snapshot",
+    surface: `${packageName}/${surfaceId}`,
+    version: "plugin-surface-body-v1",
+    root
+  };
+}
+
+function normalizePluginSurfaceNode(value: unknown, packageName: string, surfaceId: string): UiTreeSnapshot["root"] | undefined {
+  const record = readRecord(value);
+  const rawType = readString(record.type) ?? readString(record.primitive);
+  const id = readString(record.id);
+  if (!rawType || !id) return undefined;
+
+  const props = { ...readRecord(record.props) };
+  const primitive = rawType === "panel" ? "section" : rawType === "button" ? "action" : rawType;
+  const actionId = readString(props.action);
+  if (primitive === "action" && actionId) {
+    props.action = {
+      id: actionId,
+      label: readString(props.label) ?? actionId,
+      params: {
+        package_name: packageName,
+        surface_id: surfaceId
+      }
+    };
+  }
+  if (primitive === "section" && props.title && !props.label) {
+    props.label = props.title;
+  }
+
+  const children = Array.isArray(record.children)
+    ? record.children.map((child) => normalizePluginSurfaceNode(child, packageName, surfaceId)).filter((child): child is UiTreeSnapshot["root"] => Boolean(child))
+    : [];
+
+  return {
+    id,
+    primitive,
+    props,
+    ...(children.length > 0 ? { slots: { children } } : {})
+  };
 }
 
 type PluginSurfaceRenderPhase = "rendering" | "rendered" | "error";
@@ -452,6 +520,7 @@ export default function App() {
     [activeRoute]
   );
   const routeSettingsPackageName = activeRoute.view === "apps" && activeRoute.settings ? activeRoute.packageName : undefined;
+  const routeSettingsSurfaceId = activeRoute.view === "apps" && activeRoute.settings ? activeRoute.surfaceId : undefined;
   const routePluginSurfaceKey = routePluginSurface
     ? `${routePluginSurface.packageName}/${routePluginSurface.surfaceId}`
     : undefined;
@@ -476,8 +545,8 @@ export default function App() {
     const surfaceId = firstString(surface.surface_id, surface.id);
     if (surfaceId) navigateToPluginSurface(packageName, surfaceId);
   }, [navigateToPluginSurface, navigateToRoute]);
-  const navigateToPackageSettings = useCallback((packageName: string) => {
-    navigateToRoute({ view: "apps", packageName, settings: true });
+  const navigateToPackageSettings = useCallback((packageName: string, surfaceId?: string) => {
+    navigateToRoute({ view: "apps", packageName, settings: true, surfaceId });
   }, [navigateToRoute]);
 
   useEffect(() => {
@@ -598,6 +667,12 @@ export default function App() {
         if (packageFeedback) {
           setPackageActionToast(packageFeedback);
         }
+        if (action.id === "contract.action") {
+          setPackageActionToast({
+            message: result.accepted ? "contract.action accepted" : result.reason ?? "contract.action failed",
+            color: result.accepted ? "success" : "danger"
+          });
+        }
         if (action.id === "botster.package.configuration.save") {
           void runtimeClient.entities.pull({ family: "botster-web.package" });
         }
@@ -616,6 +691,21 @@ export default function App() {
     },
     [recordDiagnostic, runtimeClient, updateLocalState]
   );
+  useEffect(() => {
+    const harness = (window as typeof window & {
+      __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
+        dispatchAction?: (action: ActionBinding) => void;
+      };
+    }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    if (!harness) return;
+
+    harness.dispatchAction = dispatchAction;
+    return () => {
+      if (harness.dispatchAction === dispatchAction) {
+        delete harness.dispatchAction;
+      }
+    };
+  }, [dispatchAction]);
   const loadMarketplaceRegistry = useCallback(() => {
     const registryPath = marketplaceRegistryPath.trim();
     if (!registryPath) return;
@@ -701,6 +791,26 @@ export default function App() {
         ? `No package named ${routeSettingsPackageName} is loaded from the hub.`
         : undefined
     : undefined;
+  const routeSettingsSurfaceRecord = settingsPackage && routeSettingsSurfaceId
+    ? packageSettingsSurfaces(settingsPackage).find((surface) => firstString(surface.surface_id, surface.id) === routeSettingsSurfaceId)
+    : undefined;
+  const routeSettingsLaunchAction = surfaceLaunchAction(routeSettingsSurfaceRecord);
+  const routeSettingsSurfaceKey = routeSettingsPackageName && routeSettingsSurfaceId
+    ? `${routeSettingsPackageName}/settings/${routeSettingsSurfaceId}`
+    : undefined;
+  const routeSettingsSurfaceDiagnostic = routeSettingsSurfaceId
+    ? settingsPackageDiagnostic
+      ? settingsPackageDiagnostic
+      : !routeSettingsSurfaceRecord
+        ? `Package ${routeSettingsPackageName} does not expose settings surface ${routeSettingsSurfaceId}.`
+        : routeSettingsSurfaceRecord.route_enabled === false
+          ? `Settings surface ${routeSettingsSurfaceId} is disabled by the hub route descriptor.`
+          : routeSettingsSurfaceRecord.route_blocked === true
+            ? `Settings surface ${routeSettingsSurfaceId} is blocked by the hub route descriptor.`
+            : !routeSettingsLaunchAction
+              ? `Settings surface ${routeSettingsSurfaceId} has no hub-provided render action.`
+              : undefined
+    : undefined;
 
   useEffect(() => {
     if (routePluginSurfaceDiagnostic) return;
@@ -739,6 +849,48 @@ export default function App() {
     routePluginSurfaceDiagnostic,
     routePluginSurfaceKey,
     routePluginSurfaceRecord,
+    runtimeClient,
+    updateLocalState
+  ]);
+
+  useEffect(() => {
+    if (routeSettingsSurfaceDiagnostic) return;
+    if (!routeSettingsPackageName || !routeSettingsSurfaceId) return;
+    if (!routeSettingsSurfaceKey || !routeSettingsSurfaceRecord || !routeSettingsLaunchAction) return;
+    if (lastPluginRouteRenderKey.current === routeSettingsSurfaceKey) return;
+
+    const expectedSurface = {
+      packageName: routeSettingsPackageName,
+      surfaceId: routeSettingsSurfaceId
+    };
+    lastPluginRouteRenderKey.current = routeSettingsSurfaceKey;
+    setSelectedPluginSurface({
+      routeKey: routeSettingsSurfaceKey,
+      title: surfaceTitle(routeSettingsSurfaceRecord),
+      phase: "rendering",
+      status: `Rendering ${surfaceTitle(routeSettingsSurfaceRecord)}`
+    });
+    void runtimeClient.actions.dispatch({ origin: "ui_node", action: routeSettingsLaunchAction }).then((result) => {
+      const renderedSurface = renderedPluginSurfaceState(
+        result,
+        routeSettingsLaunchAction.label ?? surfaceTitle(routeSettingsSurfaceRecord),
+        expectedSurface,
+        routeSettingsSurfaceKey
+      );
+      setSelectedPluginSurface(renderedSurface);
+      updateLocalState({
+        "dogfood.plugin_surface_status": renderedSurface.status
+      });
+      recordDiagnostic(actionFailureDiagnostic(routeSettingsLaunchAction, result));
+    });
+  }, [
+    recordDiagnostic,
+    routeSettingsLaunchAction,
+    routeSettingsPackageName,
+    routeSettingsSurfaceDiagnostic,
+    routeSettingsSurfaceId,
+    routeSettingsSurfaceKey,
+    routeSettingsSurfaceRecord,
     runtimeClient,
     updateLocalState
   ]);
@@ -807,6 +959,10 @@ export default function App() {
   }, [appSurfacePackages, navigateToPluginSurfaceRecord]);
   const openPackageSettings = useCallback((app: Record<string, unknown>) => {
     navigateToPackageSettings(stringValue(app.package_name, String(app.id)));
+  }, [navigateToPackageSettings]);
+  const openPackageSettingsSurface = useCallback((packageName: string, surface: PackageSurfaceRecord) => {
+    const surfaceId = firstString(surface.surface_id, surface.id);
+    if (surfaceId) navigateToPackageSettings(packageName, surfaceId);
   }, [navigateToPackageSettings]);
   const sessions = runtimeClient.entities.list("botster-web.session");
   const attachableDogfoodSession = sessions.find((session) => session.id === realHubDogfoodSessionId && isAttachableSession(session));
@@ -1106,6 +1262,10 @@ export default function App() {
                       packageRecord={settingsPackage}
                       onAction={dispatchAction}
                       onBack={() => navigateToView("apps")}
+                      onOpenSurface={openPackageSettingsSurface}
+                      selectedSurface={routeSettingsSurfaceKey && selectedPluginSurface?.routeKey === routeSettingsSurfaceKey ? selectedPluginSurface : undefined}
+                      surfaceDiagnostic={routeSettingsSurfaceDiagnostic}
+                      entities={runtimeClient.entities}
                     />
                   ) : (
                     <>
@@ -1409,9 +1569,23 @@ interface PluginSettingsRoutePageProps {
   diagnostic?: string;
   onAction: (action: ActionBinding) => void;
   onBack: () => void;
+  onOpenSurface: (packageName: string, surface: PackageSurfaceRecord) => void;
+  selectedSurface?: SelectedPluginSurface;
+  surfaceDiagnostic?: string;
+  entities: EntityFrameStore;
 }
 
-function PluginSettingsRoutePage({ packageName, packageRecord, diagnostic, onAction, onBack }: PluginSettingsRoutePageProps) {
+function PluginSettingsRoutePage({
+  packageName,
+  packageRecord,
+  diagnostic,
+  onAction,
+  onBack,
+  onOpenSurface,
+  selectedSurface,
+  surfaceDiagnostic,
+  entities
+}: PluginSettingsRoutePageProps) {
   return (
     <article className="workflow-section" aria-label="Plugin settings" data-testid="plugin-settings-route">
       <div className="section-heading">
@@ -1424,7 +1598,29 @@ function PluginSettingsRoutePage({ packageName, packageRecord, diagnostic, onAct
       {diagnostic ? (
         <p className="entity-empty" data-testid="plugin-settings-route-diagnostic">{diagnostic}</p>
       ) : packageRecord ? (
-        <PluginSettingsPanel app={packageRecord} key={String(packageRecord.id)} onAction={onAction} />
+        <>
+          <PluginSettingsPanel
+            app={packageRecord}
+            key={String(packageRecord.id)}
+            onAction={onAction}
+            onOpenSurface={(surface) => onOpenSurface(packageName, surface)}
+          />
+          {surfaceDiagnostic ? (
+            <p className="entity-empty" data-testid="plugin-settings-surface-diagnostic">{surfaceDiagnostic}</p>
+          ) : selectedSurface?.snapshot ? (
+            <UiNodeSurface
+              snapshot={selectedSurface.snapshot}
+              entities={entities}
+              capabilities={{
+                ...defaultUiCapabilitySet,
+                isolated_plugin_asset: false
+              }}
+              onAction={onAction}
+            />
+          ) : selectedSurface ? (
+            <p className="entity-empty">{selectedSurface.status ?? "Rendering plugin settings surface from the hub."}</p>
+          ) : null}
+        </>
       ) : (
         <p className="entity-empty">Loading package settings from the hub.</p>
       )}
@@ -1575,9 +1771,10 @@ export function PluginListItem({ app, onOpen, onSettings }: PluginListItemProps)
 interface PluginSettingsPanelProps {
   app: Record<string, unknown>;
   onAction: (action: ActionBinding) => void;
+  onOpenSurface?: (surface: PackageSurfaceRecord) => void;
 }
 
-export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps) {
+export function PluginSettingsPanel({ app, onAction, onOpenSurface }: PluginSettingsPanelProps) {
   const settingsSurfaces = packageSettingsSurfaces(app);
   const actions = packageActions(app);
   const configurationFields = useMemo(() => packageSurfaceRecords(app.configuration_fields), [app.configuration_fields]);
@@ -1629,7 +1826,11 @@ export function PluginSettingsPanel({ app, onAction }: PluginSettingsPanelProps)
               key={surfaceKey(surface)}
               disabled={!launchAction}
               onClick={() => {
-                if (launchAction) onAction(launchAction);
+                if (onOpenSurface) {
+                  onOpenSurface(surface);
+                } else if (launchAction) {
+                  onAction(launchAction);
+                }
               }}
             >
               <IonIcon slot="start" icon={constructOutline} aria-hidden="true" />

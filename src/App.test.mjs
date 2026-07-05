@@ -3643,6 +3643,20 @@ try {
       endpoint: "https://example.invalid/hook",
       mode: "write",
       enabled: false,
+      api_token: "replacement-token"
+    }),
+    {
+      endpoint: { type: "url", value: "https://example.invalid/hook" },
+      mode: { type: "select", value: "write" },
+      enabled: { type: "boolean", value: false },
+      api_token: { type: "secret", state: "write_only" }
+    }
+  );
+  assert.deepEqual(
+    configurationSubmitValues(configurableDescriptorApp.configuration_fields, {
+      endpoint: "https://example.invalid/hook",
+      mode: "write",
+      enabled: false,
       api_token: ""
     }),
     {

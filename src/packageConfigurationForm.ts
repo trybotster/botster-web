@@ -25,11 +25,12 @@ export function configurationSubmitValues(
   draft: Record<string, unknown>
 ): Record<string, unknown> {
   return Object.fromEntries(
-    fields.flatMap((field) => {
+    fields.flatMap<[string, unknown]>((field) => {
       const id = configurationFieldId(field);
       const value = draft[id];
       const configType = configurationFieldType(field);
       if (configType === "secret" && (value === undefined || value === "")) return [];
+      if (configType === "secret") return [[id, { type: "secret", state: "write_only" }]];
 
       return [[id, { type: configType, value: configType === "boolean" ? value === true : value }]];
     })

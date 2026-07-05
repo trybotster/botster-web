@@ -223,7 +223,8 @@ async function sendDaemonRequest(path, daemonRequest) {
 
 async function serveStaticUi(request, response) {
   const url = new URL(request.url ?? "/", `http://${host}:${port}`);
-  const safePath = safeDistPath(url.pathname);
+  const rawPathname = (request.url ?? "/").split(/[?#]/, 1)[0] || "/";
+  const safePath = safeDistPath(url.pathname, rawPathname);
 
   if (!safePath.ok) {
     writeJson(response, 404, { error: "not_found" });
@@ -243,7 +244,7 @@ async function serveStaticUi(request, response) {
     return;
   }
 
-  if (hasFileExtension(url.pathname)) {
+  if (!url.pathname.startsWith("/apps/") && hasFileExtension(url.pathname)) {
     writeJson(response, 404, { error: "not_found" });
     return;
   }
@@ -275,15 +276,19 @@ async function readExistingFile(filePath) {
   }
 }
 
-function safeDistPath(pathname) {
+function safeDistPath(pathname, rawPathname = pathname) {
   let decoded;
   try {
-    decoded = decodeURIComponent(pathname);
+    decoded = decodeURIComponent(rawPathname);
   } catch {
     return { ok: false };
   }
 
-  const normalized = normalize(decoded).replace(/^(\.\.(?:\/|\\|$))+/, "");
+  if (/(^|[/\\])\.\.([/\\]|$)/.test(decoded)) {
+    return { ok: false };
+  }
+
+  const normalized = normalize(pathname).replace(/^(\.\.(?:\/|\\|$))+/, "");
   const relativePath = normalized.replace(/^[/\\]+/, "");
   const filePath = join(distRoot, relativePath);
   const distRelative = relative(distRoot, filePath);
