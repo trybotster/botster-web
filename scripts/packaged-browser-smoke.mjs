@@ -156,11 +156,11 @@ async function runPackagedBrowserSmoke(scenario) {
     await page.waitForURL(/\/apps\/botster-web\/dogfood-app/);
     await page.getByTestId("selected-app-surface").waitFor();
     await page.getByText("botster-web Dogfood").waitFor();
-    await page.getByText("botster-web Dogfood: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
+    await page.getByText("Dogfood app: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
     await assertPluginRouteBadgeRendered(page);
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.getByTestId("selected-app-surface").waitFor();
-    await page.getByText("botster-web Dogfood: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
+    await page.getByText("Dogfood app: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
     await assertPluginRouteBadgeRendered(page);
     const installedAppSurfaceRequest = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).find((entry) =>
@@ -482,7 +482,6 @@ function daemonResponse(request, scenario, state) {
       plugin_surface: {
         package_name: request.package_name,
         surface_id: request.surface_id,
-        title: "Smoke package app",
         body: "Smoke package surface rendered"
       },
       events: []

@@ -212,6 +212,9 @@ assert.match(generatedDaemonProtocol, /\| \{ type: "restart_package_entrypoint";
 assert.match(generatedDaemonProtocol, /\| \{ type: "package_entrypoint_status"; package_name: string; entrypoint_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_action"; package_name: string; surface_id: string; action_id: string; payload: JsonValue \}/);
+assert.match(generatedDaemonProtocol, /plugin_surface\?: DaemonPluginSurface \| null;/);
+assert.match(generatedDaemonProtocol, /export interface DaemonPluginSurface/);
+assert.match(generatedDaemonProtocol, /body: JsonValue;/);
 assert.match(generatedDaemonProtocol, /export interface DaemonPackage/);
 assert.match(generatedDaemonProtocol, /apps\?: DaemonApp\[\];/);
 assert.match(generatedDaemonProtocol, /export interface DaemonApp/);
@@ -1556,11 +1559,9 @@ const bridge = {
           plugin_surface: {
             package_name: "botster-web",
             surface_id: request.surface_id,
-            title: settings ? "botster-web Settings" : "botster-web Dogfood",
             body: settings
               ? "Deterministic settings surface rendered by the botster-web dogfood package."
-              : "Deterministic app surface rendered by the botster-web dogfood package.",
-            payload: request.payload
+              : "Deterministic app surface rendered by the botster-web dogfood package."
           },
           events: [],
           diagnostics: []
@@ -1572,7 +1573,7 @@ const bridge = {
         plugin_surface: {
           package_name: request.package_name,
           surface_id: request.surface_id,
-          rendered: true
+          body: { rendered: true }
         },
         events: [],
         diagnostics: []
@@ -2515,9 +2516,7 @@ assert.deepEqual(await appSurfaceRender, {
     plugin_surface: {
       package_name: "botster-web",
       surface_id: "dogfood-app",
-      title: "botster-web Dogfood",
-      body: "Deterministic app surface rendered by the botster-web dogfood package.",
-      payload: {}
+      body: "Deterministic app surface rendered by the botster-web dogfood package."
     }
   },
   reason: undefined
@@ -3331,7 +3330,6 @@ try {
           plugin_surface: {
             package_name: "botster-web",
             surface_id: "dogfood-app",
-            title: "botster-web Dogfood",
             body: "Workspaces rendered"
           }
         }
@@ -3345,6 +3343,31 @@ try {
       title: "botster-web Dogfood",
       phase: "rendered",
       status: "botster-web Dogfood: Workspaces rendered (botster-web/dogfood-app)",
+      snapshot: undefined
+    }
+  );
+  assert.deepEqual(
+    renderedPluginSurfaceState(
+      {
+        accepted: true,
+        result: {
+          kind: "plugin_surface",
+          plugin_surface: {
+            package_name: "botster-web",
+            surface_id: "dogfood-app",
+            body: { text: "Workspaces rendered from JSON body" }
+          }
+        }
+      },
+      "botster-web Dogfood",
+      expectedDogfoodSurface,
+      "botster-web/dogfood-app"
+    ),
+    {
+      routeKey: "botster-web/dogfood-app",
+      title: "botster-web Dogfood",
+      phase: "rendered",
+      status: "botster-web Dogfood: Workspaces rendered from JSON body (botster-web/dogfood-app)",
       snapshot: undefined
     }
   );
@@ -3365,7 +3388,7 @@ try {
           plugin_surface: {
             package_name: "botster-web",
             surface_id: "dogfood-app",
-            title: "botster-web Dogfood"
+            body: {}
           }
         }
       },
@@ -3404,7 +3427,6 @@ try {
           plugin_surface: {
             package_name: "other-package",
             surface_id: "other-surface",
-            title: "Other Surface",
             body: "Other rendered"
           }
         }

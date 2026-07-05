@@ -218,25 +218,48 @@ function normalizeLocalWebrtcBootstrap(bootstrap: LocalWebrtcBootstrap | undefin
   };
 }
 
-function pluginSurfaceStatus(result: unknown): string | undefined {
-  const pluginSurface = readRecord(readRecord(result).plugin_surface);
+function pluginSurfaceRecord(result: unknown): Record<string, unknown> {
+  return readRecord(readRecord(result).plugin_surface);
+}
+
+function hasPluginSurfaceBody(pluginSurface: Record<string, unknown>): boolean {
+  return Object.hasOwn(pluginSurface, "body");
+}
+
+function pluginSurfaceBodyText(body: unknown): string | undefined {
+  if (typeof body === "string") return body;
+  if (typeof body === "number" || typeof body === "boolean") return String(body);
+
+  const bodyRecord = readRecord(body);
+  return readString(bodyRecord.text)
+    ?? readString(bodyRecord.body)
+    ?? readString(bodyRecord.message)
+    ?? readString(bodyRecord.label)
+    ?? readString(bodyRecord.title);
+}
+
+function pluginSurfaceStatus(result: unknown, title = "Plugin surface"): string | undefined {
+  const pluginSurface = pluginSurfaceRecord(result);
   const packageName = readString(pluginSurface.package_name);
   const surfaceId = readString(pluginSurface.surface_id);
 
-  if (!packageName || !surfaceId) {
+  if (!packageName || !surfaceId || !hasPluginSurfaceBody(pluginSurface)) {
     return undefined;
   }
 
-  const title = readString(pluginSurface.title) ?? "Plugin surface";
-  const body = readString(pluginSurface.body);
+  const body = pluginSurfaceBodyText(pluginSurface.body);
   return body
     ? `${title}: ${body} (${packageName}/${surfaceId})`
     : `${title} rendered (${packageName}/${surfaceId})`;
 }
 
 function pluginSurfaceMatches(result: unknown, packageName: string, surfaceId: string): boolean {
-  const pluginSurface = readRecord(readRecord(result).plugin_surface);
-  return readString(pluginSurface.package_name) === packageName && readString(pluginSurface.surface_id) === surfaceId;
+  const pluginSurface = pluginSurfaceRecord(result);
+  return (
+    readString(pluginSurface.package_name) === packageName &&
+    readString(pluginSurface.surface_id) === surfaceId &&
+    hasPluginSurfaceBody(pluginSurface)
+  );
 }
 
 function pluginSurfaceSnapshot(result: unknown): UiTreeSnapshot | undefined {
@@ -262,7 +285,7 @@ export function renderedPluginSurfaceState(
   expectedSurface?: { packageName: string; surfaceId: string },
   routeKey?: string
 ): SelectedPluginSurface {
-  const renderedSurfaceStatus = pluginSurfaceStatus(result.result);
+  const renderedSurfaceStatus = pluginSurfaceStatus(result.result, title);
   const renderedSurfaceSnapshot = pluginSurfaceSnapshot(result.result);
   const matchedExpectedSurface = expectedSurface
     ? pluginSurfaceMatches(result.result, expectedSurface.packageName, expectedSurface.surfaceId)

@@ -492,11 +492,9 @@ function deterministicBotsterWebSurfaceResponse(daemonRequest) {
     plugin_surface: {
       package_name: "botster-web",
       surface_id: daemonRequest.surface_id,
-      title: settings ? "botster-web Settings" : "botster-web Dogfood",
       body: settings
         ? "Deterministic settings surface rendered by the botster-web dogfood package."
-        : "Deterministic app surface rendered by the botster-web dogfood package.",
-      payload: daemonRequest.payload ?? {}
+        : "Deterministic app surface rendered by the botster-web dogfood package."
     },
     events: [],
     cleanup: null,
