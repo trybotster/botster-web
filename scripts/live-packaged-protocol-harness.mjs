@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { connect, createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -10,6 +10,10 @@ import { chromium } from "playwright";
 const host = "127.0.0.1";
 const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
+const workspacesPackagePath = resolveOptionalPackagePath(
+  [process.env.BOTSTER_WORKSPACES_PACKAGE_PATH, process.env.BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH],
+  "botster-workspaces"
+);
 let port = Number.parseInt(process.env.BOTSTER_WEB_DOGFOOD_BRIDGE_PORT ?? String(await findAvailablePort()), 10);
 let bridgeUrl = `http://${host}:${port}`;
 const echoProbe = "botster-web-dogfood-live-input";
@@ -264,6 +268,20 @@ async function prepareProjectPipelinesPackage() {
     type: "enable_package",
     package_name: "project-pipelines"
   });
+  await prepareWorkspacesPackageThroughBridge();
+}
+
+async function prepareWorkspacesPackageThroughBridge() {
+  if (!workspacesPackagePath) return;
+
+  await sendBridgeDaemonRequest("install-workspaces-package", {
+    type: "install_package_local_path",
+    path: workspacesPackagePath
+  });
+  await sendBridgeDaemonRequest("enable-workspaces-package", {
+    type: "enable_package",
+    package_name: "botster-workspaces"
+  });
 }
 
 function daemonPackageHasConfigurationField(payload, packageName, fieldId) {
@@ -310,6 +328,20 @@ function resolveProjectPipelinesPackagePath() {
     );
   }
   return packagePath;
+}
+
+function resolveOptionalPackagePath(candidates, packageName) {
+  return candidates
+    .filter(Boolean)
+    .find((candidate) => {
+      if (!existsSync(join(candidate, "botster-package.json"))) return false;
+      try {
+        const manifest = JSON.parse(readFileSync(join(candidate, "botster-package.json"), "utf8"));
+        return manifest.name === packageName;
+      } catch {
+        return false;
+      }
+    });
 }
 
 async function refreshPackageRuntime(page) {
@@ -399,12 +431,23 @@ async function openDiagnosticsView(page) {
 async function openFirstPartyUiAppSurface(page, mode) {
   const installedAppsList = page.locator("[aria-label='Installed apps']");
   const installedPackagesList = page.locator("[aria-label='Installed packages']");
-  const firstPartyPattern = mode === "webrtc" ? /botster[- ]web|Dogfood/i : /project[- ]pipelines|botster[- ]workspaces|workspaces/i;
-  const packageNamePattern = mode === "webrtc" ? "^botster-web$" : "^(project-pipelines|botster-workspaces)$";
-  let candidate = installedAppsList.getByText(firstPartyPattern).first();
+  const target = mode === "webrtc" && workspacesPackagePath
+    ? {
+        packageName: "botster-workspaces",
+        surfaceId: "workspaces",
+        visiblePattern: /botster[- ]workspaces|workspaces/i,
+        packageNamePattern: "^botster-workspaces$"
+      }
+    : {
+        packageName: mode === "webrtc" ? "botster-web" : undefined,
+        surfaceId: mode === "webrtc" ? "dogfood-app" : undefined,
+        visiblePattern: mode === "webrtc" ? /botster[- ]web|Dogfood/i : /project[- ]pipelines|botster[- ]workspaces|workspaces/i,
+        packageNamePattern: mode === "webrtc" ? "^botster-web$" : "^(project-pipelines|botster-workspaces)$"
+      };
+  let candidate = installedAppsList.getByText(target.visiblePattern).first();
   const appRowCount = await candidate.count();
   if (appRowCount === 0) {
-    candidate = installedPackagesList.getByText(firstPartyPattern).first();
+    candidate = installedPackagesList.getByText(target.visiblePattern).first();
   }
   const foundSurface = await candidate.waitFor({ timeout: 15_000 }).then(() => true).catch(async (error) => {
     const installedAppsText = await installedAppsList.innerText().catch(() => "");
@@ -420,16 +463,40 @@ async function openFirstPartyUiAppSurface(page, mode) {
   await candidate.click();
   await waitForHarnessEvent(
     page,
-    { kind: "daemon_request", type: "plugin_surface_render", package_name_pattern: packageNamePattern },
+    { kind: "daemon_request", type: "plugin_surface_render", package_name_pattern: target.packageNamePattern },
     "first-party app plugin_surface_render request"
   );
+  await assertSelectedAppSurfaceRendered(page, target);
+  if (target.packageName && target.surfaceId) {
+    await assertPluginSurfaceRouteReloadAndDirectLoad(page, target);
+  }
+}
+
+async function assertPluginSurfaceRouteReloadAndDirectLoad(page, target) {
+  const routePath = `/apps/${target.packageName}/${target.surfaceId}`;
+  const routeUrl = new URL(routePath, appUrl);
+  const expectedUrl = withDogfoodMode(routeUrl);
+
+  await page.waitForURL(new RegExp(`${routePath.replaceAll("/", "\\/")}`), { timeout: 15_000 });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await assertSelectedAppSurfaceRendered(page, target);
+
+  await page.goto(expectedUrl, { waitUntil: "domcontentloaded" });
+  await assertSelectedAppSurfaceRendered(page, target);
+}
+
+async function assertSelectedAppSurfaceRendered(page, target) {
   await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
   await page.waitForFunction(
-    () => {
+    ({ packageName, surfaceId }) => {
       const text = globalThis.document.querySelector("[data-testid='selected-app-surface']")?.textContent ?? "";
-      return /project-pipelines|botster-workspaces|Pipelines|Workspaces|botster-web|Dogfood/i.test(text) && /rendered|\//i.test(text);
+      const expectedRoute = packageName && surfaceId ? `${packageName}/${surfaceId}` : "";
+      return /project-pipelines|botster-workspaces|Pipelines|Workspaces|botster-web|Dogfood/i.test(text) &&
+        /rendered|\//i.test(text) &&
+        !/Render response did not include/i.test(text) &&
+        (!expectedRoute || text.includes(expectedRoute));
     },
-    undefined,
+    target,
     { timeout: 45_000 }
   ).catch(async (error) => {
     const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
@@ -1127,6 +1194,10 @@ async function startWebrtcPackageRuntime() {
 
   await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", packageRoot]);
   await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, "botster-web"]);
+  if (workspacesPackagePath) {
+    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", workspacesPackagePath]);
+    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, "botster-workspaces"]);
+  }
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
   await sendDaemonRequest(socketPath, {
     type: "start_package_entrypoint",
