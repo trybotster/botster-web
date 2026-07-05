@@ -234,9 +234,59 @@ function pluginSurfaceStatus(result: unknown): string | undefined {
     : `${title} rendered (${packageName}/${surfaceId})`;
 }
 
+function pluginSurfaceMatches(result: unknown, packageName: string, surfaceId: string): boolean {
+  const pluginSurface = readRecord(readRecord(result).plugin_surface);
+  return readString(pluginSurface.package_name) === packageName && readString(pluginSurface.surface_id) === surfaceId;
+}
+
 function pluginSurfaceSnapshot(result: unknown): UiTreeSnapshot | undefined {
   const snapshot = readRecord(readRecord(result).ui_tree_snapshot);
   return snapshot.kind === "ui_tree_snapshot" ? (snapshot as unknown as UiTreeSnapshot) : undefined;
+}
+
+type PluginSurfaceRenderPhase = "rendering" | "rendered" | "error";
+
+interface SelectedPluginSurface {
+  routeKey?: string;
+  title: string;
+  phase: PluginSurfaceRenderPhase;
+  status?: string;
+  snapshot?: UiTreeSnapshot;
+}
+
+// Exported for focused regression coverage of route render terminal-state derivation.
+// eslint-disable-next-line react-refresh/only-export-components
+export function renderedPluginSurfaceState(
+  result: { accepted: boolean; reason?: string; result?: unknown },
+  title: string,
+  expectedSurface?: { packageName: string; surfaceId: string },
+  routeKey?: string
+): SelectedPluginSurface {
+  const renderedSurfaceStatus = pluginSurfaceStatus(result.result);
+  const renderedSurfaceSnapshot = pluginSurfaceSnapshot(result.result);
+  const matchedExpectedSurface = expectedSurface
+    ? pluginSurfaceMatches(result.result, expectedSurface.packageName, expectedSurface.surfaceId)
+    : true;
+  const hasTerminalSuccess = result.accepted && (Boolean(renderedSurfaceSnapshot) || Boolean(renderedSurfaceStatus && matchedExpectedSurface));
+
+  if (hasTerminalSuccess) {
+    return {
+      routeKey,
+      title,
+      phase: "rendered",
+      status: renderedSurfaceStatus ?? `${title} rendered`,
+      snapshot: renderedSurfaceSnapshot
+    };
+  }
+
+  return {
+    routeKey,
+    title,
+    phase: "error",
+    status: result.accepted
+      ? `Render response did not include ${expectedSurface ? `${expectedSurface.packageName}/${expectedSurface.surfaceId}` : "a plugin surface"} payload.`
+      : result.reason ?? "Plugin surface render was rejected."
+  };
 }
 
 function packageActionFeedback(result: { accepted: boolean; reason?: string; result?: unknown }): { message: string; color: string } {
@@ -345,12 +395,7 @@ export default function App() {
   const [marketplaceRegistryPath, setMarketplaceRegistryPath] = useState("");
   const [localPackagePath, setLocalPackagePath] = useState("");
   const [packageActionToast, setPackageActionToast] = useState<{ message: string; color: string } | undefined>();
-  const [selectedPluginSurface, setSelectedPluginSurface] = useState<{
-    routeKey?: string;
-    title: string;
-    status?: string;
-    snapshot?: UiTreeSnapshot;
-  } | undefined>();
+  const [selectedPluginSurface, setSelectedPluginSurface] = useState<SelectedPluginSurface | undefined>();
   const lastPluginRouteRenderKey = useRef<string | undefined>(undefined);
   const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
   const [, setFrameVersion] = useState(0);
@@ -377,9 +422,12 @@ export default function App() {
     }
   }, [navigateToRoute]);
   const activeView = appViewFromRoute(activeRoute);
-  const routePluginSurface = activeRoute.view === "apps" && !activeRoute.settings && activeRoute.packageName && activeRoute.surfaceId
-    ? { packageName: activeRoute.packageName, surfaceId: activeRoute.surfaceId }
-    : undefined;
+  const routePluginSurface = useMemo(
+    () => activeRoute.view === "apps" && !activeRoute.settings && activeRoute.packageName && activeRoute.surfaceId
+      ? { packageName: activeRoute.packageName, surfaceId: activeRoute.surfaceId }
+      : undefined,
+    [activeRoute]
+  );
   const routeSettingsPackageName = activeRoute.view === "apps" && activeRoute.settings ? activeRoute.packageName : undefined;
   const routePluginSurfaceKey = routePluginSurface
     ? `${routePluginSurface.packageName}/${routePluginSurface.surfaceId}`
@@ -512,21 +560,14 @@ export default function App() {
       updateLocalState({ [statusKey]: `Dispatching ${action.id}` });
       void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
         const isAttachAction = action.id === "botster.session.attach";
-        const renderedSurfaceStatus = action.id === "botster.package.surface.render"
-          ? pluginSurfaceStatus(result.result)
-          : undefined;
-        const renderedSurfaceSnapshot = action.id === "botster.package.surface.render"
-          ? pluginSurfaceSnapshot(result.result)
-          : undefined;
         if (result.accepted && isAttachAction && action.target) {
           setSelectedRealHubTerminalSessionId(action.target);
         }
-        if (result.accepted && action.id === "botster.package.surface.render") {
-          setSelectedPluginSurface({
-            title: action.label ?? "Plugin surface",
-            status: renderedSurfaceStatus ?? `${action.label ?? "Plugin surface"} rendered`,
-            snapshot: renderedSurfaceSnapshot
-          });
+        const renderedSurface = action.id === "botster.package.surface.render"
+          ? renderedPluginSurfaceState(result, action.label ?? "Plugin surface")
+          : undefined;
+        if (renderedSurface) {
+          setSelectedPluginSurface(renderedSurface);
         }
         const packageFeedback = action.id === "botster.package.daemon_request" || action.id === "botster.package.configuration.save"
           ? packageActionFeedback(result)
@@ -545,7 +586,7 @@ export default function App() {
             : result.accepted
               ? `Accepted ${action.id}`
               : result.reason ?? `Rejected ${action.id}`,
-          ...(renderedSurfaceStatus ? { "dogfood.plugin_surface_status": renderedSurfaceStatus } : {})
+          ...(renderedSurface?.status ? { "dogfood.plugin_surface_status": renderedSurface.status } : {})
         });
         recordDiagnostic(actionFailureDiagnostic(action, result));
       });
@@ -640,36 +681,38 @@ export default function App() {
 
   useEffect(() => {
     if (routePluginSurfaceDiagnostic) return;
+    if (!routePluginSurface) return;
     if (!routePluginSurfaceKey || !routePluginSurfaceRecord || !routePluginLaunchAction) return;
     if (lastPluginRouteRenderKey.current === routePluginSurfaceKey) return;
 
+    const expectedSurface = {
+      packageName: routePluginSurface.packageName,
+      surfaceId: routePluginSurface.surfaceId
+    };
     lastPluginRouteRenderKey.current = routePluginSurfaceKey;
     setSelectedPluginSurface({
       routeKey: routePluginSurfaceKey,
       title: surfaceTitle(routePluginSurfaceRecord),
+      phase: "rendering",
       status: `Rendering ${surfaceTitle(routePluginSurfaceRecord)}`
     });
     void runtimeClient.actions.dispatch({ origin: "ui_node", action: routePluginLaunchAction }).then((result) => {
-      const renderedSurfaceStatus = pluginSurfaceStatus(result.result);
-      const renderedSurfaceSnapshot = pluginSurfaceSnapshot(result.result);
-      setSelectedPluginSurface({
-        routeKey: routePluginSurfaceKey,
-        title: routePluginLaunchAction.label ?? surfaceTitle(routePluginSurfaceRecord),
-        status: result.accepted
-          ? renderedSurfaceStatus ?? `${routePluginLaunchAction.label ?? surfaceTitle(routePluginSurfaceRecord)} rendered`
-          : result.reason ?? `Rejected ${routePluginLaunchAction.id}`,
-        snapshot: renderedSurfaceSnapshot
-      });
+      const renderedSurface = renderedPluginSurfaceState(
+        result,
+        routePluginLaunchAction.label ?? surfaceTitle(routePluginSurfaceRecord),
+        expectedSurface,
+        routePluginSurfaceKey
+      );
+      setSelectedPluginSurface(renderedSurface);
       updateLocalState({
-        "dogfood.plugin_surface_status": result.accepted
-          ? renderedSurfaceStatus ?? `${routePluginLaunchAction.label ?? surfaceTitle(routePluginSurfaceRecord)} rendered`
-          : result.reason ?? `Rejected ${routePluginLaunchAction.id}`
+        "dogfood.plugin_surface_status": renderedSurface.status
       });
       recordDiagnostic(actionFailureDiagnostic(routePluginLaunchAction, result));
     });
   }, [
     recordDiagnostic,
     routePluginLaunchAction,
+    routePluginSurface,
     routePluginSurfaceDiagnostic,
     routePluginSurfaceKey,
     routePluginSurfaceRecord,
@@ -1288,17 +1331,13 @@ interface PluginSurfaceRoutePageProps {
   packageName: string;
   surfaceId: string;
   diagnostic?: string;
-  selectedSurface?: {
-    title: string;
-    status?: string;
-    snapshot?: UiTreeSnapshot;
-  };
+  selectedSurface?: SelectedPluginSurface;
   localState: Record<string, unknown>;
   entities: ReturnType<typeof createBotsterWebClient>["entities"];
   onAction: (action: ActionBinding) => void;
 }
 
-function PluginSurfaceRoutePage({
+export function PluginSurfaceRoutePage({
   packageName,
   surfaceId,
   diagnostic,
@@ -1307,6 +1346,9 @@ function PluginSurfaceRoutePage({
   entities,
   onAction
 }: PluginSurfaceRoutePageProps) {
+  const badgeLabel = diagnostic ? "Diagnostic" : selectedSurface?.phase === "rendered" ? "Rendered" : selectedSurface?.phase === "error" ? "Error" : "Loading";
+  const badgeColor = diagnostic ? "warning" : selectedSurface?.phase === "rendered" ? "success" : selectedSurface?.phase === "error" ? "danger" : "medium";
+
   return (
     <article className="workflow-section" aria-label="Rendered app surface" data-testid="selected-app-surface">
       <div className="section-heading">
@@ -1314,8 +1356,8 @@ function PluginSurfaceRoutePage({
           <p className="eyebrow">Plugin surface</p>
           <h2>{selectedSurface?.title ?? `${packageName}/${surfaceId}`}</h2>
         </div>
-        <IonBadge color={diagnostic ? "warning" : selectedSurface?.snapshot ? "success" : "medium"}>
-          {diagnostic ? "Diagnostic" : selectedSurface?.snapshot ? "Rendered" : "Loading"}
+        <IonBadge color={badgeColor} data-testid="plugin-route-status-badge">
+          {badgeLabel}
         </IonBadge>
       </div>
       {diagnostic ? (

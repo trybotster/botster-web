@@ -157,9 +157,11 @@ async function runPackagedBrowserSmoke(scenario) {
     await page.getByTestId("selected-app-surface").waitFor();
     await page.getByText("botster-web Dogfood").waitFor();
     await page.getByText("botster-web Dogfood: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
+    await assertPluginRouteBadgeRendered(page);
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.getByTestId("selected-app-surface").waitFor();
     await page.getByText("botster-web Dogfood: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
+    await assertPluginRouteBadgeRendered(page);
     const installedAppSurfaceRequest = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).find((entry) =>
         entry.kind === "daemon_request" &&
@@ -330,6 +332,16 @@ async function openDiagnosticsView(page) {
 async function openAppsView(page) {
   await page.getByRole("button", { name: "Apps" }).click();
   await page.getByTestId("apps-view").waitFor();
+}
+
+async function assertPluginRouteBadgeRendered(page) {
+  const badgeText = await page.getByTestId("plugin-route-status-badge").innerText();
+  if (/Loading/i.test(badgeText)) {
+    throw new Error(`plugin surface route badge remained Loading after render completion: ${badgeText}`);
+  }
+  if (!/Rendered/i.test(badgeText)) {
+    throw new Error(`plugin surface route badge did not show rendered completion: ${badgeText}`);
+  }
 }
 
 function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) {

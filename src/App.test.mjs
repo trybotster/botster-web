@@ -3122,9 +3122,11 @@ try {
     {
       AppListItem,
       PluginListItem,
+      PluginSurfaceRoutePage,
       PluginSettingsPanel,
       packageAppSurfaces,
       packageSettingsSurfaces,
+      renderedPluginSurfaceState,
       surfaceLaunchAction
     }
   ] = await Promise.all([
@@ -3298,6 +3300,140 @@ try {
   assert.match(uiSurfaceMarkup, /Project Pipelines workbench/);
   assert.match(uiSurfaceMarkup, /Open UI/);
   assert.doesNotMatch(uiSurfaceMarkup, /has no hub-provided local URL/);
+
+  const renderPluginSurfaceRoutePage = (selectedSurface) =>
+    renderToStaticMarkup(
+      createElement(PluginSurfaceRoutePage, {
+        packageName: "botster-web",
+        surfaceId: "dogfood-app",
+        selectedSurface,
+        localState: {},
+        entities: createInMemoryEntityFrameStore(),
+        onAction: () => undefined
+      })
+    );
+  const expectedDogfoodSurface = { packageName: "botster-web", surfaceId: "dogfood-app" };
+  const successfulNoSnapshotSurfaceMarkup = renderPluginSurfaceRoutePage({
+    title: "botster-web Dogfood",
+    phase: "rendered",
+    status: "botster-web Dogfood: Workspaces rendered (botster-web/dogfood-app)"
+  });
+  assert.match(successfulNoSnapshotSurfaceMarkup, /data-testid="plugin-route-status-badge"/);
+  assert.match(successfulNoSnapshotSurfaceMarkup, />Rendered<\/ion-badge>/);
+  assert.match(successfulNoSnapshotSurfaceMarkup, /Workspaces rendered/);
+  assert.doesNotMatch(successfulNoSnapshotSurfaceMarkup, />Loading<\/ion-badge>/);
+  assert.deepEqual(
+    renderedPluginSurfaceState(
+      {
+        accepted: true,
+        result: {
+          kind: "plugin_surface",
+          plugin_surface: {
+            package_name: "botster-web",
+            surface_id: "dogfood-app",
+            title: "botster-web Dogfood",
+            body: "Workspaces rendered"
+          }
+        }
+      },
+      "botster-web Dogfood",
+      expectedDogfoodSurface,
+      "botster-web/dogfood-app"
+    ),
+    {
+      routeKey: "botster-web/dogfood-app",
+      title: "botster-web Dogfood",
+      phase: "rendered",
+      status: "botster-web Dogfood: Workspaces rendered (botster-web/dogfood-app)",
+      snapshot: undefined
+    }
+  );
+  const emptyPlaceholderSurfaceMarkup = renderPluginSurfaceRoutePage({
+    title: "botster-web Dogfood",
+    phase: "rendered",
+    status: "botster-web Dogfood rendered (botster-web/dogfood-app)"
+  });
+  assert.match(emptyPlaceholderSurfaceMarkup, />Rendered<\/ion-badge>/);
+  assert.match(emptyPlaceholderSurfaceMarkup, /botster-web Dogfood rendered/);
+  assert.doesNotMatch(emptyPlaceholderSurfaceMarkup, />Loading<\/ion-badge>/);
+  assert.deepEqual(
+    renderedPluginSurfaceState(
+      {
+        accepted: true,
+        result: {
+          kind: "plugin_surface",
+          plugin_surface: {
+            package_name: "botster-web",
+            surface_id: "dogfood-app",
+            title: "botster-web Dogfood"
+          }
+        }
+      },
+      "botster-web Dogfood",
+      expectedDogfoodSurface,
+      "botster-web/dogfood-app"
+    ),
+    {
+      routeKey: "botster-web/dogfood-app",
+      title: "botster-web Dogfood",
+      phase: "rendered",
+      status: "botster-web Dogfood rendered (botster-web/dogfood-app)",
+      snapshot: undefined
+    }
+  );
+  assert.deepEqual(
+    renderedPluginSurfaceState(
+      { accepted: true, result: { kind: "plugin_surface" } },
+      "botster-web Dogfood",
+      expectedDogfoodSurface,
+      "botster-web/dogfood-app"
+    ),
+    {
+      routeKey: "botster-web/dogfood-app",
+      title: "botster-web Dogfood",
+      phase: "error",
+      status: "Render response did not include botster-web/dogfood-app payload."
+    }
+  );
+  assert.deepEqual(
+    renderedPluginSurfaceState(
+      {
+        accepted: true,
+        result: {
+          kind: "plugin_surface",
+          plugin_surface: {
+            package_name: "other-package",
+            surface_id: "other-surface",
+            title: "Other Surface",
+            body: "Other rendered"
+          }
+        }
+      },
+      "botster-web Dogfood",
+      expectedDogfoodSurface,
+      "botster-web/dogfood-app"
+    ),
+    {
+      routeKey: "botster-web/dogfood-app",
+      title: "botster-web Dogfood",
+      phase: "error",
+      status: "Render response did not include botster-web/dogfood-app payload."
+    }
+  );
+  const structuredErrorSurfaceMarkup = renderPluginSurfaceRoutePage({
+    title: "botster-web Dogfood",
+    phase: "error",
+    status: "Surface render blocked by package policy."
+  });
+  assert.match(structuredErrorSurfaceMarkup, />Error<\/ion-badge>/);
+  assert.match(structuredErrorSurfaceMarkup, /Surface render blocked by package policy/);
+  assert.doesNotMatch(structuredErrorSurfaceMarkup, />Loading<\/ion-badge>/);
+  const pendingSurfaceMarkup = renderPluginSurfaceRoutePage({
+    title: "botster-web Dogfood",
+    phase: "rendering",
+    status: "Rendering botster-web Dogfood"
+  });
+  assert.match(pendingSurfaceMarkup, />Loading<\/ion-badge>/);
 
   assert.match(
     renderToStaticMarkup(createElement(AppListItem, { app: dtoBackedMissingUrlApp, onOpen: () => undefined })),
