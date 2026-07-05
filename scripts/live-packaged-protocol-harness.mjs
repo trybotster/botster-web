@@ -14,6 +14,19 @@ const workspacesPackagePath = resolveOptionalPackagePath(
   [process.env.BOTSTER_WORKSPACES_PACKAGE_PATH, process.env.BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH],
   "botster-workspaces"
 );
+const contractMatrixMode = process.env.BOTSTER_LIVE_CONTRACT_MATRIX === "1";
+const contractMatrixPackageName = "botster.plugin-contract-matrix";
+const contractMatrixSeedEndpoint = "https://example.invalid/plugin-contract-matrix/acceptance";
+const contractMatrixPackagePath = contractMatrixMode
+  ? resolveRequiredPackagePath(
+      [
+        process.env.BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH,
+        process.env.BOTSTER_HUB_SOURCE_DIR ? join(process.env.BOTSTER_HUB_SOURCE_DIR, "fixtures/plugins/plugin-contract-matrix") : undefined
+      ],
+      contractMatrixPackageName,
+      "BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH"
+    )
+  : undefined;
 let port = Number.parseInt(process.env.BOTSTER_WEB_DOGFOOD_BRIDGE_PORT ?? String(await findAvailablePort()), 10);
 let bridgeUrl = `http://${host}:${port}`;
 const echoProbe = "botster-web-dogfood-live-input";
@@ -63,6 +76,7 @@ try {
     await waitForHttpOk(`${bridgeUrl}/health`, () => bridgeProcess?.exitCode !== null ? `bridge exited before readiness (code=${bridgeProcess.exitCode})` : undefined);
     await waitForHtmlShell(`${bridgeUrl}/?dogfood=real-hub`);
     await prepareProjectPipelinesPackage();
+    await prepareContractMatrixPackageThroughBridge();
   }
 
   browser = await chromium.launch({
@@ -110,6 +124,13 @@ try {
   await openAppsView(page);
   if (transportMode === "webrtc") {
     await assertRemoteAccessSettingsDispatch(page);
+  }
+  if (contractMatrixMode) {
+    await exercisePluginContractMatrix(page);
+    assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+    await requestDaemonShutdown();
+    console.log(`plugin contract matrix smoke passed (${transportMode})`);
+    process.exit(0);
   }
   if (transportMode === "bridge") {
     await exerciseFirstPartyPackageConfiguration(page);
@@ -291,6 +312,28 @@ async function prepareWorkspacesPackageThroughBridge() {
   });
 }
 
+async function prepareContractMatrixPackageThroughBridge() {
+  if (!contractMatrixMode || !contractMatrixPackagePath) return;
+
+  await sendBridgeDaemonRequest("install-plugin-contract-matrix-package", {
+    type: "install_package_local_path",
+    path: contractMatrixPackagePath
+  });
+  await sendBridgeDaemonRequest("configure-plugin-contract-matrix-package", {
+    type: "set_package_configuration",
+    package_name: contractMatrixPackageName,
+    values: {
+      endpoint: { type: "url", value: contractMatrixSeedEndpoint },
+      mode: { type: "select", value: "write" },
+      api_token: { type: "secret", state: "write_only" }
+    }
+  });
+  await sendBridgeDaemonRequest("enable-plugin-contract-matrix-package", {
+    type: "enable_package",
+    package_name: contractMatrixPackageName
+  });
+}
+
 function daemonPackageHasConfigurationField(payload, packageName, fieldId) {
   const packages = payload?.packages ?? [];
   return packages.some((packageRecord) => {
@@ -349,6 +392,16 @@ function resolveOptionalPackagePath(candidates, packageName) {
         return false;
       }
     });
+}
+
+function resolveRequiredPackagePath(candidates, packageName, envName) {
+  const packagePath = resolveOptionalPackagePath(candidates, packageName);
+  if (!packagePath) {
+    throw new Error(
+      `live harness could not find ${packageName}; set ${envName}. Checked ${JSON.stringify(candidates.filter(Boolean))}`
+    );
+  }
+  return packagePath;
 }
 
 async function refreshPackageRuntime(page) {
@@ -426,7 +479,7 @@ async function typeThroughMountedTerminal(page, data) {
 }
 
 async function openAppsView(page) {
-  await page.getByRole("button", { name: "Apps", exact: true }).click();
+  await page.getByLabel("Botster workbench").getByRole("button", { name: "Apps", exact: true }).click();
   await page.getByTestId("apps-view").waitFor();
 }
 
@@ -476,6 +529,247 @@ async function openFirstPartyUiAppSurface(page, mode) {
   await assertSelectedAppSurfaceRendered(page, target);
   if (target.packageName && target.surfaceId) {
     await assertPluginSurfaceRouteReloadAndDirectLoad(page, target);
+  }
+}
+
+async function exercisePluginContractMatrix(page) {
+  await assertContractMatrixPackageLoaded(page);
+  await openContractAppFromApps(page);
+  await assertContractSurfaceRoute(page, "contract.app", "UiNode payload delivered through plugin_surface_render.");
+  await assertContractSurfaceRouteReloadAndDirectLoad(page, "contract.app", "UiNode payload delivered through plugin_surface_render.");
+
+  await navigateToContractSurface(page, "contract.empty");
+  await assertContractSurfaceRoute(page, "contract.empty", "No fixture rows are available.");
+
+  await navigateToContractSurface(page, "contract.blocked");
+  await assertContractBlockedSurface(page);
+  await assertDaemonResponsiveAfterBlockedSurface(page);
+
+  await exerciseContractMatrixSettings(page);
+  await exerciseContractMatrixActions(page);
+}
+
+async function assertContractMatrixPackageLoaded(page) {
+  await page.waitForFunction(
+    ({ packageName }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const packages = [];
+      const apps = [];
+      for (const entry of events) {
+        if (entry.kind === "daemon_response" && entry.payload?.kind === "packages") {
+          packages.push(...(entry.payload.packages ?? []));
+        }
+        if (entry.kind === "daemon_response" && entry.payload?.kind === "apps") {
+          apps.push(...(entry.payload.apps ?? []));
+        }
+        if (entry.kind === "hub_frame" && entry.payload?.kind === "entity_snapshot") {
+          const payload = entry.payload.payload;
+          if (payload?.family === "botster-web.package") packages.push(...(payload.records ?? []));
+          if (payload?.family === "botster-web.app") apps.push(...(payload.records ?? []));
+        }
+      }
+      const packageRecord = packages.find((record) => (record.package_name ?? record.name ?? record.id) === packageName);
+      const appRecord = apps.find((record) => record.package_name === packageName);
+      const surfaces = packageRecord?.surfaces ?? packageRecord?.app_surfaces ?? [];
+      return Boolean(packageRecord) &&
+        Boolean(appRecord || surfaces.length > 0) &&
+        JSON.stringify(packageRecord).includes("contract.app") &&
+        JSON.stringify(packageRecord).includes("contract.empty") &&
+        JSON.stringify(packageRecord).includes("contract.blocked") &&
+        JSON.stringify(packageRecord).includes("contract.settings");
+    },
+    { packageName: contractMatrixPackageName },
+    { timeout: 45_000 }
+  ).catch(async (error) => {
+    const installedPackagesText = await page.locator("[aria-label='Installed packages']").innerText().catch(() => "");
+    const installedAppsText = await page.locator("[aria-label='Installed apps']").innerText().catch(() => "");
+    throw new Error(
+      `contract matrix package/app descriptors were not visible; installed packages=${JSON.stringify(installedPackagesText)} installed apps=${JSON.stringify(installedAppsText)}: ${error.message}`
+    );
+  });
+}
+
+async function openContractAppFromApps(page) {
+  const installedAppsList = page.locator("[aria-label='Installed apps']");
+  const installedPackagesList = page.locator("[aria-label='Installed packages']");
+  let row = installedAppsList.getByText(/Contract App|plugin contract matrix|botster\.plugin-contract-matrix/i).first();
+  if (await row.count() === 0) {
+    row = installedPackagesList.getByText(/botster\.plugin-contract-matrix|plugin contract matrix/i).first();
+  }
+  await row.waitFor({ timeout: 15_000 }).catch(async (error) => {
+    const installedAppsText = await installedAppsList.innerText().catch(() => "");
+    const installedPackagesText = await installedPackagesList.innerText().catch(() => "");
+    throw new Error(
+      `timed out waiting for contract matrix app/package row; installed apps=${JSON.stringify(installedAppsText)} installed packages=${JSON.stringify(installedPackagesText)}: ${error.message}`
+    );
+  });
+  await row.click();
+}
+
+async function navigateToContractSurface(page, surfaceId) {
+  await page.goto(withDogfoodMode(new URL(`/apps/${contractMatrixPackageName}/${surfaceId}`, appUrl)), {
+    waitUntil: "domcontentloaded"
+  });
+}
+
+async function assertContractSurfaceRoute(page, surfaceId, visibleText) {
+  await page.waitForURL(new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/${surfaceId.replaceAll(".", "\\.")}`), { timeout: 15_000 });
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: surfaceId },
+    `${surfaceId} plugin_surface_render request`
+  );
+  await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
+  await page.getByText(visibleText).waitFor({ timeout: 45_000 });
+  await assertSelectedSurfaceNotLoading(page, surfaceId);
+}
+
+async function assertContractSurfaceRouteReloadAndDirectLoad(page, surfaceId, visibleText) {
+  const routePath = `/apps/${contractMatrixPackageName}/${surfaceId}`;
+  const routeUrl = withDogfoodMode(new URL(routePath, appUrl));
+
+  await page.waitForURL(new RegExp(`${routePath.replaceAll(".", "\\.").replaceAll("/", "\\/")}`), { timeout: 15_000 });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await assertContractSurfaceRoute(page, surfaceId, visibleText);
+
+  await page.goto(routeUrl, { waitUntil: "domcontentloaded" });
+  await assertContractSurfaceRoute(page, surfaceId, visibleText);
+}
+
+async function assertSelectedSurfaceNotLoading(page, surfaceId) {
+  await page.waitForFunction(
+    () => {
+      const text = globalThis.document.querySelector("[data-testid='selected-app-surface']")?.textContent ?? "";
+      return !/Loading package surfaces from the hub|Rendering plugin surface from the hub|Rendering Contract/i.test(text);
+    },
+    undefined,
+    { timeout: 45_000 }
+  ).catch(async (error) => {
+    const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
+    throw new Error(`${surfaceId} remained in a loading/rendering state; text=${JSON.stringify(selectedText)}: ${error.message}`);
+  });
+}
+
+async function assertContractBlockedSurface(page) {
+  await page.waitForURL(new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/contract\\.blocked`), { timeout: 15_000 });
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: "contract.blocked" },
+    "contract.blocked plugin_surface_render request"
+  );
+  await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
+  await page.getByText(/contract matrix blocked render|Plugin surface render was rejected|Hub action failed|operator/i).first().waitFor({ timeout: 45_000 });
+  await assertSelectedSurfaceNotLoading(page, "contract.blocked");
+}
+
+async function assertDaemonResponsiveAfterBlockedSurface(page) {
+  await revisitPackageRuntime(page);
+  await openAppsView(page);
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "list_packages" },
+    "post-blocked-surface list_packages request"
+  );
+}
+
+async function exerciseContractMatrixSettings(page) {
+  const endpoint = "https://example.invalid/contract-matrix-web-smoke";
+  await openPackageSettings(page, contractMatrixPackageName);
+  await page.waitForURL(new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/settings`));
+  await page.getByTestId("plugin-settings-route").getByText("Package configuration", { exact: true }).waitFor();
+  await page.getByText("Endpoint").waitFor();
+  await page.getByText("Mode").waitFor();
+  await page.getByText("API token").waitFor();
+  await page.getByText("Contract Settings").click();
+  await page.waitForURL(new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/settings/contract\\.settings`));
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: "contract.settings" },
+    "contract.settings plugin_surface_render request"
+  );
+  await assertContractSettingsSummary(page, [
+    `endpoint=${contractMatrixSeedEndpoint} mode=write api_token_state=redacted`,
+    "endpoint=https://example.invalid/plugin-contract-matrix mode=read api_token_state="
+  ]);
+  await assertRawSecretNotVisible(page);
+
+  await openPackageSettings(page, contractMatrixPackageName);
+  await page.locator("ion-input[data-configuration-field='endpoint'] input").fill(endpoint);
+  await setIonicSelectValue(page, "mode", "write");
+  await page.locator("ion-input[data-configuration-field='api_token'] input").fill("contract-matrix-secret");
+  const configActionResultCountBeforeSave = await packageConfigurationActionResultCount(page, contractMatrixPackageName);
+  await page.locator("[data-testid='package-configuration-save']").click();
+  await waitForPackageConfigurationRequest(page, {
+    packageName: contractMatrixPackageName,
+    values: {
+      endpoint: { type: "url", value: endpoint },
+      mode: { type: "select", value: "write" },
+      api_token: { type: "secret", state: "write_only" }
+    }
+  });
+  await waitForPackageConfigurationActionResultCount(page, contractMatrixPackageName, true, configActionResultCountBeforeSave + 1);
+  await waitForPackageEffectiveConfiguration(page, contractMatrixPackageName, {
+    endpoint: { type: "url", value: endpoint },
+    mode: { type: "select", value: "write" },
+    api_token: { type: "secret", state: "redacted" }
+  });
+
+  await openPackageSettings(page, contractMatrixPackageName);
+  const requestCountBeforeInvalidSave = await daemonRequestCount(page, { type: "set_package_configuration" });
+  await setIonicSelectValue(page, "mode", "invalid-mode");
+  await page.locator("[data-testid='package-configuration-save']").click();
+  await waitForDaemonRequestCount(
+    page,
+    { type: "set_package_configuration" },
+    requestCountBeforeInvalidSave + 1,
+    "contract matrix invalid package configuration save request"
+  );
+  await waitForPackageConfigurationRequest(page, {
+    packageName: contractMatrixPackageName,
+    values: {
+      mode: { type: "select", value: "invalid-mode" }
+    }
+  });
+  await closePackageSettingsRoute(page);
+  await openDiagnosticsView(page);
+  await page.getByText(/select_option_unknown|invalid-mode/).first().waitFor({ timeout: 15_000 });
+}
+
+async function exerciseContractMatrixActions(page) {
+  await navigateToContractSurface(page, "contract.app");
+  await assertContractSurfaceRoute(page, "contract.app", "UiNode payload delivered through plugin_surface_render.");
+  await page.getByRole("button", { name: "Run contract action" }).click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_action", package_name: contractMatrixPackageName, surface_id: "contract.app" },
+    "contract.action plugin_surface_action request"
+  );
+  await page.getByText(/Accepted contract\.action|contract action accepted|accepted/i).first().waitFor({ timeout: 15_000 });
+
+  await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchAction));
+  await page.evaluate(({ packageName }) => {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.dispatchAction({
+      id: "contract.action",
+      label: "Run contract action",
+      params: {
+        package_name: packageName,
+        surface_id: "contract.app",
+        fail: true
+      }
+    });
+  }, { packageName: contractMatrixPackageName });
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_action", package_name: contractMatrixPackageName, surface_id: "contract.app" },
+    "contract.action error plugin_surface_action request"
+  );
+  await page.getByText(/contract action failed by request|Rejected contract\.action|error/i).first().waitFor({ timeout: 15_000 });
+}
+
+async function assertRawSecretNotVisible(page) {
+  const secretVisible = await page.locator("body").innerText().then((text) => text.includes("contract-matrix-secret"));
+  if (secretVisible) {
+    throw new Error("contract matrix smoke rendered the raw api_token secret");
   }
 }
 
@@ -603,6 +897,7 @@ async function pagePackageHasConfigurationFields(page, packageName, fieldIds) {
 }
 
 async function openPackageSettings(page, packageName) {
+  await openAppsView(page);
   const installedPackagesList = page.locator("[aria-label='Installed packages']");
   const packageLabel = packageName.replace(/[-_]+/g, " ");
   const settingsButton = installedPackagesList.getByRole("button", {
@@ -685,6 +980,116 @@ async function waitForPackageConfigurationRequest(page, { packageName, values, o
     throw new Error(
       `timed out waiting for ${packageName} configuration request values=${JSON.stringify(values)} omitted=${JSON.stringify(omittedKeys)}; observed=${JSON.stringify(observedRequests, null, 2)}: ${error.message}`
     );
+  });
+}
+
+async function assertContractSettingsSummary(page, expectedText) {
+  await page.getByText(/endpoint=.* mode=.* api_token_state=.*/).waitFor({ timeout: 45_000 });
+  const expectedTexts = Array.isArray(expectedText) ? expectedText : [expectedText];
+  const summaries = await page.locator("text=/endpoint=.* mode=.* api_token_state=.*/").allTextContents();
+  if (!expectedTexts.some((expected) => summaries.includes(expected))) {
+    const relevantEvents = await page.evaluate((nextPackageName) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) => {
+        const payload = entry.payload ?? {};
+        if (entry.kind === "daemon_request") {
+          return payload.package_name === nextPackageName && (
+            payload.type === "set_package_configuration" ||
+            payload.type === "plugin_surface_render"
+          );
+        }
+        if (entry.kind === "daemon_response") {
+          return payload.packages?.some?.((record) => record.name === nextPackageName) ||
+            payload.plugin_surface?.package_name === nextPackageName;
+        }
+        if (entry.kind === "hub_frame" && payload.kind === "action_result") {
+          return payload.payload?.result?.package_name === nextPackageName;
+        }
+        return false;
+      }),
+      contractMatrixPackageName
+    );
+    throw new Error(`contract settings summary mismatch; expected=${JSON.stringify(expectedTexts)} actual=${JSON.stringify(summaries)} relevant=${JSON.stringify(relevantEvents, null, 2)}`);
+  }
+}
+
+async function waitForPackageEffectiveConfiguration(page, packageName, expectedValues) {
+  await page.waitForFunction(
+    ({ nextPackageName, nextExpectedValues }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
+        if (entry.kind !== "daemon_response" && entry.kind !== "hub_frame") return false;
+        const packages = entry.kind === "daemon_response"
+          ? entry.payload?.packages
+          : entry.payload?.kind === "entity_snapshot" && entry.payload.payload?.family === "botster-web.package"
+            ? entry.payload.payload.records
+            : undefined;
+        if (!Array.isArray(packages)) return false;
+        const record = packages.find((candidate) => candidate.name === nextPackageName || candidate.id === nextPackageName);
+        const effectiveValues = record?.configuration?.effective_values ?? Object.fromEntries(
+          (record?.configuration_fields ?? []).map((field) => [field.id, field.secret_state ? { type: field.config_type, state: field.secret_state } : { type: field.config_type, value: field.value }])
+        );
+        return Object.entries(nextExpectedValues).every(([key, expectedValue]) =>
+          JSON.stringify(effectiveValues[key]) === JSON.stringify(expectedValue)
+        );
+      }),
+    { nextPackageName: packageName, nextExpectedValues: expectedValues },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observedConfigurations = await page.evaluate((nextPackageName) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .flatMap((entry) => {
+          const packages = entry.kind === "daemon_response"
+            ? entry.payload?.packages
+            : entry.kind === "hub_frame" && entry.payload?.kind === "entity_snapshot" && entry.payload.payload?.family === "botster-web.package"
+              ? entry.payload.payload.records
+              : [];
+          return Array.isArray(packages) ? packages : [];
+        })
+        .filter((record) => record?.name === nextPackageName || record?.id === nextPackageName)
+        .map((record) => ({
+          name: record.name ?? record.id,
+          effective_values: record.configuration?.effective_values,
+          fields: record.configuration_fields
+        })),
+      packageName
+    );
+    throw new Error(`timed out waiting for ${packageName} effective configuration ${JSON.stringify(expectedValues)}; observed=${JSON.stringify(observedConfigurations, null, 2)}: ${error.message}`);
+  });
+}
+
+async function packageConfigurationActionResultCount(page, packageName, accepted = undefined) {
+  return page.evaluate(
+    ({ nextPackageName, nextAccepted }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) => {
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
+        const payload = entry.payload.payload ?? {};
+        const result = payload.result ?? {};
+        if (result.package_name !== nextPackageName) return false;
+        return nextAccepted === undefined || payload.accepted === nextAccepted;
+      }).length,
+    { nextPackageName: packageName, nextAccepted: accepted }
+  );
+}
+
+async function waitForPackageConfigurationActionResultCount(page, packageName, accepted, expectedCount) {
+  await page.waitForFunction(
+    ({ nextPackageName, nextAccepted, nextExpectedCount }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) => {
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
+        const payload = entry.payload.payload ?? {};
+        const result = payload.result ?? {};
+        return payload.accepted === nextAccepted && result.package_name === nextPackageName;
+      }).length >= nextExpectedCount,
+    { nextPackageName: packageName, nextAccepted: accepted, nextExpectedCount: expectedCount },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observedResults = await page.evaluate((nextPackageName) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
+        .map((entry) => entry.payload?.payload)
+        .filter((payload) => !nextPackageName || payload?.result?.package_name === nextPackageName),
+      packageName
+    );
+    throw new Error(`timed out waiting for ${packageName} configuration action_result accepted=${accepted} count>=${expectedCount}; observed=${JSON.stringify(observedResults, null, 2)}: ${error.message}`);
   });
 }
 
@@ -1204,6 +1609,10 @@ async function startWebrtcPackageRuntime() {
   if (workspacesPackagePath) {
     await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", workspacesPackagePath]);
     await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, "botster-workspaces"]);
+  }
+  if (contractMatrixMode && contractMatrixPackagePath) {
+    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", contractMatrixPackagePath]);
+    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, contractMatrixPackageName]);
   }
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
   await sendDaemonRequest(socketPath, {

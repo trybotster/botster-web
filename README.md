@@ -71,6 +71,20 @@ The live harness can also attach to an explicitly isolated existing hub with `BO
 
 The harness reloads the packaged UI after the browser-dispatched spawn before asserting terminal output. That keeps this smoke focused on proving the live protocol loop against an existing real session while a separate follow-up tracks the product race where immediate terminal attach after spawn can briefly hit `UnknownSession`.
 
+Plugin contract matrix smoke:
+
+```bash
+BOTSTER_HUB_BIN=/path/to/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
+BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH=/path/to/botster-hub/fixtures/plugins/plugin-contract-matrix \
+BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL=/path/to/botster-hub/crates/botster-hub-client/generated/daemon-protocol.ts \
+npm run smoke:plugin-contract-matrix
+```
+
+This command builds the app, starts the live packaged harness in contract-matrix mode, installs and enables the hub-owned `botster.plugin-contract-matrix` fixture, opens Apps in Playwright Chromium, and fails if visible app or settings routes remain in Loading/Error after the daemon dispatches `plugin_surface_render`. It proves the Apps row opens `/apps/botster.plugin-contract-matrix/contract.app`, direct reload preserves that route, `contract.empty` reaches a terminal non-loading state, `contract.blocked` renders a visible error while the daemon remains responsive, `/apps/botster.plugin-contract-matrix/settings/contract.settings` renders sanitized configuration, invalid config reports hub validation, and `plugin_surface_action` success/error paths are visible.
+
+The fixture is owned by `botster-hub`. Point `BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH` at `fixtures/plugins/plugin-contract-matrix` from that repo, or set `BOTSTER_HUB_SOURCE_DIR` to the hub checkout and let the harness derive the fixture path. Use `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL` with the same hub checkout when running drift checks or `npm test` so botster-web compares against the authoritative generated daemon protocol artifact.
+
 Lint:
 
 ```bash

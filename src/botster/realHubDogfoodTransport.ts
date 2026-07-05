@@ -994,6 +994,28 @@ async function dispatchDaemonAction(
     return;
   }
 
+  if (action.id === "contract.action") {
+    const response = await bridge.request({
+      type: "plugin_surface_action",
+      package_name: readConfigString(action.params?.package_name, "botster.plugin-contract-matrix"),
+      surface_id: readConfigString(action.params?.surface_id, "contract.app"),
+      action_id: action.id,
+      payload: jsonObject(action.params)
+    });
+    const pluginActionResult = isRecord(response.plugin_action_result) ? response.plugin_action_result : {};
+    const actionState = readConfigString(pluginActionResult.state);
+    const actionError = readConfigString(pluginActionResult.error, undefined);
+    emitResponse(response);
+    emit(actionResultFrame(request, !response.error && actionState !== "error", response.error?.message ?? actionError, {
+      package_name: "botster.plugin-contract-matrix",
+      surface_id: "contract.app",
+      action_id: action.id,
+      kind: response.kind,
+      plugin_action_result: response.plugin_action_result
+    }));
+    return;
+  }
+
   if (action.id === "botster.package.daemon_request") {
     const daemonRequest = daemonRequestFromAction(action);
     if (!daemonRequest) {
