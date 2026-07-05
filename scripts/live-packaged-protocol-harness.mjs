@@ -30,6 +30,13 @@ if (!process.env.BOTSTER_HUB_BIN && !process.env.BOTSTER_HUB_SOCKET && !process.
   );
 }
 
+if (!workspacesPackagePath) {
+  console.log(
+    "Workspaces package path not provided; live packaged protocol harness will fall back to generic first-party/dogfood surface coverage. " +
+      "Set BOTSTER_WORKSPACES_PACKAGE_PATH or BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH for named botster-workspaces/workspaces acceptance."
+  );
+}
+
 let bridgeProcess;
 let bridgeStdout = "";
 let bridgeStderr = "";
