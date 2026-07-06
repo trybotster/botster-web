@@ -270,39 +270,35 @@ function pluginSurfaceMatches(result: unknown, packageName: string, surfaceId: s
   const pluginSurface = pluginSurfaceRecord(result);
   return (
     readString(pluginSurface.package_name) === packageName &&
-    readString(pluginSurface.surface_id) === surfaceId &&
-    hasPluginSurfaceBody(pluginSurface)
+    readString(pluginSurface.surface_id) === surfaceId
   );
 }
 
-function pluginSurfaceSnapshot(result: unknown): UiTreeSnapshot | undefined {
+function pluginSurfaceSnapshot(result: unknown, expectedSurface?: { packageName: string; surfaceId: string }): UiTreeSnapshot | undefined {
   const snapshot = readRecord(readRecord(result).ui_tree_snapshot);
   if (snapshot.kind === "ui_tree_snapshot") return snapshot as unknown as UiTreeSnapshot;
 
   const pluginSurface = pluginSurfaceRecord(result);
-  const bodySnapshot = pluginSurfaceBodySnapshot(pluginSurface);
-  return bodySnapshot;
-}
-
-function pluginSurfaceBodySnapshot(pluginSurface: Record<string, unknown>): UiTreeSnapshot | undefined {
-  const packageName = readString(pluginSurface.package_name);
-  const surfaceId = readString(pluginSurface.surface_id);
+  const hubSnapshot = readRecord(pluginSurface.ui_tree_snapshot);
+  const packageName = readString(hubSnapshot.package_name);
+  const surfaceId = readString(hubSnapshot.surface_id);
   if (!packageName || !surfaceId) return undefined;
+  if (expectedSurface && (packageName !== expectedSurface.packageName || surfaceId !== expectedSurface.surfaceId)) return undefined;
 
-  const root = normalizePluginSurfaceNode(pluginSurface.body, packageName, surfaceId);
+  const root = validatedPluginSurfaceSnapshotNode(hubSnapshot.body, packageName, surfaceId);
   if (!root) return undefined;
 
   return {
     kind: "ui_tree_snapshot",
     surface: `${packageName}/${surfaceId}`,
-    version: "plugin-surface-body-v1",
+    version: "plugin-surface-hub-validated-v1",
     root
   };
 }
 
-function normalizePluginSurfaceNode(value: unknown, packageName: string, surfaceId: string): UiTreeSnapshot["root"] | undefined {
+function validatedPluginSurfaceSnapshotNode(value: unknown, packageName: string, surfaceId: string): UiTreeSnapshot["root"] | undefined {
   const record = readRecord(value);
-  const rawType = readString(record.type) ?? readString(record.primitive);
+  const rawType = readString(record.primitive) ?? readString(record.type);
   const id = readString(record.id);
   if (!rawType || !id) return undefined;
 
@@ -324,9 +320,13 @@ function normalizePluginSurfaceNode(value: unknown, packageName: string, surface
     props.label = props.title;
   }
 
-  const children = Array.isArray(record.children)
-    ? record.children.map((child) => normalizePluginSurfaceNode(child, packageName, surfaceId)).filter((child): child is UiTreeSnapshot["root"] => Boolean(child))
-    : [];
+  const slotChildren = readRecord(record.slots).children;
+  const rawChildren = Array.isArray(record.children)
+    ? record.children
+    : Array.isArray(slotChildren)
+      ? slotChildren
+      : [];
+  const children = rawChildren.map((child) => validatedPluginSurfaceSnapshotNode(child, packageName, surfaceId)).filter((child): child is UiTreeSnapshot["root"] => Boolean(child));
 
   return {
     id,
@@ -334,6 +334,10 @@ function normalizePluginSurfaceNode(value: unknown, packageName: string, surface
     props,
     ...(children.length > 0 ? { slots: { children } } : {})
   };
+}
+
+function incompatiblePluginSurfaceSnapshotStatus(title: string, packageName: string, surfaceId: string): string {
+  return `${title} requires a hub validated UiTree snapshot for ${packageName}/${surfaceId}; this hub returned only an unvalidated plugin surface body.`;
 }
 
 type PluginSurfaceRenderPhase = "rendering" | "rendered" | "error";
@@ -355,11 +359,11 @@ export function renderedPluginSurfaceState(
   routeKey?: string
 ): SelectedPluginSurface {
   const renderedSurfaceStatus = pluginSurfaceStatus(result.result, title);
-  const renderedSurfaceSnapshot = pluginSurfaceSnapshot(result.result);
+  const renderedSurfaceSnapshot = pluginSurfaceSnapshot(result.result, expectedSurface);
   const matchedExpectedSurface = expectedSurface
     ? pluginSurfaceMatches(result.result, expectedSurface.packageName, expectedSurface.surfaceId)
     : true;
-  const hasTerminalSuccess = result.accepted && (Boolean(renderedSurfaceSnapshot) || Boolean(renderedSurfaceStatus && matchedExpectedSurface));
+  const hasTerminalSuccess = result.accepted && Boolean(renderedSurfaceSnapshot) && matchedExpectedSurface;
 
   if (hasTerminalSuccess) {
     return {
@@ -376,7 +380,9 @@ export function renderedPluginSurfaceState(
     title,
     phase: "error",
     status: result.accepted
-      ? `Render response did not include ${expectedSurface ? `${expectedSurface.packageName}/${expectedSurface.surfaceId}` : "a plugin surface"} payload.`
+      ? renderedSurfaceStatus && expectedSurface && matchedExpectedSurface
+        ? incompatiblePluginSurfaceSnapshotStatus(title, expectedSurface.packageName, expectedSurface.surfaceId)
+        : `Render response did not include ${expectedSurface ? `${expectedSurface.packageName}/${expectedSurface.surfaceId}` : "a plugin surface"} validated snapshot.`
       : result.reason ?? "Plugin surface render was rejected."
   };
 }

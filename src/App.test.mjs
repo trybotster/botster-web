@@ -127,6 +127,8 @@ assert.match(app, /operatorErrorDiagnostic/);
 assert.match(app, /hubConnectionDiagnosticFromFrame/);
 assert.match(app, /dogfood\.diagnostic_action_status/);
 assert.match(app, /dogfood\.plugin_surface_status/);
+assert.match(app, /plugin-surface-hub-validated-v1/);
+assert.doesNotMatch(app, /plugin-surface-body-v1|normalizePluginSurfaceNode|pluginSurfaceBodySnapshot/);
 assert.match(app, /terminalUnavailableDiagnostic/);
 assert.match(app, /surfaceSnapshot \?\? loadingSnapshot/);
 assert.match(app, /runtimeClient\.entities\.list\("botster-web\.app"\)/);
@@ -215,7 +217,6 @@ assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_action"; pack
 assert.doesNotMatch(app, /action\.id === "contract\.action"/);
 assert.doesNotMatch(realHubDogfoodTransport, /action\.id === "contract\.action"/);
 assert.doesNotMatch(realHubDogfoodTransport, /botster\.plugin-contract-matrix|surface_id:\s*"contract\.app"/);
-assert.match(app, /action_id:\s*actionId/);
 assert.match(realHubDogfoodTransport, /pluginSurfaceActionRequest\(action\)/);
 assert.match(realHubDogfoodTransport, /package_name:\s*pluginSurfaceAction\.packageName/);
 assert.match(realHubDogfoodTransport, /surface_id:\s*pluginSurfaceAction\.surfaceId/);
@@ -228,6 +229,8 @@ assert.doesNotMatch(liveProtocolHarnessScript, /Rejected contract\\.action\|erro
 assert.match(generatedDaemonProtocol, /plugin_surface\?: DaemonPluginSurface \| null;/);
 assert.match(generatedDaemonProtocol, /export interface DaemonPluginSurface/);
 assert.match(generatedDaemonProtocol, /body: JsonValue;/);
+assert.match(generatedDaemonProtocol, /ui_tree_snapshot\?: DaemonUiTreeSnapshot \| null;/);
+assert.match(generatedDaemonProtocol, /export interface DaemonUiTreeSnapshot/);
 assert.match(generatedDaemonProtocol, /export interface DaemonPackage/);
 assert.match(generatedDaemonProtocol, /apps\?: DaemonApp\[\];/);
 assert.match(generatedDaemonProtocol, /export interface DaemonApp/);
@@ -1567,14 +1570,33 @@ const bridge = {
     if (request.type === "plugin_surface_render") {
       if (request.package_name === "botster-web") {
         const settings = request.surface_id === "dogfood-settings";
+        const bodyText = settings
+          ? "Deterministic settings surface rendered by the botster-web dogfood package."
+          : "Deterministic app surface rendered by the botster-web dogfood package.";
         return {
           kind: "plugin_surface",
           plugin_surface: {
             package_name: "botster-web",
             surface_id: request.surface_id,
-            body: settings
-              ? "Deterministic settings surface rendered by the botster-web dogfood package."
-              : "Deterministic app surface rendered by the botster-web dogfood package."
+            body: bodyText,
+            ui_tree_snapshot: {
+              package_name: "botster-web",
+              surface_id: request.surface_id,
+              body: {
+                id: `botster-web-${request.surface_id}-root`,
+                primitive: "section",
+                props: { label: settings ? "Dogfood Settings" : "Dogfood App" },
+                slots: {
+                  children: [
+                    {
+                      id: `botster-web-${request.surface_id}-copy`,
+                      primitive: "text",
+                      props: { text: bodyText }
+                    }
+                  ]
+                }
+              }
+            }
           },
           events: [],
           diagnostics: []
@@ -1586,7 +1608,16 @@ const bridge = {
         plugin_surface: {
           package_name: request.package_name,
           surface_id: request.surface_id,
-          body: { rendered: true }
+          body: { rendered: true },
+          ui_tree_snapshot: {
+            package_name: request.package_name,
+            surface_id: request.surface_id,
+            body: {
+              id: `${request.package_name}-${request.surface_id}-root`,
+              primitive: "section",
+              props: { label: "Rendered plugin surface" }
+            }
+          }
         },
         events: [],
         diagnostics: []
@@ -2574,7 +2605,25 @@ assert.deepEqual(await appSurfaceRender, {
     plugin_surface: {
       package_name: "botster-web",
       surface_id: "dogfood-app",
-      body: "Deterministic app surface rendered by the botster-web dogfood package."
+      body: "Deterministic app surface rendered by the botster-web dogfood package.",
+      ui_tree_snapshot: {
+        package_name: "botster-web",
+        surface_id: "dogfood-app",
+        body: {
+          id: "botster-web-dogfood-app-root",
+          primitive: "section",
+          props: { label: "Dogfood App" },
+          slots: {
+            children: [
+              {
+                id: "botster-web-dogfood-app-copy",
+                primitive: "text",
+                props: { text: "Deterministic app surface rendered by the botster-web dogfood package." }
+              }
+            ]
+          }
+        }
+      }
     }
   },
   reason: undefined
@@ -3370,15 +3419,35 @@ try {
       })
     );
   const expectedDogfoodSurface = { packageName: "botster-web", surfaceId: "dogfood-app" };
-  const successfulNoSnapshotSurfaceMarkup = renderPluginSurfaceRoutePage({
+  const validatedDogfoodSnapshot = {
+    kind: "ui_tree_snapshot",
+    surface: "botster-web/dogfood-app",
+    version: "plugin-surface-hub-validated-v1",
+    root: {
+      id: "dogfood-app-root",
+      primitive: "section",
+      props: { title: "Dogfood App", label: "Dogfood App" },
+      slots: {
+        children: [
+          {
+            id: "dogfood-app-copy",
+            primitive: "text",
+            props: { text: "Workspaces rendered" }
+          }
+        ]
+      }
+    }
+  };
+  const successfulValidatedSnapshotSurfaceMarkup = renderPluginSurfaceRoutePage({
     title: "botster-web Dogfood",
     phase: "rendered",
-    status: "botster-web Dogfood: Workspaces rendered (botster-web/dogfood-app)"
+    status: "botster-web Dogfood: Workspaces rendered (botster-web/dogfood-app)",
+    snapshot: validatedDogfoodSnapshot
   });
-  assert.match(successfulNoSnapshotSurfaceMarkup, /data-testid="plugin-route-status-badge"/);
-  assert.match(successfulNoSnapshotSurfaceMarkup, />Rendered<\/ion-badge>/);
-  assert.match(successfulNoSnapshotSurfaceMarkup, /Workspaces rendered/);
-  assert.doesNotMatch(successfulNoSnapshotSurfaceMarkup, />Loading<\/ion-badge>/);
+  assert.match(successfulValidatedSnapshotSurfaceMarkup, /data-testid="plugin-route-status-badge"/);
+  assert.match(successfulValidatedSnapshotSurfaceMarkup, />Rendered<\/ion-badge>/);
+  assert.match(successfulValidatedSnapshotSurfaceMarkup, /Workspaces rendered/);
+  assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, />Loading<\/ion-badge>/);
   assert.deepEqual(
     renderedPluginSurfaceState(
       {
@@ -3388,7 +3457,23 @@ try {
           plugin_surface: {
             package_name: "botster-web",
             surface_id: "dogfood-app",
-            body: "Workspaces rendered"
+            body: "Workspaces rendered",
+            ui_tree_snapshot: {
+              package_name: "botster-web",
+              surface_id: "dogfood-app",
+              body: {
+                id: "dogfood-app-root",
+                type: "panel",
+                props: { title: "Dogfood App" },
+                children: [
+                  {
+                    id: "dogfood-app-copy",
+                    type: "text",
+                    props: { text: "Workspaces rendered" }
+                  }
+                ]
+              }
+            }
           }
         }
       },
@@ -3401,7 +3486,7 @@ try {
       title: "botster-web Dogfood",
       phase: "rendered",
       status: "botster-web Dogfood: Workspaces rendered (botster-web/dogfood-app)",
-      snapshot: undefined
+      snapshot: validatedDogfoodSnapshot
     }
   );
   assert.deepEqual(
@@ -3424,19 +3509,10 @@ try {
     {
       routeKey: "botster-web/dogfood-app",
       title: "botster-web Dogfood",
-      phase: "rendered",
-      status: "botster-web Dogfood: Workspaces rendered from JSON body (botster-web/dogfood-app)",
-      snapshot: undefined
+      phase: "error",
+      status: "botster-web Dogfood requires a hub validated UiTree snapshot for botster-web/dogfood-app; this hub returned only an unvalidated plugin surface body."
     }
   );
-  const emptyPlaceholderSurfaceMarkup = renderPluginSurfaceRoutePage({
-    title: "botster-web Dogfood",
-    phase: "rendered",
-    status: "botster-web Dogfood rendered (botster-web/dogfood-app)"
-  });
-  assert.match(emptyPlaceholderSurfaceMarkup, />Rendered<\/ion-badge>/);
-  assert.match(emptyPlaceholderSurfaceMarkup, /botster-web Dogfood rendered/);
-  assert.doesNotMatch(emptyPlaceholderSurfaceMarkup, />Loading<\/ion-badge>/);
   assert.deepEqual(
     renderedPluginSurfaceState(
       {
@@ -3457,9 +3533,8 @@ try {
     {
       routeKey: "botster-web/dogfood-app",
       title: "botster-web Dogfood",
-      phase: "rendered",
-      status: "botster-web Dogfood rendered (botster-web/dogfood-app)",
-      snapshot: undefined
+      phase: "error",
+      status: "botster-web Dogfood requires a hub validated UiTree snapshot for botster-web/dogfood-app; this hub returned only an unvalidated plugin surface body."
     }
   );
   assert.deepEqual(
@@ -3473,7 +3548,7 @@ try {
       routeKey: "botster-web/dogfood-app",
       title: "botster-web Dogfood",
       phase: "error",
-      status: "Render response did not include botster-web/dogfood-app payload."
+      status: "Render response did not include botster-web/dogfood-app validated snapshot."
     }
   );
   assert.deepEqual(
@@ -3497,7 +3572,7 @@ try {
       routeKey: "botster-web/dogfood-app",
       title: "botster-web Dogfood",
       phase: "error",
-      status: "Render response did not include botster-web/dogfood-app payload."
+      status: "Render response did not include botster-web/dogfood-app validated snapshot."
     }
   );
   const structuredErrorSurfaceMarkup = renderPluginSurfaceRoutePage({

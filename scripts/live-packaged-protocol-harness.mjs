@@ -619,6 +619,9 @@ async function assertContractSurfaceRoute(page, surfaceId, visibleText) {
     { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: surfaceId },
     `${surfaceId} plugin_surface_render request`
   );
+  if (transportMode === "bridge") {
+    await waitForValidatedPluginSurfaceSnapshot(page, surfaceId);
+  }
   await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
   await page.getByText(visibleText).waitFor({ timeout: 45_000 });
   await assertSelectedSurfaceNotLoading(page, surfaceId);
@@ -647,6 +650,39 @@ async function assertSelectedSurfaceNotLoading(page, surfaceId) {
   ).catch(async (error) => {
     const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
     throw new Error(`${surfaceId} remained in a loading/rendering state; text=${JSON.stringify(selectedText)}: ${error.message}`);
+  });
+}
+
+async function waitForValidatedPluginSurfaceSnapshot(page, surfaceId) {
+  await page.waitForFunction(
+    ({ nextPackageName, nextSurfaceId }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
+        const pluginSurface = entry.kind === "daemon_response"
+          ? entry.payload?.plugin_surface ?? {}
+          : entry.kind === "hub_frame" && entry.payload?.kind === "action_result"
+            ? entry.payload?.payload?.result?.plugin_surface ?? {}
+            : {};
+        const snapshot = pluginSurface.ui_tree_snapshot ?? {};
+        return pluginSurface.package_name === nextPackageName &&
+          pluginSurface.surface_id === nextSurfaceId &&
+          snapshot.package_name === nextPackageName &&
+          snapshot.surface_id === nextSurfaceId &&
+          Boolean(snapshot.body);
+      }),
+    { nextPackageName: contractMatrixPackageName, nextSurfaceId: surfaceId },
+    { timeout: 45_000 }
+  ).catch(async (error) => {
+    const observedResponses = await page.evaluate((nextPackageName) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .map((entry) => entry.kind === "daemon_response"
+          ? entry.payload?.plugin_surface
+          : entry.kind === "hub_frame" && entry.payload?.kind === "action_result"
+            ? entry.payload?.payload?.result?.plugin_surface
+            : undefined)
+        .filter((pluginSurface) => pluginSurface?.package_name === nextPackageName),
+      contractMatrixPackageName
+    );
+    throw new Error(`${surfaceId} did not receive a hub validated plugin_surface.ui_tree_snapshot; observed=${JSON.stringify(observedResponses, null, 2)}: ${error.message}`);
   });
 }
 
@@ -691,6 +727,9 @@ async function exerciseContractMatrixSettings(page) {
     { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: "contract.settings" },
     "contract.settings plugin_surface_render request"
   );
+  if (transportMode === "bridge") {
+    await waitForValidatedPluginSurfaceSnapshot(page, "contract.settings");
+  }
   await assertContractSettingsSummary(page, [
     `endpoint=${contractMatrixSeedEndpoint} mode=write api_token_state=redacted`,
     "endpoint=https://example.invalid/plugin-contract-matrix mode=read api_token_state="
