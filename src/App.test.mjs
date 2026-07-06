@@ -212,6 +212,19 @@ assert.match(generatedDaemonProtocol, /\| \{ type: "restart_package_entrypoint";
 assert.match(generatedDaemonProtocol, /\| \{ type: "package_entrypoint_status"; package_name: string; entrypoint_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_action"; package_name: string; surface_id: string; action_id: string; payload: JsonValue \}/);
+assert.doesNotMatch(app, /action\.id === "contract\.action"/);
+assert.doesNotMatch(realHubDogfoodTransport, /action\.id === "contract\.action"/);
+assert.doesNotMatch(realHubDogfoodTransport, /botster\.plugin-contract-matrix|surface_id:\s*"contract\.app"/);
+assert.match(app, /action_id:\s*actionId/);
+assert.match(realHubDogfoodTransport, /pluginSurfaceActionRequest\(action\)/);
+assert.match(realHubDogfoodTransport, /package_name:\s*pluginSurfaceAction\.packageName/);
+assert.match(realHubDogfoodTransport, /surface_id:\s*pluginSurfaceAction\.surfaceId/);
+assert.match(realHubDogfoodTransport, /action_id:\s*pluginSurfaceAction\.actionId/);
+assert.match(liveProtocolHarnessScript, /waitForContractActionResult/);
+assert.match(liveProtocolHarnessScript, /waitForVisibleContractMatrixText/);
+assert.doesNotMatch(liveProtocolHarnessScript, /accepted\|accepted/i);
+assert.doesNotMatch(liveProtocolHarnessScript, /operator\/i/);
+assert.doesNotMatch(liveProtocolHarnessScript, /Rejected contract\\.action\|error/i);
 assert.match(generatedDaemonProtocol, /plugin_surface\?: DaemonPluginSurface \| null;/);
 assert.match(generatedDaemonProtocol, /export interface DaemonPluginSurface/);
 assert.match(generatedDaemonProtocol, /body: JsonValue;/);
@@ -1580,6 +1593,18 @@ const bridge = {
       };
     }
 
+    if (request.type === "plugin_surface_action") {
+      return {
+        kind: "plugin_action_result",
+        plugin_action_result: {
+          state: "success",
+          message: `${request.action_id} accepted`
+        },
+        events: [],
+        diagnostics: []
+      };
+    }
+
     if (
       request.type === "enable_package" ||
       request.type === "disable_package" ||
@@ -2219,6 +2244,24 @@ await realTransport.send({
   }
 });
 await flushMicrotasks();
+await realTransport.send({
+  kind: "action_request",
+  payload: {
+    request_id: "real-plugin-surface-action-1",
+    origin: "ui_node",
+    action: {
+      id: "ticket.open",
+      label: "Open ticket",
+      params: {
+        package_name: "project-pipelines",
+        surface_id: "home",
+        action_id: "ticket.open",
+        ticket_id: "ticket_123"
+      }
+    }
+  }
+});
+await flushMicrotasks();
 for (const action of [
   {
     id: "botster.package.surface.render",
@@ -2331,6 +2374,21 @@ assert.deepEqual(
     package_name: "project-pipelines",
     surface_id: "home",
     payload: {}
+  }
+);
+assert.deepEqual(
+  bridgeRequests.find((request) => request.type === "plugin_surface_action"),
+  {
+    type: "plugin_surface_action",
+    package_name: "project-pipelines",
+    surface_id: "home",
+    action_id: "ticket.open",
+    payload: {
+      package_name: "project-pipelines",
+      surface_id: "home",
+      action_id: "ticket.open",
+      ticket_id: "ticket_123"
+    }
   }
 );
 assert.deepEqual(
