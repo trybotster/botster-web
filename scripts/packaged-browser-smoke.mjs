@@ -155,12 +155,11 @@ async function runPackagedBrowserSmoke(scenario) {
     await installedAppsList.getByText("botster web dogfood app").click();
     await page.waitForURL(/\/apps\/botster-web\/dogfood-app/);
     await page.getByTestId("selected-app-surface").waitFor();
-    await page.getByText("botster-web Dogfood").waitFor();
-    await page.getByText("Dogfood app: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
+    await page.getByText("Deterministic app surface rendered by the botster-web dogfood package.").waitFor();
     await assertPluginRouteBadgeRendered(page);
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.getByTestId("selected-app-surface").waitFor();
-    await page.getByText("Dogfood app: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)").waitFor();
+    await page.getByText("Deterministic app surface rendered by the botster-web dogfood package.").waitFor();
     await assertPluginRouteBadgeRendered(page);
     const installedAppSurfaceRequest = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).find((entry) =>
@@ -477,12 +476,31 @@ function daemonResponse(request, scenario, state) {
   }
 
   if (request.type === "plugin_surface_render") {
+    const bodyText = "Smoke package surface rendered";
     return {
       kind: "plugin_surface",
       plugin_surface: {
         package_name: request.package_name,
         surface_id: request.surface_id,
-        body: "Smoke package surface rendered"
+        body: bodyText,
+        ui_tree_snapshot: {
+          package_name: request.package_name,
+          surface_id: request.surface_id,
+          body: {
+            id: `${request.package_name}-${request.surface_id}-root`,
+            primitive: "section",
+            props: { label: "Smoke package surface" },
+            slots: {
+              children: [
+                {
+                  id: `${request.package_name}-${request.surface_id}-copy`,
+                  primitive: "text",
+                  props: { text: bodyText }
+                }
+              ]
+            }
+          }
+        }
       },
       events: []
     };
