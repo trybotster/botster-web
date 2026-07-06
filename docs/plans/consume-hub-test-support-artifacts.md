@@ -7,7 +7,7 @@ description: Plan for consuming botster-hub test-support artifacts in botster-we
 ## Context Loaded
 
 - Ticket: `ticket_1783308847_124919`, "Consume botster-hub test-support artifacts instead of sibling checkout paths".
-- Run: `run_1783310736_492947`, step `botster_plan`, target `tgt_40abcf71ccf049f4ac0c99953a799869`, worktree `/Users/jasonconigliari/botster-sessions/git@github.com:trybotster-botster-web-project-pipelines-ticket_1783308847_124919`.
+- Run: `run_1783310736_492947`, step `botster_plan`, target `tgt_40abcf71ccf049f4ac0c99953a799869`, worktree: the pipeline-provided ticket worktree.
 - Dependency: closed ticket `ticket_1783308847_286503`, "Publish reusable plugin contract matrix test assets from botster-hub-test-support".
 - Pipeline context had no prior artifacts, findings, reviews, questions, or answers for this run.
 - Playbooks and vault notes loaded: [[planner-playbook]], [[botster-planner-playbook]], [[botster-architecture]], [[cli-patterns]], [[spa-patterns]], [[project pipeline orchestration belongs in a device-level botster plugin]], [[project pipelines needs an operator workbench not more primitives]], [[project pipelines ui contract belongs in the plugin readme]], [[botster orchestration should spawn agents with explicit target ids]], [[botster orchestration prompts must bind agents to explicit worktrees]], and [[project pipelines checklist worker timeouts require artifact evidence fallback]].
