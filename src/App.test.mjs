@@ -7,6 +7,11 @@ import { pathToFileURL } from "node:url";
 import { createServer as createNetServer } from "node:net";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import {
+  materializePluginContractMatrixFixture,
+  metadata as hubTestSupportMetadata,
+  verifyPackageAssets
+} from "@trybotster/hub-test-support";
 import ts from "typescript";
 import { createServer } from "vite";
 import { createElement } from "react";
@@ -44,6 +49,7 @@ const [
   packageManifestRaw,
   packageJsonRaw,
   pluginEntrypoint,
+  checkDaemonProtocolDriftScript,
   dogfoodBridgeModeScript,
   dogfoodBridgeScript,
   liveProtocolHarnessScript,
@@ -77,6 +83,7 @@ const [
   readFile(new URL("../botster-package.json", import.meta.url), "utf8"),
   readFile(new URL("../package.json", import.meta.url), "utf8"),
   readFile(new URL("../plugin.lua", import.meta.url), "utf8"),
+  readFile(new URL("../scripts/check-daemon-protocol-drift.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/dogfoodBridgeMode.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/real-hub-dogfood-bridge.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-packaged-protocol-harness.mjs", import.meta.url), "utf8"),
@@ -488,6 +495,42 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
+assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.0");
+assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
+assert.equal(hubTestSupportMetadata.package_version, "0.1.0");
+assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
+assert.equal(verifyPackageAssets().ok, true);
+assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
+assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping daemon protocol drift check|check out \.\.\/botster-hub/);
+assert.match(liveProtocolHarnessScript, /@trybotster\/hub-test-support/);
+assert.match(liveProtocolHarnessScript, /materializePluginContractMatrixFixture/);
+assert.doesNotMatch(
+  liveProtocolHarnessScript,
+  /BOTSTER_HUB_SOURCE_DIR \? join\(process\.env\.BOTSTER_HUB_SOURCE_DIR, "fixtures\/plugins\/plugin-contract-matrix"\)/
+);
+const materializedFixtureRoot = await mkdtemp(join(tmpdir(), "botster-web-contract-matrix-fixture-"));
+try {
+  const materializedFixturePath = materializePluginContractMatrixFixture(materializedFixtureRoot);
+  const materializedFixtureManifest = JSON.parse(await readFile(join(materializedFixturePath, "botster-package.json"), "utf8"));
+  const materializedFixturePlugin = await readFile(join(materializedFixturePath, "plugin.lua"), "utf8");
+  assert.equal(materializedFixtureManifest.name, "botster.plugin-contract-matrix");
+  assert.match(materializedFixturePlugin, /contract\.app/);
+} finally {
+  await rm(materializedFixtureRoot, { recursive: true, force: true });
+}
+const mismatchedProtocolRoot = await mkdtemp(join(tmpdir(), "botster-web-daemon-protocol-mismatch-"));
+try {
+  const mismatchedProtocolPath = join(mismatchedProtocolRoot, "daemon-protocol.ts");
+  await writeFile(mismatchedProtocolPath, `${generatedDaemonProtocol}\n// deliberate drift\n`);
+  const driftResult = await runNodeScript(new URL("../scripts/check-daemon-protocol-drift.mjs", import.meta.url), {
+    BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL: mismatchedProtocolPath
+  });
+  assert.notEqual(driftResult.code, 0);
+  assert.match(`${driftResult.stdout}\n${driftResult.stderr}`, /Vendored daemon protocol drift detected/);
+  assert.doesNotMatch(`${driftResult.stdout}\n${driftResult.stderr}`, /missing|Skipping daemon protocol drift check/i);
+} finally {
+  await rm(mismatchedProtocolRoot, { recursive: true, force: true });
+}
 assert.equal(
   packageJson.scripts["smoke:live-packaged-protocol"],
   "npm run build && node scripts/live-packaged-protocol-harness.mjs"
@@ -4900,6 +4943,26 @@ function hexToArrayBuffer(encoded) {
 function base64ToArrayBuffer(encoded) {
   const bytes = Buffer.from(encoded, "base64");
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
+async function runNodeScript(scriptUrl, env = {}) {
+  const child = spawn(process.execPath, [scriptUrl.pathname], {
+    cwd: new URL("..", import.meta.url).pathname,
+    env: { ...process.env, ...env },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const [code, signal] = await once(child, "exit");
+  return { code, signal, stdout, stderr };
 }
 
 function extractTopLevelCssRule(source, selector) {

@@ -17,15 +17,9 @@ const workspacesPackagePath = resolveOptionalPackagePath(
 const contractMatrixMode = process.env.BOTSTER_LIVE_CONTRACT_MATRIX === "1";
 const contractMatrixPackageName = "botster.plugin-contract-matrix";
 const contractMatrixSeedEndpoint = "https://example.invalid/plugin-contract-matrix/acceptance";
+let contractMatrixFixtureTempDir;
 const contractMatrixPackagePath = contractMatrixMode
-  ? resolveRequiredPackagePath(
-      [
-        process.env.BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH,
-        process.env.BOTSTER_HUB_SOURCE_DIR ? join(process.env.BOTSTER_HUB_SOURCE_DIR, "fixtures/plugins/plugin-contract-matrix") : undefined
-      ],
-      contractMatrixPackageName,
-      "BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH"
-    )
+  ? await resolveContractMatrixPackagePath()
   : undefined;
 let port = Number.parseInt(process.env.BOTSTER_WEB_DOGFOOD_BRIDGE_PORT ?? String(await findAvailablePort()), 10);
 let bridgeUrl = `http://${host}:${port}`;
@@ -248,6 +242,9 @@ try {
   if (ownsWebrtcDataDir && webrtcDataDir) {
     await rm(webrtcDataDir, { recursive: true, force: true });
   }
+  if (contractMatrixFixtureTempDir) {
+    await rm(contractMatrixFixtureTempDir, { recursive: true, force: true });
+  }
 }
 
 async function requestDaemonShutdown() {
@@ -378,6 +375,52 @@ function resolveProjectPipelinesPackagePath() {
     );
   }
   return packagePath;
+}
+
+async function resolveContractMatrixPackagePath() {
+  if (process.env.BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH) {
+    return resolveRequiredPackagePath(
+      [process.env.BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH],
+      contractMatrixPackageName,
+      "BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH"
+    );
+  }
+
+  const {
+    materializePluginContractMatrixFixture,
+    metadata: hubTestSupportMetadata,
+    verifyPackageAssets
+  } = await loadHubTestSupport();
+  const assetCheck = verifyPackageAssets();
+  if (!assetCheck.ok) {
+    throw new Error(
+      [
+        `live harness could not use ${hubTestSupportMetadata.package_name}@${hubTestSupportMetadata.package_version}`,
+        `artifact: ${hubTestSupportMetadata.plugin_contract_matrix.artifact_path}`,
+        `failures: ${assetCheck.failures.join(", ")}`,
+        "Run npm install so the declared devDependency is present, or set BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH for a local override."
+      ].join("\n")
+    );
+  }
+
+  contractMatrixFixtureTempDir = await mkdtemp(join(tmpdir(), "botster-web-contract-matrix-"));
+  return materializePluginContractMatrixFixture(contractMatrixFixtureTempDir);
+}
+
+async function loadHubTestSupport() {
+  try {
+    return await import("@trybotster/hub-test-support");
+  } catch (error) {
+    if (error?.code === "ERR_MODULE_NOT_FOUND") {
+      throw new Error(
+        [
+          "live harness contract matrix mode requires the declared @trybotster/hub-test-support devDependency.",
+          "Run npm install so the artifact package is present, or set BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH for a local override."
+        ].join("\n")
+      );
+    }
+    throw error;
+  }
 }
 
 function resolveOptionalPackagePath(candidates, packageName) {
