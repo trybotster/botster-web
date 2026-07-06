@@ -3433,6 +3433,22 @@ try {
             id: "dogfood-app-copy",
             primitive: "text",
             props: { text: "Workspaces rendered" }
+          },
+          {
+            id: "dogfood-app-action",
+            primitive: "action",
+            props: {
+              label: "Run deterministic action",
+              action: {
+                id: "ticket.open",
+                label: "Run deterministic action",
+                params: {
+                  package_name: "botster-web",
+                  surface_id: "dogfood-app",
+                  action_id: "ticket.open"
+                }
+              }
+            }
           }
         ]
       }
@@ -3470,6 +3486,11 @@ try {
                     id: "dogfood-app-copy",
                     type: "text",
                     props: { text: "Workspaces rendered" }
+                  },
+                  {
+                    id: "dogfood-app-action",
+                    type: "button",
+                    props: { label: "Run deterministic action", action: "ticket.open" }
                   }
                 ]
               }
