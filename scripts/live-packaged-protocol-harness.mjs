@@ -748,10 +748,13 @@ async function exerciseContractMatrixActions(page) {
     { kind: "daemon_request", type: "plugin_surface_action", package_name: contractMatrixPackageName, surface_id: "contract.app" },
     "contract.action plugin_surface_action request"
   );
-  await waitForVisibleContractMatrixText(
+  await waitForContractActionResult(
     page,
-    ["Accepted contract.action", "Contract action accepted", "contract action accepted"],
-    "contract.action deterministic success text"
+    {
+      accepted: true,
+      expectedTexts: ["Accepted contract.action", "Contract action accepted", "contract action accepted"],
+      label: "contract.action deterministic success result"
+    }
   );
 
   await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchAction));
@@ -772,11 +775,53 @@ async function exerciseContractMatrixActions(page) {
     { kind: "daemon_request", type: "plugin_surface_action", package_name: contractMatrixPackageName, surface_id: "contract.app" },
     "contract.action error plugin_surface_action request"
   );
-  await waitForVisibleContractMatrixText(
+  await waitForContractActionResult(
     page,
-    ["contract action failed by request", "Rejected contract.action"],
-    "contract.action deterministic failure text"
+    {
+      accepted: false,
+      expectedTexts: ["contract action failed by request", "Rejected contract.action"],
+      label: "contract.action deterministic failure result"
+    }
   );
+}
+
+async function waitForContractActionResult(page, { accepted, expectedTexts, label }) {
+  await page.waitForFunction(
+    ({ nextAccepted, texts }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events.some((entry) => {
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
+        const payload = entry.payload.payload ?? {};
+        const result = payload.result ?? {};
+        const pluginActionResult = result.plugin_action_result ?? {};
+        if (payload.accepted !== nextAccepted) return false;
+        if (result.package_name !== "botster.plugin-contract-matrix") return false;
+        if (result.surface_id !== "contract.app") return false;
+        if (result.action_id !== "contract.action") return false;
+        const resultText = [
+          payload.reason,
+          pluginActionResult.message,
+          pluginActionResult.error,
+          pluginActionResult.payload?.message,
+          pluginActionResult.payload?.error,
+          pluginActionResult.normalized_values?.message,
+          pluginActionResult.normalized_values?.error,
+          pluginActionResult.state
+        ].filter((value) => typeof value === "string").join("\n");
+        return texts.some((text) => resultText.includes(text));
+      });
+    },
+    { nextAccepted: accepted, texts: expectedTexts },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observedResults = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
+        .map((entry) => entry.payload?.payload)
+        .filter((payload) => payload?.result?.package_name === "botster.plugin-contract-matrix")
+    );
+    throw new Error(`timed out waiting for ${label}; expected=${JSON.stringify(expectedTexts)} observed=${JSON.stringify(observedResults, null, 2)}: ${error.message}`);
+  });
 }
 
 async function waitForVisibleContractMatrixText(page, expectedTexts, label) {

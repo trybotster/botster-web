@@ -220,6 +220,7 @@ assert.match(realHubDogfoodTransport, /pluginSurfaceActionRequest\(action\)/);
 assert.match(realHubDogfoodTransport, /package_name:\s*pluginSurfaceAction\.packageName/);
 assert.match(realHubDogfoodTransport, /surface_id:\s*pluginSurfaceAction\.surfaceId/);
 assert.match(realHubDogfoodTransport, /action_id:\s*pluginSurfaceAction\.actionId/);
+assert.match(liveProtocolHarnessScript, /waitForContractActionResult/);
 assert.match(liveProtocolHarnessScript, /waitForVisibleContractMatrixText/);
 assert.doesNotMatch(liveProtocolHarnessScript, /accepted\|accepted/i);
 assert.doesNotMatch(liveProtocolHarnessScript, /operator\/i/);
