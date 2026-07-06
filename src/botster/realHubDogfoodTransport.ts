@@ -994,12 +994,13 @@ async function dispatchDaemonAction(
     return;
   }
 
-  if (action.id === "contract.action") {
+  const pluginSurfaceAction = pluginSurfaceActionRequest(action);
+  if (pluginSurfaceAction) {
     const response = await bridge.request({
       type: "plugin_surface_action",
-      package_name: readConfigString(action.params?.package_name, "botster.plugin-contract-matrix"),
-      surface_id: readConfigString(action.params?.surface_id, "contract.app"),
-      action_id: action.id,
+      package_name: pluginSurfaceAction.packageName,
+      surface_id: pluginSurfaceAction.surfaceId,
+      action_id: pluginSurfaceAction.actionId,
       payload: jsonObject(action.params)
     });
     const pluginActionResult = isRecord(response.plugin_action_result) ? response.plugin_action_result : {};
@@ -1007,9 +1008,9 @@ async function dispatchDaemonAction(
     const actionError = readConfigString(pluginActionResult.error, undefined);
     emitResponse(response);
     emit(actionResultFrame(request, !response.error && actionState !== "error", response.error?.message ?? actionError, {
-      package_name: "botster.plugin-contract-matrix",
-      surface_id: "contract.app",
-      action_id: action.id,
+      package_name: pluginSurfaceAction.packageName,
+      surface_id: pluginSurfaceAction.surfaceId,
+      action_id: pluginSurfaceAction.actionId,
       kind: response.kind,
       plugin_action_result: response.plugin_action_result
     }));
@@ -1092,6 +1093,13 @@ function daemonRequestFromDescriptor(request: DaemonPackageActionRequest): Daemo
     return { type: "apply_package_update", package_name: packageName, pin: request.pin };
   }
   return undefined;
+}
+
+function pluginSurfaceActionRequest(action: ActionBinding): { packageName: string; surfaceId: string; actionId: string } | undefined {
+  const packageName = readConfigString(action.params?.package_name);
+  const surfaceId = readConfigString(action.params?.surface_id);
+  const actionId = readConfigString(action.params?.action_id);
+  return packageName && surfaceId && actionId ? { packageName, surfaceId, actionId } : undefined;
 }
 
 function actionResultFrame(

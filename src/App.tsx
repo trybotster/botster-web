@@ -315,7 +315,8 @@ function normalizePluginSurfaceNode(value: unknown, packageName: string, surface
       label: readString(props.label) ?? actionId,
       params: {
         package_name: packageName,
-        surface_id: surfaceId
+        surface_id: surfaceId,
+        action_id: actionId
       }
     };
   }
@@ -428,6 +429,25 @@ function packageActionFeedback(result: { accepted: boolean; reason?: string; res
   return {
     message: diagnostics[0] ?? `${actionLabelFromId(requestType)} accepted`,
     color: "success"
+  };
+}
+
+function pluginSurfaceActionFeedback(result: { accepted: boolean; reason?: string; result?: unknown }): { message: string; color: string } | undefined {
+  const payload = readRecord(result.result);
+  const pluginActionResult = readRecord(payload.plugin_action_result);
+  const packageName = readString(payload.package_name);
+  const surfaceId = readString(payload.surface_id);
+  const actionId = readString(payload.action_id);
+  if (!packageName || !surfaceId || !actionId || Object.keys(pluginActionResult).length === 0) return undefined;
+
+  const state = readString(pluginActionResult.state);
+  const message = readString(pluginActionResult.message);
+  const error = readString(pluginActionResult.error);
+  return {
+    message: result.accepted
+      ? message ?? `${actionLabelFromId(actionId)} accepted`
+      : result.reason ?? error ?? `${actionLabelFromId(actionId)} failed`,
+    color: result.accepted && state !== "error" ? "success" : "danger"
   };
 }
 
@@ -667,11 +687,9 @@ export default function App() {
         if (packageFeedback) {
           setPackageActionToast(packageFeedback);
         }
-        if (action.id === "contract.action") {
-          setPackageActionToast({
-            message: result.accepted ? "contract.action accepted" : result.reason ?? "contract.action failed",
-            color: result.accepted ? "success" : "danger"
-          });
+        const pluginSurfaceFeedback = pluginSurfaceActionFeedback(result);
+        if (pluginSurfaceFeedback) {
+          setPackageActionToast(pluginSurfaceFeedback);
         }
         if (action.id === "botster.package.configuration.save") {
           void runtimeClient.entities.pull({ family: "botster-web.package" });
