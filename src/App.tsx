@@ -111,6 +111,22 @@ function appRouteFromPathname(pathname: string): AppRoute {
   const normalizedPath = pathname.replace(/\/+$/, "") || "/";
   if (normalizedPath === appViewPaths.diagnostics || normalizedPath.startsWith(`${appViewPaths.diagnostics}/`)) return { view: "diagnostics" };
   if (normalizedPath === appViewPaths.apps) return { view: "apps" };
+  if (normalizedPath.startsWith("/packages/")) {
+    const segments = normalizedPath
+      .slice("/packages/".length)
+      .split("/")
+      .filter((segment) => segment.length > 0)
+      .map((segment) => decodeURIComponent(segment));
+    const [packageName, routeKind, targetId] = segments;
+    if (!packageName) return { view: "apps" };
+    if (routeKind === "settings") {
+      return { view: "apps", packageName, settings: true };
+    }
+    if (routeKind === "surfaces" && targetId) {
+      return { view: "apps", packageName, surfaceId: targetId, settings: false };
+    }
+    return { view: "apps", packageName };
+  }
   if (normalizedPath.startsWith(`${appViewPaths.apps}/`)) {
     const segments = normalizedPath
       .slice(appViewPaths.apps.length + 1)
@@ -501,8 +517,9 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<ConnectionDiagnostic[]>(() =>
     initialConnectionDiagnostics(dogfoodRuntime.mode, dogfoodRuntime.statusText, dogfoodRuntime.terminalDataPlaneKind)
   );
-  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "package" | "availablePackage" | "session" | "draft", DogfoodEntityLoadStatus>>({
+  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "packageNavigation" | "package" | "availablePackage" | "session" | "draft", DogfoodEntityLoadStatus>>({
     app: "not_loaded",
+    packageNavigation: "not_loaded",
     package: "not_loaded",
     availablePackage: "not_loaded",
     session: "not_loaded",
@@ -528,6 +545,15 @@ export default function App() {
   const navigateToRoute = useCallback((route: AppRoute) => {
     setActiveRoute(route);
     pushAppRouteUrl(route);
+  }, []);
+  const navigateToHubRoutePath = useCallback((routePath: string) => {
+    const route = appRouteFromPathname(routePath);
+    if (route.view !== "apps" || !route.packageName) return false;
+    const url = new URL(window.location.href);
+    url.pathname = routePath;
+    setActiveRoute(route);
+    window.history.pushState({ botsterRoute: route }, "", `${url.pathname}${url.search}${url.hash}`);
+    return true;
   }, []);
   const navigateToView = useCallback((view: AppView) => {
     if (view === "apps") {
@@ -563,14 +589,16 @@ export default function App() {
   const navigateToPluginSurfaceRecord = useCallback((packageName: string, surface: PackageSurfaceRecord) => {
     const routePath = firstString(surface.route_path);
     const route = routePath ? appRouteFromPathname(routePath) : undefined;
-    if (route?.view === "apps" && route.packageName) {
-      navigateToRoute(route);
+    if (routePath && route?.view === "apps" && route.packageName) {
+      if (!navigateToHubRoutePath(routePath)) {
+        navigateToRoute(route);
+      }
       return;
     }
 
     const surfaceId = firstString(surface.surface_id, surface.id);
     if (surfaceId) navigateToPluginSurface(packageName, surfaceId);
-  }, [navigateToPluginSurface, navigateToRoute]);
+  }, [navigateToHubRoutePath, navigateToPluginSurface, navigateToRoute]);
   const navigateToPackageSettings = useCallback((packageName: string, surfaceId?: string) => {
     navigateToRoute({ view: "apps", packageName, settings: true, surfaceId });
   }, [navigateToRoute]);
@@ -623,7 +651,7 @@ export default function App() {
     });
 
     const pullDogfoodEntity = async (
-      key: "app" | "package" | "availablePackage" | "session" | "draft",
+      key: "app" | "packageNavigation" | "package" | "availablePackage" | "session" | "draft",
       request: { family: string; id?: string }
     ) => {
       setEntityLoadStatus((current) => ({ ...current, [key]: "loading" }));
@@ -648,6 +676,7 @@ export default function App() {
       .then(() => runtimeClient.hub.subscribe())
       .then(() => runtimeClient.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/local" }))
       .then(() => pullDogfoodEntity("app", { family: "botster-web.app" }))
+      .then(() => pullDogfoodEntity("packageNavigation", { family: "botster-web.package_navigation" }))
       .then(() => pullDogfoodEntity("package", { family: "botster-web.package" }))
       .then(() => pullDogfoodEntity("availablePackage", { family: "botster-web.available_package" }))
       .then(() => pullDogfoodEntity("session", { family: "botster-web.session" }))
@@ -699,6 +728,9 @@ export default function App() {
         }
         if (action.id === "botster.package.configuration.save") {
           void runtimeClient.entities.pull({ family: "botster-web.package" });
+        }
+        if (action.id === "botster.package.daemon_request" || action.id === "botster.package.configuration.save") {
+          void runtimeClient.entities.pull({ family: "botster-web.package_navigation" });
         }
         updateLocalState({
           [statusKey]: result.accepted && isSpawnAction
@@ -771,6 +803,7 @@ export default function App() {
     [recordDiagnostic]
   );
   const installedApps = runtimeClient.entities.list("botster-web.app");
+  const packageNavigation = runtimeClient.entities.list("botster-web.package_navigation");
   const packages = runtimeClient.entities.list("botster-web.package");
   const appSurfacePackages = useMemo(
     () =>
@@ -988,6 +1021,21 @@ export default function App() {
     const surfaceId = firstString(surface.surface_id, surface.id);
     if (surfaceId) navigateToPackageSettings(packageName, surfaceId);
   }, [navigateToPackageSettings]);
+  const openPackageNavigation = useCallback((entry: Record<string, unknown>) => {
+    const routePath = firstString(entry.route_path);
+    if (routePath && navigateToHubRoutePath(routePath)) {
+      return;
+    }
+
+    const packageName = firstString(entry.package_name);
+    const surfaceId = firstString(entry.surface_id);
+    if (packageName && surfaceId) {
+      navigateToPluginSurface(packageName, surfaceId);
+    }
+  }, [navigateToHubRoutePath, navigateToPluginSurface]);
+  const packageNavigationShortcuts = packageNavigation
+    .filter((entry) => firstString(entry.surface_id) && stringValue(entry.target_kind, "") === "plugin_surface")
+    .slice(0, 8);
   const sessions = runtimeClient.entities.list("botster-web.session");
   const attachableDogfoodSession = sessions.find((session) => session.id === realHubDogfoodSessionId && isAttachableSession(session));
   const selectedRealHubSession = selectedRealHubTerminalSessionId
@@ -1108,23 +1156,32 @@ export default function App() {
                   </IonMenuToggle>
                 ))}
               </IonList>
-              <div className="sidebar-section" aria-label="Installed app shortcuts">
-                <p className="sidebar-section-label">Apps</p>
-                      {installedApps.slice(0, 5).map((app) => (
-                        <IonMenuToggle autoHide={false} key={app.id}>
-                    <button
-                      type="button"
-                      className="nav-item app-shortcut"
-                      onClick={() => {
-                        navigateToView("apps");
-                        openApp(app);
-                      }}
-                    >
-                      <IonIcon icon={cubeOutline} aria-hidden="true" />
-                      <span>{stringValue(app.title, app.id)}</span>
-                    </button>
-                  </IonMenuToggle>
-                ))}
+              <div className="sidebar-section" aria-label="Admitted plugin navigation">
+                <p className="sidebar-section-label">Plugins</p>
+                {entityLoadStatus.packageNavigation === "loaded" && packageNavigationShortcuts.length === 0 ? (
+                  <p className="sidebar-empty">No plugin navigation</p>
+                ) : null}
+                {packageNavigationShortcuts.map((entry) => {
+                  const disabled = entry.enabled === false || entry.blocked === true;
+                  const label = stringValue(entry.label, String(entry.id));
+                  const diagnostic = firstString(entry.diagnostics_summary, ...(Array.isArray(entry.diagnostics) ? entry.diagnostics : []));
+                  return (
+                    <IonMenuToggle autoHide={false} key={String(entry.id)}>
+                      <button
+                        type="button"
+                        className={disabled ? "nav-item app-shortcut disabled" : "nav-item app-shortcut"}
+                        aria-disabled={disabled ? "true" : undefined}
+                        title={disabled ? diagnostic : undefined}
+                        onClick={() => {
+                          if (!disabled) openPackageNavigation(entry);
+                        }}
+                      >
+                        <IonIcon icon={cubeOutline} aria-hidden="true" />
+                        <span>{label}</span>
+                      </button>
+                    </IonMenuToggle>
+                  );
+                })}
               </div>
             </nav>
           </IonContent>
