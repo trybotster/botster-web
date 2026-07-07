@@ -512,9 +512,9 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.0");
+assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.1");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.0");
+assert.equal(hubTestSupportMetadata.package_version, "0.1.1");
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(verifyPackageAssets().ok, true);
 assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
@@ -4060,6 +4060,25 @@ try {
   );
   assert.match(invalidIframeMarkup, /Iframe source unavailable/);
   assert.doesNotMatch(invalidIframeMarkup, /javascript:alert/);
+
+  const protocolRelativeIframeMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "iframe.protocol-relative",
+        version: "test",
+        root: {
+          id: "protocol-relative-frame",
+          primitive: "iframe",
+          props: { src: "//example.invalid/preview.html", title: "Protocol relative" }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.match(protocolRelativeIframeMarkup, /Iframe source unavailable/);
+  assert.doesNotMatch(protocolRelativeIframeMarkup, /example\.invalid/);
 
   const dogfoodStore = createInMemoryEntityFrameStore();
   dogfoodStore.apply({

@@ -266,7 +266,7 @@ function iframeSandboxValue(props: Record<string, unknown>): string {
 function iframeSrc(props: Record<string, unknown>): string | undefined {
   const src = readString(props.src).trim();
   if (!src) return undefined;
-  if (src.startsWith("/")) return src;
+  if (src.startsWith("/") && !src.startsWith("//")) return src;
 
   try {
     const url = new URL(src);
