@@ -149,6 +149,9 @@ assert.match(app, /runtimeClient\.entities\.list\("botster-web\.app"\)/);
 assert.match(app, /pullDogfoodEntity\("app", \{ family: "botster-web\.app" \}\)/);
 assert.match(app, /window\.open\(localUrl, "_blank", "noopener,noreferrer"\)/);
 assert.match(app, /export function AppListItem/);
+assert.match(app, /export function PluginNavigationShortcuts/);
+assert.match(app, /<PluginNavigationShortcuts\s+[\s\S]*entries=\{packageNavigationShortcuts\}[\s\S]*loadStatus=\{entityLoadStatus\.packageNavigation\}[\s\S]*onOpen=\{openPackageNavigation\}/);
+assert.doesNotMatch(app, /packageNavigation(?:Shortcuts)?\.slice\(0,\s*8\)/);
 assert.match(app, /appSurfacePackages\.get\(stringValue\(app\.package_name, ""\)\)/);
 assert.match(app, /packageAppSurfaces\(app\)/);
 assert.match(app, /packageSettingsSurfaces\(app\)/);
@@ -3298,6 +3301,7 @@ try {
     {
       AppListItem,
       PackageNavigationShortcutButton,
+      PluginNavigationShortcuts,
       PluginListItem,
       PluginSurfaceRoutePage,
       PluginSettingsPanel,
@@ -3452,37 +3456,77 @@ try {
   enabledNavigationButton.props.onClick();
   assert.equal(navigationOpenCount, 1);
 
-  const mixedNavigationEntries = [
-    blockedAppEntrypointShortcut,
-    enabledUnsupportedShortcut,
-    blockedFutureShortcut,
-    ...Array.from({ length: 5 }, (_, index) => packageNavigationShortcut({
+  const mixedNavigationRecords = [
+    {
+      id: "project-pipelines:web-client",
+      label: "Blocked Web Client",
+      target_kind: "app_entrypoint",
+      package_name: "project-pipelines",
+      enabled: false,
+      diagnostics: ["Entrypoint is disabled by admission."]
+    },
+    {
+      id: "project-pipelines:enabled-entrypoint",
+      label: "Enabled Web Client",
+      target_kind: "app_entrypoint",
+      package_name: "project-pipelines",
+      route_path: "/packages/project-pipelines"
+    },
+    {
+      id: "project-pipelines:future",
+      label: "Blocked Future Target",
+      target_kind: "future_widget",
+      blocked: true
+    },
+    ...Array.from({ length: 5 }, (_, index) => ({
       id: `project-pipelines:blocked-${index}`,
       label: `Blocked ${index + 1}`,
       target_kind: "future_widget",
       blocked: true
     })),
-    supportedPluginSurfaceShortcut
+    {
+      id: "project-pipelines:home",
+      label: "Pipelines",
+      target_kind: "plugin_surface",
+      package_name: "project-pipelines",
+      surface_id: "home",
+      route_path: "/packages/project-pipelines/surfaces/home"
+    }
   ];
   const mixedNavigationMarkup = renderToStaticMarkup(
-    createElement(
-      "div",
-      { "aria-label": "Admitted plugin navigation" },
-      mixedNavigationEntries.map((shortcut) =>
-        createElement(PackageNavigationShortcutButton, {
-          key: shortcut.id,
-          shortcut,
-          onOpen: () => undefined
-        })
-      )
-    )
+    createElement(PluginNavigationShortcuts, {
+      entries: mixedNavigationRecords,
+      loadStatus: "loaded",
+      onOpen: () => undefined
+    })
   );
-  assert.equal(mixedNavigationEntries.length, 9);
+  assert.equal(mixedNavigationRecords.length, 9);
   assert.match(mixedNavigationMarkup, /Blocked Web Client/);
   assert.match(mixedNavigationMarkup, /Enabled Web Client/);
   assert.match(mixedNavigationMarkup, /Blocked Future Target/);
   assert.match(mixedNavigationMarkup, /Blocked 5/);
   assert.match(mixedNavigationMarkup, /Pipelines/);
+  assert.match(mixedNavigationMarkup, /class="sidebar-section-scroll"/);
+  assert.match(mixedNavigationMarkup, /tabindex="0"/);
+  assert.match(mixedNavigationMarkup, /aria-label="Scrollable plugin navigation"/);
+  assert.match(mixedNavigationMarkup, /aria-describedby="plugin-navigation-overflow-hint"/);
+  assert.match(mixedNavigationMarkup, /id="plugin-navigation-overflow-hint"/);
+  assert.match(mixedNavigationMarkup, /Scroll for more plugin navigation\./);
+
+  const boundedNavigationMarkup = renderToStaticMarkup(
+    createElement(PluginNavigationShortcuts, {
+      entries: mixedNavigationRecords.slice(0, 8),
+      loadStatus: "loaded",
+      onOpen: () => undefined
+    })
+  );
+  assert.match(boundedNavigationMarkup, /Blocked Web Client/);
+  assert.match(boundedNavigationMarkup, /Blocked 5/);
+  assert.doesNotMatch(boundedNavigationMarkup, /sidebar-section-scroll/);
+  assert.doesNotMatch(boundedNavigationMarkup, /tabindex="0"/);
+  assert.doesNotMatch(boundedNavigationMarkup, /Scrollable plugin navigation/);
+  assert.doesNotMatch(boundedNavigationMarkup, /plugin-navigation-overflow-hint/);
+  assert.doesNotMatch(boundedNavigationMarkup, /Scroll for more plugin navigation/);
 
   assert.equal(terminalDataPlaneLabel("webrtc"), "WebRTC DataChannel");
   assert.equal(terminalDataPlaneLabel("real-hub"), "Bridge/SSE");
