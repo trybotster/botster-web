@@ -3297,10 +3297,12 @@ try {
     { configurationFieldType, configurationSaveAction, configurationSubmitValues },
     {
       AppListItem,
+      PackageNavigationShortcutButton,
       PluginListItem,
       PluginSurfaceRoutePage,
       PluginSettingsPanel,
       packageAppSurfaces,
+      packageNavigationShortcut,
       packageSettingsSurfaces,
       renderedPluginSurfaceState,
       surfaceLaunchAction
@@ -3335,6 +3337,152 @@ try {
     }
     return undefined;
   }
+
+  const blockedPluginSurfaceShortcut = packageNavigationShortcut({
+    id: "project-pipelines:blocked-home",
+    label: "Blocked Home",
+    target_kind: "plugin_surface",
+    package_name: "project-pipelines",
+    surface_id: "home",
+    enabled: false,
+    diagnostics_summary: "Package policy blocked this surface."
+  });
+  const blockedAppEntrypointShortcut = packageNavigationShortcut({
+    id: "project-pipelines:web-client",
+    label: "Blocked Web Client",
+    target_kind: "app_entrypoint",
+    package_name: "project-pipelines",
+    enabled: false,
+    diagnostics: ["Entrypoint is disabled by admission."]
+  });
+  const blockedFutureShortcut = packageNavigationShortcut({
+    id: "project-pipelines:future",
+    label: "Blocked Future Target",
+    target_kind: "future_widget",
+    blocked: true
+  });
+  const enabledUnsupportedShortcut = packageNavigationShortcut({
+    id: "project-pipelines:enabled-entrypoint",
+    label: "Enabled Web Client",
+    target_kind: "app_entrypoint",
+    package_name: "project-pipelines",
+    route_path: "/packages/project-pipelines"
+  });
+  const supportedPluginSurfaceShortcut = packageNavigationShortcut({
+    id: "project-pipelines:home",
+    label: "Pipelines",
+    target_kind: "plugin_surface",
+    package_name: "project-pipelines",
+    surface_id: "home",
+    route_path: "/packages/project-pipelines/surfaces/home"
+  });
+
+  assert.equal(blockedPluginSurfaceShortcut.openable, false);
+  assert.equal(blockedPluginSurfaceShortcut.diagnostic, "Package policy blocked this surface.");
+  assert.equal(blockedAppEntrypointShortcut.openable, false);
+  assert.equal(blockedAppEntrypointShortcut.diagnostic, "Entrypoint is disabled by admission.");
+  assert.equal(blockedFutureShortcut.openable, false);
+  assert.equal(blockedFutureShortcut.diagnostic, "Unavailable from hub navigation registry");
+  assert.equal(enabledUnsupportedShortcut.openable, false);
+  assert.equal(enabledUnsupportedShortcut.diagnostic, "Unsupported navigation target: app_entrypoint");
+  assert.equal(supportedPluginSurfaceShortcut.openable, true);
+  assert.equal(supportedPluginSurfaceShortcut.diagnostic, undefined);
+
+  let navigationOpenCount = 0;
+  const blockedPluginMarkup = renderToStaticMarkup(
+    createElement(PackageNavigationShortcutButton, {
+      shortcut: blockedPluginSurfaceShortcut,
+      onOpen: () => { navigationOpenCount += 1; }
+    })
+  );
+  const blockedAppEntrypointMarkup = renderToStaticMarkup(
+    createElement(PackageNavigationShortcutButton, {
+      shortcut: blockedAppEntrypointShortcut,
+      onOpen: () => { navigationOpenCount += 1; }
+    })
+  );
+  const blockedFutureMarkup = renderToStaticMarkup(
+    createElement(PackageNavigationShortcutButton, {
+      shortcut: blockedFutureShortcut,
+      onOpen: () => { navigationOpenCount += 1; }
+    })
+  );
+  const enabledUnsupportedMarkup = renderToStaticMarkup(
+    createElement(PackageNavigationShortcutButton, {
+      shortcut: enabledUnsupportedShortcut,
+      onOpen: () => { navigationOpenCount += 1; }
+    })
+  );
+  const supportedPluginMarkup = renderToStaticMarkup(
+    createElement(PackageNavigationShortcutButton, {
+      shortcut: supportedPluginSurfaceShortcut,
+      onOpen: () => { navigationOpenCount += 1; }
+    })
+  );
+
+  assert.match(blockedPluginMarkup, /Blocked Home/);
+  assert.match(blockedPluginMarkup, /Package policy blocked this surface\./);
+  assert.match(blockedPluginMarkup, /aria-disabled="true"/);
+  assert.match(blockedAppEntrypointMarkup, /Blocked Web Client/);
+  assert.match(blockedAppEntrypointMarkup, /Entrypoint is disabled by admission\./);
+  assert.match(blockedFutureMarkup, /Blocked Future Target/);
+  assert.match(blockedFutureMarkup, /Unavailable from hub navigation registry/);
+  assert.match(enabledUnsupportedMarkup, /Enabled Web Client/);
+  assert.match(enabledUnsupportedMarkup, /Unsupported navigation target: app_entrypoint/);
+  assert.doesNotMatch(enabledUnsupportedMarkup, /Package policy blocked this surface|Unavailable from hub navigation registry/);
+  assert.match(supportedPluginMarkup, /Pipelines/);
+  assert.doesNotMatch(supportedPluginMarkup, /aria-disabled="true"|Unsupported navigation target|Unavailable from hub navigation registry/);
+
+  const disabledNavigationButton = findReactElement(
+    PackageNavigationShortcutButton({
+      shortcut: enabledUnsupportedShortcut,
+      onOpen: () => { navigationOpenCount += 1; }
+    }),
+    (node) => node.type === "button"
+  );
+  disabledNavigationButton.props.onClick();
+  assert.equal(navigationOpenCount, 0);
+  const enabledNavigationButton = findReactElement(
+    PackageNavigationShortcutButton({
+      shortcut: supportedPluginSurfaceShortcut,
+      onOpen: () => { navigationOpenCount += 1; }
+    }),
+    (node) => node.type === "button"
+  );
+  enabledNavigationButton.props.onClick();
+  assert.equal(navigationOpenCount, 1);
+
+  const mixedNavigationEntries = [
+    blockedAppEntrypointShortcut,
+    enabledUnsupportedShortcut,
+    blockedFutureShortcut,
+    ...Array.from({ length: 5 }, (_, index) => packageNavigationShortcut({
+      id: `project-pipelines:blocked-${index}`,
+      label: `Blocked ${index + 1}`,
+      target_kind: "future_widget",
+      blocked: true
+    })),
+    supportedPluginSurfaceShortcut
+  ];
+  const mixedNavigationMarkup = renderToStaticMarkup(
+    createElement(
+      "div",
+      { "aria-label": "Admitted plugin navigation" },
+      mixedNavigationEntries.map((shortcut) =>
+        createElement(PackageNavigationShortcutButton, {
+          key: shortcut.id,
+          shortcut,
+          onOpen: () => undefined
+        })
+      )
+    )
+  );
+  assert.equal(mixedNavigationEntries.length, 9);
+  assert.match(mixedNavigationMarkup, /Blocked Web Client/);
+  assert.match(mixedNavigationMarkup, /Enabled Web Client/);
+  assert.match(mixedNavigationMarkup, /Blocked Future Target/);
+  assert.match(mixedNavigationMarkup, /Blocked 5/);
+  assert.match(mixedNavigationMarkup, /Pipelines/);
 
   assert.equal(terminalDataPlaneLabel("webrtc"), "WebRTC DataChannel");
   assert.equal(terminalDataPlaneLabel("real-hub"), "Bridge/SSE");
