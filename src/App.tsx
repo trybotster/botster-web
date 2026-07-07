@@ -244,6 +244,52 @@ export function PackageNavigationShortcutButton({
   );
 }
 
+export function PluginNavigationShortcuts({
+  entries,
+  loadStatus,
+  onOpen
+}: {
+  entries: Record<string, unknown>[];
+  loadStatus: DogfoodEntityLoadStatus;
+  onOpen: (entry: Record<string, unknown>) => void;
+}) {
+  const hasOverflow = entries.length > 8;
+  const shortcuts = entries.map((entry) => {
+    const shortcut = packageNavigationShortcut(entry);
+    return (
+      <PackageNavigationShortcutButton
+        key={String(entry.id)}
+        shortcut={shortcut}
+        onOpen={() => onOpen(entry)}
+      />
+    );
+  });
+
+  return (
+    <div className="sidebar-section" aria-label="Admitted plugin navigation">
+      <p className="sidebar-section-label">Plugins</p>
+      {loadStatus === "loaded" && entries.length === 0 ? (
+        <p className="sidebar-empty">No plugin navigation</p>
+      ) : null}
+      {hasOverflow ? (
+        <>
+          <div
+            className="sidebar-section-scroll"
+            tabIndex={0}
+            aria-label="Scrollable plugin navigation"
+            aria-describedby="plugin-navigation-overflow-hint"
+          >
+            {shortcuts}
+          </div>
+          <p id="plugin-navigation-overflow-hint" className="sidebar-overflow-hint">
+            Scroll for more plugin navigation.
+          </p>
+        </>
+      ) : shortcuts}
+    </div>
+  );
+}
+
 const loadingSnapshot: UiTreeSnapshot = {
   kind: "ui_tree_snapshot",
   surface: "botster-web.dogfood.loading",
@@ -1222,22 +1268,11 @@ export default function App() {
                   </IonMenuToggle>
                 ))}
               </IonList>
-              <div className="sidebar-section" aria-label="Admitted plugin navigation">
-                <p className="sidebar-section-label">Plugins</p>
-                {entityLoadStatus.packageNavigation === "loaded" && packageNavigationShortcuts.length === 0 ? (
-                  <p className="sidebar-empty">No plugin navigation</p>
-                ) : null}
-                {packageNavigationShortcuts.map((entry) => {
-                  const shortcut = packageNavigationShortcut(entry);
-                  return (
-                    <PackageNavigationShortcutButton
-                      key={String(entry.id)}
-                      shortcut={shortcut}
-                      onOpen={() => openPackageNavigation(entry)}
-                    />
-                  );
-                })}
-              </div>
+              <PluginNavigationShortcuts
+                entries={packageNavigationShortcuts}
+                loadStatus={entityLoadStatus.packageNavigation}
+                onOpen={openPackageNavigation}
+              />
             </nav>
           </IonContent>
         </IonMenu>
