@@ -486,8 +486,8 @@ function deterministicBotsterWebSurfaceResponse(daemonRequest) {
 
   const settings = daemonRequest.surface_id === "dogfood-settings";
   const bodyText = settings
-    ? "Deterministic settings surface rendered by the botster-web dogfood package."
-    : "Deterministic app surface rendered by the botster-web dogfood package.";
+    ? "Deterministic settings surface rendered by the botster-web validation package."
+    : "Deterministic app surface rendered by the botster-web validation package.";
   return {
     kind: "plugin_surface",
     status: null,
@@ -507,7 +507,7 @@ function deterministicBotsterWebSurfaceResponse(daemonRequest) {
         body: {
           id: `botster-web-${daemonRequest.surface_id}-root`,
           primitive: "section",
-          props: { label: settings ? "Dogfood Settings" : "Dogfood App" },
+          props: { label: settings ? "botster-web Settings" : "botster-web App" },
           slots: {
             children: [
               {

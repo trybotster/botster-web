@@ -1,19 +1,19 @@
 import { IonBadge } from "@ionic/react";
 
-import { realHubDogfoodSessionId, defaultSpawnCommand } from "./realHubDogfoodTransport";
+import { realHubDogfoodSessionId } from "./realHubDogfoodTransport";
 import type { ConnectionDiagnostic } from "./connectionDiagnostics";
 import type { EntityRecord } from "./entities";
 
-export type DogfoodEntityLoadStatus = "not_loaded" | "loading" | "loaded" | "error";
+export type HubEntityLoadStatus = "not_loaded" | "loading" | "loaded" | "error";
 
-export interface DogfoodFirstScreenProps {
+export interface LocalHubFirstScreenProps {
   mode: string;
   statusText: string;
   diagnostics: ConnectionDiagnostic[];
   packages: EntityRecord[];
-  packageLoadStatus: DogfoodEntityLoadStatus;
+  packageLoadStatus: HubEntityLoadStatus;
   sessions: EntityRecord[];
-  sessionLoadStatus: DogfoodEntityLoadStatus;
+  sessionLoadStatus: HubEntityLoadStatus;
   actionStatus: string;
 }
 
@@ -25,9 +25,7 @@ interface StatusSummary {
   severity: ConnectionDiagnostic["severity"];
 }
 
-const spawnCommand = defaultSpawnCommand();
-
-export function DogfoodFirstScreen({
+export function LocalHubFirstScreen({
   mode,
   statusText,
   diagnostics,
@@ -36,8 +34,8 @@ export function DogfoodFirstScreen({
   sessions,
   sessionLoadStatus,
   actionStatus
-}: DogfoodFirstScreenProps) {
-  const summaries = dogfoodStatusSummaries({
+}: LocalHubFirstScreenProps) {
+  const summaries = hubStatusSummaries({
     mode,
     statusText,
     diagnostics,
@@ -49,30 +47,30 @@ export function DogfoodFirstScreen({
   });
 
   return (
-    <section className="dogfood-first-screen" aria-labelledby="dogfood-status-heading">
-      <div className="dogfood-status-lead">
-        <p className="eyebrow">Packaged dogfood status</p>
-        <h1 id="dogfood-status-heading">Local hub workbench</h1>
+    <section className="local-hub-first-screen" aria-labelledby="local-hub-status-heading">
+      <div className="local-hub-status-lead">
+        <p className="eyebrow">Local hub status</p>
+        <h1 id="local-hub-status-heading">Local hub workbench</h1>
         <p>
           Hub, bridge, package registry, session state, spawn action, and terminal
           health are visible here without opening the browser console.
         </p>
       </div>
-      <div className="dogfood-primary-action" aria-label="Primary dogfood action">
+      <div className="local-hub-primary-action" aria-label="Primary local hub action">
         <div>
           <p className="eyebrow">Primary action</p>
-          <h2>Spawn {realHubDogfoodSessionId}</h2>
+          <h2>Start local hub session</h2>
           <p>
-            Runs <code>{spawnCommand}</code>. Output appears in the terminal panel.
+            Runs the local hub startup command. Output appears in the terminal panel.
           </p>
-          <p className="dogfood-action-state">{actionStatus}</p>
+          <p className="local-hub-action-state">{visibleStatusText(actionStatus)}</p>
         </div>
         <IonBadge color="primary">Primary</IonBadge>
       </div>
-      <div className="dogfood-status-grid" aria-label="Dogfood health summary">
+      <div className="local-hub-status-grid" aria-label="Local hub health summary">
         {summaries.map((summary) => (
-          <article className={`dogfood-status-card ${summary.severity}`} key={summary.key}>
-            <div className="dogfood-status-title">
+          <article className={`local-hub-status-card ${summary.severity}`} key={summary.key}>
+            <div className="local-hub-status-title">
               <h3>{summary.label}</h3>
               <IonBadge color={badgeColor(summary.severity)}>{summary.state}</IonBadge>
             </div>
@@ -84,7 +82,7 @@ export function DogfoodFirstScreen({
   );
 }
 
-function dogfoodStatusSummaries({
+function hubStatusSummaries({
   mode,
   statusText,
   diagnostics,
@@ -93,7 +91,7 @@ function dogfoodStatusSummaries({
   sessions,
   sessionLoadStatus,
   actionStatus
-}: DogfoodFirstScreenProps): StatusSummary[] {
+}: LocalHubFirstScreenProps): StatusSummary[] {
   const bridgeDiagnostic = diagnostics.find((diagnostic) => diagnostic.source === "bridge" && diagnostic.severity === "danger");
   const hubDiagnostic = highestSeverityDiagnostic(
     diagnostics.filter((diagnostic) => diagnostic.source === "stream" || diagnostic.source === "compatibility")
@@ -133,21 +131,21 @@ function dogfoodStatusSummaries({
       state: actionDiagnostic ? "Blocked" : runningSession ? "Running" : spawnRequested(actionStatus) ? "Requested" : "Ready",
       detail: actionDiagnostic?.detail ??
         (runningSession
-          ? `Session ${realHubDogfoodSessionId} is running; output appears in the terminal panel.`
-          : `Creates ${realHubDogfoodSessionId} with the command shown above.`),
+          ? "The local hub session is running; output appears in the terminal panel."
+          : "Creates a local hub session with the command shown above."),
       severity: actionDiagnostic?.severity ?? (runningSession ? "success" : "info")
     },
     {
       key: "terminal",
       label: "Terminal",
       state: terminalDiagnostic ? stateLabel(terminalDiagnostic.severity) : "Ready",
-      detail: terminalDiagnostic?.detail ?? `Terminal output destination: ${realHubDogfoodSessionId}.`,
+      detail: terminalDiagnostic?.detail ?? "Terminal output destination: local hub session.",
       severity: terminalDiagnostic?.severity ?? "success"
     }
   ];
 }
 
-function packageSummary(packages: EntityRecord[], loadStatus: DogfoodEntityLoadStatus): StatusSummary {
+function packageSummary(packages: EntityRecord[], loadStatus: HubEntityLoadStatus): StatusSummary {
   if (loadStatus === "not_loaded" || loadStatus === "loading") {
     return {
       key: "packages",
@@ -190,7 +188,7 @@ function packageSummary(packages: EntityRecord[], loadStatus: DogfoodEntityLoadS
   };
 }
 
-function sessionSummary(sessions: EntityRecord[], loadStatus: DogfoodEntityLoadStatus): StatusSummary {
+function sessionSummary(sessions: EntityRecord[], loadStatus: HubEntityLoadStatus): StatusSummary {
   if (loadStatus === "not_loaded" || loadStatus === "loading") {
     return {
       key: "sessions",
@@ -216,7 +214,7 @@ function sessionSummary(sessions: EntityRecord[], loadStatus: DogfoodEntityLoadS
       key: "sessions",
       label: "Sessions",
       state: "Empty",
-      detail: `No sessions are loaded yet; spawn ${realHubDogfoodSessionId} to create one.`,
+      detail: "No sessions are loaded yet; start a local hub session to create one.",
       severity: "warning"
     };
   }
@@ -251,6 +249,12 @@ function stateLabel(severity: ConnectionDiagnostic["severity"]) {
 
 function spawnRequested(actionStatus: string) {
   return actionStatus.toLowerCase().includes("spawn requested");
+}
+
+function visibleStatusText(value: string): string {
+  return value
+    .replaceAll(realHubDogfoodSessionId, "local hub session")
+    .replace(/dogfood/gi, "local");
 }
 
 function isSpawnDiagnostic(diagnostic: ConnectionDiagnostic) {

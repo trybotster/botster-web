@@ -36,7 +36,7 @@ const [
   webrtcDaemonClient,
   connectionDiagnostics,
   connectionDiagnosticsPanel,
-  dogfoodFirstScreen,
+  localHubFirstScreen,
   protocol,
   entities,
   uiNodes,
@@ -70,7 +70,7 @@ const [
   readFile(new URL("./botster/webrtcDaemonClient.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/connectionDiagnostics.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/ConnectionDiagnosticsPanel.tsx", import.meta.url), "utf8"),
-  readFile(new URL("./botster/dogfoodFirstScreen.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./botster/LocalHubFirstScreen.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/protocol.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/entities.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/uiNodes.ts", import.meta.url), "utf8"),
@@ -99,14 +99,13 @@ assert.match(app, /import \{ UiNodeSurface \} from "\.\/botster\/UiNodeSurface"/
 assert.match(app, /IonToast/);
 assert.match(app, /import \{ TerminalViewHost \} from "\.\/botster\/TerminalViewHost"/);
 assert.match(app, /import \{ ConnectionDiagnosticsPanel \} from "\.\/botster\/ConnectionDiagnosticsPanel"/);
-assert.match(app, /import \{ DogfoodFirstScreen/);
+assert.match(app, /import \{ LocalHubFirstScreen/);
 assert.match(app, /createBotsterWebClient/);
 assert.match(app, /createDogfoodRuntimeConfig/);
 assert.match(app, /platform:\s*\{\s*desktop:/);
 assert.match(app, /packageRuntime \? \{ bridgeUrl: `\$\{window\.location\.origin\}\/request` \} : \{\}/);
 assert.match(app, /__BOTSTER_PACKAGE_RUNTIME__/);
 assert.match(app, /initialConnectionDiagnostics\(dogfoodRuntime\.mode, dogfoodRuntime\.statusText, dogfoodRuntime\.terminalDataPlaneKind\)/);
-assert.match(app, /terminalDataPlaneLabel\(dogfoodRuntime\.terminalDataPlaneKind\)/);
 assert.match(app, /window\.addEventListener\(webRtcDaemonLifecycleEventName, recordWebRtcLifecycle\)/);
 assert.match(app, /runtimeClient\.hub\.subscribeSurface/);
 assert.match(app, /runtimeClient\.entities\.pull/);
@@ -127,7 +126,8 @@ assert.match(app, /window\.addEventListener\("popstate", syncViewFromLocation\)/
 assert.match(app, /lastPluginRouteRenderKey/);
 assert.match(app, /routePluginSurfaceDiagnostic/);
 assert.match(app, /data-testid="plugin-settings-route"/);
-assert.doesNotMatch(app, /IonModal/);
+assert.match(app, /IonModal/);
+assert.match(app, /aria-label="Add package"/);
 assert.match(app, /Marketplace registry path/);
 assert.match(app, /Local package path/);
 assert.match(app, /registry_path: registryPath/);
@@ -158,8 +158,15 @@ assert.match(app, /packageSettingsSurfaces\(app\)/);
 assert.match(app, /navigateToPluginSurface\(packageName, surfaceId\)/);
 assert.match(app, /runtimeClient\.actions\.dispatch\(\{ origin: "ui_node", action: routePluginLaunchAction \}\)/);
 assert.match(app, /surfaceLaunchAction\(surface\)/);
+assert.match(app, /const routePluginCanonicalSurfaceRecord = routePluginPackage && routePluginSurface && !routePluginRequestedSurfaceRecord/);
+assert.match(app, /const routePluginSurfaceRecord = routePluginRequestedSurfaceRecord \?\? routePluginCanonicalSurfaceRecord/);
+assert.match(app, /surfaceId: routePluginEffectiveSurfaceId \?\? routePluginSurface\.surfaceId/);
 assert.doesNotMatch(app, /const packagesWithUi|const packagesWithoutUi/);
 assert.match(app, /aria-label="Rendered app surface"/);
+assert.match(app, /routePluginSurface \? \(\s*<PluginSurfaceRoutePage/);
+assert.match(app, /const pluginAppRouteActive = activeView === "apps" && Boolean\(routePluginSurface\)/);
+assert.match(app, /className=\{pluginAppRouteActive \? "workspace-shell plugin-workspace-shell" : "workspace-shell"\}/);
+assert.match(app, /\{!pluginAppRouteActive \? \(\s*<IonHeader className="app-header">/);
 assert.doesNotMatch(app, /function pluginViewSurface/);
 assert.doesNotMatch(app, /function pluginSettingsSurface/);
 assert.doesNotMatch(app, /app\.view_surface(?!s)|app\.plugin_view_surface|app\.primary_surface|app\.ui_surface/);
@@ -174,14 +181,20 @@ assert.doesNotMatch(app, /<IonButton fill="solid" color="primary">\s*[\s\S]*Insp
 assert.doesNotMatch(app, /Inspect frames/);
 assert.match(app, /<UiNodeSurface/);
 assert.match(app, /<ConnectionDiagnosticsPanel/);
-assert.match(app, /<DogfoodFirstScreen/);
+assert.match(app, /<LocalHubFirstScreen/);
 assert.match(app, /data-testid="renderer-registry-workflow"/);
 assert.match(app, /aria-label="Diagnostic workspace"/);
 assert.doesNotMatch(app, /data-testid="terminal-workflow"/);
 assert.doesNotMatch(app, /Selected app/);
 assert.doesNotMatch(app, /selected-app-panel/);
-assert.match(app, /<IonGrid className="workflow-overview"/);
-assert.match(app, /<IonGrid className="dashboard-layout"/);
+assert.doesNotMatch(app, /<IonGrid className="workflow-overview"/);
+assert.doesNotMatch(app, /<IonGrid className="dashboard-layout"/);
+assert.doesNotMatch(app, /data-testid="active-workflows"/);
+assert.match(app, /aria-label="Primary destinations"/);
+assert.match(app, /<IonLabel>Installed<\/IonLabel>/);
+assert.doesNotMatch(app, /<IonLabel>Installed apps<\/IonLabel>/);
+assert.doesNotMatch(app, /<IonLabel>Available marketplace packages<\/IonLabel>/);
+assert.doesNotMatch(app, /<IonLabel>Installed packages<\/IonLabel>/);
 assert.match(app, /<IonGrid className="workspace-grid"/);
 assert.match(app, /<IonCol size="12" sizeLg="8"/);
 assert.match(app, /<IonCol size="12" sizeLg="4"/);
@@ -334,10 +347,10 @@ assert.match(connectionDiagnostics, /terminalUnavailableDiagnostic/);
 assert.match(connectionDiagnosticsPanel, /data-diagnostic-id/);
 assert.match(connectionDiagnosticsPanel, /severityRank/);
 assert.match(connectionDiagnosticsPanel, /severityLabel/);
-assert.match(dogfoodFirstScreen, /Local hub workbench/);
-assert.match(dogfoodFirstScreen, /packageLoadStatus/);
-assert.match(dogfoodFirstScreen, /sessionLoadStatus/);
-assert.match(dogfoodFirstScreen, /realHubDogfoodSessionId/);
+assert.match(localHubFirstScreen, /Local hub workbench/);
+assert.match(localHubFirstScreen, /packageLoadStatus/);
+assert.match(localHubFirstScreen, /sessionLoadStatus/);
+assert.match(localHubFirstScreen, /realHubDogfoodSessionId/);
 assert.match(dogfoodBridgeScript, /protocol = "botster-hub-daemon-v1"/);
 assert.match(dogfoodBridgeScript, /resolveDogfoodBridgeMode/);
 assert.match(dogfoodBridgeScript, /serveStaticUi/);
@@ -574,19 +587,19 @@ assert.deepEqual(packageManifest.surfaces, [
   {
     id: "dogfood-app",
     kind: "app",
-    title: "botster-web Dogfood",
-    description: "Descriptor-backed botster-web app surface for package launcher dogfood.",
+    title: "botster-web",
+    description: "Descriptor-backed botster-web app surface for package launcher validation.",
     order: 1,
-    category: "dogfood",
+    category: "validation",
     supports: ["render"]
   },
   {
     id: "dogfood-settings",
     kind: "settings",
     title: "botster-web Settings",
-    description: "Descriptor-backed settings surface for package launcher dogfood.",
+    description: "Descriptor-backed settings surface for package launcher validation.",
     order: 2,
-    category: "dogfood",
+    category: "validation",
     supports: ["render"]
   }
 ]);
@@ -599,7 +612,7 @@ assert.equal(packageManifest.runnable_entrypoints.length, 1);
 assert.match(pluginEntrypoint, /kind = "surface_route"/);
 assert.match(pluginEntrypoint, /descriptor_id = "dogfood-app"/);
 assert.match(pluginEntrypoint, /descriptor_id = "dogfood-settings"/);
-assert.match(pluginEntrypoint, /Deterministic app surface rendered by the botster-web dogfood package/);
+assert.match(pluginEntrypoint, /Deterministic app surface rendered by the botster-web validation package/);
 assert.doesNotMatch(pluginEntrypoint, /tools|commands|surfaces|entities|mcp/);
 
 const [webClientEntrypoint] = packageManifest.runnable_entrypoints;
@@ -797,29 +810,37 @@ try {
 const desktopCss = removeCssAtRules(css);
 assert.doesNotMatch(desktopCss, /\.workspace-grid\s*\{[^}]*grid-template-columns/);
 assert.doesNotMatch(desktopCss, /\.dashboard-layout\s*\{[^}]*grid-template-columns/);
+assert.doesNotMatch(desktopCss, /\.active-work-grid\s*\{/);
 assert.doesNotMatch(desktopCss, /\.app-grid\s*\{[^}]*grid-template-columns/);
+
+const pluginWorkspaceShellRule = extractTopLevelCssRule(desktopCss, ".workspace-shell.plugin-workspace-shell");
+assert.match(pluginWorkspaceShellRule, /width:\s*100%/);
+assert.match(pluginWorkspaceShellRule, /padding:\s*0/);
+const pluginSurfaceSectionRule = extractTopLevelCssRule(desktopCss, ".plugin-surface-page .uinode-section");
+assert.match(pluginSurfaceSectionRule, /border:\s*0/);
+assert.match(pluginSurfaceSectionRule, /background:\s*transparent/);
 
 const terminalPanelRule = extractTopLevelCssRule(desktopCss, ".terminal-panel");
 assert.match(terminalPanelRule, /max-height:\s*calc\(100vh\s*-\s*210px\)/);
 assert.match(terminalPanelRule, /overflow:\s*hidden/);
 
-const dogfoodMainRule = extractTopLevelCssRule(desktopCss, ".dogfood-main");
-assert.match(dogfoodMainRule, /display:\s*grid/);
+const localHubMainRule = extractTopLevelCssRule(desktopCss, ".local-hub-main");
+assert.match(localHubMainRule, /display:\s*grid/);
 
 const diagnosticPanelRule = extractTopLevelCssRule(desktopCss, ".diagnostic-panel");
 assert.match(diagnosticPanelRule, /padding:\s*14px/);
 
-const dogfoodStatusGridRule = extractTopLevelCssRule(desktopCss, ".dogfood-status-grid");
-assert.match(dogfoodStatusGridRule, /display:\s*grid/);
-assert.match(dogfoodStatusGridRule, /grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
+const localHubStatusGridRule = extractTopLevelCssRule(desktopCss, ".local-hub-status-grid");
+assert.match(localHubStatusGridRule, /display:\s*grid/);
+assert.match(localHubStatusGridRule, /grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
 
-const dogfoodPrimaryActionRule = extractTopLevelCssRule(desktopCss, ".dogfood-primary-action");
-assert.match(dogfoodPrimaryActionRule, /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/);
+const localHubPrimaryActionRule = extractTopLevelCssRule(desktopCss, ".local-hub-primary-action");
+assert.match(localHubPrimaryActionRule, /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/);
 
 const mobileCss = extractCssAtRule(css, "@media (max-width: 860px)");
 assert.doesNotMatch(mobileCss, /\.workspace-grid\s*\{[^}]*grid-template-columns/);
-assert.match(extractTopLevelCssRule(mobileCss, ".dogfood-status-grid"), /grid-template-columns:\s*1fr\s*;/);
-assert.match(extractTopLevelCssRule(mobileCss, ".dogfood-primary-action"), /grid-template-columns:\s*1fr\s*;/);
+assert.match(extractTopLevelCssRule(mobileCss, ".local-hub-status-grid"), /grid-template-columns:\s*1fr\s*;/);
+assert.match(extractTopLevelCssRule(mobileCss, ".local-hub-primary-action"), /grid-template-columns:\s*1fr\s*;/);
 assert.match(extractTopLevelCssRule(mobileCss, ".terminal-panel"), /max-height:\s*none/);
 
 const testCompileDir = await mkdtemp(join(tmpdir(), "botster-terminal-smoke-"));
@@ -1644,8 +1665,8 @@ const bridge = {
       if (request.package_name === "botster-web") {
         const settings = request.surface_id === "dogfood-settings";
         const bodyText = settings
-          ? "Deterministic settings surface rendered by the botster-web dogfood package."
-          : "Deterministic app surface rendered by the botster-web dogfood package.";
+          ? "Deterministic settings surface rendered by the botster-web validation package."
+          : "Deterministic app surface rendered by the botster-web validation package.";
         return {
           kind: "plugin_surface",
           plugin_surface: {
@@ -1658,7 +1679,7 @@ const bridge = {
               body: {
                 id: `botster-web-${request.surface_id}-root`,
                 primitive: "section",
-                props: { label: settings ? "Dogfood Settings" : "Dogfood App" },
+                props: { label: settings ? "botster-web Settings" : "botster-web App" },
                 slots: {
                   children: [
                     {
@@ -2576,7 +2597,7 @@ assert.equal(realRuntime.entities.get("botster-web.package", "botster-web").sett
 assert.deepEqual(realRuntime.entities.get("botster-web.package", "botster-web").app_surfaces[0].launch_action, {
   id: "botster.package.surface.render",
   target: "botster-web",
-  label: "botster-web Dogfood",
+  label: "botster-web",
   params: {
     package_name: "botster-web",
     surface_id: "dogfood-app",
@@ -2678,20 +2699,20 @@ assert.deepEqual(await appSurfaceRender, {
     plugin_surface: {
       package_name: "botster-web",
       surface_id: "dogfood-app",
-      body: "Deterministic app surface rendered by the botster-web dogfood package.",
+      body: "Deterministic app surface rendered by the botster-web validation package.",
       ui_tree_snapshot: {
         package_name: "botster-web",
         surface_id: "dogfood-app",
         body: {
           id: "botster-web-dogfood-app-root",
           primitive: "section",
-          props: { label: "Dogfood App" },
+          props: { label: "botster-web App" },
           slots: {
             children: [
               {
                 id: "botster-web-dogfood-app-copy",
                 primitive: "text",
-                props: { text: "Deterministic app surface rendered by the botster-web dogfood package." }
+                props: { text: "Deterministic app surface rendered by the botster-web validation package." }
               }
             ]
           }
@@ -3295,7 +3316,7 @@ try {
     { dogfoodUiTreeSnapshot },
     { realHubDogfoodUiTreeSnapshot },
     { ConnectionDiagnosticsPanel },
-    { DogfoodFirstScreen },
+    { LocalHubFirstScreen },
     { createInMemoryEntityFrameStore },
     { configurationFieldType, configurationSaveAction, configurationSubmitValues },
     {
@@ -3305,6 +3326,7 @@ try {
       PluginListItem,
       PluginSurfaceRoutePage,
       PluginSettingsPanel,
+      compareInstalledPackageRows,
       packageAppSurfaces,
       packageNavigationShortcut,
       packageSettingsSurfaces,
@@ -3317,7 +3339,7 @@ try {
     vite.ssrLoadModule("/src/botster/localDogfoodTransport.ts"),
     vite.ssrLoadModule("/src/botster/realHubDogfoodTransport.ts"),
     vite.ssrLoadModule("/src/botster/ConnectionDiagnosticsPanel.tsx"),
-    vite.ssrLoadModule("/src/botster/dogfoodFirstScreen.tsx"),
+    vite.ssrLoadModule("/src/botster/LocalHubFirstScreen.tsx"),
     vite.ssrLoadModule("/src/botster/entities.ts"),
     vite.ssrLoadModule("/src/packageConfigurationForm.ts"),
     vite.ssrLoadModule("/src/App.tsx")
@@ -3688,7 +3710,7 @@ try {
     root: {
       id: "dogfood-app-root",
       primitive: "section",
-      props: { title: "Dogfood App", label: "Dogfood App" },
+      props: { title: "botster-web App", label: "botster-web App" },
       slots: {
         children: [
           {
@@ -3717,14 +3739,18 @@ try {
     }
   };
   const successfulValidatedSnapshotSurfaceMarkup = renderPluginSurfaceRoutePage({
-    title: "botster-web Dogfood",
+    title: "botster-web",
     phase: "rendered",
-    status: "botster-web Dogfood: Workspaces rendered (botster-web/dogfood-app)",
+    status: "botster-web: Workspaces rendered (botster-web/dogfood-app)",
     snapshot: validatedDogfoodSnapshot
   });
-  assert.match(successfulValidatedSnapshotSurfaceMarkup, /data-testid="plugin-route-status-badge"/);
-  assert.match(successfulValidatedSnapshotSurfaceMarkup, />Rendered<\/ion-badge>/);
+  assert.match(successfulValidatedSnapshotSurfaceMarkup, /class="plugin-surface-page"/);
   assert.match(successfulValidatedSnapshotSurfaceMarkup, /Workspaces rendered/);
+  assert.match(successfulValidatedSnapshotSurfaceMarkup, /botster-web App/);
+  assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, /data-testid="plugin-route-status-badge"/);
+  assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, />Rendered<\/ion-badge>/);
+  assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, /Plugin surface/);
+  assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, /workflow-section/);
   assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, />Loading<\/ion-badge>/);
   assert.deepEqual(
     renderedPluginSurfaceState(
@@ -3742,7 +3768,7 @@ try {
               body: {
                 id: "dogfood-app-root",
                 type: "panel",
-                props: { title: "Dogfood App" },
+                props: { title: "botster-web App" },
                 children: [
                   {
                     id: "dogfood-app-copy",
@@ -3760,15 +3786,15 @@ try {
           }
         }
       },
-      "botster-web Dogfood",
+      "botster-web",
       expectedDogfoodSurface,
       "botster-web/dogfood-app"
     ),
     {
       routeKey: "botster-web/dogfood-app",
-      title: "botster-web Dogfood",
+      title: "botster-web",
       phase: "rendered",
-      status: "botster-web Dogfood: Workspaces rendered (botster-web/dogfood-app)",
+      status: "botster-web: Workspaces rendered (botster-web/dogfood-app)",
       snapshot: validatedDogfoodSnapshot
     }
   );
@@ -3785,15 +3811,15 @@ try {
           }
         }
       },
-      "botster-web Dogfood",
+      "botster-web",
       expectedDogfoodSurface,
       "botster-web/dogfood-app"
     ),
     {
       routeKey: "botster-web/dogfood-app",
-      title: "botster-web Dogfood",
+      title: "botster-web",
       phase: "error",
-      status: "botster-web Dogfood requires a hub validated UiTree snapshot for botster-web/dogfood-app; this hub returned only an unvalidated plugin surface body."
+      status: "botster-web requires a hub validated UiTree snapshot for botster-web/dogfood-app; this hub returned only an unvalidated plugin surface body."
     }
   );
   assert.deepEqual(
@@ -3809,27 +3835,27 @@ try {
           }
         }
       },
-      "botster-web Dogfood",
+      "botster-web",
       expectedDogfoodSurface,
       "botster-web/dogfood-app"
     ),
     {
       routeKey: "botster-web/dogfood-app",
-      title: "botster-web Dogfood",
+      title: "botster-web",
       phase: "error",
-      status: "botster-web Dogfood requires a hub validated UiTree snapshot for botster-web/dogfood-app; this hub returned only an unvalidated plugin surface body."
+      status: "botster-web requires a hub validated UiTree snapshot for botster-web/dogfood-app; this hub returned only an unvalidated plugin surface body."
     }
   );
   assert.deepEqual(
     renderedPluginSurfaceState(
       { accepted: true, result: { kind: "plugin_surface" } },
-      "botster-web Dogfood",
+      "botster-web",
       expectedDogfoodSurface,
       "botster-web/dogfood-app"
     ),
     {
       routeKey: "botster-web/dogfood-app",
-      title: "botster-web Dogfood",
+      title: "botster-web",
       phase: "error",
       status: "Render response did not include botster-web/dogfood-app validated snapshot."
     }
@@ -3847,19 +3873,19 @@ try {
           }
         }
       },
-      "botster-web Dogfood",
+      "botster-web",
       expectedDogfoodSurface,
       "botster-web/dogfood-app"
     ),
     {
       routeKey: "botster-web/dogfood-app",
-      title: "botster-web Dogfood",
+      title: "botster-web",
       phase: "error",
       status: "Render response did not include botster-web/dogfood-app validated snapshot."
     }
   );
   const structuredErrorSurfaceMarkup = renderPluginSurfaceRoutePage({
-    title: "botster-web Dogfood",
+    title: "botster-web",
     phase: "error",
     status: "Surface render blocked by package policy."
   });
@@ -3867,9 +3893,9 @@ try {
   assert.match(structuredErrorSurfaceMarkup, /Surface render blocked by package policy/);
   assert.doesNotMatch(structuredErrorSurfaceMarkup, />Loading<\/ion-badge>/);
   const pendingSurfaceMarkup = renderPluginSurfaceRoutePage({
-    title: "botster-web Dogfood",
+    title: "botster-web",
     phase: "rendering",
-    status: "Rendering botster-web Dogfood"
+    status: "Rendering botster-web"
   });
   assert.match(pendingSurfaceMarkup, />Loading<\/ion-badge>/);
 
@@ -3903,12 +3929,12 @@ try {
     app_surfaces: [
       {
         surface_id: "dogfood-app",
-        title: "Descriptor Dogfood",
+        title: "Descriptor App",
         description: "Descriptor-backed app surface",
         launch_action: {
           id: "botster.package.surface.render",
           target: "descriptor-only",
-          label: "Descriptor Dogfood",
+          label: "Descriptor App",
           params: {
             package_name: "descriptor-only",
             surface_id: "dogfood-app",
@@ -3954,8 +3980,8 @@ try {
     })
   );
   assert.match(descriptorListMarkup, /Descriptor Only/);
-  assert.match(descriptorListMarkup, /1 UI/);
-  assert.doesNotMatch(descriptorListMarkup, /Descriptor Dogfood|Disable Package|surface-action-row/);
+  assert.match(descriptorListMarkup, /App/);
+  assert.doesNotMatch(descriptorListMarkup, /Descriptor App|Disable Package|surface-action-row/);
   assert.equal(packageAppSurfaces(descriptorApp).length, 1);
   assert.equal(packageSettingsSurfaces(descriptorApp).length, 1);
   assert.equal(surfaceLaunchAction(packageAppSurfaces(descriptorApp)[0]).id, "botster.package.surface.render");
@@ -4166,10 +4192,39 @@ try {
     })
   );
   assert.match(legacyListMarkup, /Legacy Only/);
-  assert.match(legacyListMarkup, /No UI/);
+  assert.match(legacyListMarkup, /Plugin/);
   assert.doesNotMatch(legacyListMarkup, /Legacy View|Legacy Settings|surface-action-row/);
   assert.equal(packageAppSurfaces(legacyOnlyApp).length, 0);
   assert.equal(packageSettingsSurfaces(legacyOnlyApp).length, 0);
+  assert.deepEqual(
+    [
+      {
+        id: "plugin-z",
+        package_name: "plugin-z",
+        title: "Zulu Plugin",
+        app_surfaces: [],
+      },
+      {
+        id: "app-b",
+        package_name: "app-b",
+        title: "Beta App",
+        app_surfaces: [{ surface_id: "home" }],
+      },
+      {
+        id: "plugin-a",
+        package_name: "plugin-a",
+        title: "Alpha Plugin",
+        app_surfaces: [],
+      },
+      {
+        id: "app-a",
+        package_name: "app-a",
+        title: "Alpha App",
+        app_surfaces: [{ surface_id: "home" }],
+      }
+    ].sort(compareInstalledPackageRows).map((row) => row.package_name),
+    ["app-a", "app-b", "plugin-a", "plugin-z"]
+  );
 
   const collectedActions = [];
   const markup = renderToStaticMarkup(
@@ -4272,6 +4327,50 @@ try {
   assert.match(protocolRelativeIframeMarkup, /Iframe source unavailable/);
   assert.doesNotMatch(protocolRelativeIframeMarkup, /example\.invalid/);
 
+  const directListItemMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "workspaces.test",
+        version: "test",
+        root: {
+          id: "workspaces-root",
+          primitive: "section",
+          props: { title: "Workspaces" },
+          slots: {
+            children: [
+              {
+                id: "workspaces-list",
+                primitive: "list",
+                props: { aria_label: "Workspaces" },
+                slots: {
+                  children: [
+                    {
+                      id: "workspace-row-1",
+                      primitive: "list_item",
+                      slots: {
+                        title: [{ id: "workspace-row-1-title", primitive: "text", props: { text: "Core renderer contract" } }],
+                        subtitle: [{ id: "workspace-row-1-purpose", primitive: "text", props: { text: "Keep plugin UI generic" } }],
+                        meta: [{ id: "workspace-row-1-status", primitive: "text", props: { text: "active" } }]
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.match(directListItemMarkup, /<ion-list/);
+  assert.match(directListItemMarkup, /Core renderer contract/);
+  assert.match(directListItemMarkup, /Keep plugin UI generic/);
+  assert.match(directListItemMarkup, /active/);
+  assert.doesNotMatch(directListItemMarkup, /Unsupported primitive: list_item/);
+
   const dogfoodStore = createInMemoryEntityFrameStore();
   dogfoodStore.apply({
     operation: "entity_snapshot",
@@ -4279,9 +4378,9 @@ try {
     records: [
       {
         id: "session-local-1",
-        title: "Local dogfood session",
+        title: "Local validation session",
         status: "running",
-        last_result: "action_request accepted by local dogfood adapter"
+        last_result: "action_request accepted by local validation adapter"
       }
     ]
   });
@@ -4327,11 +4426,11 @@ try {
     })
   );
 
-  assert.match(dogfoodMarkup, /Session spawn\/attach dogfood/);
+  assert.match(dogfoodMarkup, /Session spawn\/attach/);
   assert.match(dogfoodMarkup, /Accepted botster\.session\.select/);
-  assert.match(dogfoodMarkup, /Local dogfood session/);
+  assert.match(dogfoodMarkup, /Local validation session/);
   assert.match(dogfoodMarkup, /running/);
-  assert.match(dogfoodMarkup, /action_request accepted by local dogfood adapter/);
+  assert.match(dogfoodMarkup, /action_request accepted by local validation adapter/);
   assert.match(dogfoodMarkup, /Session name is required/);
   assert.match(dogfoodMarkup, /data-action-id="botster\.session\.select"/);
   assert.match(dogfoodMarkup, /data-action-id="botster\.session\.rename"/);
@@ -4552,21 +4651,21 @@ try {
       localState: {
         "dogfood.action_status": `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`,
         "dogfood.diagnostic_action_status": "Session not found",
-        "dogfood.plugin_surface_status": "botster-web Dogfood: Deterministic app surface rendered by the botster-web dogfood package. (botster-web/dogfood-app)"
+        "dogfood.plugin_surface_status": "botster-web: Deterministic app surface rendered by the botster-web validation package. (botster-web/dogfood-app)"
       }
     })
   );
-  assert.match(realHubMarkup, /Installed packages/);
-  assert.match(realHubMarkup, /Installed apps/);
+  assert.match(realHubMarkup, /Installed/);
+  assert.match(realHubMarkup, /Installed app surfaces/);
   assert.match(realHubMarkup, /botster-web/);
-  assert.match(realHubMarkup, /botster-web dogfood/);
+  assert.match(realHubMarkup, /botster-web/);
   assert.match(realHubMarkup, /Lifecycle: running/);
   assert.match(realHubMarkup, /Requires local terminal launch/);
   assert.match(realHubMarkup, /botster-web Settings/);
   assert.match(realHubMarkup, /dogfood-settings/);
   assert.match(realHubMarkup, /Remote browser access/);
   assert.match(realHubMarkup, /Rendered package surface|Rendered app surface/);
-  assert.match(realHubMarkup, /Deterministic app surface rendered by the botster-web dogfood package/);
+  assert.match(realHubMarkup, /Deterministic app surface rendered by the botster-web validation package/);
   assert.match(realHubMarkup, /botster-web\/dogfood-app/);
   assert.match(realHubMarkup, /project-pipelines/);
   assert.match(realHubMarkup, /enabled/);
@@ -4626,7 +4725,7 @@ try {
   assert.doesNotMatch(realHubMarkup, /install_package|update_package|retry_package/);
 
   const healthyFirstScreenMarkup = renderToStaticMarkup(
-    createElement(DogfoodFirstScreen, {
+    createElement(LocalHubFirstScreen, {
       mode: "real-hub",
       statusText: "Packaged runtime attached to real hub bridge",
       diagnostics: [matchingSchemaDiagnostic, compatibleDescriptorDiagnostic],
@@ -4644,10 +4743,10 @@ try {
       actionStatus: `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
     })
   );
-  assert.match(healthyFirstScreenMarkup, /Local hub workbench/);
-  assert.match(healthyFirstScreenMarkup, /Hub, bridge, package registry, session state, spawn action, and terminal/);
-  assert.match(healthyFirstScreenMarkup, new RegExp(`Spawn ${realHubDogfoodSessionId}`));
-  assert.match(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
+assert.match(healthyFirstScreenMarkup, /Local hub workbench/);
+assert.match(healthyFirstScreenMarkup, /Hub, bridge, package registry, session state, spawn action, and terminal/);
+assert.match(healthyFirstScreenMarkup, /Start local hub session/);
+assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
   assert.match(healthyFirstScreenMarkup, /Output appears in the terminal panel/);
   assert.match(healthyFirstScreenMarkup, /Packages/);
   assert.match(healthyFirstScreenMarkup, /Loaded/);
@@ -4658,7 +4757,7 @@ try {
   assert.doesNotMatch(healthyFirstScreenMarkup, /Spawn succeeded/);
 
   const bridgeDownFirstScreenMarkup = renderToStaticMarkup(
-    createElement(DogfoodFirstScreen, {
+    createElement(LocalHubFirstScreen, {
       mode: "real-hub",
       statusText: "Packaged runtime attached to real hub bridge",
       diagnostics: [bridgeUnavailableDiagnostic(new Error("connect ECONNREFUSED"))],
@@ -4675,7 +4774,7 @@ try {
   assert.doesNotMatch(bridgeDownFirstScreenMarkup, /<h3>Hub<\/h3><ion-badge color="success">Connected/);
 
   const unloadedFirstScreenMarkup = renderToStaticMarkup(
-    createElement(DogfoodFirstScreen, {
+    createElement(LocalHubFirstScreen, {
       mode: "real-hub",
       statusText: "Packaged runtime attached to real hub bridge",
       diagnostics: [],
@@ -4692,7 +4791,7 @@ try {
   assert.doesNotMatch(unloadedFirstScreenMarkup, /Loaded package registry returned zero package records/);
 
   const emptyFirstScreenMarkup = renderToStaticMarkup(
-    createElement(DogfoodFirstScreen, {
+    createElement(LocalHubFirstScreen, {
       mode: "real-hub",
       statusText: "Packaged runtime attached to real hub bridge",
       diagnostics: [],
@@ -4708,7 +4807,7 @@ try {
   assert.match(emptyFirstScreenMarkup, /No sessions are loaded yet/);
 
   const failedPackageFirstScreenMarkup = renderToStaticMarkup(
-    createElement(DogfoodFirstScreen, {
+    createElement(LocalHubFirstScreen, {
       mode: "real-hub",
       statusText: "Packaged runtime attached to real hub bridge",
       diagnostics: [compatibleDescriptorDiagnostic],
@@ -4725,11 +4824,11 @@ try {
       actionStatus: `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
     })
   );
-  assert.match(failedPackageFirstScreenMarkup, /<article class="dogfood-status-card danger"><div class="dogfood-status-title"><h3>Packages<\/h3><ion-badge color="danger">Error/);
+  assert.match(failedPackageFirstScreenMarkup, /<article class="local-hub-status-card danger"><div class="local-hub-status-title"><h3>Packages<\/h3><ion-badge color="danger">Error/);
   assert.match(failedPackageFirstScreenMarkup, /1 has failed entrypoint state/);
 
   const degradedTerminalFirstScreenMarkup = renderToStaticMarkup(
-    createElement(DogfoodFirstScreen, {
+    createElement(LocalHubFirstScreen, {
       mode: "real-hub",
       statusText: "Packaged runtime attached to real hub bridge",
       diagnostics: [terminalUnavailableDiagnostic(new Error("terminal stream closed"))],
@@ -4746,7 +4845,7 @@ try {
   assert.match(degradedTerminalFirstScreenMarkup, /Running/);
 
   const spawnRequestedFirstScreenMarkup = renderToStaticMarkup(
-    createElement(DogfoodFirstScreen, {
+    createElement(LocalHubFirstScreen, {
       mode: "real-hub",
       statusText: "Packaged runtime attached to real hub bridge",
       diagnostics: [compatibleDescriptorDiagnostic],
@@ -4761,7 +4860,7 @@ try {
   assert.doesNotMatch(spawnRequestedFirstScreenMarkup, /Session botster-web-dogfood-session is running/);
 
   const spawnFailedFirstScreenMarkup = renderToStaticMarkup(
-    createElement(DogfoodFirstScreen, {
+    createElement(LocalHubFirstScreen, {
       mode: "real-hub",
       statusText: "Packaged runtime attached to real hub bridge",
       diagnostics: [spawnFailureOperatorDiagnostic, spawnFailureHubDiagnostic],
@@ -4791,7 +4890,7 @@ try {
     { accepted: false, reason: "unknown session: missing-real-hub-session" }
   );
   const missingSessionFirstScreenMarkup = renderToStaticMarkup(
-    createElement(DogfoodFirstScreen, {
+    createElement(LocalHubFirstScreen, {
       mode: "real-hub",
       statusText: "Packaged runtime attached to real hub bridge",
       diagnostics: [missingSessionOperatorDiagnostic, missingSessionActionDiagnostic],
@@ -4803,7 +4902,7 @@ try {
     })
   );
   assert.match(missingSessionFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="medium">Ready/);
-  assert.match(missingSessionFirstScreenMarkup, new RegExp(`Creates ${realHubDogfoodSessionId}`));
+  assert.match(missingSessionFirstScreenMarkup, /Creates a local hub session/);
   assert.doesNotMatch(missingSessionFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="danger">Blocked/);
   assert.doesNotMatch(missingSessionFirstScreenMarkup, /unknown session: missing-real-hub-session/);
 
@@ -4816,7 +4915,7 @@ try {
     }
   });
   const nonSpawnHubActionFirstScreenMarkup = renderToStaticMarkup(
-    createElement(DogfoodFirstScreen, {
+    createElement(LocalHubFirstScreen, {
       mode: "real-hub",
       statusText: "Packaged runtime attached to real hub bridge",
       diagnostics: [nonSpawnHubActionDiagnostic],
@@ -4835,7 +4934,7 @@ try {
     { accepted: false, reason: "spawn action rejected" }
   );
   const primaryActionFailedFirstScreenMarkup = renderToStaticMarkup(
-    createElement(DogfoodFirstScreen, {
+    createElement(LocalHubFirstScreen, {
       mode: "real-hub",
       statusText: "Packaged runtime attached to real hub bridge",
       diagnostics: [primaryActionFailureDiagnostic],

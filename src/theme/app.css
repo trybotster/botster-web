@@ -163,9 +163,53 @@ body {
   padding: 28px 0 40px;
 }
 
+.workspace-shell.plugin-workspace-shell {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+.plugin-app-content {
+  --background: #ffffff;
+}
+
 .view-stack {
   display: grid;
   gap: 16px;
+}
+
+.plugin-surface-page {
+  min-width: 0;
+  min-height: 100%;
+}
+
+.plugin-surface-page .uinode-root {
+  margin-top: 0;
+  min-height: 100%;
+}
+
+.plugin-surface-page .uinode-section {
+  min-height: 100%;
+  padding: 24px;
+  border: 0;
+  background: transparent;
+}
+
+.plugin-surface-page .uinode-list {
+  border: 0;
+  border-radius: 0;
+}
+
+.plugin-surface-page .uinode-list ion-item {
+  --background: transparent;
+}
+
+.plugin-surface-page .uinode-empty-state,
+.plugin-surface-page .uinode-fallback,
+.plugin-surface-page .uinode-dialog {
+  border: 0;
+  background: transparent;
 }
 
 .page-heading {
@@ -183,7 +227,6 @@ body {
   letter-spacing: 0;
 }
 
-.workflow-card,
 .workflow-section {
   min-width: 0;
   border: 1px solid #d8dee7;
@@ -191,52 +234,12 @@ body {
   background: #ffffff;
 }
 
-.workflow-card {
-  min-height: 96px;
-  height: 100%;
-  margin: 0;
-  border-left-width: 4px;
-}
-
-.workflow-card.success {
-  border-left-color: var(--ion-color-success);
-}
-
-.workflow-card.info {
-  border-left-color: var(--ion-color-medium);
-}
-
-.workflow-card.warning {
-  border-left-color: var(--ion-color-warning);
-}
-
-.workflow-card.danger {
-  border-left-color: var(--ion-color-danger);
-}
-
-.workflow-card ion-card-header,
-.dashboard-widget ion-card-header,
 .section-heading,
 .entity-family-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-}
-
-.workflow-card ion-card-subtitle,
-.plugin-widget ion-card-subtitle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.workflow-card ion-badge,
-.dashboard-widget ion-badge {
-  max-width: 132px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .workflow-section {
@@ -270,59 +273,31 @@ body {
   color: var(--ion-color-primary);
 }
 
-.dashboard-main {
+.add-package-flow {
   display: grid;
   gap: 14px;
-  min-width: 0;
 }
 
-.dashboard-widget,
-.plugin-widget {
-  min-width: 0;
-  height: 100%;
-  margin: 0;
-}
-
-.dashboard-widget {
-  border-left-width: 4px;
-}
-
-.dashboard-widget.success {
-  border-left-color: var(--ion-color-success);
-}
-
-.dashboard-widget.info {
-  border-left-color: var(--ion-color-medium);
-}
-
-.dashboard-widget.warning {
-  border-left-color: var(--ion-color-warning);
-}
-
-.dashboard-widget.danger {
-  border-left-color: var(--ion-color-danger);
-}
-
-.dogfood-first-screen {
+.local-hub-first-screen {
   display: grid;
   gap: 14px;
   padding: 22px 0 20px;
 }
 
-.dogfood-status-lead {
+.local-hub-status-lead {
   min-width: 0;
 }
 
-.dogfood-status-lead h1 {
+.local-hub-status-lead h1 {
   margin: 4px 0 8px;
   font-size: 32px;
   line-height: 1.1;
   letter-spacing: 0;
 }
 
-.dogfood-status-lead p,
-.dogfood-primary-action p,
-.dogfood-status-card p {
+.local-hub-status-lead p,
+.local-hub-primary-action p,
+.local-hub-status-card p {
   max-width: 640px;
   margin: 0;
   color: #586174;
@@ -343,7 +318,7 @@ body {
   gap: 8px;
 }
 
-.dogfood-primary-action {
+.local-hub-primary-action {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
@@ -354,30 +329,30 @@ body {
   background: #f7faff;
 }
 
-.dogfood-primary-action h2 {
+.local-hub-primary-action h2 {
   margin: 0 0 6px;
   font-size: 20px;
   line-height: 1.25;
   letter-spacing: 0;
 }
 
-.dogfood-primary-action code {
+.local-hub-primary-action code {
   overflow-wrap: anywhere;
 }
 
-.dogfood-action-state {
+.local-hub-action-state {
   margin-top: 8px !important;
   font-weight: 700;
   color: #263245 !important;
 }
 
-.dogfood-status-grid {
+.local-hub-status-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
-.dogfood-status-card {
+.local-hub-status-card {
   min-width: 0;
   min-height: 112px;
   padding: 12px;
@@ -387,23 +362,23 @@ body {
   background: #ffffff;
 }
 
-.dogfood-status-card.success {
+.local-hub-status-card.success {
   border-left-color: var(--ion-color-success);
 }
 
-.dogfood-status-card.info {
+.local-hub-status-card.info {
   border-left-color: var(--ion-color-medium);
 }
 
-.dogfood-status-card.warning {
+.local-hub-status-card.warning {
   border-left-color: var(--ion-color-warning);
 }
 
-.dogfood-status-card.danger {
+.local-hub-status-card.danger {
   border-left-color: var(--ion-color-danger);
 }
 
-.dogfood-status-title {
+.local-hub-status-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -411,7 +386,7 @@ body {
   margin-bottom: 6px;
 }
 
-.dogfood-status-title h3 {
+.local-hub-status-title h3 {
   margin: 0;
   font-size: 15px;
   line-height: 1.25;
@@ -495,7 +470,7 @@ body {
   overflow-wrap: anywhere;
 }
 
-.dogfood-main {
+.local-hub-main {
   min-width: 0;
   display: grid;
   gap: 14px;
@@ -717,6 +692,13 @@ body {
   --inner-padding-end: 12px;
 }
 
+.uinode-list-item-meta {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  color: #5b6575;
+}
+
 .uinode-table {
   display: grid;
   overflow-x: auto;
@@ -792,13 +774,13 @@ body {
     padding-top: 18px;
   }
 
-  .dogfood-first-screen {
+  .local-hub-first-screen {
     display: grid;
     align-items: start;
   }
 
-  .dogfood-primary-action,
-  .dogfood-status-grid {
+  .local-hub-primary-action,
+  .local-hub-status-grid {
     grid-template-columns: 1fr;
   }
 

@@ -115,10 +115,9 @@ async function runPackagedBrowserSmoke(scenario) {
 
     await openAppsView(page);
     await page.getByRole("heading", { name: "Apps", exact: true }).waitFor();
-    const installedAppsList = page.locator("[aria-label='Installed apps']");
-    const installedPackagesList = page.locator("[aria-label='Installed packages']");
-    await installedAppsList.getByText("botster web dogfood app").waitFor();
-    await installedPackagesList.getByText("botster web").first().waitFor();
+    const installedList = page.locator("[aria-label='Installed']");
+    await installedList.getByText("botster web app").waitFor();
+    await installedList.getByText("botster web").first().waitFor();
     await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
     await page.waitForURL(/\/apps\/botster-web\/settings/);
     await page.getByTestId("plugin-settings-route").waitFor();
@@ -152,14 +151,14 @@ async function runPackagedBrowserSmoke(scenario) {
     await page.waitForURL(/\/apps(?:[?#]|$)/);
     await page.getByText("Package configuration").waitFor({ state: "detached" });
 
-    await installedAppsList.getByText("botster web dogfood app").click();
+    await installedList.getByText("botster web app").click();
     await page.waitForURL(/\/apps\/botster-web\/dogfood-app/);
     await page.getByTestId("selected-app-surface").waitFor();
-    await page.getByText("Deterministic app surface rendered by the botster-web dogfood package.").waitFor();
+    await page.getByText("Deterministic app surface rendered by the botster-web validation package.").waitFor();
     await assertPluginRouteBadgeRendered(page);
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.getByTestId("selected-app-surface").waitFor();
-    await page.getByText("Deterministic app surface rendered by the botster-web dogfood package.").waitFor();
+    await page.getByText("Deterministic app surface rendered by the botster-web validation package.").waitFor();
     await assertPluginRouteBadgeRendered(page);
     const installedAppSurfaceRequest = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).find((entry) =>
@@ -662,7 +661,7 @@ function configurableSmokePackage(packageConfigured, remoteAccessEnabled) {
       {
         id: "dogfood-app",
         kind: "app",
-        title: "Dogfood app",
+        title: "botster-web app",
         description: "Smoke package app surface",
         supports: ["web"],
         order: 1
@@ -670,7 +669,7 @@ function configurableSmokePackage(packageConfigured, remoteAccessEnabled) {
       {
         id: "dogfood-settings",
         kind: "settings",
-        title: "Dogfood settings",
+        title: "botster-web settings",
         description: "Smoke package settings surface",
         supports: ["settings"],
         order: 2

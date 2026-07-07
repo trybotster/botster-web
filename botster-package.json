@@ -20,19 +20,19 @@
     {
       "id": "dogfood-app",
       "kind": "app",
-      "title": "botster-web Dogfood",
-      "description": "Descriptor-backed botster-web app surface for package launcher dogfood.",
+      "title": "botster-web",
+      "description": "Descriptor-backed botster-web app surface for package launcher validation.",
       "order": 1,
-      "category": "dogfood",
+      "category": "validation",
       "supports": ["render"]
     },
     {
       "id": "dogfood-settings",
       "kind": "settings",
       "title": "botster-web Settings",
-      "description": "Descriptor-backed settings surface for package launcher dogfood.",
+      "description": "Descriptor-backed settings surface for package launcher validation.",
       "order": 2,
-      "category": "dogfood",
+      "category": "validation",
       "supports": ["render"]
     }
   ],

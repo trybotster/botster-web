@@ -14,6 +14,7 @@ import {
 import { useMemo, useState, type ReactNode } from "react";
 
 import { defaultUiCapabilitySet } from "./capabilities";
+import type { ActionBinding } from "./actions";
 import type { EntityFrameStore, EntityRecord } from "./entities";
 import type {
   UiNode,
@@ -28,19 +29,27 @@ type RowContext = Record<string, unknown>;
 const supportedPrimitives = new Set([
   "action",
   "badge",
+  "button",
+  "checkbox",
   "dialog",
   "empty_state",
-  "field",
   "form",
+  "form_field",
+  "form_section",
   "heading",
   "iframe",
   "inline",
   "list",
+  "list_item",
   "row",
   "section",
+  "select",
+  "select_option",
   "stack",
   "table",
-  "text"
+  "text",
+  "text_input",
+  "textarea"
 ]);
 
 function readString(value: unknown, fallback = ""): string {
@@ -69,6 +78,10 @@ function readRecords(value: unknown): Record<string, unknown>[] {
 
 function readSlot(node: UiNode, name = "children"): UiNode[] {
   return node.slots?.[name] ?? [];
+}
+
+function readChildren(node: UiNode): UiNode[] {
+  return readSlot(node, "children");
 }
 
 function readRequiredCapabilities(node: UiNode): string[] {
@@ -173,77 +186,10 @@ function renderChildren(
   nodes: UiNode[],
   store: EntityFrameStore,
   options: UiNodeRenderOptions,
-  row?: RowContext
+  row?: RowContext,
+  form?: FormRenderState
 ): ReactNode {
-  return nodes.map((child) => renderNode(child, store, options, row));
-}
-
-function fieldErrors(field: Record<string, unknown>): string[] {
-  return Array.isArray(field.errors) ? field.errors.filter((error): error is string => typeof error === "string") : [];
-}
-
-function renderField(
-  field: Record<string, unknown>,
-  valueOverride?: unknown,
-  onChange?: (value: unknown) => void
-): ReactNode {
-  const id = readString(field.id);
-  const label = readString(field.label, id);
-  const kind = readString(field.kind, "text_input");
-  const value = valueOverride ?? field.value;
-  const errors = fieldErrors(field);
-  const required = readBoolean(field.required);
-  const placeholder = readString(field.placeholder, undefined);
-  const helper = readString(field.helper, undefined);
-  const labelText = required ? `${label} *` : label;
-
-  const control =
-    kind === "textarea" ? (
-      <IonTextarea
-        value={readString(value)}
-        placeholder={placeholder}
-        onIonInput={(event) => onChange?.(event.detail.value ?? "")}
-        readonly={!onChange}
-      />
-    ) : kind === "checkbox" ? (
-      <IonCheckbox checked={readBoolean(value)} disabled={!onChange} onIonChange={(event) => onChange?.(event.detail.checked)} />
-    ) : kind === "select" ? (
-      <IonSelect value={value} disabled={!onChange} placeholder={placeholder} onIonChange={(event) => onChange?.(event.detail.value)}>
-        {readRecords(field.options).map((option) => (
-          <IonSelectOption key={readString(option.value)} value={option.value}>
-            {readString(option.label)}
-          </IonSelectOption>
-        ))}
-      </IonSelect>
-    ) : kind === "secret" ? (
-      <IonInput
-        type="password"
-        value={readString(value)}
-        placeholder={placeholder}
-        onIonInput={(event) => onChange?.(event.detail.value ?? "")}
-        readonly={!onChange}
-      />
-    ) : (
-      <IonInput
-        value={readString(value)}
-        placeholder={placeholder}
-        onIonInput={(event) => onChange?.(event.detail.value ?? "")}
-        readonly={!onChange}
-      />
-    );
-
-  return (
-    <IonItem key={id} className={errors.length > 0 ? "uinode-field invalid" : "uinode-field"}>
-      <IonLabel position="stacked">{labelText}</IonLabel>
-      {control}
-      {helper ? <IonNote slot="helper">{helper}</IonNote> : null}
-      {errors.map((error) => (
-        <IonNote color="danger" key={error} slot="error">
-          {error}
-        </IonNote>
-      ))}
-    </IonItem>
-  );
+  return nodes.map((child) => renderNode(child, store, options, row, form));
 }
 
 const iframeSandboxTokens = new Set([
@@ -276,105 +222,171 @@ function iframeSrc(props: Record<string, unknown>): string | undefined {
   }
 }
 
-function draftValue(field: Record<string, unknown>): unknown {
-  if (readString(field.kind) === "secret") {
-    return "";
+type FormRenderState = {
+  draft: Record<string, unknown>;
+  setDraft: (update: (current: Record<string, unknown>) => Record<string, unknown>) => void;
+};
+
+function actionFromProps(props: Record<string, unknown>, fallbackLabel: string): ActionBinding {
+  const action = props.action;
+  if (typeof action === "string") {
+    return {
+      id: action,
+      label: readString(props.label, fallbackLabel),
+      params: {}
+    };
   }
 
-  if (Object.hasOwn(field, "value")) {
-    return field.value;
-  }
-
-  return readString(field.kind) === "checkbox" ? false : "";
+  const actionRecord = readRecord(action);
+  return {
+    id: readString(actionRecord.id),
+    target: readString(actionRecord.target, undefined),
+    params: readRecord(actionRecord.params),
+    label: readString(actionRecord.label, readString(props.label, fallbackLabel)),
+    disabled: readBoolean(actionRecord.disabled, readBoolean(props.disabled))
+  };
 }
 
-function initialDraft(fields: Record<string, unknown>[]): Record<string, unknown> {
-  return Object.fromEntries(fields.map((field) => [readString(field.id), draftValue(field)]));
+function coreControlName(node: UiNode, props: Record<string, unknown>): string {
+  return readString(props.name, node.id);
 }
 
-function typedFormValue(field: Record<string, unknown>, value: unknown): unknown {
-  const configType = readString(field.config_type, readString(field.kind, "string"));
-
-  if (configType === "secret") {
-    const secret = readString(value).trim();
-    return secret ? { type: "secret", state: "write_only" } : undefined;
+function coreControlInitialValue(node: UiNode, props: Record<string, unknown>): unknown {
+  if (node.primitive === "checkbox") {
+    return Object.hasOwn(props, "checked") ? props.checked : Object.hasOwn(props, "default") ? props.default : false;
   }
 
-  if (configType === "boolean") {
-    return { type: "boolean", value: readBoolean(value) };
+  if (node.primitive === "select") {
+    return Object.hasOwn(props, "selected")
+      ? props.selected
+      : Object.hasOwn(props, "value")
+        ? props.value
+        : props.default;
   }
 
-  if (configType === "select") {
-    return readString(value) ? { type: "select", value: readString(value) } : undefined;
-  }
+  return Object.hasOwn(props, "value") ? props.value : Object.hasOwn(props, "default") ? props.default : "";
+}
 
-  if (configType === "number" || configType === "integer") {
-    if (value === "" || value === null || typeof value === "undefined") {
-      return undefined;
+function collectFormControlDefaults(nodes: UiNode[], store: EntityFrameStore, options: UiNodeRenderOptions, row?: RowContext): Record<string, unknown> {
+  const entries: Array<[string, unknown]> = [];
+  const visit = (node: UiNode, currentRow?: RowContext) => {
+    const props = resolvedProps(node, store, options, currentRow);
+    if (["text_input", "textarea", "checkbox", "select"].includes(node.primitive)) {
+      entries.push([coreControlName(node, props), coreControlInitialValue(node, props)]);
+    } else if (node.primitive === "form_field") {
+      const schema = readRecord(props.schema);
+      entries.push([readString(schema.name, node.id), Object.hasOwn(props, "default") ? props.default : schema.default ?? ""]);
     }
-    return { type: configType, value: Number(value) };
-  }
+    for (const children of Object.values(node.slots ?? {})) {
+      children.forEach((child) => visit(child, currentRow));
+    }
+  };
 
-  const text = readString(value);
-  if (!text && !readBoolean(field.required)) {
-    return undefined;
-  }
+  nodes.forEach((node) => visit(node, row));
+  return Object.fromEntries(entries);
+}
 
-  return { type: configType, value: text };
+function renderCoreControl({
+  node,
+  props,
+  form,
+  optionNodes = []
+}: {
+  node: UiNode;
+  props: Record<string, unknown>;
+  form?: FormRenderState;
+  optionNodes?: UiNode[];
+}): ReactNode {
+  const name = coreControlName(node, props);
+  const label = readString(props.label, name);
+  const description = readString(props.description, undefined);
+  const error = readString(props.error, undefined);
+  const required = readBoolean(props.required);
+  const disabled = readBoolean(props.disabled) || !form;
+  const value = form ? form.draft[name] : coreControlInitialValue(node, props);
+  const labelText = required ? `${label} *` : label;
+  const setValue = (nextValue: unknown) => {
+    form?.setDraft((current) => ({ ...current, [name]: nextValue }));
+  };
+
+  const control =
+    node.primitive === "textarea" ? (
+      <IonTextarea
+        value={readString(value)}
+        placeholder={readString(props.placeholder, undefined)}
+        onIonInput={(event) => setValue(event.detail.value ?? "")}
+        readonly={disabled}
+      />
+    ) : node.primitive === "checkbox" ? (
+      <IonCheckbox checked={readBoolean(value)} disabled={disabled} onIonChange={(event) => setValue(event.detail.checked)} />
+    ) : node.primitive === "select" ? (
+      <IonSelect value={value} disabled={disabled} onIonChange={(event) => setValue(event.detail.value)}>
+        {optionNodes.map((optionNode) => {
+          const optionProps = readRecord(optionNode.props);
+          return (
+            <IonSelectOption disabled={readBoolean(optionProps.disabled)} key={String(optionProps.value ?? optionNode.id)} value={optionProps.value}>
+              {readString(optionProps.label, String(optionProps.value ?? ""))}
+            </IonSelectOption>
+          );
+        })}
+      </IonSelect>
+    ) : (
+      <IonInput
+        value={readString(value)}
+        placeholder={readString(props.placeholder, undefined)}
+        onIonInput={(event) => setValue(event.detail.value ?? "")}
+        readonly={disabled}
+      />
+    );
+
+  return (
+    <IonItem key={node.id} className={error ? "uinode-field invalid" : "uinode-field"} data-ui-node-id={node.id}>
+      <IonLabel position="stacked">{labelText}</IonLabel>
+      {control}
+      {description ? <IonNote slot="helper">{description}</IonNote> : null}
+      {error ? (
+        <IonNote color="danger" slot="error">
+          {error}
+        </IonNote>
+      ) : null}
+    </IonItem>
+  );
 }
 
 function UiNodeForm({
   node,
   props,
-  options
+  store,
+  options,
+  row
 }: {
   node: UiNode;
   props: Record<string, unknown>;
+  store: EntityFrameStore;
   options: UiNodeRenderOptions;
+  row?: RowContext;
 }) {
-  const fields = useMemo(() => readRecords(props.fields), [props.fields]);
-  const [draft, setDraft] = useState<Record<string, unknown>>(() => initialDraft(fields));
-
-  const submit = readRecord(props.submit);
-  const submitAction = {
-    id: readString(submit.id),
-    target: readString(submit.target, undefined),
-    params: readRecord(submit.params),
-    label: readString(submit.label, "Submit"),
-    disabled: readBoolean(submit.disabled)
-  };
+  const children = readChildren(node);
+  const initialDraft = useMemo(() => collectFormControlDefaults(children, store, options, row), [children, options, row, store]);
+  const [draft, setDraft] = useState<Record<string, unknown>>(() => initialDraft);
+  const submitAction = actionFromProps(props, "Submit");
   options.collectAction?.(submitAction, node);
 
   return (
     <form className="uinode-form" data-ui-node-id={node.id}>
-      <h3>{readString(props.title, "Form")}</h3>
-      <IonList>
-        {fields.map((field) => {
-          const id = readString(field.id);
-          return renderField(field, draft[id], (value) => {
-            setDraft((current) => ({ ...current, [id]: value }));
-          });
-        })}
-      </IonList>
+      {renderChildren(children, store, options, row, { draft, setDraft })}
       <IonButton
         data-action-id={submitAction.id}
         data-action-target={submitAction.target}
         disabled={submitAction.disabled}
         type="button"
         onClick={() => {
-          const values = Object.fromEntries(
-            fields.flatMap((field) => {
-              const id = readString(field.id);
-              const value = typedFormValue(field, draft[id]);
-              return typeof value === "undefined" ? [] : [[id, value]];
-            })
-          );
           options.dispatchAction?.(
             {
               ...submitAction,
               params: {
                 ...submitAction.params,
-                values
+                values: draft
               }
             },
             node
@@ -391,7 +403,8 @@ function renderNode(
   node: UiNode,
   store: EntityFrameStore,
   options: UiNodeRenderOptions,
-  row?: RowContext
+  row?: RowContext,
+  form?: FormRenderState
 ): ReactNode {
   const missing = missingCapabilities(node, options);
 
@@ -416,9 +429,12 @@ function renderNode(
   switch (node.primitive) {
     case "stack":
     case "section":
+    case "form_section":
       return (
         <section className={`uinode-${node.primitive}`} data-ui-node-id={node.id} aria-label={readString(props.label, undefined)} key={node.id}>
-          {renderChildren(readSlot(node), store, options, row)}
+          {readString(props.title) ? <h2>{readString(props.title)}</h2> : null}
+          {readString(props.description) ? <p>{readString(props.description)}</p> : null}
+          {renderChildren(readChildren(node), store, options, row, form)}
         </section>
       );
     case "inline":
@@ -453,7 +469,7 @@ function renderNode(
       return (
         <div className="uinode-empty-state" data-ui-node-id={node.id} key={node.id}>
           <h3>{readString(props.title, "Nothing to show")}</h3>
-          <p>{readString(props.body)}</p>
+          <p>{readString(props.body, readString(props.description))}</p>
         </div>
       );
     case "action": {
@@ -480,14 +496,40 @@ function renderNode(
         </IonButton>
       );
     }
+    case "button": {
+      const action = actionFromProps(props, readString(props.label, node.id));
+      options.collectAction?.(action, node);
+
+      return (
+        <IonButton
+          data-ui-node-id={node.id}
+          data-action-id={action.id}
+          data-action-target={action.target}
+          disabled={readBoolean(props.disabled) || action.disabled}
+          key={node.id}
+          onClick={() => options.dispatchAction?.(action, node)}
+        >
+          {readString(props.label, action.label)}
+        </IonButton>
+      );
+    }
     case "list": {
       const rows = readRecords(props.items);
       const itemTemplate = readSlot(node, "item");
+      const children = readChildren(node);
+
+      if (rows.length === 0 && children.length > 0) {
+        return (
+          <IonList className="uinode-list" data-ui-node-id={node.id} aria-label={readString(props.label, readString(props.aria_label, "List"))} key={node.id}>
+            {renderChildren(children, store, options, row)}
+          </IonList>
+        );
+      }
 
       if (rows.length === 0) {
         return (
           <div className="uinode-list" data-ui-node-id={node.id} key={node.id}>
-            {renderChildren(readSlot(node, "empty"), store, options, row)}
+          {renderChildren(readSlot(node, "empty"), store, options, row, form)}
           </div>
         );
       }
@@ -496,12 +538,24 @@ function renderNode(
         <IonList className="uinode-list" data-ui-node-id={node.id} aria-label={readString(props.label, "Entity list")} key={node.id}>
           {rows.map((item, index) => (
             <IonItem key={readString(item.id, `${node.id}-${index}`)}>
-              {renderChildren(itemTemplate, store, options, item)}
+              {renderChildren(itemTemplate, store, options, item, form)}
             </IonItem>
           ))}
         </IonList>
       );
     }
+    case "list_item":
+      return (
+        <IonItem data-ui-node-id={node.id} key={node.id}>
+          <IonLabel>
+            {renderChildren(readSlot(node, "title"), store, options, row, form)}
+            {renderChildren(readSlot(node, "subtitle"), store, options, row, form)}
+          </IonLabel>
+          <div className="uinode-list-item-meta" slot="end">
+            {renderChildren(readSlot(node, "meta"), store, options, row, form)}
+          </div>
+        </IonItem>
+      );
     case "table": {
       const columns = readRecords(props.columns);
       const rows = readRecords(props.rows);
@@ -528,10 +582,38 @@ function renderNode(
       );
     }
     case "form": {
-      return <UiNodeForm node={node} props={props} options={options} key={`${node.id}:${JSON.stringify(props.fields ?? [])}`} />;
+      return <UiNodeForm node={node} props={props} store={store} options={options} row={row} key={node.id} />;
     }
-    case "field":
-      return renderField({ id: node.id, ...props });
+    case "form_field": {
+      const schema = readRecord(props.schema);
+      const controlNode: UiNode = {
+        id: node.id,
+        primitive: readString(schema.kind, "text_input") === "text" ? "text_input" : readString(schema.kind, "text_input"),
+        props: {
+          ...schema,
+          value: props.value,
+          checked: props.checked,
+          selected: props.selected,
+          default: props.default,
+          disabled: props.disabled,
+          loading: props.loading,
+          error: props.error
+        }
+      };
+      return renderNode(controlNode, store, options, row, form);
+    }
+    case "text_input":
+    case "textarea":
+    case "checkbox":
+    case "select":
+      return renderCoreControl({
+        node,
+        props,
+        form,
+        optionNodes: readSlot(node, "options")
+      });
+    case "select_option":
+      return null;
     case "iframe": {
       const src = iframeSrc(props);
       if (!src) {
@@ -559,7 +641,7 @@ function renderNode(
       return readBoolean(props.open) ? (
         <div className="uinode-dialog" data-ui-node-id={node.id} role="dialog" aria-modal="false" aria-label={readString(props.title)} key={node.id}>
           <h3>{readString(props.title)}</h3>
-          {renderChildren(readSlot(node), store, options, row)}
+          {renderChildren(readSlot(node), store, options, row, form)}
         </div>
       ) : null;
     default:

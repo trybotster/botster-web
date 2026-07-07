@@ -81,7 +81,7 @@ export function createDogfoodRuntimeConfig(options: DogfoodRuntimeConfigOptions)
 
     return {
       mode: "real-hub",
-      statusText: "Connected to isolated real hub dogfood bridge",
+      statusText: "Connected to isolated real hub bridge",
       transport: createRealHubDogfoodTransport({ bridge }),
       terminalDescriptor: {
         sessionId: realHubDogfoodSessionId,

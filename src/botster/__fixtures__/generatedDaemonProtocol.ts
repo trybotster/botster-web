@@ -169,7 +169,7 @@ export const generatedPackageResponseFixture = {
           id: "dogfood-settings",
           kind: "settings",
           title: "botster-web Settings",
-          description: "Descriptor-backed settings surface for package launcher dogfood.",
+          description: "Descriptor-backed settings surface for package launcher validation.",
           order: 2,
           supports: ["render"]
         }

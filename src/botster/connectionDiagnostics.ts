@@ -199,7 +199,7 @@ export function bridgeUnavailableDiagnostic(error: unknown): ConnectionDiagnosti
   return {
     id: "bridge-unavailable",
     title: "Local hub bridge unavailable",
-    detail: errorMessage(error, "The local dogfood bridge did not answer the control request."),
+    detail: errorMessage(error, "The local hub bridge did not answer the control request."),
     severity: "danger",
     source: "bridge"
   };
@@ -209,7 +209,7 @@ export function streamDisconnectedDiagnostic(error: unknown): ConnectionDiagnost
   return {
     id: "stream-disconnected",
     title: "Control stream disconnected",
-    detail: errorMessage(error, "The local hub stream stopped before the dogfood surface finished loading."),
+    detail: errorMessage(error, "The local hub stream stopped before the surface finished loading."),
     severity: "warning",
     source: "stream"
   };

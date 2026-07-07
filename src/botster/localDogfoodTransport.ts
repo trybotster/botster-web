@@ -52,7 +52,7 @@ const initialEntityFrames: EntityFrame[] = [
     records: [
       {
         id: "session-local-1",
-        title: "Local dogfood session",
+        title: "Local validation session",
         status: "ready",
         target: "botster-web",
         last_result: "Waiting for action_request"
@@ -94,7 +94,7 @@ export const dogfoodUiTreeSnapshot: UiTreeSnapshot = {
   root: {
     id: "dogfood-root",
     primitive: "stack",
-    props: { label: "Local Botster web dogfood surface" },
+    props: { label: "Local Botster web surface" },
     slots: {
       children: [
         {
@@ -105,7 +105,7 @@ export const dogfoodUiTreeSnapshot: UiTreeSnapshot = {
               {
                 id: "session-heading",
                 primitive: "heading",
-                props: { level: 2, text: "Session spawn/attach dogfood" }
+                props: { level: 2, text: "Session spawn/attach" }
               },
               {
                 id: "session-copy",
@@ -166,15 +166,45 @@ export const dogfoodUiTreeSnapshot: UiTreeSnapshot = {
           id: "validation-form",
           primitive: "form",
           props: {
-            title: "Validation state",
-            submit: {
+            action: {
               id: "botster.session.rename",
               target: "session-local-1",
               label: "Submit invalid draft",
               params: { draft_id: "draft-1" }
             }
           },
-          bindings: [{ source: "entity", path: `/${draftFamily}/draft-1/fields`, prop: "fields" }]
+          slots: {
+            children: [
+              {
+                id: "validation-state",
+                primitive: "form_section",
+                props: { title: "Validation state" },
+                slots: {
+                  children: [
+                    {
+                      id: "session-name",
+                      primitive: "text_input",
+                      props: {
+                        name: "session_name",
+                        label: "Session name",
+                        value: "",
+                        error: "Session name is required"
+                      }
+                    },
+                    {
+                      id: "target",
+                      primitive: "text_input",
+                      props: {
+                        name: "target",
+                        label: "Target",
+                        value: "botster-web"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
         }
       ]
     }
@@ -204,7 +234,7 @@ const botsterWebPluginSnapshot: UiTreeSnapshot = {
               {
                 id: "botster-web-plugin-copy",
                 primitive: "text",
-                props: { text: "This plugin owns the web client dogfood surface and renderer diagnostics." }
+                props: { text: "This plugin owns the web client surface and renderer diagnostics." }
               }
             ]
           }
@@ -317,7 +347,7 @@ export function createLocalDogfoodTransport(options: LocalDogfoodTransportOption
               record: {
                 id: "session-local-1",
                 status: "running",
-                last_result: "action_request accepted by local dogfood adapter"
+                last_result: "action_request accepted by local validation adapter"
               }
             } satisfies EntityFrame
           });

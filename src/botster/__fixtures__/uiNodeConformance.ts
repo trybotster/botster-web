@@ -120,13 +120,23 @@ export const uiNodeConformanceSnapshot: UiTreeSnapshot = {
           id: "edit-form",
           primitive: "form",
           props: {
-            title: "Validation fixture",
-            fields: [
-              { id: "title", label: "Title", kind: "text_input", value: "Renderer registry", errors: ["Title already exists"] },
-              { id: "notes", label: "Notes", kind: "textarea", value: "Keep the renderer generic." },
-              { id: "urgent", label: "Urgent", kind: "checkbox", value: true }
-            ],
-            submit: { id: "botster.session.rename", label: "Save draft", target: "session:alpha" }
+            action: { id: "botster.session.rename", label: "Save draft", target: "session:alpha" }
+          },
+          slots: {
+            children: [
+              {
+                id: "edit-form-section",
+                primitive: "form_section",
+                props: { title: "Validation fixture" },
+                slots: {
+                  children: [
+                    { id: "title", primitive: "text_input", props: { name: "title", label: "Title", value: "Renderer registry", error: "Title already exists" } },
+                    { id: "notes", primitive: "textarea", props: { name: "notes", label: "Notes", value: "Keep the renderer generic." } },
+                    { id: "urgent", primitive: "checkbox", props: { name: "urgent", label: "Urgent", checked: true } }
+                  ]
+                }
+              }
+            ]
           }
         },
         {

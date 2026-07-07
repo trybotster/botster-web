@@ -1250,7 +1250,7 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
   root: {
     id: "real-hub-dogfood-root",
     primitive: "stack",
-    props: { label: "Real isolated hub dogfood surface" },
+    props: { label: "Real isolated hub surface" },
     slots: {
       children: [
         {
@@ -1261,13 +1261,13 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
               {
                 id: "real-hub-heading",
                 primitive: "heading",
-                props: { level: 2, text: "Isolated local hub dogfood" }
+                props: { level: 2, text: "Isolated local hub" }
               },
               {
                 id: "real-hub-copy",
                 primitive: "text",
                 props: {
-                  text: `Spawn creates ${realHubDogfoodSessionId}, runs the dogfood readiness command, and sends output to the terminal panel.`
+                  text: `Spawn creates ${realHubDogfoodSessionId}, runs the readiness command, and sends output to the terminal panel.`
                 }
               },
               {
@@ -1314,7 +1314,7 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
         {
           id: "real-hub-package-list",
           primitive: "list",
-          props: { label: "Installed packages" },
+          props: { label: "Installed" },
           bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items" }],
           slots: {
             item: [
@@ -1356,7 +1356,7 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
         {
           id: "real-hub-available-package-list",
           primitive: "list",
-          props: { label: "Available marketplace packages" },
+          props: { label: "Marketplace" },
           bindings: [{ source: "entity", path: `/${availablePackageFamily}`, prop: "items" }],
           slots: {
             item: [
@@ -1406,7 +1406,7 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
         {
           id: "real-hub-app-list",
           primitive: "list",
-          props: { label: "Installed apps" },
+          props: { label: "Installed app surfaces" },
           bindings: [{ source: "entity", path: `/${appFamily}`, prop: "items" }],
           slots: {
             item: [
@@ -1427,7 +1427,7 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
               {
                 id: "real-hub-apps-empty",
                 primitive: "empty_state",
-                props: { title: "No installed apps", body: "The daemon returned an empty installed app registry." }
+                props: { title: "No app surfaces", body: "The daemon returned an empty app surface registry." }
               }
             ]
           }
@@ -1493,10 +1493,79 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
                 id: "real-hub-package-configuration-form",
                 primitive: "form",
                 bindings: [
-                  { source: "entity", path: "@/configuration_title", prop: "title" },
-                  { source: "entity", path: "@/configuration_fields", prop: "fields" },
-                  { source: "entity", path: "@/configuration_submit", prop: "submit" }
-                ]
+                  { source: "entity", path: "@/configuration_submit", prop: "action" }
+                ],
+                slots: {
+                  children: [
+                    {
+                      id: "real-hub-package-configuration-section",
+                      primitive: "form_section",
+                      bindings: [{ source: "entity", path: "@/configuration_title", prop: "title" }],
+                      slots: {
+                        children: [
+                          {
+                            id: "real-hub-remote-browser-rendezvous-enabled",
+                            primitive: "checkbox",
+                            props: {
+                              name: "remote_browser_rendezvous_enabled",
+                              label: "Remote browser access",
+                              description:
+                                "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
+                              checked: false
+                            }
+                          },
+                          {
+                            id: "real-hub-package-webhook-endpoint",
+                            primitive: "text_input",
+                            props: {
+                              name: "endpoint",
+                              label: "Webhook endpoint",
+                              required: true,
+                              value: "",
+                              error: "Required configuration is missing."
+                            }
+                          },
+                          {
+                            id: "real-hub-package-api-token",
+                            primitive: "text_input",
+                            props: {
+                              name: "api_token",
+                              label: "API token",
+                              required: true,
+                              value: "",
+                              placeholder: "Existing secret is saved",
+                              description: "Existing secret is saved"
+                            }
+                          },
+                          {
+                            id: "real-hub-package-mode",
+                            primitive: "select",
+                            props: {
+                              name: "mode",
+                              label: "Mode",
+                              value: "read"
+                            },
+                            slots: {
+                              options: [
+                                { id: "real-hub-package-mode-read", primitive: "select_option", props: { value: "read", label: "Read" } },
+                                { id: "real-hub-package-mode-write", primitive: "select_option", props: { value: "write", label: "Write" } }
+                              ]
+                            }
+                          },
+                          {
+                            id: "real-hub-package-enabled",
+                            primitive: "checkbox",
+                            props: {
+                              name: "enabled",
+                              label: "Enabled",
+                              checked: true
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
               }
             ],
             empty: [
@@ -1562,15 +1631,45 @@ export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
           id: "real-hub-validation-form",
           primitive: "form",
           props: {
-            title: "Diagnostic action failure",
-            submit: {
+            action: {
               id: "botster.session.rename",
               target: "missing-real-hub-session",
               label: "Run missing-session diagnostic",
               params: { mode: "real_hub_dogfood_error" }
             }
           },
-          bindings: [{ source: "entity", path: `/${draftFamily}/draft-1/fields`, prop: "fields" }]
+          slots: {
+            children: [
+              {
+                id: "real-hub-diagnostic-action-failure",
+                primitive: "form_section",
+                props: { title: "Diagnostic action failure" },
+                slots: {
+                  children: [
+                    {
+                      id: "real-hub-diagnostic-session-name",
+                      primitive: "text_input",
+                      props: {
+                        name: "session_name",
+                        label: "Session name",
+                        value: "",
+                        error: "Session name is required"
+                      }
+                    },
+                    {
+                      id: "real-hub-diagnostic-target",
+                      primitive: "text_input",
+                      props: {
+                        name: "target",
+                        label: "Target",
+                        value: "botster-web"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
         },
         {
           id: "real-hub-diagnostic-action-status",

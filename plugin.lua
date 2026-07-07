@@ -3,7 +3,7 @@ local function surface_panel(settings)
     type = "panel",
     id = settings and "botster-web-settings-panel" or "botster-web-dogfood-panel",
     props = {
-      title = settings and "botster-web Settings" or "botster-web Dogfood",
+      title = settings and "botster-web Settings" or "botster-web",
     },
     children = {
       {
@@ -11,8 +11,8 @@ local function surface_panel(settings)
         id = settings and "botster-web-settings-body" or "botster-web-dogfood-body",
         props = {
           text = settings
-            and "Deterministic settings surface rendered by the botster-web dogfood package."
-            or "Deterministic app surface rendered by the botster-web dogfood package.",
+            and "Deterministic settings surface rendered by the botster-web validation package."
+            or "Deterministic app surface rendered by the botster-web validation package.",
         },
       },
     },
@@ -34,7 +34,7 @@ return botster.register({
       kind = "surface_route",
       descriptor_id = "dogfood-app",
       descriptor = {
-        title = "botster-web Dogfood",
+        title = "botster-web",
         surface_id = "dogfood-app",
       },
       call = dogfood_surface,
