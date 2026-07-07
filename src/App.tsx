@@ -143,6 +143,12 @@ function appRouteFromPathname(pathname: string): AppRoute {
   return { view: "dashboard" };
 }
 
+function supportsHubRoutePath(routePath: string | undefined): boolean {
+  if (!routePath) return false;
+  const route = appRouteFromPathname(routePath);
+  return route.view === "apps" && Boolean(route.packageName);
+}
+
 function appViewFromRoute(route: AppRoute): AppView {
   return route.view;
 }
@@ -177,6 +183,65 @@ function pushAppRouteUrl(route: AppRoute): void {
   if (nextUrl !== currentUrl) {
     window.history.pushState({ botsterRoute: route }, "", nextUrl);
   }
+}
+
+export type PackageNavigationShortcut = {
+  id: string;
+  label: string;
+  targetKind: string;
+  openable: boolean;
+  diagnostic?: string;
+};
+
+export function packageNavigationShortcut(entry: Record<string, unknown>): PackageNavigationShortcut {
+  const targetKind = stringValue(entry.target_kind, "");
+  const blocked = entry.enabled === false || entry.blocked === true;
+  const blockedDiagnostic = firstString(entry.diagnostics_summary, ...(Array.isArray(entry.diagnostics) ? entry.diagnostics : []))
+    ?? "Unavailable from hub navigation registry";
+  const openablePluginSurface =
+    targetKind === "plugin_surface" &&
+    (supportsHubRoutePath(firstString(entry.route_path)) || Boolean(firstString(entry.package_name) && firstString(entry.surface_id)));
+
+  return {
+    id: String(entry.id),
+    label: stringValue(entry.label, String(entry.id)),
+    targetKind,
+    openable: !blocked && openablePluginSurface,
+    diagnostic: blocked
+      ? blockedDiagnostic
+      : openablePluginSurface
+        ? undefined
+        : `Unsupported navigation target: ${targetKind || "unknown"}`
+  };
+}
+
+export function PackageNavigationShortcutButton({
+  shortcut,
+  onOpen
+}: {
+  shortcut: PackageNavigationShortcut;
+  onOpen: () => void;
+}) {
+  const disabled = !shortcut.openable;
+  return (
+    <IonMenuToggle autoHide={false}>
+      <button
+        type="button"
+        className={disabled ? "nav-item app-shortcut disabled" : "nav-item app-shortcut"}
+        aria-disabled={disabled ? "true" : undefined}
+        title={shortcut.diagnostic}
+        onClick={() => {
+          if (shortcut.openable) onOpen();
+        }}
+      >
+        <IonIcon icon={cubeOutline} aria-hidden="true" />
+        <span className="nav-item-copy">
+          <span>{shortcut.label}</span>
+          {shortcut.diagnostic ? <small>{shortcut.diagnostic}</small> : null}
+        </span>
+      </button>
+    </IonMenuToggle>
+  );
 }
 
 const loadingSnapshot: UiTreeSnapshot = {
@@ -547,8 +612,8 @@ export default function App() {
     pushAppRouteUrl(route);
   }, []);
   const navigateToHubRoutePath = useCallback((routePath: string) => {
+    if (!supportsHubRoutePath(routePath)) return false;
     const route = appRouteFromPathname(routePath);
-    if (route.view !== "apps" || !route.packageName) return false;
     const url = new URL(window.location.href);
     url.pathname = routePath;
     setActiveRoute(route);
@@ -1022,6 +1087,9 @@ export default function App() {
     if (surfaceId) navigateToPackageSettings(packageName, surfaceId);
   }, [navigateToPackageSettings]);
   const openPackageNavigation = useCallback((entry: Record<string, unknown>) => {
+    const targetKind = stringValue(entry.target_kind, "");
+    if (targetKind !== "plugin_surface") return;
+
     const routePath = firstString(entry.route_path);
     if (routePath && navigateToHubRoutePath(routePath)) {
       return;
@@ -1033,9 +1101,7 @@ export default function App() {
       navigateToPluginSurface(packageName, surfaceId);
     }
   }, [navigateToHubRoutePath, navigateToPluginSurface]);
-  const packageNavigationShortcuts = packageNavigation
-    .filter((entry) => firstString(entry.surface_id) && stringValue(entry.target_kind, "") === "plugin_surface")
-    .slice(0, 8);
+  const packageNavigationShortcuts = packageNavigation;
   const sessions = runtimeClient.entities.list("botster-web.session");
   const attachableDogfoodSession = sessions.find((session) => session.id === realHubDogfoodSessionId && isAttachableSession(session));
   const selectedRealHubSession = selectedRealHubTerminalSessionId
@@ -1162,24 +1228,13 @@ export default function App() {
                   <p className="sidebar-empty">No plugin navigation</p>
                 ) : null}
                 {packageNavigationShortcuts.map((entry) => {
-                  const disabled = entry.enabled === false || entry.blocked === true;
-                  const label = stringValue(entry.label, String(entry.id));
-                  const diagnostic = firstString(entry.diagnostics_summary, ...(Array.isArray(entry.diagnostics) ? entry.diagnostics : []));
+                  const shortcut = packageNavigationShortcut(entry);
                   return (
-                    <IonMenuToggle autoHide={false} key={String(entry.id)}>
-                      <button
-                        type="button"
-                        className={disabled ? "nav-item app-shortcut disabled" : "nav-item app-shortcut"}
-                        aria-disabled={disabled ? "true" : undefined}
-                        title={disabled ? diagnostic : undefined}
-                        onClick={() => {
-                          if (!disabled) openPackageNavigation(entry);
-                        }}
-                      >
-                        <IonIcon icon={cubeOutline} aria-hidden="true" />
-                        <span>{label}</span>
-                      </button>
-                    </IonMenuToggle>
+                    <PackageNavigationShortcutButton
+                      key={String(entry.id)}
+                      shortcut={shortcut}
+                      onOpen={() => openPackageNavigation(entry)}
+                    />
                   );
                 })}
               </div>
