@@ -113,8 +113,15 @@ assert.match(app, /runtimeClient\.entities\.pull/);
 assert.match(app, /type AppRoute =/);
 assert.match(app, /const appViewPaths: Record<AppView, string>/);
 assert.match(app, /function appRouteFromPathname\(pathname: string\): AppRoute/);
+assert.match(app, /normalizedPath\.startsWith\("\/packages\/"\)/);
+assert.match(app, /routeKind === "surfaces"/);
+assert.match(app, /routeKind === "settings"/);
 assert.match(app, /function appRoutePath\(route: AppRoute\): string/);
 assert.match(app, /function pushAppRouteUrl\(route: AppRoute\): void/);
+assert.match(app, /navigateToHubRoutePath/);
+assert.match(app, /botster-web\.package_navigation/);
+assert.match(app, /openPackageNavigation/);
+assert.doesNotMatch(app, /installedApps\.slice\(0, 5\)/);
 assert.match(app, /window\.history\.pushState\(\{ botsterRoute: route \}/);
 assert.match(app, /window\.addEventListener\("popstate", syncViewFromLocation\)/);
 assert.match(app, /lastPluginRouteRenderKey/);
@@ -207,6 +214,7 @@ assert.doesNotMatch(realHubDaemonDto, /export interface DaemonPackage\s*\{/);
 assert.doesNotMatch(realHubDaemonDto, /export type DaemonEvent\s*=/);
 assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client Rust serde DTOs/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_apps" \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "list_package_navigation" \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_packages" \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_available_packages"; registry_path: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "install_package_registry_entry"; registry_path: string; entry_id: string \}/);
@@ -240,8 +248,11 @@ assert.match(generatedDaemonProtocol, /ui_tree_snapshot\?: DaemonUiTreeSnapshot 
 assert.match(generatedDaemonProtocol, /export interface DaemonUiTreeSnapshot/);
 assert.match(generatedDaemonProtocol, /export interface DaemonPackage/);
 assert.match(generatedDaemonProtocol, /apps\?: DaemonApp\[\];/);
+assert.match(generatedDaemonProtocol, /package_navigation\?: DaemonPackageNavigationEntry\[\];/);
 assert.match(generatedDaemonProtocol, /export interface DaemonApp/);
 assert.match(generatedDaemonProtocol, /export interface DaemonAppLaunchTarget/);
+assert.match(generatedDaemonProtocol, /export interface DaemonPackageNavigationEntry/);
+assert.match(generatedDaemonProtocol, /export interface DaemonPackageNavigationSource/);
 assert.match(generatedDaemonProtocol, /local_url\?: string \| null;/);
 assert.match(generatedDaemonProtocol, /package_name: string/);
 assert.match(generatedDaemonProtocol, /requested_capabilities: DaemonCapability\[\]/);
@@ -269,7 +280,9 @@ assert.match(realHubDogfoodTransport, /daemonResponseFrames/);
 assert.match(realHubDogfoodTransport, /realHubDogfoodUiTreeSnapshot/);
 assert.match(realHubDogfoodTransport, /const packageFamily = "botster-web\.package"/);
 assert.match(realHubDogfoodTransport, /const appFamily = "botster-web\.app"/);
+assert.match(realHubDogfoodTransport, /const packageNavigationFamily = "botster-web\.package_navigation"/);
 assert.match(realHubDogfoodTransport, /bridge\.request\(\{ type: "list_apps" \}\)/);
+assert.match(realHubDogfoodTransport, /bridge\.request\(\{ type: "list_package_navigation" \}\)/);
 assert.match(realHubDogfoodTransport, /const availablePackageFamily = "botster-web\.available_package"/);
 assert.match(realHubDogfoodTransport, /bridge\.request\(\{ type: "list_packages" \}\)/);
 assert.match(realHubDogfoodTransport, /type: "list_available_packages"/);
@@ -392,6 +405,10 @@ assert.match(actions, /class CorrelatedActionDispatcher/);
 assert.match(actions, /botster\.session\.select/);
 assert.doesNotMatch(actions, /click|submit|change/);
 assert.match(uiNodes, /dispatchAction\?: \(action: ActionBinding, node: UiNode\) => void/);
+assert.doesNotMatch(app, /dangerouslySetInnerHTML|srcDoc/);
+assert.doesNotMatch(client, /dangerouslySetInnerHTML|srcDoc/);
+assert.doesNotMatch(localDogfoodTransport, /dangerouslySetInnerHTML|srcDoc/);
+assert.doesNotMatch(realHubDogfoodTransport, /dangerouslySetInnerHTML|srcDoc/);
 assert.match(terminal, /renderer: "restty"/);
 assert.match(terminal, /class DefaultTerminalViewBridge/);
 assert.match(terminal, /TerminalViewMount/);
@@ -495,9 +512,9 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.0");
+assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.1");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.0");
+assert.equal(hubTestSupportMetadata.package_version, "0.1.1");
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(verifyPackageAssets().ok, true);
 assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
@@ -886,6 +903,7 @@ const { DefaultTerminalViewBridge } = requireRuntime("./botster/terminal.js");
 const {
   generatedDaemonRequestFixtures,
   generatedAppResponseFixture,
+  generatedPackageNavigationResponseFixture,
   generatedPackageResponseFixture
 } = requireRuntime("./botster/__fixtures__/generatedDaemonProtocol.js");
 const {
@@ -907,6 +925,7 @@ const {
 
 assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), [
   "list_apps",
+  "list_package_navigation",
   "list_packages",
   "list_available_packages",
   "inspect_available_package",
@@ -971,6 +990,14 @@ assert.equal(
     .payload.records[0].id,
   "project-pipelines"
 );
+const packageNavigationSnapshot = daemonResponseFrames(generatedPackageNavigationResponseFixture, 12)
+  .find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.package_navigation");
+assert.equal(packageNavigationSnapshot.payload.records.length, 2);
+assert.equal(packageNavigationSnapshot.payload.records[0].id, "project-pipelines:home");
+assert.equal(packageNavigationSnapshot.payload.records[0].route_path, "/packages/project-pipelines/surfaces/home");
+assert.equal(packageNavigationSnapshot.payload.records[0].launch_action.id, "botster.package.surface.render");
+assert.equal(packageNavigationSnapshot.payload.records[1].blocked, true);
+assert.equal(packageNavigationSnapshot.payload.records[1].launch_action, undefined);
 const optionalDaemonAppFrames = daemonResponseFrames(
   {
     kind: "apps",
@@ -3985,6 +4012,73 @@ try {
   assert.match(markup, /data-unsupported-primitive="timeline"/);
   assert.equal(collectedActions.some(({ action }) => action.id === "botster.session.select"), true);
   assert.equal(fixtureProvenance.mirroredFor, "ticket_1780941197_299829");
+  assert.equal(ionicUiNodeRendererRegistry.supports("iframe"), true);
+
+  const iframeMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "iframe.test",
+        version: "test",
+        root: {
+          id: "preview-frame",
+          primitive: "iframe",
+          props: {
+            src: "/packages/iframe.plugin/assets/preview.html",
+            title: "Preview",
+            html: "<script>window.__raw = true</script>",
+            srcdoc: "<p>raw</p>",
+            sandbox: ["allow-forms", "allow-scripts", "allow-top-navigation"]
+          }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.match(iframeMarkup, /<iframe/);
+  assert.match(iframeMarkup, /src="\/packages\/iframe\.plugin\/assets\/preview\.html"/);
+  assert.match(iframeMarkup, /title="Preview"/);
+  assert.match(iframeMarkup, /sandbox="allow-forms allow-scripts"/);
+  assert.doesNotMatch(iframeMarkup, /srcdoc|__raw|allow-top-navigation|dangerouslySetInnerHTML/);
+
+  const invalidIframeMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "iframe.invalid",
+        version: "test",
+        root: {
+          id: "bad-frame",
+          primitive: "iframe",
+          props: { src: "javascript:alert(1)", title: "Bad" }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.match(invalidIframeMarkup, /Iframe source unavailable/);
+  assert.doesNotMatch(invalidIframeMarkup, /javascript:alert/);
+
+  const protocolRelativeIframeMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "iframe.protocol-relative",
+        version: "test",
+        root: {
+          id: "protocol-relative-frame",
+          primitive: "iframe",
+          props: { src: "//example.invalid/preview.html", title: "Protocol relative" }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.match(protocolRelativeIframeMarkup, /Iframe source unavailable/);
+  assert.doesNotMatch(protocolRelativeIframeMarkup, /example\.invalid/);
 
   const dogfoodStore = createInMemoryEntityFrameStore();
   dogfoodStore.apply({

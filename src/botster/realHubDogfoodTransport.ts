@@ -14,6 +14,7 @@ import type {
   DaemonPackageActionRequest,
   DaemonPackageActionState,
   DaemonPackageConfiguration,
+  DaemonPackageNavigationEntry,
   DaemonPackageRouteDescriptor,
   DaemonPackageRunnableEntrypoint,
   DaemonPackageSurfaceDescriptor,
@@ -31,6 +32,7 @@ const dogfoodSurface = "botster-web.dogfood.session";
 const sessionFamily = "botster-web.session";
 const draftFamily = "botster-web.session_draft";
 const appFamily = "botster-web.app";
+const packageNavigationFamily = "botster-web.package_navigation";
 const packageFamily = "botster-web.package";
 const availablePackageFamily = "botster-web.available_package";
 const statusFamily = hubStatusFamily;
@@ -182,6 +184,8 @@ export function createRealHubDogfoodTransport({
           emitResponse(await bridge.request({ type: "list_sessions" }));
         } else if (request.family === appFamily) {
           emitResponse(await bridge.request({ type: "list_apps" }));
+        } else if (request.family === packageNavigationFamily) {
+          emitResponse(await bridge.request({ type: "list_package_navigation" }));
         } else if (request.family === packageFamily) {
           emitResponse(await bridge.request({ type: "list_packages" }));
         } else if (request.family === availablePackageFamily) {
@@ -255,6 +259,18 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
     });
   }
 
+  if (responseOwnsPackageNavigation(response)) {
+    frames.push({
+      kind: "entity_snapshot",
+      payload: {
+        operation: "entity_snapshot",
+        family: packageNavigationFamily,
+        sequence,
+        records: (response.package_navigation ?? []).map(packageNavigationRecord)
+      } satisfies EntityFrame
+    });
+  }
+
   if (responseOwnsPackages(response) && Array.isArray(response.packages)) {
     frames.push({
       kind: "entity_snapshot",
@@ -305,6 +321,10 @@ function responseOwnsSessions(response: DaemonResponse): boolean {
 
 function responseOwnsApps(response: DaemonResponse): boolean {
   return response.kind === "apps";
+}
+
+function responseOwnsPackageNavigation(response: DaemonResponse): boolean {
+  return response.kind === "package_navigation";
 }
 
 function responseOwnsPackages(response: DaemonResponse): boolean {
@@ -579,6 +599,46 @@ function availablePackageRecord(packageRecord: DaemonAvailablePackage) {
       : `${packageRecord.compatibility.result}: ${packageRecord.compatibility.diagnostics.join("; ")}`,
     package_actions: actions,
     package_action_summary: actionListSummary(actions, "No marketplace actions returned")
+  };
+}
+
+function packageNavigationRecord(entry: DaemonPackageNavigationEntry) {
+  const diagnostics = (entry.diagnostics ?? []).map((diagnostic) => `${diagnostic.kind}: ${diagnostic.message}`);
+  const surfaceId = entry.source.surface_id ?? entry.target.surface_id ?? "";
+  const entrypointId = entry.source.entrypoint_id ?? entry.target.entrypoint_id ?? "";
+  const unavailable = !entry.enabled || entry.blocked;
+  const renderablePluginSurface = entry.target.kind === "plugin_surface" && surfaceId.length > 0;
+  return {
+    id: `${entry.package_name}:${entry.item_id}`,
+    package_name: entry.package_name,
+    item_id: entry.item_id,
+    label: entry.label,
+    title: entry.label,
+    icon: entry.icon ?? "",
+    description: entry.description ?? "",
+    route_id: entry.route_id,
+    route_path: entry.route_path,
+    target_kind: entry.target.kind,
+    source_kind: entry.source.kind,
+    surface_id: surfaceId,
+    entrypoint_id: entrypointId,
+    enabled: entry.enabled,
+    blocked: entry.blocked,
+    diagnostics,
+    diagnostics_summary: diagnostics.length > 0 ? diagnostics.join("; ") : unavailable ? "Unavailable from hub navigation registry" : "",
+    launch_action: unavailable || !renderablePluginSurface
+      ? undefined
+      : {
+          id: "botster.package.surface.render",
+          target: entry.package_name,
+          label: entry.label,
+          params: {
+            package_name: entry.package_name,
+            surface_id: surfaceId,
+            route_id: entry.route_id,
+            source_kind: entry.source.kind
+          }
+        } satisfies ActionBinding
   };
 }
 

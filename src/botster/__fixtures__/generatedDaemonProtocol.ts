@@ -2,6 +2,7 @@ import type { DaemonRequest, DaemonResponse } from "../realHubDaemonDto";
 
 export const generatedDaemonRequestFixtures = [
   { type: "list_apps" },
+  { type: "list_package_navigation" },
   { type: "list_packages" },
   { type: "list_available_packages", registry_path: "/tmp/botster-registry" },
   { type: "inspect_available_package", registry_path: "/tmp/botster-registry", entry_id: "github-provider" },
@@ -252,6 +253,49 @@ export const generatedPackageResponseFixture = {
   coordination: null,
   error: null,
   diagnostics: []
+} satisfies DaemonResponse;
+
+export const generatedPackageNavigationResponseFixture = {
+  kind: "package_navigation",
+  status: null,
+  sessions: [],
+  package_navigation: [
+    {
+      package_name: "project-pipelines",
+      item_id: "home",
+      label: "Pipelines",
+      icon: "workflow",
+      description: "Project Pipelines workbench",
+      route_id: "surface:home",
+      route_path: "/packages/project-pipelines/surfaces/home",
+      target: { kind: "plugin_surface", surface_id: "home" },
+      source: { kind: "surface", surface_id: "home" },
+      enabled: true,
+      blocked: false,
+      diagnostics: []
+    },
+    {
+      package_name: "project-pipelines",
+      item_id: "blocked",
+      label: "Blocked Pipelines",
+      route_id: "surface:blocked",
+      route_path: "/packages/project-pipelines/surfaces/blocked",
+      target: { kind: "plugin_surface", surface_id: "blocked" },
+      source: { kind: "surface", surface_id: "blocked" },
+      enabled: false,
+      blocked: true,
+      diagnostics: [{ kind: "package_not_enabled", message: "package is disabled" }]
+    }
+  ],
+  packages: [],
+  package_decision: null,
+  lifecycle: [],
+  plugin_tools: [],
+  plugin_tool_result: null,
+  events: [],
+  cleanup: null,
+  coordination: null,
+  error: null
 } satisfies DaemonResponse;
 
 export const generatedAppResponseFixture = {

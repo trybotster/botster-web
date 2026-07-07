@@ -33,6 +33,7 @@ const supportedPrimitives = new Set([
   "field",
   "form",
   "heading",
+  "iframe",
   "inline",
   "list",
   "row",
@@ -48,6 +49,10 @@ function readString(value: unknown, fallback = ""): string {
 
 function readBoolean(value: unknown, fallback = false): boolean {
   return typeof value === "boolean" ? value : fallback;
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function readRecord(value: unknown): Record<string, unknown> {
@@ -239,6 +244,36 @@ function renderField(
       ))}
     </IonItem>
   );
+}
+
+const iframeSandboxTokens = new Set([
+  "allow-downloads",
+  "allow-forms",
+  "allow-modals",
+  "allow-popups",
+  "allow-popups-to-escape-sandbox",
+  "allow-presentation",
+  "allow-same-origin",
+  "allow-scripts"
+]);
+
+function iframeSandboxValue(props: Record<string, unknown>): string {
+  return readStringArray(props.sandbox)
+    .filter((token) => iframeSandboxTokens.has(token))
+    .join(" ");
+}
+
+function iframeSrc(props: Record<string, unknown>): string | undefined {
+  const src = readString(props.src).trim();
+  if (!src) return undefined;
+  if (src.startsWith("/") && !src.startsWith("//")) return src;
+
+  try {
+    const url = new URL(src);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function draftValue(field: Record<string, unknown>): unknown {
@@ -497,6 +532,29 @@ function renderNode(
     }
     case "field":
       return renderField({ id: node.id, ...props });
+    case "iframe": {
+      const src = iframeSrc(props);
+      if (!src) {
+        return (
+          <div className="uinode-fallback" data-ui-node-id={node.id} data-unsupported-primitive="iframe-src" role="note" key={node.id}>
+            Iframe source unavailable
+          </div>
+        );
+      }
+
+      return (
+        <iframe
+          className="uinode-iframe"
+          data-ui-node-id={node.id}
+          key={node.id}
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          sandbox={iframeSandboxValue(props)}
+          src={src}
+          title={readString(props.title, node.id)}
+        />
+      );
+    }
     case "dialog":
       return readBoolean(props.open) ? (
         <div className="uinode-dialog" data-ui-node-id={node.id} role="dialog" aria-modal="false" aria-label={readString(props.title)} key={node.id}>

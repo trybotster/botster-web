@@ -71,6 +71,13 @@ body {
   color: #ffffff;
 }
 
+.nav-item.disabled,
+.nav-item.disabled:hover {
+  cursor: default;
+  color: #6f7785;
+  background: transparent;
+}
+
 .sidebar-section {
   margin-top: 12px;
   padding: 0 6px;
@@ -88,6 +95,12 @@ body {
 
 .app-shortcut {
   color: #aeb6c4;
+}
+
+.sidebar-empty {
+  margin: 6px 9px 0;
+  color: #7d8797;
+  font-size: 12px;
 }
 
 .app-header ion-toolbar {
@@ -693,6 +706,14 @@ body {
   padding: 14px;
   border: 1px solid #d8dee7;
   border-radius: 6px;
+}
+
+.uinode-iframe {
+  width: 100%;
+  min-height: 360px;
+  border: 1px solid #d8dee7;
+  border-radius: 6px;
+  background: #ffffff;
 }
 
 .uinode-field.invalid {

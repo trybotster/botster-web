@@ -416,7 +416,8 @@ async function loadHubTestSupport() {
         [
           "live harness contract matrix mode requires the declared @trybotster/hub-test-support devDependency.",
           "Run npm install so the artifact package is present, or set BOTSTER_PLUGIN_CONTRACT_MATRIX_PACKAGE_PATH for a local override."
-        ].join("\n")
+        ].join("\n"),
+        { cause: error }
       );
     }
     throw error;
