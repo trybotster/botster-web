@@ -2,15 +2,25 @@ import {
   IonBadge,
   IonButton,
   IonButtons,
+  IonCard,
+  IonCardContent,
+  IonCardHeader,
+  IonCardSubtitle,
+  IonCardTitle,
   IonCheckbox,
+  IonCol,
+  IonGrid,
   IonInput,
   IonItem,
   IonLabel,
   IonList,
   IonNote,
+  IonRow,
   IonSelect,
   IonSelectOption,
-  IonTextarea
+  IonTextarea,
+  IonTitle,
+  IonToolbar
 } from "@ionic/react";
 import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 
@@ -42,15 +52,20 @@ const supportedPrimitives = new Set([
   "inline",
   "list",
   "list_item",
+  "metric",
+  "metric_grid",
+  "panel",
   "row",
   "section",
   "select",
   "select_option",
   "stack",
+  "status_badge",
   "table",
   "text",
   "text_input",
-  "textarea"
+  "textarea",
+  "toolbar"
 ]);
 
 function readString(value: unknown, fallback = ""): string {
@@ -75,6 +90,61 @@ function readRecords(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value)
     ? value.filter((item): item is Record<string, unknown> => item !== null && typeof item === "object" && !Array.isArray(item))
     : [];
+}
+
+function readTableColumns(value: unknown): Array<{ key: string; label: string }> {
+  return Array.isArray(value)
+    ? value
+        .map((column) => {
+          if (typeof column === "string") {
+            return { key: column, label: column };
+          }
+
+          const record = readRecord(column);
+          const key = readString(record.key, readString(record.id));
+          if (!key) {
+            return undefined;
+          }
+
+          return { key, label: readString(record.label, key) };
+        })
+        .filter((column): column is { key: string; label: string } => Boolean(column))
+    : [];
+}
+
+function uiNodeFromRecord(value: unknown): UiNode | undefined {
+  const record = readRecord(value);
+  const primitive = readString(record.primitive, readString(record.type));
+  const id = readString(record.id);
+  if (!primitive || !id) {
+    return undefined;
+  }
+
+  const children = Array.isArray(record.children)
+    ? record.children.map(uiNodeFromRecord).filter((child): child is UiNode => Boolean(child))
+    : [];
+  const slots = Object.entries(readRecord(record.slots)).reduce<Record<string, UiNode[]>>((result, [name, slotValue]) => {
+    if (!Array.isArray(slotValue)) {
+      return result;
+    }
+
+    const slotChildren = slotValue.map(uiNodeFromRecord).filter((child): child is UiNode => Boolean(child));
+    if (slotChildren.length > 0) {
+      result[name] = slotChildren;
+    }
+    return result;
+  }, {});
+
+  if (children.length > 0) {
+    slots.children = [...(slots.children ?? []), ...children];
+  }
+
+  return {
+    id,
+    primitive,
+    props: readRecord(record.props),
+    ...(Object.keys(slots).length > 0 ? { slots } : {})
+  };
 }
 
 function hasSlot(node: UiNode, name: string): boolean {
@@ -554,6 +624,24 @@ function renderNode(
           {renderChildren(readChildren(node), store, options, row, form)}
         </section>
       );
+    case "panel":
+      return (
+        <IonCard
+          className={`uinode-panel density-${readString(props.density, "regular")} variant-${readString(props.variant, "plain")}`}
+          data-ui-node-id={node.id}
+          key={node.id}
+        >
+          {readString(props.title) || readString(props.description) ? (
+            <IonCardHeader>
+              {readString(props.title) ? <IonCardTitle>{readString(props.title)}</IonCardTitle> : null}
+              {readString(props.description) ? <IonCardSubtitle>{readString(props.description)}</IonCardSubtitle> : null}
+            </IonCardHeader>
+          ) : null}
+          <IonCardContent>
+            {renderChildren(readChildren(node), store, options, row, form)}
+          </IonCardContent>
+        </IonCard>
+      );
     case "inline":
     case "row":
       return (
@@ -581,6 +669,66 @@ function renderNode(
         <IonBadge color={ionicTone(props)} data-ui-node-id={node.id} key={node.id}>
           {readString(props.text)}
         </IonBadge>
+      );
+    case "status_badge":
+      return (
+        <IonBadge
+          className="uinode-status-badge"
+          color={ionicTone(props)}
+          data-ui-node-id={node.id}
+          data-status={readString(props.status, undefined)}
+          key={node.id}
+        >
+          {readString(props.label, readString(props.status))}
+        </IonBadge>
+      );
+    case "toolbar":
+      return (
+        <IonToolbar
+          className={`uinode-toolbar density-${readString(props.density, "regular")} variant-${readString(props.variant, "plain")}`}
+          data-ui-node-id={node.id}
+          key={node.id}
+        >
+          {readString(props.label) ? <IonTitle>{readString(props.label)}</IonTitle> : null}
+          {hasSlot(node, "actions") ? <IonButtons slot="end">{renderChildren(readSlot(node, "actions"), store, options, row, form)}</IonButtons> : null}
+          {renderChildren(readChildren(node), store, options, row, form)}
+        </IonToolbar>
+      );
+    case "metric_grid": {
+      const children = readChildren(node);
+      const compact = readBoolean(props.compact) || readString(props.density) === "compact";
+
+      return (
+        <IonGrid
+          className={`uinode-metric-grid density-${readString(props.density, "regular")} variant-${readString(props.variant, "plain")}`}
+          data-ui-node-id={node.id}
+          fixed={false}
+          key={node.id}
+        >
+          <IonRow>
+            {children.map((child) => (
+              <IonCol key={child.id} size="12" sizeMd={compact ? "4" : "6"} sizeLg={compact ? "3" : "4"}>
+                {renderNode(child, store, options, row, form)}
+              </IonCol>
+            ))}
+          </IonRow>
+        </IonGrid>
+      );
+    }
+    case "metric":
+      return (
+        <IonCard
+          className={`uinode-metric tone-${ionicTone(props, "medium")}`}
+          data-ui-node-id={node.id}
+          data-status={readString(props.status, undefined)}
+          key={node.id}
+        >
+          <IonCardContent>
+            <p className="uinode-metric-label">{readString(props.label)}</p>
+            <strong className="uinode-metric-value">{readString(props.value)}</strong>
+            {readString(props.caption) ? <p className="uinode-metric-caption">{readString(props.caption)}</p> : null}
+          </IonCardContent>
+        </IonCard>
       );
     case "empty_state":
       return (
@@ -683,23 +831,34 @@ function renderNode(
       );
     }
     case "table": {
-      const columns = readRecords(props.columns);
+      const columns = readTableColumns(props.columns);
       const rows = readRecords(props.rows);
+      const emptyState = uiNodeFromRecord(props.empty_state);
+
+      if (rows.length === 0) {
+        return (
+          <div className="uinode-table-empty" data-ui-node-id={node.id} key={node.id}>
+            {emptyState
+              ? renderNode(emptyState, store, options, row, form)
+              : <div className="uinode-empty-state" role="status"><div className="uinode-empty-state-copy"><h3>No rows</h3></div></div>}
+          </div>
+        );
+      }
 
       return (
         <div className="uinode-table" data-ui-node-id={node.id} key={node.id} role="table">
           <div className="uinode-table-row heading" role="row">
             {columns.map((column) => (
-              <div role="columnheader" key={readString(column.key)}>
-                {readString(column.label, readString(column.key))}
+              <div role="columnheader" key={column.key}>
+                {column.label}
               </div>
             ))}
           </div>
           {rows.map((tableRow, index) => (
             <div className="uinode-table-row" role="row" key={readString(tableRow.id, `${node.id}-${index}`)}>
               {columns.map((column) => (
-                <div role="cell" key={readString(column.key)}>
-                  {String(tableRow[readString(column.key)] ?? "")}
+                <div role="cell" key={column.key}>
+                  {String(readRecord(tableRow.cells)[column.key] ?? tableRow[column.key] ?? "")}
                 </div>
               ))}
             </div>

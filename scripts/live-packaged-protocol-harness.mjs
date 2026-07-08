@@ -69,8 +69,11 @@ try {
     bridgeProcess = startBridgeProcess();
     await waitForHttpOk(`${bridgeUrl}/health`, () => bridgeProcess?.exitCode !== null ? `bridge exited before readiness (code=${bridgeProcess.exitCode})` : undefined);
     await waitForHtmlShell(`${bridgeUrl}/?dogfood=real-hub`);
-    await prepareProjectPipelinesPackage();
-    await prepareContractMatrixPackageThroughBridge();
+    if (contractMatrixMode) {
+      await prepareContractMatrixPackageThroughBridge();
+    } else {
+      await prepareProjectPipelinesPackage();
+    }
   }
 
   browser = await chromium.launch({
@@ -528,13 +531,16 @@ async function openAppsView(page) {
 }
 
 async function openDiagnosticsView(page) {
-  await page.getByRole("button", { name: "Diagnostics", exact: true }).click();
+  await page.getByLabel("Botster workbench").getByRole("button", { name: "Diagnostics", exact: true }).click();
   await page.getByTestId("diagnostics-view").waitFor();
 }
 
+function installedList(page) {
+  return page.locator("[aria-label='Installed']");
+}
+
 async function openFirstPartyUiAppSurface(page, mode) {
-  const installedAppsList = page.locator("[aria-label='Installed apps']");
-  const installedPackagesList = page.locator("[aria-label='Installed packages']");
+  const installed = installedList(page);
   const target = mode === "webrtc" && workspacesPackagePath
     ? {
         packageName: "botster-workspaces",
@@ -548,15 +554,10 @@ async function openFirstPartyUiAppSurface(page, mode) {
         visiblePattern: mode === "webrtc" ? /botster[- ]web|Dogfood/i : /project[- ]pipelines|botster[- ]workspaces|workspaces/i,
         packageNamePattern: mode === "webrtc" ? "^botster-web$" : "^(project-pipelines|botster-workspaces)$"
       };
-  let candidate = installedAppsList.getByText(target.visiblePattern).first();
-  const appRowCount = await candidate.count();
-  if (appRowCount === 0) {
-    candidate = installedPackagesList.getByText(target.visiblePattern).first();
-  }
+  const candidate = installed.getByText(target.visiblePattern).first();
   const foundSurface = await candidate.waitFor({ timeout: 15_000 }).then(() => true).catch(async (error) => {
-    const installedAppsText = await installedAppsList.innerText().catch(() => "");
-    const installedPackagesText = await installedPackagesList.innerText().catch(() => "");
-    const message = `no first-party UI surface row was visible; installed apps=${JSON.stringify(installedAppsText)} installed packages=${JSON.stringify(installedPackagesText)}: ${error.message}`;
+    const installedText = await installed.innerText().catch(() => "");
+    const message = `no first-party UI surface row was visible; installed=${JSON.stringify(installedText)}: ${error.message}`;
     if (process.env.BOTSTER_LIVE_ALLOW_SURFACE_SKIP === "1") {
       console.log(`skipping first-party app surface proof; ${message}`);
       return false;
@@ -579,8 +580,8 @@ async function openFirstPartyUiAppSurface(page, mode) {
 async function exercisePluginContractMatrix(page) {
   await assertContractMatrixPackageLoaded(page);
   await openContractAppFromApps(page);
-  await assertContractSurfaceRoute(page, "contract.app", "UiNode payload delivered through plugin_surface_render.");
-  await assertContractSurfaceRouteReloadAndDirectLoad(page, "contract.app", "UiNode payload delivered through plugin_surface_render.");
+  await assertContractSurfaceRoute(page, "contract.app", "plugin_surface_render");
+  await assertContractSurfaceRouteReloadAndDirectLoad(page, "contract.app", "plugin_surface_render");
 
   await navigateToContractSurface(page, "contract.empty");
   await assertContractSurfaceRoute(page, "contract.empty", "No fixture rows are available.");
@@ -625,39 +626,41 @@ async function assertContractMatrixPackageLoaded(page) {
     { packageName: contractMatrixPackageName },
     { timeout: 45_000 }
   ).catch(async (error) => {
-    const installedPackagesText = await page.locator("[aria-label='Installed packages']").innerText().catch(() => "");
-    const installedAppsText = await page.locator("[aria-label='Installed apps']").innerText().catch(() => "");
+    const installedText = await installedList(page).innerText().catch(() => "");
     throw new Error(
-      `contract matrix package/app descriptors were not visible; installed packages=${JSON.stringify(installedPackagesText)} installed apps=${JSON.stringify(installedAppsText)}: ${error.message}`
+      `contract matrix package/app descriptors were not visible; installed=${JSON.stringify(installedText)}: ${error.message}`
     );
   });
 }
 
 async function openContractAppFromApps(page) {
-  const installedAppsList = page.locator("[aria-label='Installed apps']");
-  const installedPackagesList = page.locator("[aria-label='Installed packages']");
-  let row = installedAppsList.getByText(/Contract App|plugin contract matrix|botster\.plugin-contract-matrix/i).first();
-  if (await row.count() === 0) {
-    row = installedPackagesList.getByText(/botster\.plugin-contract-matrix|plugin contract matrix/i).first();
-  }
+  const installed = installedList(page);
+  const row = installed.getByText(/Contract App|plugin contract matrix|botster\.plugin-contract-matrix/i).first();
   await row.waitFor({ timeout: 15_000 }).catch(async (error) => {
-    const installedAppsText = await installedAppsList.innerText().catch(() => "");
-    const installedPackagesText = await installedPackagesList.innerText().catch(() => "");
+    const installedText = await installed.innerText().catch(() => "");
     throw new Error(
-      `timed out waiting for contract matrix app/package row; installed apps=${JSON.stringify(installedAppsText)} installed packages=${JSON.stringify(installedPackagesText)}: ${error.message}`
+      `timed out waiting for contract matrix app/package row; installed=${JSON.stringify(installedText)}: ${error.message}`
     );
   });
   await row.click();
 }
 
+function contractSurfaceRoutePath(surfaceId) {
+  return `/packages/${contractMatrixPackageName}/surfaces/${surfaceId}`;
+}
+
+function escapedRoutePathPattern(routePath) {
+  return routePath.replaceAll(".", "\\.").replaceAll("/", "\\/");
+}
+
 async function navigateToContractSurface(page, surfaceId) {
-  await page.goto(withDogfoodMode(new URL(`/apps/${contractMatrixPackageName}/${surfaceId}`, appUrl)), {
+  await page.goto(withDogfoodMode(new URL(contractSurfaceRoutePath(surfaceId), appUrl)), {
     waitUntil: "domcontentloaded"
   });
 }
 
 async function assertContractSurfaceRoute(page, surfaceId, visibleText) {
-  await page.waitForURL(new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/${surfaceId.replaceAll(".", "\\.")}`), { timeout: 15_000 });
+  await page.waitForURL(new RegExp(escapedRoutePathPattern(contractSurfaceRoutePath(surfaceId))), { timeout: 15_000 });
   await waitForHarnessEvent(
     page,
     { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: surfaceId },
@@ -672,10 +675,10 @@ async function assertContractSurfaceRoute(page, surfaceId, visibleText) {
 }
 
 async function assertContractSurfaceRouteReloadAndDirectLoad(page, surfaceId, visibleText) {
-  const routePath = `/apps/${contractMatrixPackageName}/${surfaceId}`;
+  const routePath = contractSurfaceRoutePath(surfaceId);
   const routeUrl = withDogfoodMode(new URL(routePath, appUrl));
 
-  await page.waitForURL(new RegExp(`${routePath.replaceAll(".", "\\.").replaceAll("/", "\\/")}`), { timeout: 15_000 });
+  await page.waitForURL(new RegExp(escapedRoutePathPattern(routePath)), { timeout: 15_000 });
   await page.reload({ waitUntil: "domcontentloaded" });
   await assertContractSurfaceRoute(page, surfaceId, visibleText);
 
@@ -731,7 +734,7 @@ async function waitForValidatedPluginSurfaceSnapshot(page, surfaceId) {
 }
 
 async function assertContractBlockedSurface(page) {
-  await page.waitForURL(new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/contract\\.blocked`), { timeout: 15_000 });
+  await page.waitForURL(new RegExp(escapedRoutePathPattern(contractSurfaceRoutePath("contract.blocked"))), { timeout: 15_000 });
   await waitForHarnessEvent(
     page,
     { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: "contract.blocked" },
@@ -824,7 +827,7 @@ async function exerciseContractMatrixSettings(page) {
 
 async function exerciseContractMatrixActions(page) {
   await navigateToContractSurface(page, "contract.app");
-  await assertContractSurfaceRoute(page, "contract.app", "UiNode payload delivered through plugin_surface_render.");
+  await assertContractSurfaceRoute(page, "contract.app", "plugin_surface_render");
   await page.getByRole("button", { name: "Run contract action" }).click();
   await waitForHarnessEvent(
     page,
@@ -1053,16 +1056,16 @@ async function pagePackageHasConfigurationFields(page, packageName, fieldIds) {
 
 async function openPackageSettings(page, packageName) {
   await openAppsView(page);
-  const installedPackagesList = page.locator("[aria-label='Installed packages']");
+  const installed = installedList(page);
   const packageLabel = packageName.replace(/[-_]+/g, " ");
-  const settingsButton = installedPackagesList.getByRole("button", {
+  const settingsButton = installed.getByRole("button", {
     name: `Settings for ${packageLabel}`,
     exact: true
   });
   await settingsButton.waitFor({ timeout: 15_000 }).catch(async (error) => {
-    const installedPackagesText = await installedPackagesList.innerText().catch(() => "");
+    const installedText = await installed.innerText().catch(() => "");
     throw new Error(
-      `timed out waiting for ${packageName} settings button; installed packages=${JSON.stringify(installedPackagesText)}: ${error.message}`
+      `timed out waiting for ${packageName} settings button; installed=${JSON.stringify(installedText)}: ${error.message}`
     );
   });
   await settingsButton.click();

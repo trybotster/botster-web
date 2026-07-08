@@ -433,36 +433,52 @@ function validatedPluginSurfaceSnapshotNode(value: unknown, packageName: string,
   if (!rawType || !id) return undefined;
 
   const props = { ...readRecord(record.props) };
-  const primitive = rawType === "panel" ? "section" : rawType === "button" ? "action" : rawType;
-  const actionId = readString(props.action);
-  if (primitive === "action" && actionId) {
+  const primitive = rawType;
+  const actionRecord = readRecord(props.action);
+  const actionId = readString(props.action) ?? readString(actionRecord.id);
+  if ((primitive === "button" || primitive === "action") && actionId) {
+    const actionTarget = readString(actionRecord.target);
     props.action = {
       id: actionId,
-      label: readString(props.label) ?? actionId,
+      label: readString(actionRecord.label) ?? readString(props.label) ?? actionId,
+      ...(actionTarget ? { target: actionTarget } : {}),
       params: {
+        ...readRecord(actionRecord.params),
         package_name: packageName,
         surface_id: surfaceId,
         action_id: actionId
       }
     };
   }
-  if (primitive === "section" && props.title && !props.label) {
+  if ((primitive === "panel" || primitive === "section") && props.title && !props.label) {
     props.label = props.title;
   }
 
-  const slotChildren = readRecord(record.slots).children;
+  const rawSlots = readRecord(record.slots);
+  const slots = Object.entries(rawSlots).reduce<Record<string, UiTreeSnapshot["root"][]>>((result, [name, slotValue]) => {
+    if (!Array.isArray(slotValue)) return result;
+
+    const slotNodes = slotValue
+      .map((child) => validatedPluginSurfaceSnapshotNode(child, packageName, surfaceId))
+      .filter((child): child is UiTreeSnapshot["root"] => Boolean(child));
+    if (slotNodes.length > 0) {
+      result[name] = slotNodes;
+    }
+    return result;
+  }, {});
   const rawChildren = Array.isArray(record.children)
     ? record.children
-    : Array.isArray(slotChildren)
-      ? slotChildren
-      : [];
+    : [];
   const children = rawChildren.map((child) => validatedPluginSurfaceSnapshotNode(child, packageName, surfaceId)).filter((child): child is UiTreeSnapshot["root"] => Boolean(child));
+  if (children.length > 0) {
+    slots.children = [...(slots.children ?? []), ...children];
+  }
 
   return {
     id,
     primitive,
     props,
-    ...(children.length > 0 ? { slots: { children } } : {})
+    ...(Object.keys(slots).length > 0 ? { slots } : {})
   };
 }
 

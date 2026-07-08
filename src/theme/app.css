@@ -202,6 +202,12 @@ body {
   border-radius: 0;
 }
 
+.plugin-surface-page .uinode-panel {
+  margin: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
 .plugin-surface-page .uinode-list ion-item {
   --background: transparent;
 }
@@ -683,6 +689,19 @@ body {
   box-shadow: var(--app-shadow);
 }
 
+.uinode-panel {
+  margin: 0;
+  border: 1px solid var(--app-border-color);
+  border-radius: 8px;
+  background: var(--app-surface-color);
+  box-shadow: var(--app-shadow);
+}
+
+.uinode-panel.density-compact ion-card-content,
+.uinode-panel.density-compact ion-card-header {
+  padding-inline: 12px;
+}
+
 .uinode-form-section {
   display: grid;
   gap: var(--uinode-gap, 12px);
@@ -775,6 +794,60 @@ body {
   gap: 4px;
 }
 
+.uinode-toolbar {
+  --background: transparent;
+  --border-color: var(--app-border-subtle-color);
+  --min-height: 44px;
+  border: 1px solid var(--app-border-subtle-color);
+  border-radius: 6px;
+}
+
+.uinode-toolbar.density-compact {
+  --min-height: 38px;
+}
+
+.uinode-status-badge {
+  width: fit-content;
+}
+
+.uinode-metric-grid {
+  width: 100%;
+  padding: 0;
+}
+
+.uinode-metric {
+  height: 100%;
+  margin: 0;
+  border: 1px solid var(--app-border-subtle-color);
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.uinode-metric-label,
+.uinode-metric-caption {
+  margin: 0;
+  color: var(--app-text-muted-color);
+}
+
+.uinode-metric-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.uinode-metric-value {
+  display: block;
+  margin-top: 6px;
+  color: var(--ion-text-color);
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+.uinode-metric-caption {
+  margin-top: 6px;
+  font-size: 13px;
+}
+
 .uinode-table {
   display: grid;
   overflow-x: auto;
@@ -799,6 +872,10 @@ body {
   background: var(--app-control-surface-color);
   color: var(--ion-text-color);
   font-weight: 700;
+}
+
+.uinode-table-empty {
+  min-width: 0;
 }
 
 .uinode-form {

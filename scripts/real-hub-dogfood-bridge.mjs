@@ -244,7 +244,7 @@ async function serveStaticUi(request, response) {
     return;
   }
 
-  if (!url.pathname.startsWith("/apps/") && hasFileExtension(url.pathname)) {
+  if (!isSpaRoutePath(url.pathname) && hasFileExtension(url.pathname)) {
     writeJson(response, 404, { error: "not_found" });
     return;
   }
@@ -302,6 +302,10 @@ function safeDistPath(pathname, rawPathname = pathname) {
 
 function hasFileExtension(pathname) {
   return extname(new URL(pathname, `http://${host}:${port}`).pathname) !== "";
+}
+
+function isSpaRoutePath(pathname) {
+  return pathname.startsWith("/apps/") || pathname.startsWith("/packages/");
 }
 
 function injectPackageRuntimeMarker(html) {
