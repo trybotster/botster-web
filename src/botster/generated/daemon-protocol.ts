@@ -56,6 +56,16 @@ export type DaemonRequest =
   | { type: "resolve_session_template"; template_id: string; request: DaemonSessionTemplateRequest }
   | { type: "spawn_session_template"; template_id: string; session_id: string; request: DaemonSessionTemplateRequest }
   | { type: "read_session_context"; session_id: string; context_id?: string | null; key?: string | null }
+  | { type: "list_spawn_targets" }
+  | { type: "show_spawn_target"; target_id: string }
+  | { type: "create_spawn_target"; target_id?: string | null; label?: string | null; root: string; enabled?: boolean; kind?: string | null; metadata?: Record<string, string> }
+  | { type: "update_spawn_target"; target_id: string; label?: string | null; root?: string | null; enabled?: boolean | null; kind?: string | null; metadata?: Record<string, string> | null }
+  | { type: "delete_spawn_target"; target_id: string }
+  | { type: "validate_spawn_target"; target_id: string }
+  | { type: "list_worktrees" }
+  | { type: "show_worktree"; worktree_id: string }
+  | { type: "create_worktree"; worktree_id?: string | null; target_id: string; label?: string | null; path: string; metadata?: Record<string, string> }
+  | { type: "delete_worktree"; worktree_id: string }
   | { type: "list_apps" }
   | { type: "resolve_app_launch"; package_name: string; entrypoint_id: string }
   | { type: "resolve_package_route"; package_name: string; route_id: string }
@@ -96,6 +106,9 @@ export interface DaemonResponse {
   session_templates?: DaemonSessionTemplate[];
   resolved_session_template?: DaemonResolvedSessionTemplate | null;
   session_context?: DaemonSessionContext | null;
+  spawn_targets?: DaemonSpawnTarget[];
+  spawn_target_validation?: DaemonSpawnTargetValidation | null;
+  worktrees?: DaemonWorktree[];
   apps?: DaemonApp[];
   resolved_app_launch?: DaemonResolvedAppLaunch | null;
   resolved_package_route?: DaemonPackageRouteDescriptor | null;
@@ -132,6 +145,17 @@ export interface DaemonUiTreeSnapshot {
   body: JsonValue;
 }
 
+export interface DaemonWorktreeLifecycleEvent {
+  event: string;
+  worktree_id?: string | null;
+  target_id?: string | null;
+  status?: string | null;
+  label?: string | null;
+  display_path?: string | null;
+  failure_kind?: string | null;
+  message?: string | null;
+}
+
 export type DaemonResponseKind =
   | "status"
   | "sessions"
@@ -140,6 +164,9 @@ export type DaemonResponseKind =
   | "session_templates"
   | "resolved_session_template"
   | "session_context"
+  | "spawn_targets"
+  | "spawn_target_validation"
+  | "worktrees"
   | "apps"
   | "resolved_app_launch"
   | "resolved_package_route"
@@ -172,6 +199,37 @@ export interface DaemonCoordination {
   next_cursor: number | null;
   ack: DaemonEnvelopeAck | null;
   notify: DaemonNotify | null;
+}
+
+export interface DaemonSpawnTarget {
+  target_id: string;
+  label: string;
+  root: string;
+  enabled: boolean;
+  kind: string;
+  metadata?: Record<string, string>;
+}
+
+export interface DaemonSpawnTargetValidation {
+  target_id: string;
+  ok: boolean;
+  status: string;
+}
+
+export interface DaemonWorktree {
+  worktree_id: string;
+  target_id: string;
+  label: string;
+  path: string;
+  status: string;
+  git?: DaemonWorktreeGitMetadata | null;
+  metadata?: Record<string, string>;
+}
+
+export interface DaemonWorktreeGitMetadata {
+  repository_root: string;
+  branch?: string | null;
+  head?: string | null;
 }
 
 export interface DaemonIdentity {
@@ -628,4 +686,5 @@ export type DaemonEvent =
   | { type: "scrollback"; session_id: string; subscription_id: string; data: string; bytes: number }
   | { type: "process_exit"; session_id: string; subscription_id: string; code: number | null }
   | { type: "attach_state"; session_id: string; subscription_id: string; state: string }
-  | { type: "runtime_observation"; kind: string };
+  | { type: "runtime_observation"; kind: string }
+  | { type: "worktree_lifecycle"; event: DaemonWorktreeLifecycleEvent };

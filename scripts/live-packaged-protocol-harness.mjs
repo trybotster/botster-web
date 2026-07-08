@@ -69,8 +69,11 @@ try {
     bridgeProcess = startBridgeProcess();
     await waitForHttpOk(`${bridgeUrl}/health`, () => bridgeProcess?.exitCode !== null ? `bridge exited before readiness (code=${bridgeProcess.exitCode})` : undefined);
     await waitForHtmlShell(`${bridgeUrl}/?dogfood=real-hub`);
-    await prepareProjectPipelinesPackage();
-    await prepareContractMatrixPackageThroughBridge();
+    if (contractMatrixMode) {
+      await prepareContractMatrixPackageThroughBridge();
+    } else {
+      await prepareProjectPipelinesPackage();
+    }
   }
 
   browser = await chromium.launch({
@@ -528,7 +531,7 @@ async function openAppsView(page) {
 }
 
 async function openDiagnosticsView(page) {
-  await page.getByRole("button", { name: "Diagnostics", exact: true }).click();
+  await page.getByLabel("Botster workbench").getByRole("button", { name: "Diagnostics", exact: true }).click();
   await page.getByTestId("diagnostics-view").waitFor();
 }
 

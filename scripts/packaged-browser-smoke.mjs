@@ -323,7 +323,7 @@ async function waitForTerminalCanvas(page) {
 }
 
 async function openDiagnosticsView(page) {
-  await page.getByRole("button", { name: "Diagnostics" }).click();
+  await page.getByLabel("Botster workbench").getByRole("button", { name: "Diagnostics" }).click();
   await page.getByTestId("diagnostics-view").waitFor();
 }
 

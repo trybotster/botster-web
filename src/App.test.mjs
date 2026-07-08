@@ -8,8 +8,10 @@ import { createServer as createNetServer } from "node:net";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
+  applicationPrimitivesFixturePath,
   materializePluginContractMatrixFixture,
   metadata as hubTestSupportMetadata,
+  pluginContractMatrixFixturePath,
   verifyPackageAssets
 } from "@trybotster/hub-test-support";
 import ts from "typescript";
@@ -531,10 +533,23 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.1");
+assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.2");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.1");
+assert.equal(hubTestSupportMetadata.package_version, "0.1.2");
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
+assert.equal(hubTestSupportMetadata.application_primitives.surface_id, "contract.app");
+assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, [
+  "button",
+  "empty_state",
+  "metric",
+  "metric_grid",
+  "panel",
+  "section",
+  "status_badge",
+  "table",
+  "toolbar"
+]);
+assert.equal(applicationPrimitivesFixturePath(), pluginContractMatrixFixturePath());
 assert.equal(verifyPackageAssets().ok, true);
 assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
 assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping daemon protocol drift check|check out \.\.\/botster-hub/);
@@ -3754,7 +3769,7 @@ try {
     version: "plugin-surface-hub-validated-v1",
     root: {
       id: "dogfood-app-root",
-      primitive: "section",
+      primitive: "panel",
       props: { title: "botster-web App", label: "botster-web App" },
       slots: {
         children: [
@@ -3765,7 +3780,7 @@ try {
           },
           {
             id: "dogfood-app-action",
-            primitive: "action",
+            primitive: "button",
             props: {
               label: "Run deterministic action",
               action: {
@@ -3843,6 +3858,147 @@ try {
       snapshot: validatedDogfoodSnapshot
     }
   );
+  const applicationPrimitiveSurface = { packageName: "botster.plugin-contract-matrix", surfaceId: "contract.app" };
+  const applicationPrimitiveHubBody = {
+    id: "contract-app-panel",
+    type: "panel",
+    props: { title: "Plugin Contract Matrix", density: "regular", variant: "plain" },
+    children: [
+      {
+        id: "contract-app-toolbar",
+        type: "toolbar",
+        props: { label: "Contract actions", density: "compact", variant: "plain" },
+        slots: {
+          actions: [
+            {
+              id: "contract-app-action",
+              type: "button",
+              props: {
+                label: "Run contract action",
+                action: { id: "contract.action" }
+              }
+            }
+          ]
+        }
+      },
+      {
+        id: "contract-app-metrics",
+        type: "metric_grid",
+        props: { density: "compact", variant: "subtle", compact: true },
+        children: [
+          {
+            id: "contract-app-render-metric",
+            type: "metric",
+            props: {
+              label: "Render path",
+              value: "validated",
+              caption: "plugin_surface_render",
+              tone: "success",
+              status: "healthy"
+            }
+          }
+        ]
+      },
+      {
+        id: "contract-app-section",
+        type: "section",
+        props: {
+          title: "Application primitives",
+          description: "Renderer-neutral UiNode application surface."
+        },
+        children: [
+          {
+            id: "contract-app-status",
+            type: "status_badge",
+            props: { label: "Validated", status: "supported", tone: "success" }
+          },
+          {
+            id: "contract-app-table",
+            type: "table",
+            props: {
+              columns: [{ id: "primitive", label: "Primitive" }, "status"],
+              rows: [
+                {
+                  id: "contract-app-row-toolbar",
+                  cells: {
+                    primitive: "toolbar",
+                    status: "supported"
+                  }
+                }
+              ],
+              empty_state: {
+                id: "contract-app-table-empty",
+                type: "empty_state",
+                props: {
+                  title: "No primitives",
+                  description: "The fixture did not publish primitive rows."
+                }
+              }
+            }
+          },
+          {
+            id: "contract-app-empty-state",
+            type: "empty_state",
+            props: {
+              title: "No pending contracts",
+              description: "All required application primitives validated."
+            }
+          }
+        ]
+      }
+    ]
+  };
+  const applicationPrimitiveState = renderedPluginSurfaceState(
+    {
+      accepted: true,
+      result: {
+        kind: "plugin_surface",
+        plugin_surface: {
+          package_name: applicationPrimitiveSurface.packageName,
+          surface_id: applicationPrimitiveSurface.surfaceId,
+          body: "UiNode payload delivered through plugin_surface_render.",
+          ui_tree_snapshot: {
+            package_name: applicationPrimitiveSurface.packageName,
+            surface_id: applicationPrimitiveSurface.surfaceId,
+            body: applicationPrimitiveHubBody
+          }
+        }
+      }
+    },
+    "Contract App",
+    applicationPrimitiveSurface,
+    "botster.plugin-contract-matrix/contract.app"
+  );
+  const applicationPrimitiveMarkup = renderPluginSurfaceRoutePage({
+    ...applicationPrimitiveState,
+    title: "Contract App"
+  });
+  assert.equal(applicationPrimitiveState.snapshot.root.primitive, "panel");
+  assert.equal(applicationPrimitiveState.snapshot.root.slots.children[0].primitive, "toolbar");
+  assert.equal(applicationPrimitiveState.snapshot.root.slots.children[0].slots.actions[0].primitive, "button");
+  assert.deepEqual(applicationPrimitiveState.snapshot.root.slots.children[0].slots.actions[0].props.action.params, {
+    package_name: "botster.plugin-contract-matrix",
+    surface_id: "contract.app",
+    action_id: "contract.action"
+  });
+  assert.match(applicationPrimitiveMarkup, /<ion-card/);
+  assert.match(applicationPrimitiveMarkup, /<ion-toolbar/);
+  assert.match(applicationPrimitiveMarkup, /<ion-grid/);
+  assert.match(applicationPrimitiveMarkup, /<ion-row/);
+  assert.match(applicationPrimitiveMarkup, /<ion-col/);
+  assert.match(applicationPrimitiveMarkup, /class="uinode-metric/);
+  assert.match(applicationPrimitiveMarkup, /Render path/);
+  assert.match(applicationPrimitiveMarkup, /validated/);
+  assert.match(applicationPrimitiveMarkup, /plugin_surface_render/);
+  assert.match(applicationPrimitiveMarkup, /data-ui-node-id="contract-app-status"/);
+  assert.match(applicationPrimitiveMarkup, /Validated/);
+  assert.match(applicationPrimitiveMarkup, /role="table"/);
+  assert.match(applicationPrimitiveMarkup, /Primitive/);
+  assert.match(applicationPrimitiveMarkup, /toolbar/);
+  assert.match(applicationPrimitiveMarkup, /supported/);
+  assert.match(applicationPrimitiveMarkup, /No pending contracts/);
+  assert.match(applicationPrimitiveMarkup, /data-action-id="contract\.action"/);
+  assert.doesNotMatch(applicationPrimitiveMarkup, /Unsupported primitive/);
   assert.deepEqual(
     renderedPluginSurfaceState(
       {
@@ -4348,6 +4504,11 @@ try {
   );
 
   assert.equal(ionicUiNodeRendererRegistry.supports("stack"), true);
+  assert.equal(ionicUiNodeRendererRegistry.supports("panel"), true);
+  assert.equal(ionicUiNodeRendererRegistry.supports("toolbar"), true);
+  assert.equal(ionicUiNodeRendererRegistry.supports("metric_grid"), true);
+  assert.equal(ionicUiNodeRendererRegistry.supports("metric"), true);
+  assert.equal(ionicUiNodeRendererRegistry.supports("status_badge"), true);
   assert.equal(ionicUiNodeRendererRegistry.supports("timeline"), false);
   assert.match(markup, /Universal primitives/);
   assert.match(markup, /Renderer registry/);
