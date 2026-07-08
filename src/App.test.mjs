@@ -56,6 +56,7 @@ const [
   architecture,
   readme,
   css,
+  variablesCss,
   vendorReadme
 ] = await Promise.all([
   readFile(new URL("./main.tsx", import.meta.url), "utf8"),
@@ -90,6 +91,7 @@ const [
   readFile(new URL("../docs/architecture.md", import.meta.url), "utf8"),
   readFile(new URL("../README.md", import.meta.url), "utf8"),
   readFile(new URL("./theme/app.css", import.meta.url), "utf8"),
+  readFile(new URL("./theme/variables.css", import.meta.url), "utf8"),
   readFile(new URL("./vendor/restty/README.md", import.meta.url), "utf8")
 ]);
 
@@ -319,6 +321,7 @@ assert.match(realHubDogfoodTransport, /daemonRequestFromDescriptor/);
 assert.match(realHubDogfoodTransport, /type: "enable_package"/);
 assert.match(realHubDogfoodTransport, /type: "disable_package"/);
 assert.match(realHubDogfoodTransport, /type: "remove_package"/);
+assert.match(realHubDogfoodTransport, /type: "reload_package"/);
 assert.match(realHubDogfoodTransport, /type: "start_package_entrypoint"/);
 assert.match(realHubDogfoodTransport, /type: "stop_package_entrypoint"/);
 assert.match(realHubDogfoodTransport, /type: "restart_package_entrypoint"/);
@@ -326,7 +329,7 @@ assert.match(realHubDogfoodTransport, /type: "package_entrypoint_status"/);
 assert.doesNotMatch(realHubDogfoodTransport, /function packageManagementRequest|function packageEntrypointRequest|unsupportedPackageAction/);
 assert.match(realHubDogfoodTransport, /family: packageFamily/);
 assert.match(realHubDogfoodTransport, /family: availablePackageFamily/);
-assert.doesNotMatch(realHubDogfoodTransport, /["']view_surface["']|["']settings_surface["']|UpdatePackage|update_package|reload_package|type: "restart_hub"/);
+assert.doesNotMatch(realHubDogfoodTransport, /["']view_surface["']|["']settings_surface["']|UpdatePackage|update_package|type: "restart_hub"/);
 assert.match(realHubTerminalDataPlane, /streamTerminal/);
 assert.match(realHubTerminalDataPlane, /type: "send_input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
@@ -812,6 +815,10 @@ assert.doesNotMatch(desktopCss, /\.workspace-grid\s*\{[^}]*grid-template-columns
 assert.doesNotMatch(desktopCss, /\.dashboard-layout\s*\{[^}]*grid-template-columns/);
 assert.doesNotMatch(desktopCss, /\.active-work-grid\s*\{/);
 assert.doesNotMatch(desktopCss, /\.app-grid\s*\{[^}]*grid-template-columns/);
+assert.match(variablesCss, /@media\s*\(prefers-color-scheme:\s*dark\)/);
+assert.match(variablesCss, /--ion-background-color:\s*#0f1218/);
+assert.match(variablesCss, /--ion-item-background:\s*#171b23/);
+assert.match(variablesCss, /--app-surface-color:\s*#171b23/);
 
 const pluginWorkspaceShellRule = extractTopLevelCssRule(desktopCss, ".workspace-shell.plugin-workspace-shell");
 assert.match(pluginWorkspaceShellRule, /width:\s*100%/);
@@ -819,16 +826,27 @@ assert.match(pluginWorkspaceShellRule, /padding:\s*0/);
 const pluginSurfaceSectionRule = extractTopLevelCssRule(desktopCss, ".plugin-surface-page .uinode-section");
 assert.match(pluginSurfaceSectionRule, /border:\s*0/);
 assert.match(pluginSurfaceSectionRule, /background:\s*transparent/);
+const uiNodeSectionRule = extractTopLevelCssRule(desktopCss, ".uinode-section");
+assert.match(uiNodeSectionRule, /border:\s*1px\s+solid\s+var\(--app-border-color\)/);
+assert.match(uiNodeSectionRule, /border-radius:\s*8px/);
+assert.match(uiNodeSectionRule, /background:\s*var\(--app-surface-color\)/);
+const uiNodeInlineRule = extractTopLevelCssRule(desktopCss, ".uinode-inline");
+assert.match(uiNodeInlineRule, /flex-wrap:\s*wrap/);
+const uiNodeEmptyStateRule = extractTopLevelCssRule(desktopCss, ".uinode-empty-state");
+assert.match(uiNodeEmptyStateRule, /place-items:\s*center/);
+assert.match(uiNodeEmptyStateRule, /text-align:\s*center/);
 
 const terminalPanelRule = extractTopLevelCssRule(desktopCss, ".terminal-panel");
 assert.match(terminalPanelRule, /max-height:\s*calc\(100vh\s*-\s*210px\)/);
 assert.match(terminalPanelRule, /overflow:\s*hidden/);
+assert.match(terminalPanelRule, /background:\s*var\(--app-surface-color\)/);
 
 const localHubMainRule = extractTopLevelCssRule(desktopCss, ".local-hub-main");
 assert.match(localHubMainRule, /display:\s*grid/);
 
 const diagnosticPanelRule = extractTopLevelCssRule(desktopCss, ".diagnostic-panel");
 assert.match(diagnosticPanelRule, /padding:\s*14px/);
+assert.match(diagnosticPanelRule, /background:\s*var\(--app-surface-color\)/);
 
 const localHubStatusGridRule = extractTopLevelCssRule(desktopCss, ".local-hub-status-grid");
 assert.match(localHubStatusGridRule, /display:\s*grid/);
@@ -836,6 +854,7 @@ assert.match(localHubStatusGridRule, /grid-template-columns:\s*repeat\(3,\s*minm
 
 const localHubPrimaryActionRule = extractTopLevelCssRule(desktopCss, ".local-hub-primary-action");
 assert.match(localHubPrimaryActionRule, /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/);
+assert.match(localHubPrimaryActionRule, /background:\s*var\(--app-accent-surface-color\)/);
 
 const mobileCss = extractCssAtRule(css, "@media (max-width: 860px)");
 assert.doesNotMatch(mobileCss, /\.workspace-grid\s*\{[^}]*grid-template-columns/);
@@ -1013,6 +1032,22 @@ assert.equal(
     .find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.package")
     .payload.records[0].id,
   "project-pipelines"
+);
+assert.equal(
+  daemonResponseFrames({
+    ...generatedPackageResponseFixture,
+    kind: "package_update_status",
+    packages: [],
+    update_status: {
+      package_name: "project-pipelines",
+      current_pin: null,
+      candidate_pin: null,
+      update_available: false,
+      diagnostics: [],
+      actions: []
+    }
+  }, 12).some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.package"),
+  false
 );
 const packageNavigationSnapshot = daemonResponseFrames(generatedPackageNavigationResponseFixture, 12)
   .find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.package_navigation");
@@ -2428,6 +2463,13 @@ for (const action of [
     id: "botster.package.daemon_request",
     target: "project-pipelines",
     params: {
+      daemon_request: { request_type: "reload_package", package_name: "project-pipelines" }
+    }
+  },
+  {
+    id: "botster.package.daemon_request",
+    target: "project-pipelines",
+    params: {
       daemon_request: { request_type: "start_package_entrypoint", package_name: "project-pipelines", entrypoint_id: "web-client" }
     }
   },
@@ -2536,6 +2578,7 @@ assert.deepEqual(
 assert.equal(bridgeRequests.some((request) => request.type === "enable_package" && request.package_name === "project-pipelines"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "disable_package" && request.package_name === "project-pipelines"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "remove_package" && request.package_name === "project-pipelines"), true);
+assert.equal(bridgeRequests.some((request) => request.type === "reload_package" && request.package_name === "project-pipelines"), true);
 assert.equal(
   bridgeRequests.some((request) => request.type === "start_package_entrypoint" && request.entrypoint_id === "web-client"),
   true
@@ -2554,7 +2597,7 @@ assert.equal(
 );
 assert.equal(bridgeRequests.some((request) => request.type === "list_apps"), true);
 assert.equal(bridgeRequests.some((request) => /legacy/.test(JSON.stringify(request))), false);
-assert.equal(bridgeRequests.some((request) => /update_package|reload_package|restart_hub/.test(request.type)), false);
+assert.equal(bridgeRequests.some((request) => /update_package|restart_hub/.test(request.type)), false);
 assert.equal(realFrames.some((frame) => frame.kind === "ui_tree_snapshot"), true);
 assert.equal(realFrames.some((frame) => frame.kind === "entity_snapshot"), true);
 assert.equal(
@@ -3324,8 +3367,10 @@ try {
       PackageNavigationShortcutButton,
       PluginNavigationShortcuts,
       PluginListItem,
+      SpawnTargetListItem,
       PluginSurfaceRoutePage,
       PluginSettingsPanel,
+      compareSpawnTargetRows,
       compareInstalledPackageRows,
       packageAppSurfaces,
       packageNavigationShortcut,
@@ -4225,6 +4270,60 @@ try {
     ].sort(compareInstalledPackageRows).map((row) => row.package_name),
     ["app-a", "app-b", "plugin-a", "plugin-z"]
   );
+  assert.deepEqual(
+    [
+      { id: "disabled-target", label: "Zulu target", enabled: false },
+      { id: "enabled-target-b", label: "Beta target", enabled: true },
+      { id: "enabled-target-a", label: "Alpha target", enabled: true }
+    ].sort(compareSpawnTargetRows).map((row) => row.id),
+    ["enabled-target-a", "enabled-target-b", "disabled-target"]
+  );
+  const spawnTargetMarkup = renderToStaticMarkup(
+    createElement(SpawnTargetListItem, {
+      target: {
+        id: "project-main",
+        target_id: "project-main",
+        label: "Project main",
+        root: "/tmp/project-main",
+        enabled: true,
+        kind: "directory"
+      },
+      onEdit: () => undefined,
+      onDelete: () => undefined
+    })
+  );
+  assert.match(spawnTargetMarkup, /Project main/);
+  assert.match(spawnTargetMarkup, /\/tmp\/project-main/);
+  assert.match(spawnTargetMarkup, /Enabled/);
+  assert.match(spawnTargetMarkup, /Edit/);
+  assert.match(spawnTargetMarkup, /Delete/);
+  const spawnTargetFrames = daemonResponseFrames({
+    kind: "spawn_targets",
+    status: null,
+    sessions: [],
+    packages: [],
+    package_decision: null,
+    lifecycle: [],
+    plugin_tools: [],
+    plugin_tool_result: null,
+    events: [],
+    cleanup: null,
+    coordination: null,
+    error: null,
+    spawn_targets: [
+      {
+        target_id: "project-main",
+        label: "Project main",
+        root: "/tmp/project-main",
+        enabled: true,
+        kind: "directory",
+        metadata: { owner: "platform" }
+      }
+    ]
+  }, 42);
+  const spawnTargetSnapshot = spawnTargetFrames.find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.spawn_target");
+  assert.equal(spawnTargetSnapshot.payload.records[0].id, "project-main");
+  assert.equal(spawnTargetSnapshot.payload.records[0].metadata_summary, "owner: platform");
 
   const collectedActions = [];
   const markup = renderToStaticMarkup(
@@ -4260,6 +4359,50 @@ try {
   assert.equal(collectedActions.some(({ action }) => action.id === "botster.session.select"), true);
   assert.equal(fixtureProvenance.mirroredFor, "ticket_1780941197_299829");
   assert.equal(ionicUiNodeRendererRegistry.supports("iframe"), true);
+
+  const schemaSelectMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "form-field.select-options",
+        version: "test",
+        root: {
+          id: "spawn-form",
+          primitive: "form",
+          props: {
+            action: "spawn.submit",
+            label: "Create"
+          },
+          slots: {
+            children: [
+              {
+                id: "spawn-point-field",
+                primitive: "form_field",
+                props: {
+                  schema: {
+                    kind: "select",
+                    name: "spawn_point_id",
+                    label: "Spawn point",
+                    options: [
+                      { value: "target_codex_local", label: "Local Codex" },
+                      { value: "target_cloud", label: "Cloud", disabled: true }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.match(schemaSelectMarkup, /ion-select/);
+  assert.match(schemaSelectMarkup, /value="target_codex_local"/);
+  assert.match(schemaSelectMarkup, /Local Codex/);
+  assert.match(schemaSelectMarkup, /value="target_cloud"/);
+  assert.match(schemaSelectMarkup, /Cloud/);
 
   const iframeMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(
@@ -4351,7 +4494,17 @@ try {
                       slots: {
                         title: [{ id: "workspace-row-1-title", primitive: "text", props: { text: "Core renderer contract" } }],
                         subtitle: [{ id: "workspace-row-1-purpose", primitive: "text", props: { text: "Keep plugin UI generic" } }],
-                        meta: [{ id: "workspace-row-1-status", primitive: "text", props: { text: "active" } }]
+                        meta: [{ id: "workspace-row-1-status", primitive: "badge", props: { text: "active", tone: "success" } }],
+                        actions: [
+                          {
+                            id: "workspace-row-1-open",
+                            primitive: "button",
+                            props: {
+                              label: "Open",
+                              action: { id: "workspace.open", target: "workspace-row-1", label: "Open workspace" }
+                            }
+                          }
+                        ]
                       }
                     }
                   ]
@@ -4369,7 +4522,71 @@ try {
   assert.match(directListItemMarkup, /Core renderer contract/);
   assert.match(directListItemMarkup, /Keep plugin UI generic/);
   assert.match(directListItemMarkup, /active/);
+  assert.match(directListItemMarkup, /color="success"/);
+  assert.match(directListItemMarkup, /data-action-id="workspace\.open"/);
+  assert.match(directListItemMarkup, /uinode-list-item-actions/);
   assert.doesNotMatch(directListItemMarkup, /Unsupported primitive: list_item/);
+
+  const inlineLayoutMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "inline.layout",
+        version: "test",
+        root: {
+          id: "inline-root",
+          primitive: "inline",
+          props: { gap: "large", align: "center", justify: "end" },
+          slots: {
+            children: [
+              { id: "inline-title", primitive: "text", props: { text: "Inline controls" } },
+              { id: "inline-status", primitive: "badge", props: { text: "Blocked", tone: "danger" } }
+            ]
+          }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.match(inlineLayoutMarkup, /class="uinode-inline"/);
+  assert.match(inlineLayoutMarkup, /--uinode-gap:16px/);
+  assert.match(inlineLayoutMarkup, /justify-content:flex-end/);
+  assert.match(inlineLayoutMarkup, /color="danger"/);
+
+  const emptyStateMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "empty-state.actions",
+        version: "test",
+        root: {
+          id: "empty-root",
+          primitive: "empty_state",
+          props: { title: "No workspaces", body: "Create one to start routing sessions." },
+          slots: {
+            actions: [
+              {
+                id: "empty-create",
+                primitive: "button",
+                props: {
+                  label: "Create",
+                  action: { id: "workspace.create", label: "Create workspace" }
+                }
+              }
+            ]
+          }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.match(emptyStateMarkup, /role="status"/);
+  assert.match(emptyStateMarkup, /No workspaces/);
+  assert.match(emptyStateMarkup, /Create one to start routing sessions/);
+  assert.match(emptyStateMarkup, /uinode-empty-state-actions/);
+  assert.match(emptyStateMarkup, /data-action-id="workspace\.create"/);
 
   const dogfoodStore = createInMemoryEntityFrameStore();
   dogfoodStore.apply({

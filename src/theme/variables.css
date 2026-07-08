@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light;
   --ion-font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --ion-color-primary: #2f6fed;
   --ion-color-primary-rgb: 47, 111, 237;
@@ -8,4 +9,50 @@
   --ion-color-primary-tint: #477ff0;
   --ion-background-color: #f4f6f8;
   --ion-text-color: #151922;
+  --ion-border-color: #d8dee7;
+  --ion-card-background: #ffffff;
+  --ion-item-background: #ffffff;
+  --ion-toolbar-background: #ffffff;
+  --ion-toolbar-color: #151922;
+  --app-surface-color: #ffffff;
+  --app-subtle-surface-color: #f9fafc;
+  --app-accent-surface-color: #f7faff;
+  --app-control-surface-color: #eef2f7;
+  --app-icon-surface-color: #e8effd;
+  --app-dialog-surface-color: #f6f8fb;
+  --app-border-color: #d8dee7;
+  --app-border-subtle-color: #e8edf4;
+  --app-border-strong-color: #c9d7ef;
+  --app-text-muted-color: #5b6575;
+  --app-text-soft-color: #536070;
+  --app-text-faint-color: #586174;
+  --app-text-strong-color: #263245;
+  --app-shadow: 0 12px 26px rgb(22 27 36 / 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --ion-background-color: #0f1218;
+    --ion-text-color: #f4f6fb;
+    --ion-border-color: #303846;
+    --ion-card-background: #171b23;
+    --ion-item-background: #171b23;
+    --ion-toolbar-background: #171b23;
+    --ion-toolbar-color: #f4f6fb;
+    --app-surface-color: #171b23;
+    --app-subtle-surface-color: #1d232d;
+    --app-accent-surface-color: #182236;
+    --app-control-surface-color: #242b36;
+    --app-icon-surface-color: #172943;
+    --app-dialog-surface-color: #1b2230;
+    --app-border-color: #303846;
+    --app-border-subtle-color: #28303d;
+    --app-border-strong-color: #3b4b66;
+    --app-text-muted-color: #a8b1c0;
+    --app-text-soft-color: #b5bdca;
+    --app-text-faint-color: #9ba6b7;
+    --app-text-strong-color: #eef2f8;
+    --app-shadow: 0 12px 26px rgb(0 0 0 / 0.28);
+  }
 }

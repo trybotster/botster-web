@@ -1,5 +1,6 @@
 import {
   IonApp,
+  IonAlert,
   IonBadge,
   IonButton,
   IonButtons,
@@ -86,28 +87,32 @@ setupIonicReact({
   }
 });
 
-type AppView = "dashboard" | "apps" | "diagnostics";
+type AppView = "dashboard" | "apps" | "spawn-points" | "diagnostics";
 type AppRoute =
   | { view: "dashboard" }
   | { view: "apps"; packageName?: string; surfaceId?: string; settings?: false }
   | { view: "apps"; packageName: string; settings: true; surfaceId?: string }
+  | { view: "spawn-points" }
   | { view: "diagnostics" };
 
 const navigationItems: Array<{ label: string; icon: string; view: AppView }> = [
   { label: "Dashboard", icon: layersOutline, view: "dashboard" },
   { label: "Apps", icon: cubeOutline, view: "apps" },
+  { label: "Spawn points", icon: serverOutline, view: "spawn-points" },
   { label: "Diagnostics", icon: listCircleOutline, view: "diagnostics" }
 ];
 
 const appViewPaths: Record<AppView, string> = {
   dashboard: "/dashboard",
   apps: "/apps",
+  "spawn-points": "/spawn-points",
   diagnostics: "/diagnostics"
 };
 
 function appRouteFromPathname(pathname: string): AppRoute {
   const normalizedPath = pathname.replace(/\/+$/, "") || "/";
   if (normalizedPath === appViewPaths.diagnostics || normalizedPath.startsWith(`${appViewPaths.diagnostics}/`)) return { view: "diagnostics" };
+  if (normalizedPath === appViewPaths["spawn-points"] || normalizedPath.startsWith(`${appViewPaths["spawn-points"]}/`)) return { view: "spawn-points" };
   if (normalizedPath === appViewPaths.apps) return { view: "apps" };
   if (normalizedPath.startsWith("/packages/")) {
     const segments = normalizedPath
@@ -582,6 +587,27 @@ function pluginSurfaceActionFeedback(result: { accepted: boolean; reason?: strin
   };
 }
 
+function spawnTargetActionFeedback(result: { accepted: boolean; reason?: string; result?: unknown }): { message: string; color: string } | undefined {
+  const payload = readRecord(result.result);
+  const requestType = readString(payload.request_type);
+  if (!requestType?.includes("spawn_target")) return undefined;
+
+  if (!result.accepted) {
+    return {
+      message: result.reason ?? `${actionLabelFromId(requestType)} failed`,
+      color: "danger"
+    };
+  }
+
+  const targets = Array.isArray(payload.spawn_targets) ? payload.spawn_targets : [];
+  const target = readRecord(targets[0]);
+  const targetId = readString(target.target_id) ?? readString(payload.target_id);
+  return {
+    message: targetId ? `${targetId}: ${actionLabelFromId(requestType)}` : `${actionLabelFromId(requestType)} accepted`,
+    color: "success"
+  };
+}
+
 function readDiagnosticMessage(value: unknown): string | undefined {
   const record = readRecord(value);
   return readString(record.message);
@@ -591,6 +617,112 @@ function actionLabelFromId(actionId: string): string {
   return actionId
     .replace(/_/g, " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+type SpawnTargetFormMode = "create" | "edit";
+
+interface SpawnTargetFormState {
+  mode: SpawnTargetFormMode;
+  targetId: string;
+  originalTargetId?: string;
+  label: string;
+  root: string;
+  kind: string;
+  enabled: boolean;
+  metadata: string;
+}
+
+const emptySpawnTargetForm: SpawnTargetFormState = {
+  mode: "create",
+  targetId: "",
+  label: "",
+  root: "",
+  kind: "directory",
+  enabled: true,
+  metadata: ""
+};
+
+function spawnTargetFormFromRecord(record: Record<string, unknown>): SpawnTargetFormState {
+  const targetId = stringValue(record.target_id, String(record.id));
+  return {
+    mode: "edit",
+    targetId,
+    originalTargetId: targetId,
+    label: stringValue(record.label, stringValue(record.title, targetId)),
+    root: stringValue(record.root, ""),
+    kind: stringValue(record.kind, "directory"),
+    enabled: record.enabled !== false,
+    metadata: formatMetadata(readRecord(record.metadata))
+  };
+}
+
+function formatMetadata(metadata: Record<string, unknown>): string {
+  return Object.entries(metadata)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+}
+
+function parseMetadata(input: string): Record<string, string> {
+  return Object.fromEntries(
+    input
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .flatMap((line) => {
+        const separatorIndex = line.indexOf("=");
+        if (separatorIndex < 1) return [];
+        const key = line.slice(0, separatorIndex).trim();
+        const value = line.slice(separatorIndex + 1).trim();
+        return key ? [[key, value]] : [];
+      })
+  );
+}
+
+export function compareSpawnTargetRows(left: Record<string, unknown>, right: Record<string, unknown>): number {
+  const leftEnabled = left.enabled !== false ? 0 : 1;
+  const rightEnabled = right.enabled !== false ? 0 : 1;
+  return leftEnabled - rightEnabled
+    || stringValue(left.label, stringValue(left.title, String(left.id))).localeCompare(stringValue(right.label, stringValue(right.title, String(right.id))))
+    || String(left.id).localeCompare(String(right.id));
+}
+
+export function SpawnTargetListItem({
+  target,
+  onEdit,
+  onDelete
+}: {
+  target: Record<string, unknown>;
+  onEdit: (target: Record<string, unknown>) => void;
+  onDelete: (target: Record<string, unknown>) => void;
+}) {
+  const targetId = stringValue(target.target_id, String(target.id));
+  const label = stringValue(target.label, stringValue(target.title, targetId));
+  const root = stringValue(target.root, "");
+  const kind = stringValue(target.kind, "directory");
+  const enabled = target.enabled !== false;
+
+  return (
+    <IonItem className="spawn-target-item">
+      <IonLabel>
+        <h2>{label}</h2>
+        <p>{targetId}</p>
+        <p>{root}</p>
+        <p>{kind}</p>
+      </IonLabel>
+      <IonBadge color={enabled ? "success" : "medium"} slot="end">
+        {enabled ? "Enabled" : "Disabled"}
+      </IonBadge>
+      <IonButtons slot="end">
+        <IonButton aria-label={`Edit ${label}`} onClick={() => onEdit(target)}>
+          Edit
+        </IonButton>
+        <IonButton aria-label={`Delete ${label}`} color="danger" onClick={() => onDelete(target)}>
+          Delete
+        </IonButton>
+      </IonButtons>
+    </IonItem>
+  );
 }
 
 export default function App() {
@@ -626,11 +758,12 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<ConnectionDiagnostic[]>(() =>
     initialConnectionDiagnostics(dogfoodRuntime.mode, dogfoodRuntime.statusText, dogfoodRuntime.terminalDataPlaneKind)
   );
-  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "packageNavigation" | "package" | "availablePackage" | "session" | "draft", HubEntityLoadStatus>>({
+  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "session" | "draft", HubEntityLoadStatus>>({
     app: "not_loaded",
     packageNavigation: "not_loaded",
     package: "not_loaded",
     availablePackage: "not_loaded",
+    spawnTarget: "not_loaded",
     session: "not_loaded",
     draft: "not_loaded"
   });
@@ -638,6 +771,8 @@ export default function App() {
   const [marketplaceRegistryPath, setMarketplaceRegistryPath] = useState("");
   const [localPackagePath, setLocalPackagePath] = useState("");
   const [addPackageOpen, setAddPackageOpen] = useState(false);
+  const [spawnTargetForm, setSpawnTargetForm] = useState<SpawnTargetFormState | undefined>();
+  const [deleteSpawnTarget, setDeleteSpawnTarget] = useState<Record<string, unknown> | undefined>();
   const [packageActionToast, setPackageActionToast] = useState<{ message: string; color: string } | undefined>();
   const [selectedPluginSurface, setSelectedPluginSurface] = useState<SelectedPluginSurface | undefined>();
   const lastPluginRouteRenderKey = useRef<string | undefined>(undefined);
@@ -666,13 +801,7 @@ export default function App() {
     return true;
   }, []);
   const navigateToView = useCallback((view: AppView) => {
-    if (view === "apps") {
-      navigateToRoute({ view: "apps" });
-    } else if (view === "diagnostics") {
-      navigateToRoute({ view: "diagnostics" });
-    } else {
-      navigateToRoute({ view: "dashboard" });
-    }
+    navigateToRoute({ view } as AppRoute);
   }, [navigateToRoute]);
   const activeView = appViewFromRoute(activeRoute);
   const routePluginSurface = useMemo(
@@ -751,7 +880,7 @@ export default function App() {
     });
 
     const pullDogfoodEntity = async (
-      key: "app" | "packageNavigation" | "package" | "availablePackage" | "session" | "draft",
+      key: "app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "session" | "draft",
       request: { family: string; id?: string }
     ) => {
       setEntityLoadStatus((current) => ({ ...current, [key]: "loading" }));
@@ -779,6 +908,7 @@ export default function App() {
       .then(() => pullDogfoodEntity("packageNavigation", { family: "botster-web.package_navigation" }))
       .then(() => pullDogfoodEntity("package", { family: "botster-web.package" }))
       .then(() => pullDogfoodEntity("availablePackage", { family: "botster-web.available_package" }))
+      .then(() => pullDogfoodEntity("spawnTarget", { family: "botster-web.spawn_target" }))
       .then(() => pullDogfoodEntity("session", { family: "botster-web.session" }))
       .then(() => pullDogfoodEntity("draft", { family: "botster-web.session_draft", id: "draft-1" }))
       .catch((error: unknown) => {
@@ -826,11 +956,18 @@ export default function App() {
         if (pluginSurfaceFeedback) {
           setPackageActionToast(pluginSurfaceFeedback);
         }
+        const spawnTargetFeedback = spawnTargetActionFeedback(result);
+        if (spawnTargetFeedback) {
+          setPackageActionToast(spawnTargetFeedback);
+        }
         if (action.id === "botster.package.configuration.save") {
           void runtimeClient.entities.pull({ family: "botster-web.package" });
         }
         if (action.id === "botster.package.daemon_request" || action.id === "botster.package.configuration.save") {
           void runtimeClient.entities.pull({ family: "botster-web.package_navigation" });
+        }
+        if (action.id === "botster.spawn_target.daemon_request") {
+          void runtimeClient.entities.pull({ family: "botster-web.spawn_target" });
         }
         updateLocalState({
           [statusKey]: result.accepted && isSpawnAction
@@ -897,6 +1034,54 @@ export default function App() {
       }
     });
   }, [dispatchAction, localPackagePath]);
+  const openCreateSpawnTarget = useCallback(() => {
+    setSpawnTargetForm(emptySpawnTargetForm);
+  }, []);
+  const openEditSpawnTarget = useCallback((target: Record<string, unknown>) => {
+    setSpawnTargetForm(spawnTargetFormFromRecord(target));
+  }, []);
+  const submitSpawnTargetForm = useCallback(() => {
+    if (!spawnTargetForm) return;
+    const root = spawnTargetForm.root.trim();
+    const targetId = spawnTargetForm.targetId.trim();
+    if (!root || (spawnTargetForm.mode === "edit" && !spawnTargetForm.originalTargetId)) return;
+
+    const requestType = spawnTargetForm.mode === "create" ? "create_spawn_target" : "update_spawn_target";
+    dispatchAction({
+      id: "botster.spawn_target.daemon_request",
+      target: spawnTargetForm.mode === "edit" ? spawnTargetForm.originalTargetId : targetId,
+      label: spawnTargetForm.mode === "create" ? "Create spawn point" : "Save spawn point",
+      params: {
+        daemon_request: {
+          request_type: requestType,
+          target_id: spawnTargetForm.mode === "create" ? targetId || undefined : spawnTargetForm.originalTargetId,
+          label: spawnTargetForm.label.trim() || undefined,
+          root,
+          enabled: spawnTargetForm.enabled,
+          kind: spawnTargetForm.kind.trim() || "directory",
+          metadata: parseMetadata(spawnTargetForm.metadata)
+        }
+      }
+    });
+    setSpawnTargetForm(undefined);
+  }, [dispatchAction, spawnTargetForm]);
+  const confirmDeleteSpawnTarget = useCallback(() => {
+    if (!deleteSpawnTarget) return;
+    const targetId = stringValue(deleteSpawnTarget.target_id, String(deleteSpawnTarget.id));
+    if (!targetId) return;
+    dispatchAction({
+      id: "botster.spawn_target.daemon_request",
+      target: targetId,
+      label: "Delete spawn point",
+      params: {
+        daemon_request: {
+          request_type: "delete_spawn_target",
+          target_id: targetId
+        }
+      }
+    });
+    setDeleteSpawnTarget(undefined);
+  }, [deleteSpawnTarget, dispatchAction]);
   const recordTerminalDiagnostic = useCallback(
     (error: unknown) => {
       recordDiagnostic(terminalUnavailableDiagnostic(error));
@@ -960,6 +1145,7 @@ export default function App() {
     }
   }, [routePluginSurfaceKey]);
   const availablePackages = runtimeClient.entities.list("botster-web.available_package");
+  const spawnTargets = [...runtimeClient.entities.list("botster-web.spawn_target")].sort(compareSpawnTargetRows);
   const installedPackageRows = useMemo(() => [...packages].sort(compareInstalledPackageRows), [packages]);
   const installedAppPackageRows = useMemo(
     () => installedPackageRows.filter((app) => packageAppSurfaces(app).length > 0),
@@ -1316,8 +1502,8 @@ export default function App() {
                 </section>
               ) : null}
 
-              {activeView === "apps" ? (
-                routePluginSurface ? (
+                {activeView === "apps" ? (
+                  routePluginSurface ? (
                   <PluginSurfaceRoutePage
                     diagnostic={routePluginSurfaceDiagnostic}
                     packageName={routePluginSurface.packageName}
@@ -1392,11 +1578,51 @@ export default function App() {
                           <p className="entity-empty">Add a package to make an app or plugin available here.</p>
                         </article>
                       )}
-                  </section>
-                )
-              ) : null}
+                    </section>
+                  )
+                ) : null}
 
-              {activeView === "diagnostics" ? (
+                {activeView === "spawn-points" ? (
+                  <section className="view-stack" aria-labelledby="spawn-points-heading" data-testid="spawn-points-view">
+                    <div className="page-heading">
+                      <div>
+                        <p className="eyebrow">Hub</p>
+                        <h1 id="spawn-points-heading">Spawn points</h1>
+                      </div>
+                      <IonButton onClick={openCreateSpawnTarget}>
+                        <IonIcon icon={addOutline} slot="start" aria-hidden="true" />
+                        Add
+                      </IonButton>
+                    </div>
+                    {entityLoadStatus.spawnTarget === "error" ? (
+                      <IonNote color="danger">Spawn points could not be loaded from the hub.</IonNote>
+                    ) : null}
+                    {spawnTargets.length > 0 ? (
+                      <IonList lines="full" aria-label="Spawn points">
+                        {spawnTargets.map((target) => (
+                          <SpawnTargetListItem
+                            key={String(target.id)}
+                            target={target}
+                            onEdit={openEditSpawnTarget}
+                            onDelete={setDeleteSpawnTarget}
+                          />
+                        ))}
+                      </IonList>
+                    ) : (
+                      <article className="workflow-section">
+                        <div className="section-heading">
+                          <div>
+                            <p className="eyebrow">Spawn points</p>
+                            <h2>No spawn points</h2>
+                          </div>
+                        </div>
+                        <p className="entity-empty">Add a directory that the hub can use as an admitted spawn target.</p>
+                      </article>
+                    )}
+                  </section>
+                ) : null}
+
+                {activeView === "diagnostics" ? (
                 <section className="view-stack" aria-labelledby="diagnostics-view-heading" data-testid="diagnostics-view">
                   <div className="page-heading">
                     <div>
@@ -1577,11 +1803,114 @@ export default function App() {
                   ) : null}
                 </div>
               </IonContent>
-            </IonModal>
-          </IonContent>
-        </IonPage>
-      </IonSplitPane>
-      <IonToast
+              </IonModal>
+              <IonModal isOpen={Boolean(spawnTargetForm)} onDidDismiss={() => setSpawnTargetForm(undefined)}>
+                <IonHeader>
+                  <IonToolbar>
+                    <IonTitle>{spawnTargetForm?.mode === "edit" ? "Edit spawn point" : "Add spawn point"}</IonTitle>
+                    <IonButtons slot="end">
+                      <IonButton onClick={() => setSpawnTargetForm(undefined)}>Close</IonButton>
+                    </IonButtons>
+                  </IonToolbar>
+                </IonHeader>
+                <IonContent className="ion-padding">
+                  {spawnTargetForm ? (
+                    <div className="spawn-target-form">
+                      <IonList lines="full" aria-label="Spawn point form">
+                        <IonItem>
+                          <IonInput
+                            label="Target ID"
+                            labelPlacement="stacked"
+                            value={spawnTargetForm.targetId}
+                            disabled={spawnTargetForm.mode === "edit"}
+                            placeholder="project-main"
+                            onIonInput={(event) => setSpawnTargetForm((current) => current ? { ...current, targetId: String(event.detail.value ?? "") } : current)}
+                          />
+                        </IonItem>
+                        <IonItem>
+                          <IonInput
+                            label="Label"
+                            labelPlacement="stacked"
+                            value={spawnTargetForm.label}
+                            placeholder="Project main"
+                            onIonInput={(event) => setSpawnTargetForm((current) => current ? { ...current, label: String(event.detail.value ?? "") } : current)}
+                          />
+                        </IonItem>
+                        <IonItem>
+                          <IonInput
+                            label="Root directory"
+                            labelPlacement="stacked"
+                            value={spawnTargetForm.root}
+                            placeholder="/path/to/project"
+                            onIonInput={(event) => setSpawnTargetForm((current) => current ? { ...current, root: String(event.detail.value ?? "") } : current)}
+                          />
+                        </IonItem>
+                        <IonItem>
+                          <IonSelect
+                            label="Kind"
+                            labelPlacement="stacked"
+                            value={spawnTargetForm.kind}
+                            onIonChange={(event) => setSpawnTargetForm((current) => current ? { ...current, kind: String(event.detail.value ?? "directory") } : current)}
+                          >
+                            <IonSelectOption value="directory">Directory</IonSelectOption>
+                          </IonSelect>
+                        </IonItem>
+                        <IonItem>
+                          <IonCheckbox
+                            checked={spawnTargetForm.enabled}
+                            onIonChange={(event) => setSpawnTargetForm((current) => current ? { ...current, enabled: event.detail.checked } : current)}
+                          >
+                            Enabled
+                          </IonCheckbox>
+                        </IonItem>
+                        <IonItem>
+                          <IonTextarea
+                            label="Metadata"
+                            labelPlacement="stacked"
+                            value={spawnTargetForm.metadata}
+                            autoGrow
+                            placeholder={"owner=platform\npurpose=agents"}
+                            onIonInput={(event) => setSpawnTargetForm((current) => current ? { ...current, metadata: String(event.detail.value ?? "") } : current)}
+                          />
+                        </IonItem>
+                      </IonList>
+                      <div className="modal-actions">
+                        <IonButton
+                          disabled={!spawnTargetForm.root.trim() || (spawnTargetForm.mode === "edit" ? !spawnTargetForm.originalTargetId : false)}
+                          onClick={submitSpawnTargetForm}
+                        >
+                          {spawnTargetForm.mode === "edit" ? "Save" : "Create"}
+                        </IonButton>
+                        <IonButton fill="clear" onClick={() => setSpawnTargetForm(undefined)}>
+                          Cancel
+                        </IonButton>
+                      </div>
+                    </div>
+                  ) : null}
+                </IonContent>
+              </IonModal>
+            </IonContent>
+          </IonPage>
+        </IonSplitPane>
+        <IonAlert
+          isOpen={Boolean(deleteSpawnTarget)}
+          header="Delete spawn point"
+          message={deleteSpawnTarget ? `Delete ${stringValue(deleteSpawnTarget.label, String(deleteSpawnTarget.id))}?` : undefined}
+          buttons={[
+            {
+              text: "Cancel",
+              role: "cancel",
+              handler: () => setDeleteSpawnTarget(undefined)
+            },
+            {
+              text: "Delete",
+              role: "destructive",
+              handler: confirmDeleteSpawnTarget
+            }
+          ]}
+          onDidDismiss={() => setDeleteSpawnTarget(undefined)}
+        />
+        <IonToast
         isOpen={Boolean(packageActionToast)}
         message={packageActionToast?.message}
         color={packageActionToast?.color}

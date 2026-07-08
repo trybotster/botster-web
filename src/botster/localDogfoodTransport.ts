@@ -7,6 +7,7 @@ const dogfoodSurface = "botster-web.dogfood.session";
 const packageFamily = "botster-web.package";
 const sessionFamily = "botster-web.session";
 const draftFamily = "botster-web.session_draft";
+const spawnTargetFamily = "botster-web.spawn_target";
 
 // Local dogfood surface grammar mirrors the same temporary core-import gap as
 // uiNodeConformance.ts; replace both with canonical core fixtures when exposed.
@@ -56,6 +57,25 @@ const initialEntityFrames: EntityFrame[] = [
         status: "ready",
         target: "botster-web",
         last_result: "Waiting for action_request"
+      }
+    ]
+  },
+  {
+    operation: "entity_snapshot",
+    family: spawnTargetFamily,
+    sequence: 1,
+    records: [
+      {
+        id: "local-workspace",
+        target_id: "local-workspace",
+        title: "Local workspace",
+        label: "Local workspace",
+        root: "/tmp/botster-workspace",
+        enabled: true,
+        status: "enabled",
+        kind: "directory",
+        metadata: {},
+        metadata_summary: "No metadata"
       }
     ]
   },
@@ -398,6 +418,19 @@ export function createLocalDogfoodTransport(options: LocalDogfoodTransportOption
               reason: "Session name is required"
             }
           });
+          return;
+        }
+
+        if (request.action.id === "botster.spawn_target.daemon_request") {
+          emit({
+            kind: "action_result",
+            payload: {
+              request_id: request.request_id,
+              accepted: true,
+              result: { request_type: "spawn target action" }
+            }
+          });
+          emitEntitySnapshot(spawnTargetFamily);
         }
       }
     }

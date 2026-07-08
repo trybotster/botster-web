@@ -35,9 +35,19 @@ const appFamily = "botster-web.app";
 const packageNavigationFamily = "botster-web.package_navigation";
 const packageFamily = "botster-web.package";
 const availablePackageFamily = "botster-web.available_package";
+const spawnTargetFamily = "botster-web.spawn_target";
 const statusFamily = hubStatusFamily;
 
 type HubConnectionDiagnosticPayload = Omit<Partial<DaemonDiagnostic>, "kind"> & { kind: string };
+
+interface DaemonSpawnTarget {
+  target_id: string;
+  label: string;
+  root: string;
+  enabled: boolean;
+  kind: string;
+  metadata?: Record<string, string>;
+}
 
 export interface DaemonBridgeClient {
   request(request: DaemonRequest): Promise<DaemonResponse>;
@@ -188,6 +198,8 @@ export function createRealHubDogfoodTransport({
           emitResponse(await bridge.request({ type: "list_package_navigation" }));
         } else if (request.family === packageFamily) {
           emitResponse(await bridge.request({ type: "list_packages" }));
+        } else if (request.family === spawnTargetFamily) {
+          emitResponse(await bridge.request(spawnTargetDaemonRequest({ type: "list_spawn_targets" })));
         } else if (request.family === availablePackageFamily) {
           const registryPath = typeof request.registry_path === "string" ? request.registry_path : "";
           if (registryPath) {
@@ -295,6 +307,19 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
     });
   }
 
+  const spawnTargets = responseSpawnTargets(response);
+  if (responseOwnsSpawnTargets(response) && spawnTargets) {
+    frames.push({
+      kind: "entity_snapshot",
+      payload: {
+        operation: "entity_snapshot",
+        family: spawnTargetFamily,
+        sequence,
+        records: spawnTargets.map(spawnTargetRecord)
+      } satisfies EntityFrame
+    });
+  }
+
   if (Array.isArray(response.events)) {
     for (const event of response.events) {
       const frame = daemonEventFrame(event, sequence);
@@ -328,11 +353,35 @@ function responseOwnsPackageNavigation(response: DaemonResponse): boolean {
 }
 
 function responseOwnsPackages(response: DaemonResponse): boolean {
-  return response.kind === "packages" || response.kind === "package_decision" || response.kind === "package_update_status";
+  return response.kind === "packages" || response.kind === "package_decision";
 }
 
 function responseOwnsAvailablePackages(response: DaemonResponse): boolean {
   return response.kind === "available_packages" || response.kind === "package_install_plan";
+}
+
+function responseOwnsSpawnTargets(response: DaemonResponse): boolean {
+  return String(response.kind) === "spawn_targets";
+}
+
+function responseSpawnTargets(response: DaemonResponse): DaemonSpawnTarget[] | undefined {
+  const value = (response as unknown as { spawn_targets?: unknown }).spawn_targets;
+  return Array.isArray(value) ? value.filter(isDaemonSpawnTarget) : undefined;
+}
+
+function responseSpawnTargetValidation(response: DaemonResponse): unknown {
+  return (response as unknown as { spawn_target_validation?: unknown }).spawn_target_validation;
+}
+
+function isDaemonSpawnTarget(value: unknown): value is DaemonSpawnTarget {
+  const record = readConfigObject(value);
+  return (
+    typeof record.target_id === "string" &&
+    typeof record.label === "string" &&
+    typeof record.root === "string" &&
+    typeof record.enabled === "boolean" &&
+    typeof record.kind === "string"
+  );
 }
 
 export function daemonEventFrame(event: DaemonEvent, sequence: number): HubControlFrame | undefined {
@@ -418,6 +467,49 @@ function sessionAttachFields(sessionId: string, lifecycle: string) {
       disabled: !isRunning,
       params: { mode: "real_hub_dogfood" }
     } satisfies ActionBinding
+  };
+}
+
+function spawnTargetRecord(target: DaemonSpawnTarget) {
+  return {
+    id: target.target_id,
+    target_id: target.target_id,
+    title: target.label,
+    label: target.label,
+    root: target.root,
+    enabled: target.enabled,
+    status: target.enabled ? "enabled" : "disabled",
+    kind: target.kind,
+    metadata: target.metadata ?? {},
+    metadata_summary: metadataSummary(target.metadata),
+    edit_action: spawnTargetAction("update_spawn_target", target.target_id, "Save", {
+      label: target.label,
+      root: target.root,
+      enabled: target.enabled,
+      kind: target.kind,
+      metadata: target.metadata ?? {}
+    }),
+    delete_action: spawnTargetAction("delete_spawn_target", target.target_id, "Delete")
+  };
+}
+
+function metadataSummary(metadata: Record<string, string> | undefined): string {
+  const entries = Object.entries(metadata ?? {});
+  return entries.length === 0 ? "No metadata" : entries.map(([key, value]) => `${key}: ${value}`).join("; ");
+}
+
+function spawnTargetAction(requestType: string, targetId: string | undefined, label: string, values: Record<string, unknown> = {}): ActionBinding {
+  return {
+    id: "botster.spawn_target.daemon_request",
+    target: targetId,
+    label,
+    params: {
+      daemon_request: {
+        request_type: requestType,
+        target_id: targetId,
+        ...values
+      }
+    }
   };
 }
 
@@ -1054,6 +1146,26 @@ async function dispatchDaemonAction(
     return;
   }
 
+  if (action.id === "botster.spawn_target.daemon_request") {
+    const daemonRequest = spawnTargetRequestFromAction(action);
+    if (!daemonRequest) {
+      emit(actionResultFrame(request, false, "Spawn point action is missing a hub daemon request"));
+      return;
+    }
+
+    const response = await bridge.request(daemonRequest);
+    emitResponse(response);
+    emit(actionResultFrame(request, !response.error, response.error?.message, {
+      request_type: daemonRequest.type,
+      kind: response.kind,
+      target_id: "target_id" in daemonRequest ? daemonRequest.target_id : undefined,
+      spawn_targets: responseSpawnTargets(response),
+      validation: responseSpawnTargetValidation(response),
+      diagnostics: responseDiagnostics(response)
+    }));
+    return;
+  }
+
   const pluginSurfaceAction = pluginSurfaceActionRequest(action);
   if (pluginSurfaceAction) {
     const response = await bridge.request({
@@ -1115,6 +1227,66 @@ function daemonRequestFromAction(action: ActionBinding): DaemonRequest | undefin
   return daemonRequestFromDescriptor(request as unknown as DaemonPackageActionRequest);
 }
 
+function spawnTargetDaemonRequest(request: Record<string, unknown>): DaemonRequest {
+  return request as unknown as DaemonRequest;
+}
+
+function spawnTargetRequestFromAction(action: ActionBinding): DaemonRequest | undefined {
+  const request = action.params?.daemon_request;
+  if (!isRecord(request)) return undefined;
+
+  const requestType = readConfigString(request.request_type);
+  const targetId = readConfigString(request.target_id);
+  const label = readConfigString(request.label, undefined);
+  const root = readConfigString(request.root);
+  const kind = readConfigString(request.kind, undefined);
+  const enabled = typeof request.enabled === "boolean" ? request.enabled : undefined;
+  const metadata = stringRecord(request.metadata);
+
+  if (requestType === "create_spawn_target" && root) {
+    return spawnTargetDaemonRequest({
+      type: "create_spawn_target",
+      target_id: targetId || undefined,
+      label,
+      root,
+      ...(typeof enabled === "boolean" ? { enabled } : {}),
+      kind,
+      metadata
+    });
+  }
+
+  if (requestType === "update_spawn_target" && targetId) {
+    return spawnTargetDaemonRequest({
+      type: "update_spawn_target",
+      target_id: targetId,
+      label,
+      ...(root ? { root } : {}),
+      ...(typeof enabled === "boolean" ? { enabled } : {}),
+      kind,
+      metadata
+    });
+  }
+
+  if (requestType === "delete_spawn_target" && targetId) {
+    return spawnTargetDaemonRequest({ type: "delete_spawn_target", target_id: targetId });
+  }
+
+  if (requestType === "validate_spawn_target" && targetId) {
+    return spawnTargetDaemonRequest({ type: "validate_spawn_target", target_id: targetId });
+  }
+
+  return undefined;
+}
+
+function stringRecord(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, recordValue]) => (
+      typeof recordValue === "string" ? [[key, recordValue]] : []
+    ))
+  );
+}
+
 function daemonRequestFromDescriptor(request: DaemonPackageActionRequest): DaemonRequest | undefined {
   const packageName = request.package_name ?? "";
   const entrypointId = request.entrypoint_id ?? "";
@@ -1127,6 +1299,7 @@ function daemonRequestFromDescriptor(request: DaemonPackageActionRequest): Daemo
   if (request.request_type === "enable_package" && packageName) return { type: "enable_package", package_name: packageName };
   if (request.request_type === "disable_package" && packageName) return { type: "disable_package", package_name: packageName };
   if (request.request_type === "remove_package" && packageName) return { type: "remove_package", package_name: packageName };
+  if (request.request_type === "reload_package" && packageName) return { type: "reload_package", package_name: packageName };
   if (request.request_type === "set_package_configuration" && packageName) {
     return { type: "set_package_configuration", package_name: packageName, values: {} };
   }

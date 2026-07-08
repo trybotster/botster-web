@@ -1,6 +1,7 @@
 import {
   IonBadge,
   IonButton,
+  IonButtons,
   IonCheckbox,
   IonInput,
   IonItem,
@@ -11,7 +12,7 @@ import {
   IonSelectOption,
   IonTextarea
 } from "@ionic/react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 
 import { defaultUiCapabilitySet } from "./capabilities";
 import type { ActionBinding } from "./actions";
@@ -74,6 +75,10 @@ function readRecords(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value)
     ? value.filter((item): item is Record<string, unknown> => item !== null && typeof item === "object" && !Array.isArray(item))
     : [];
+}
+
+function hasSlot(node: UiNode, name: string): boolean {
+  return readSlot(node, name).length > 0;
 }
 
 function readSlot(node: UiNode, name = "children"): UiNode[] {
@@ -227,6 +232,87 @@ type FormRenderState = {
   setDraft: (update: (current: Record<string, unknown>) => Record<string, unknown>) => void;
 };
 
+type SelectOption = {
+  key: string;
+  value: unknown;
+  label: string;
+  disabled: boolean;
+};
+
+function uiNodeGap(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `${Math.max(value, 0)}px`;
+  }
+
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  if (/^\d+(\.\d+)?(px|rem|em)$/.test(value)) {
+    return value;
+  }
+
+  return {
+    none: "0",
+    tight: "6px",
+    small: "8px",
+    normal: "12px",
+    medium: "12px",
+    large: "16px",
+    loose: "20px"
+  }[value];
+}
+
+function uiNodeAlignment(value: unknown): string | undefined {
+  return typeof value === "string" && ["start", "center", "end", "stretch", "baseline"].includes(value) ? value : undefined;
+}
+
+function uiNodeJustify(value: unknown): string | undefined {
+  return typeof value === "string" && ["start", "center", "end", "between", "around", "evenly"].includes(value) ? value : undefined;
+}
+
+function layoutStyle(props: Record<string, unknown>): CSSProperties | undefined {
+  const gap = uiNodeGap(props.gap);
+  const align = uiNodeAlignment(props.align);
+  const justify = uiNodeJustify(props.justify);
+
+  if (!gap && !align && !justify) {
+    return undefined;
+  }
+
+  const style: CSSProperties & { "--uinode-gap"?: string } = {};
+  if (gap) style["--uinode-gap"] = gap;
+  if (align) style.alignItems = align === "start" || align === "end" ? `flex-${align}` : align;
+  if (justify) {
+    style.justifyContent =
+      justify === "between"
+        ? "space-between"
+        : justify === "around"
+          ? "space-around"
+          : justify === "evenly"
+            ? "space-evenly"
+            : justify === "start" || justify === "end"
+              ? `flex-${justify}`
+              : justify;
+  }
+
+  return style;
+}
+
+function ionicTone(props: Record<string, unknown>, fallback = "medium"): string {
+  const tone = readString(props.tone, readString(props.color, fallback));
+  if (["primary", "secondary", "tertiary", "success", "warning", "danger", "light", "medium", "dark"].includes(tone)) {
+    return tone;
+  }
+
+  return {
+    info: "primary",
+    neutral: "medium",
+    muted: "medium",
+    error: "danger"
+  }[tone] ?? fallback;
+}
+
 function actionFromProps(props: Record<string, unknown>, fallbackLabel: string): ActionBinding {
   const action = props.action;
   if (typeof action === "string") {
@@ -265,6 +351,33 @@ function coreControlInitialValue(node: UiNode, props: Record<string, unknown>): 
   }
 
   return Object.hasOwn(props, "value") ? props.value : Object.hasOwn(props, "default") ? props.default : "";
+}
+
+function readSelectOptions(props: Record<string, unknown>, optionNodes: UiNode[]): SelectOption[] {
+  const schemaOptions = readRecords(props.options).map((option, index) => {
+    const value = Object.hasOwn(option, "value") ? option.value : readString(option.id, `${index}`);
+    return {
+      key: readString(option.id, String(value)),
+      value,
+      label: readString(option.label, String(value ?? "")),
+      disabled: readBoolean(option.disabled)
+    };
+  });
+
+  if (schemaOptions.length > 0) {
+    return schemaOptions;
+  }
+
+  return optionNodes.map((optionNode) => {
+    const optionProps = readRecord(optionNode.props);
+    const value = Object.hasOwn(optionProps, "value") ? optionProps.value : optionNode.id;
+    return {
+      key: String(value ?? optionNode.id),
+      value,
+      label: readString(optionProps.label, String(value ?? "")),
+      disabled: readBoolean(optionProps.disabled)
+    };
+  });
 }
 
 function collectFormControlDefaults(nodes: UiNode[], store: EntityFrameStore, options: UiNodeRenderOptions, row?: RowContext): Record<string, unknown> {
@@ -308,6 +421,7 @@ function renderCoreControl({
   const setValue = (nextValue: unknown) => {
     form?.setDraft((current) => ({ ...current, [name]: nextValue }));
   };
+  const selectOptions = node.primitive === "select" ? readSelectOptions(props, optionNodes) : [];
 
   const control =
     node.primitive === "textarea" ? (
@@ -321,14 +435,11 @@ function renderCoreControl({
       <IonCheckbox checked={readBoolean(value)} disabled={disabled} onIonChange={(event) => setValue(event.detail.checked)} />
     ) : node.primitive === "select" ? (
       <IonSelect value={value} disabled={disabled} onIonChange={(event) => setValue(event.detail.value)}>
-        {optionNodes.map((optionNode) => {
-          const optionProps = readRecord(optionNode.props);
-          return (
-            <IonSelectOption disabled={readBoolean(optionProps.disabled)} key={String(optionProps.value ?? optionNode.id)} value={optionProps.value}>
-              {readString(optionProps.label, String(optionProps.value ?? ""))}
-            </IonSelectOption>
-          );
-        })}
+        {selectOptions.map((option) => (
+          <IonSelectOption disabled={option.disabled} key={option.key} value={option.value}>
+            {option.label}
+          </IonSelectOption>
+        ))}
       </IonSelect>
     ) : (
       <IonInput
@@ -431,7 +542,13 @@ function renderNode(
     case "section":
     case "form_section":
       return (
-        <section className={`uinode-${node.primitive}`} data-ui-node-id={node.id} aria-label={readString(props.label, undefined)} key={node.id}>
+        <section
+          className={`uinode-${node.primitive}`}
+          data-ui-node-id={node.id}
+          aria-label={readString(props.label, undefined)}
+          key={node.id}
+          style={layoutStyle(props)}
+        >
           {readString(props.title) ? <h2>{readString(props.title)}</h2> : null}
           {readString(props.description) ? <p>{readString(props.description)}</p> : null}
           {renderChildren(readChildren(node), store, options, row, form)}
@@ -440,8 +557,8 @@ function renderNode(
     case "inline":
     case "row":
       return (
-        <div className={`uinode-${node.primitive}`} data-ui-node-id={node.id} key={node.id}>
-          {renderChildren(readSlot(node), store, options, row)}
+        <div className={`uinode-${node.primitive}`} data-ui-node-id={node.id} key={node.id} style={layoutStyle(props)}>
+          {renderChildren(readSlot(node), store, options, row, form)}
         </div>
       );
     case "heading": {
@@ -461,15 +578,18 @@ function renderNode(
       );
     case "badge":
       return (
-        <IonBadge color="medium" data-ui-node-id={node.id} key={node.id}>
+        <IonBadge color={ionicTone(props)} data-ui-node-id={node.id} key={node.id}>
           {readString(props.text)}
         </IonBadge>
       );
     case "empty_state":
       return (
-        <div className="uinode-empty-state" data-ui-node-id={node.id} key={node.id}>
-          <h3>{readString(props.title, "Nothing to show")}</h3>
-          <p>{readString(props.body, readString(props.description))}</p>
+        <div className="uinode-empty-state" data-ui-node-id={node.id} key={node.id} role="status">
+          <div className="uinode-empty-state-copy">
+            <h3>{readString(props.title, "Nothing to show")}</h3>
+            <p>{readString(props.body, readString(props.description))}</p>
+          </div>
+          {hasSlot(node, "actions") ? <IonButtons className="uinode-empty-state-actions">{renderChildren(readSlot(node, "actions"), store, options, row, form)}</IonButtons> : null}
         </div>
       );
     case "action": {
@@ -529,7 +649,7 @@ function renderNode(
       if (rows.length === 0) {
         return (
           <div className="uinode-list" data-ui-node-id={node.id} key={node.id}>
-          {renderChildren(readSlot(node, "empty"), store, options, row, form)}
+            {hasSlot(node, "empty") ? renderChildren(readSlot(node, "empty"), store, options, row, form) : <div className="uinode-empty-state" role="status"><div className="uinode-empty-state-copy"><h3>No items</h3></div></div>}
           </div>
         );
       }
@@ -544,18 +664,24 @@ function renderNode(
         </IonList>
       );
     }
-    case "list_item":
+    case "list_item": {
+      const hasEndContent = hasSlot(node, "meta") || hasSlot(node, "actions");
       return (
         <IonItem data-ui-node-id={node.id} key={node.id}>
-          <IonLabel>
-            {renderChildren(readSlot(node, "title"), store, options, row, form)}
-            {renderChildren(readSlot(node, "subtitle"), store, options, row, form)}
+          <IonLabel className="uinode-list-item-label">
+            <div className="uinode-list-item-title">{renderChildren(readSlot(node, "title"), store, options, row, form)}</div>
+            {hasSlot(node, "subtitle") ? <div className="uinode-list-item-subtitle">{renderChildren(readSlot(node, "subtitle"), store, options, row, form)}</div> : null}
+            {renderChildren(readChildren(node), store, options, row, form)}
           </IonLabel>
-          <div className="uinode-list-item-meta" slot="end">
-            {renderChildren(readSlot(node, "meta"), store, options, row, form)}
-          </div>
+          {hasEndContent ? (
+            <div className="uinode-list-item-end" slot="end">
+              {hasSlot(node, "meta") ? <div className="uinode-list-item-meta">{renderChildren(readSlot(node, "meta"), store, options, row, form)}</div> : null}
+              {hasSlot(node, "actions") ? <IonButtons className="uinode-list-item-actions">{renderChildren(readSlot(node, "actions"), store, options, row, form)}</IonButtons> : null}
+            </div>
+          ) : null}
         </IonItem>
       );
+    }
     case "table": {
       const columns = readRecords(props.columns);
       const rows = readRecords(props.rows);
