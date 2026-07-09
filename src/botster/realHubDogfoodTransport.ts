@@ -1173,7 +1173,7 @@ async function dispatchDaemonAction(
       package_name: pluginSurfaceAction.packageName,
       surface_id: pluginSurfaceAction.surfaceId,
       action_id: pluginSurfaceAction.actionId,
-      payload: jsonObject(action.params)
+      payload: jsonObject(action.payload)
     });
     const pluginActionResult = isRecord(response.plugin_action_result) ? response.plugin_action_result : {};
     const actionState = readConfigString(pluginActionResult.state);

@@ -21,6 +21,11 @@ let contractMatrixFixtureTempDir;
 const contractMatrixPackagePath = contractMatrixMode
   ? await resolveContractMatrixPackagePath()
   : undefined;
+const payloadContractMode = process.env.BOTSTER_LIVE_PAYLOAD_CONTRACT === "1";
+const payloadContractPackageName = "botster.plugin-payload-contract";
+const payloadContractPackagePath = payloadContractMode
+  ? resolvePayloadContractPackagePath()
+  : undefined;
 let port = Number.parseInt(process.env.BOTSTER_WEB_DOGFOOD_BRIDGE_PORT ?? String(await findAvailablePort()), 10);
 let bridgeUrl = `http://${host}:${port}`;
 const echoProbe = "botster-web-dogfood-live-input";
@@ -69,8 +74,8 @@ try {
     bridgeProcess = startBridgeProcess();
     await waitForHttpOk(`${bridgeUrl}/health`, () => bridgeProcess?.exitCode !== null ? `bridge exited before readiness (code=${bridgeProcess.exitCode})` : undefined);
     await waitForHtmlShell(`${bridgeUrl}/?dogfood=real-hub`);
-    if (contractMatrixMode) {
-      await prepareContractMatrixPackageThroughBridge();
+    if (contractMatrixMode || payloadContractMode) {
+      await prepareContractPackagesThroughBridge();
     } else {
       await prepareProjectPipelinesPackage();
     }
@@ -124,9 +129,14 @@ try {
   }
   if (contractMatrixMode) {
     await exercisePluginContractMatrix(page);
+    if (payloadContractMode) {
+      await exercisePayloadContract(page);
+    }
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
     await requestDaemonShutdown();
-    console.log(`plugin contract matrix smoke passed (${transportMode})`);
+    console.log(payloadContractMode
+      ? `plugin payload contract smoke passed (${transportMode})`
+      : `plugin contract matrix smoke passed (${transportMode})`);
     process.exit(0);
   }
   if (transportMode === "bridge") {
@@ -312,26 +322,37 @@ async function prepareWorkspacesPackageThroughBridge() {
   });
 }
 
-async function prepareContractMatrixPackageThroughBridge() {
-  if (!contractMatrixMode || !contractMatrixPackagePath) return;
+async function prepareContractPackagesThroughBridge() {
+  if (contractMatrixMode && contractMatrixPackagePath) {
+    await sendBridgeDaemonRequest("install-plugin-contract-matrix-package", {
+      type: "install_package_local_path",
+      path: contractMatrixPackagePath
+    });
+    await sendBridgeDaemonRequest("configure-plugin-contract-matrix-package", {
+      type: "set_package_configuration",
+      package_name: contractMatrixPackageName,
+      values: {
+        endpoint: { type: "url", value: contractMatrixSeedEndpoint },
+        mode: { type: "select", value: "write" },
+        api_token: { type: "secret", state: "write_only" }
+      }
+    });
+    await sendBridgeDaemonRequest("enable-plugin-contract-matrix-package", {
+      type: "enable_package",
+      package_name: contractMatrixPackageName
+    });
+  }
 
-  await sendBridgeDaemonRequest("install-plugin-contract-matrix-package", {
-    type: "install_package_local_path",
-    path: contractMatrixPackagePath
-  });
-  await sendBridgeDaemonRequest("configure-plugin-contract-matrix-package", {
-    type: "set_package_configuration",
-    package_name: contractMatrixPackageName,
-    values: {
-      endpoint: { type: "url", value: contractMatrixSeedEndpoint },
-      mode: { type: "select", value: "write" },
-      api_token: { type: "secret", state: "write_only" }
-    }
-  });
-  await sendBridgeDaemonRequest("enable-plugin-contract-matrix-package", {
-    type: "enable_package",
-    package_name: contractMatrixPackageName
-  });
+  if (payloadContractMode && payloadContractPackagePath) {
+    await sendBridgeDaemonRequest("install-plugin-payload-contract-package", {
+      type: "install_package_local_path",
+      path: payloadContractPackagePath
+    });
+    await sendBridgeDaemonRequest("enable-plugin-payload-contract-package", {
+      type: "enable_package",
+      package_name: payloadContractPackageName
+    });
+  }
 }
 
 function daemonPackageHasConfigurationField(payload, packageName, fieldId) {
@@ -408,6 +429,17 @@ async function resolveContractMatrixPackagePath() {
 
   contractMatrixFixtureTempDir = await mkdtemp(join(tmpdir(), "botster-web-contract-matrix-"));
   return materializePluginContractMatrixFixture(contractMatrixFixtureTempDir);
+}
+
+function resolvePayloadContractPackagePath() {
+  return resolveRequiredPackagePath(
+    [
+      process.env.BOTSTER_PLUGIN_PAYLOAD_CONTRACT_PACKAGE_PATH,
+      join(packageRoot, "fixtures/plugin-payload-contract")
+    ],
+    payloadContractPackageName,
+    "BOTSTER_PLUGIN_PAYLOAD_CONTRACT_PACKAGE_PATH"
+  );
 }
 
 async function loadHubTestSupport() {
@@ -851,7 +883,9 @@ async function exerciseContractMatrixActions(page) {
       params: {
         package_name: packageName,
         surface_id: "contract.app",
-        action_id: "contract.action",
+        action_id: "contract.action"
+      },
+      payload: {
         fail: true
       }
     });
@@ -869,6 +903,57 @@ async function exerciseContractMatrixActions(page) {
       label: "contract.action deterministic failure result"
     }
   );
+}
+
+async function exercisePayloadContract(page) {
+  await navigateToPayloadContractSurface(page, "payload.app");
+  await page.locator("[data-ui-node-id='payload-contract-list-alpha']").click({ position: { x: 12, y: 12 } });
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_action", package_name: payloadContractPackageName, surface_id: "payload.app" },
+    "payload.list.activate click plugin_surface_action request"
+  );
+  await waitForPayloadContractActionResultCount(
+    page,
+    {
+      actionId: "payload.list.activate",
+      expectedPayload: { workspace_id: "workspace-alpha" },
+      expectedCount: 1,
+      label: "payload.list.activate click handler payload"
+    }
+  );
+
+  await page.locator("[data-ui-node-id='payload-contract-list-alpha']").focus();
+  await page.keyboard.press("Enter");
+  await waitForPayloadContractActionResultCount(
+    page,
+    {
+      actionId: "payload.list.activate",
+      expectedPayload: { workspace_id: "workspace-alpha" },
+      expectedCount: 2,
+      label: "payload.list.activate Enter handler payload"
+    }
+  );
+
+  await page.locator("[data-action-id='payload.row.open']").click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_action", package_name: payloadContractPackageName, surface_id: "payload.app" },
+    "payload.row.open plugin_surface_action request"
+  );
+  await waitForPayloadContractActionResult(
+    page,
+    {
+      actionId: "payload.row.open",
+      expectedPayload: { workspace_id: "workspace-alpha" },
+      label: "payload.row.open handler payload"
+    }
+  );
+
+  await page.waitForFunction(() => {
+    const table = globalThis.document.querySelector("[data-ui-node-id='payload-contract-table']");
+    return table?.getAttribute("data-unsupported-interaction-props") === "activation,row_action";
+  }, null, { timeout: 15_000 });
 }
 
 async function waitForContractActionResult(page, { accepted, expectedTexts, label }) {
@@ -907,6 +992,79 @@ async function waitForContractActionResult(page, { accepted, expectedTexts, labe
         .filter((payload) => payload?.result?.package_name === "botster.plugin-contract-matrix")
     );
     throw new Error(`timed out waiting for ${label}; expected=${JSON.stringify(expectedTexts)} observed=${JSON.stringify(observedResults, null, 2)}: ${error.message}`);
+  });
+}
+
+async function navigateToPayloadContractSurface(page, surfaceId) {
+  await page.goto(withDogfoodMode(new URL(`/packages/${payloadContractPackageName}/surfaces/${surfaceId}`, appUrl)), {
+    waitUntil: "domcontentloaded"
+  });
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_render", package_name: payloadContractPackageName, surface_id: surfaceId },
+    `${surfaceId} plugin_surface_render request`
+  );
+  if (transportMode === "bridge") {
+    await waitForValidatedPluginSurfaceSnapshot(page, surfaceId);
+  }
+}
+
+async function waitForPayloadContractActionResult(page, { actionId, expectedPayload, label }) {
+  await page.waitForFunction(
+    ({ packageName, nextActionId, nextPayload }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events.some((entry) => {
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
+        const payload = entry.payload.payload ?? {};
+        const result = payload.result ?? {};
+        const pluginActionResult = result.plugin_action_result ?? {};
+        return payload.accepted === true &&
+          result.package_name === packageName &&
+          result.surface_id === "payload.app" &&
+          result.action_id === nextActionId &&
+          JSON.stringify(pluginActionResult.payload) === JSON.stringify(nextPayload);
+      });
+    },
+    { packageName: payloadContractPackageName, nextActionId: actionId, nextPayload: expectedPayload },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observedResults = await page.evaluate((packageName) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
+        .map((entry) => entry.payload?.payload)
+        .filter((payload) => payload?.result?.package_name === packageName)
+    , payloadContractPackageName);
+    throw new Error(`timed out waiting for ${label}; expected=${JSON.stringify(expectedPayload)} observed=${JSON.stringify(observedResults, null, 2)}: ${error.message}`);
+  });
+}
+
+async function waitForPayloadContractActionResultCount(page, { actionId, expectedPayload, expectedCount, label }) {
+  await page.waitForFunction(
+    ({ packageName, nextActionId, nextPayload, count }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const matching = events.filter((entry) => {
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
+        const payload = entry.payload.payload ?? {};
+        const result = payload.result ?? {};
+        const pluginActionResult = result.plugin_action_result ?? {};
+        return payload.accepted === true &&
+          result.package_name === packageName &&
+          result.surface_id === "payload.app" &&
+          result.action_id === nextActionId &&
+          JSON.stringify(pluginActionResult.payload) === JSON.stringify(nextPayload);
+      });
+      return matching.length === count;
+    },
+    { packageName: payloadContractPackageName, nextActionId: actionId, nextPayload: expectedPayload, count: expectedCount },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observedResults = await page.evaluate((packageName) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
+        .map((entry) => entry.payload?.payload)
+        .filter((payload) => payload?.result?.package_name === packageName)
+    , payloadContractPackageName);
+    throw new Error(`timed out waiting for ${label}; expected_count=${expectedCount} expected=${JSON.stringify(expectedPayload)} observed=${JSON.stringify(observedResults, null, 2)}: ${error.message}`);
   });
 }
 
@@ -1771,6 +1929,10 @@ async function startWebrtcPackageRuntime() {
   if (contractMatrixMode && contractMatrixPackagePath) {
     await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", contractMatrixPackagePath]);
     await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, contractMatrixPackageName]);
+  }
+  if (payloadContractMode && payloadContractPackagePath) {
+    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", payloadContractPackagePath]);
+    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, payloadContractPackageName]);
   }
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
   await sendDaemonRequest(socketPath, {

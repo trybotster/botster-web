@@ -46,6 +46,8 @@ Actions are semantic Botster events such as `botster.session.select` and `botste
 
 Plugin surfaces are mounted through a host-owned sandbox seam. The current descriptor distinguishes host-rendered surfaces from isolated plugin assets without choosing an iframe, worker, or asset bridge implementation prematurely. Plugin-owned execution and product policy remain outside this client shell.
 
+Host-rendered plugin surfaces dispatch `UiAction.payload` through `plugin_surface_action` while keeping package, surface, and action ids as route metadata. For table rows, botster-web renders row-specific `UiTableRow.action` as the operable per-row action. Table-level `row_action` and `activation` are intentionally not wired as per-row controls because the current daemon request carries no row identity; plugins that need row-specific behavior must put the row id in each row's own `action.payload` until the shared core dispatch contract grows an explicit row or node identity field.
+
 ## Hosting
 
 The client can be served as a static web app by local Botster tooling. Future Rails or cloud hosting may serve the same bundle and provide relay or signaling configuration, but the web client architecture does not require cloud to be present. Rails should remain a hosting or relay layer, not the owner of client runtime state.
