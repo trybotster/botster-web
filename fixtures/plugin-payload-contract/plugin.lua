@@ -161,26 +161,6 @@ return botster.register({
       call = payload_action,
     },
     {
-      id = "payload_row_default",
-      kind = "ui_action",
-      descriptor_id = "payload.row.default",
-      descriptor = {
-        action_id = "payload.row.default",
-        surface_id = "payload.app",
-      },
-      call = payload_action,
-    },
-    {
-      id = "payload_row_activate",
-      kind = "ui_action",
-      descriptor_id = "payload.row.activate",
-      descriptor = {
-        action_id = "payload.row.activate",
-        surface_id = "payload.app",
-      },
-      call = payload_action,
-    },
-    {
       id = "payload_list_open",
       kind = "ui_action",
       descriptor_id = "payload.list.open",

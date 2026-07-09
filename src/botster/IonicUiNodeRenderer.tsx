@@ -443,6 +443,12 @@ function selectedValueSet(selection: unknown): Set<string> {
   );
 }
 
+function selectionIsActive(selection: unknown): boolean {
+  const selectionRecord = readRecord(selection);
+  const mode = readString(selectionRecord.mode);
+  return mode === "single" || mode === "multiple";
+}
+
 function isValueSelected(value: unknown, selectedValues: Set<string>): boolean {
   return (typeof value === "string" || typeof value === "number") && selectedValues.has(String(value));
 }
@@ -807,7 +813,10 @@ function renderNode(
         );
       }
     case "action": {
-      const action = actionFromProps(props, node.id);
+      const fallbackActionLabel = typeof props.action === "string"
+        ? props.action
+        : readString(readRecord(props.action).id, node.id);
+      const action = actionFromProps(props, fallbackActionLabel);
       const label = readString(action.label, action.id);
       options.collectAction?.(action, node);
 
@@ -845,23 +854,31 @@ function renderNode(
       const rows = readRecords(props.items);
       const itemTemplate = readSlot(node, "item");
       const children = readChildren(node);
+      const selectable = selectionIsActive(props.selection);
       const selectedValues = selectedValueSet(props.selection);
       const listChildren = children.map((child) => {
         if (child.primitive !== "list_item") return child;
         const childProps = readRecord(child.props);
-        if (!isValueSelected(childProps.value, selectedValues)) return child;
+        if (!selectable) return child;
         return {
           ...child,
           props: {
             ...childProps,
-            selected: true
+            selected: isValueSelected(childProps.value, selectedValues),
+            selectable: true
           }
         };
       });
 
       if (rows.length === 0 && listChildren.length > 0) {
         return (
-          <IonList className="uinode-list" data-ui-node-id={node.id} aria-label={readString(props.label, readString(props.aria_label, "List"))} key={node.id}>
+          <IonList
+            className="uinode-list"
+            data-ui-node-id={node.id}
+            aria-label={readString(props.label, readString(props.aria_label, "List"))}
+            key={node.id}
+            role={selectable ? "listbox" : undefined}
+          >
             {renderChildren(listChildren, store, options, row)}
           </IonList>
         );
@@ -889,24 +906,23 @@ function renderNode(
       const hasEndContent = hasSlot(node, "meta") || hasSlot(node, "actions");
       const activation = actionFromValue(props.activation, {}, "Activate");
       const explicitAction = actionFromValue(props.action, {}, "Open");
-      const itemActivation = explicitAction.id ? undefined : activation;
-      const unsupportedProps = explicitAction.id && activation.id ? "activation" : undefined;
       const selected = readBoolean(props.selected);
-      if (itemActivation?.id) options.collectAction?.(itemActivation, node);
+      const selectable = readBoolean(props.selectable);
+      if (activation.id) options.collectAction?.(activation, node);
       return (
         <IonItem
-          aria-selected={selected}
-          button={Boolean(itemActivation?.id && !itemActivation.disabled)}
+          aria-selected={selectable ? selected : undefined}
+          button={Boolean(activation.id && !activation.disabled)}
           className={selected ? "uinode-list-item selected" : "uinode-list-item"}
-          data-activation-action-id={itemActivation?.id || undefined}
+          data-activation-action-id={activation.id || undefined}
           data-selected={selected ? "true" : undefined}
           data-ui-node-id={node.id}
-          data-unsupported-interaction-props={unsupportedProps}
           key={node.id}
           onClick={() => {
-            if (itemActivation?.id && !itemActivation.disabled) options.dispatchAction?.(itemActivation, node);
+            if (activation.id && !activation.disabled) options.dispatchAction?.(activation, node);
           }}
-          onKeyDown={(event) => dispatchActivationOnEnter(event, itemActivation?.id ? itemActivation : undefined, node, options)}
+          onKeyDown={(event) => dispatchActivationOnEnter(event, activation.id ? activation : undefined, node, options)}
+          role={selectable ? "option" : undefined}
         >
           <IonLabel className="uinode-list-item-label">
             <div className="uinode-list-item-title">{renderChildren(readSlot(node, "title"), store, options, row, form)}</div>
@@ -931,6 +947,7 @@ function renderNode(
       const columns = readTableColumns(props.columns);
       const rows = readRecords(props.rows);
       const emptyState = uiNodeFromRecord(props.empty_state);
+      const selectable = selectionIsActive(props.selection);
       const selectedValues = selectedValueSet(props.selection);
       const tableActivation = actionFromValue(props.activation, {}, "Activate row");
       const tableRowAction = actionFromValue(props.row_action, {}, "Row action");
@@ -976,7 +993,7 @@ function renderNode(
             const selected = isValueSelected(rowId, selectedValues);
             return (
               <div
-                aria-selected={selected}
+                aria-selected={selectable ? selected : undefined}
                 className={selected ? "uinode-table-row selected" : "uinode-table-row"}
                 data-selected={selected ? "true" : undefined}
                 role="row"

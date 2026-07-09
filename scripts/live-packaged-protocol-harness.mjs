@@ -907,6 +907,34 @@ async function exerciseContractMatrixActions(page) {
 
 async function exercisePayloadContract(page) {
   await navigateToPayloadContractSurface(page, "payload.app");
+  await page.locator("[data-ui-node-id='payload-contract-list-alpha']").click({ position: { x: 12, y: 12 } });
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_action", package_name: payloadContractPackageName, surface_id: "payload.app" },
+    "payload.list.activate click plugin_surface_action request"
+  );
+  await waitForPayloadContractActionResultCount(
+    page,
+    {
+      actionId: "payload.list.activate",
+      expectedPayload: { workspace_id: "workspace-alpha" },
+      expectedCount: 1,
+      label: "payload.list.activate click handler payload"
+    }
+  );
+
+  await page.locator("[data-ui-node-id='payload-contract-list-alpha']").focus();
+  await page.keyboard.press("Enter");
+  await waitForPayloadContractActionResultCount(
+    page,
+    {
+      actionId: "payload.list.activate",
+      expectedPayload: { workspace_id: "workspace-alpha" },
+      expectedCount: 2,
+      label: "payload.list.activate Enter handler payload"
+    }
+  );
+
   await page.locator("[data-action-id='payload.row.open']").click();
   await waitForHarnessEvent(
     page,
@@ -921,6 +949,11 @@ async function exercisePayloadContract(page) {
       label: "payload.row.open handler payload"
     }
   );
+
+  await page.waitForFunction(() => {
+    const table = globalThis.document.querySelector("[data-ui-node-id='payload-contract-table']");
+    return table?.getAttribute("data-unsupported-interaction-props") === "activation,row_action";
+  }, null, { timeout: 15_000 });
 }
 
 async function waitForContractActionResult(page, { accepted, expectedTexts, label }) {
@@ -1002,6 +1035,36 @@ async function waitForPayloadContractActionResult(page, { actionId, expectedPayl
         .filter((payload) => payload?.result?.package_name === packageName)
     , payloadContractPackageName);
     throw new Error(`timed out waiting for ${label}; expected=${JSON.stringify(expectedPayload)} observed=${JSON.stringify(observedResults, null, 2)}: ${error.message}`);
+  });
+}
+
+async function waitForPayloadContractActionResultCount(page, { actionId, expectedPayload, expectedCount, label }) {
+  await page.waitForFunction(
+    ({ packageName, nextActionId, nextPayload, count }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const matching = events.filter((entry) => {
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
+        const payload = entry.payload.payload ?? {};
+        const result = payload.result ?? {};
+        const pluginActionResult = result.plugin_action_result ?? {};
+        return payload.accepted === true &&
+          result.package_name === packageName &&
+          result.surface_id === "payload.app" &&
+          result.action_id === nextActionId &&
+          JSON.stringify(pluginActionResult.payload) === JSON.stringify(nextPayload);
+      });
+      return matching.length === count;
+    },
+    { packageName: payloadContractPackageName, nextActionId: actionId, nextPayload: expectedPayload, count: expectedCount },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observedResults = await page.evaluate((packageName) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
+        .map((entry) => entry.payload?.payload)
+        .filter((payload) => payload?.result?.package_name === packageName)
+    , payloadContractPackageName);
+    throw new Error(`timed out waiting for ${label}; expected_count=${expectedCount} expected=${JSON.stringify(expectedPayload)} observed=${JSON.stringify(observedResults, null, 2)}: ${error.message}`);
   });
 }
 

@@ -4716,7 +4716,27 @@ try {
   assert.match(directListItemMarkup, /color="success"/);
   assert.match(directListItemMarkup, /data-action-id="workspace\.open"/);
   assert.match(directListItemMarkup, /uinode-list-item-actions/);
+  assert.doesNotMatch(directListItemMarkup, /aria-selected/);
   assert.doesNotMatch(directListItemMarkup, /Unsupported primitive: list_item/);
+
+  const actionPrimitiveMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "action.primitive",
+        version: "test",
+        root: {
+          id: "action-node-id",
+          primitive: "action",
+          props: { action: "workspace.action.intent" }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.match(actionPrimitiveMarkup, />workspace\.action\.intent<\/ion-button>/);
+  assert.doesNotMatch(actionPrimitiveMarkup, />action-node-id<\/ion-button>/);
 
   const interactionActions = [];
   const interactionTree = ionicUiNodeRendererRegistry.render(
@@ -4838,12 +4858,16 @@ try {
   assert.match(interactionMarkup, /Primary action/);
   assert.match(interactionMarkup, /Secondary action/);
   assert.doesNotMatch(interactionMarkup, /primary_action/);
-  assert.match(interactionMarkup, /data-unsupported-interaction-props="activation"/);
+  assert.match(interactionMarkup, /role="listbox"/);
+  assert.match(interactionMarkup, /role="option"/);
+  assert.match(interactionMarkup, /data-activation-action-id="workspace\.activate"/);
   assert.match(interactionMarkup, /data-activation-action-id="workspace\.activate\.beta"/);
-  assert.doesNotMatch(interactionMarkup, /data-activation-action-id="workspace\.activate"/);
+  assert.match(interactionMarkup, /data-activation-action-id="workspace\.activate\.gamma"/);
+  assert.doesNotMatch(interactionMarkup, /data-unsupported-interaction-props="activation"/);
   assert.match(interactionMarkup, /data-action-id="workspace\.open"/);
   assert.match(interactionMarkup, /data-action-id="workspace\.disabled\.open"[^>]*disabled=""/);
   assert.match(interactionMarkup, /aria-selected="true"/);
+  assert.match(interactionMarkup, /aria-selected="false"/);
   assert.match(interactionMarkup, /data-selected="true"/);
   assert.match(interactionMarkup, /data-action-id="workspace\.row\.open"/);
   assert.match(interactionMarkup, /data-unsupported-interaction-props="activation,row_action"/);
@@ -4859,8 +4883,10 @@ try {
     [
       ["workspace.create", { workspace_id: "new-workspace" }],
       ["workspace.import", { workspace_id: "import-workspace" }],
+      ["workspace.activate", { workspace_id: "workspace-alpha" }],
       ["workspace.open", { workspace_id: "workspace-alpha" }],
       ["workspace.activate.beta", { workspace_id: "workspace-beta" }],
+      ["workspace.activate.gamma", { workspace_id: "workspace-gamma" }],
       ["workspace.disabled.open", { workspace_id: "workspace-gamma" }],
       ["workspace.row.open", { workspace_id: "workspace-alpha" }],
       ["workspace.table.empty", { workspace_id: "empty-table" }]
