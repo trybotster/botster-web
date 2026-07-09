@@ -441,13 +441,17 @@ function validatedPluginSurfaceSnapshotNode(value: unknown, packageName: string,
   const props = { ...readRecord(record.props) };
   const primitive = rawType;
   for (const actionProp of ["action", "primary_action", "secondary_action", "row_action", "activation"]) {
-    const action = pluginSurfaceActionBinding(props[actionProp], packageName, surfaceId, readString(props.label) || actionProp);
+    const action = pluginSurfaceActionBinding(props[actionProp], packageName, surfaceId);
     if (action) props[actionProp] = action;
+  }
+  const emptyState = validatedPluginSurfaceSnapshotNode(props.empty_state, packageName, surfaceId);
+  if (emptyState) {
+    props.empty_state = emptyState;
   }
   const rows = readRecords(props.rows);
   if (rows.length > 0) {
     props.rows = rows.map((row) => {
-      const rowAction = pluginSurfaceActionBinding(row.action, packageName, surfaceId, readString(row.label) || readString(row.id) || "Row action");
+      const rowAction = pluginSurfaceActionBinding(row.action, packageName, surfaceId);
       return rowAction ? { ...row, action: rowAction } : row;
     });
   }
@@ -483,7 +487,7 @@ function validatedPluginSurfaceSnapshotNode(value: unknown, packageName: string,
   };
 }
 
-function pluginSurfaceActionBinding(value: unknown, packageName: string, surfaceId: string, fallbackLabel: string): Record<string, unknown> | undefined {
+function pluginSurfaceActionBinding(value: unknown, packageName: string, surfaceId: string): Record<string, unknown> | undefined {
   const actionRecord = readRecord(value);
   const actionId = readString(value) ?? readString(actionRecord.id);
   if (!actionId) return undefined;
@@ -491,7 +495,6 @@ function pluginSurfaceActionBinding(value: unknown, packageName: string, surface
   const actionTarget = readString(actionRecord.target);
   return {
     id: actionId,
-    label: (readString(actionRecord.label) ?? fallbackLabel) || actionId,
     ...(actionTarget ? { target: actionTarget } : {}),
     ...(Object.hasOwn(actionRecord, "disabled") ? { disabled: actionRecord.disabled } : {}),
     ...(Object.hasOwn(actionRecord, "payload") ? { payload: actionRecord.payload } : {}),

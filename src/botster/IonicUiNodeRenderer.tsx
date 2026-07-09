@@ -426,7 +426,7 @@ function actionButton(
       key={`${node.id}-${action.id}`}
       onClick={(event) => {
         if (stopPropagation) event.stopPropagation();
-        options.dispatchAction?.(action, node);
+        if (!action.disabled) options.dispatchAction?.(action, node);
       }}
     >
       {label}
@@ -889,21 +889,24 @@ function renderNode(
       const hasEndContent = hasSlot(node, "meta") || hasSlot(node, "actions");
       const activation = actionFromValue(props.activation, {}, "Activate");
       const explicitAction = actionFromValue(props.action, {}, "Open");
+      const itemActivation = explicitAction.id ? undefined : activation;
+      const unsupportedProps = explicitAction.id && activation.id ? "activation" : undefined;
       const selected = readBoolean(props.selected);
-      if (activation.id) options.collectAction?.(activation, node);
+      if (itemActivation?.id) options.collectAction?.(itemActivation, node);
       return (
         <IonItem
           aria-selected={selected}
-          button={Boolean(activation.id && !activation.disabled)}
+          button={Boolean(itemActivation?.id && !itemActivation.disabled)}
           className={selected ? "uinode-list-item selected" : "uinode-list-item"}
-          data-activation-action-id={activation.id || undefined}
+          data-activation-action-id={itemActivation?.id || undefined}
           data-selected={selected ? "true" : undefined}
           data-ui-node-id={node.id}
+          data-unsupported-interaction-props={unsupportedProps}
           key={node.id}
           onClick={() => {
-            if (activation.id && !activation.disabled) options.dispatchAction?.(activation, node);
+            if (itemActivation?.id && !itemActivation.disabled) options.dispatchAction?.(itemActivation, node);
           }}
-          onKeyDown={(event) => dispatchActivationOnEnter(event, activation.id ? activation : undefined, node, options)}
+          onKeyDown={(event) => dispatchActivationOnEnter(event, itemActivation?.id ? itemActivation : undefined, node, options)}
         >
           <IonLabel className="uinode-list-item-label">
             <div className="uinode-list-item-title">{renderChildren(readSlot(node, "title"), store, options, row, form)}</div>
@@ -931,11 +934,20 @@ function renderNode(
       const selectedValues = selectedValueSet(props.selection);
       const tableActivation = actionFromValue(props.activation, {}, "Activate row");
       const tableRowAction = actionFromValue(props.row_action, {}, "Row action");
-      if (tableActivation.id) options.collectAction?.(tableActivation, node);
+      const unsupportedProps = [
+        tableActivation.id ? "activation" : undefined,
+        tableRowAction.id ? "row_action" : undefined
+      ].filter(Boolean).join(",");
+      const unsupportedPropsAttr = unsupportedProps || undefined;
 
       if (rows.length === 0) {
         return (
-          <div className="uinode-table-empty" data-ui-node-id={node.id} key={node.id}>
+          <div
+            className="uinode-table-empty"
+            data-ui-node-id={node.id}
+            data-unsupported-interaction-props={unsupportedPropsAttr}
+            key={node.id}
+          >
             {emptyState
               ? renderNode(emptyState, store, options, row, form)
               : <div className="uinode-empty-state" role="status"><div className="uinode-empty-state-copy"><h3>No rows</h3></div></div>}
@@ -944,7 +956,13 @@ function renderNode(
       }
 
       return (
-        <div className="uinode-table" data-ui-node-id={node.id} key={node.id} role="table">
+        <div
+          className="uinode-table"
+          data-ui-node-id={node.id}
+          data-unsupported-interaction-props={unsupportedPropsAttr}
+          key={node.id}
+          role="table"
+        >
           <div className="uinode-table-row heading" role="row">
             {columns.map((column) => (
               <div role="columnheader" key={column.key}>
@@ -955,20 +973,13 @@ function renderNode(
           {rows.map((tableRow, index) => {
             const rowId = readString(tableRow.id, `${node.id}-${index}`);
             const rowAction = actionFromValue(tableRow.action, {}, "Row action");
-            const explicitAction = rowAction.id ? rowAction : tableRowAction;
             const selected = isValueSelected(rowId, selectedValues);
             return (
               <div
                 aria-selected={selected}
                 className={selected ? "uinode-table-row selected" : "uinode-table-row"}
-                data-activation-action-id={tableActivation.id || undefined}
                 data-selected={selected ? "true" : undefined}
-                onClick={() => {
-                  if (tableActivation.id && !tableActivation.disabled) options.dispatchAction?.(tableActivation, node);
-                }}
-                onKeyDown={(event) => dispatchActivationOnEnter(event, tableActivation.id ? tableActivation : undefined, node, options)}
                 role="row"
-                tabIndex={tableActivation.id && !tableActivation.disabled ? 0 : undefined}
                 key={rowId}
               >
                 {columns.map((column) => (
@@ -976,9 +987,9 @@ function renderNode(
                     {String(readRecord(tableRow.cells)[column.key] ?? tableRow[column.key] ?? "")}
                   </div>
                 ))}
-                {explicitAction.id ? (
+                {rowAction.id ? (
                   <div className="uinode-table-row-actions" role="cell">
-                    {actionButton(explicitAction, node, options, explicitAction.label ?? "Row action", undefined, true)}
+                    {actionButton(rowAction, node, options, rowAction.label ?? "Row action", undefined, true)}
                   </div>
                 ) : null}
               </div>
