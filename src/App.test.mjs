@@ -2435,7 +2435,9 @@ await realTransport.send({
       params: {
         package_name: "project-pipelines",
         surface_id: "home",
-        action_id: "ticket.open",
+        action_id: "ticket.open"
+      },
+      payload: {
         ticket_id: "ticket_123"
       }
     }
@@ -2571,9 +2573,6 @@ assert.deepEqual(
     surface_id: "home",
     action_id: "ticket.open",
     payload: {
-      package_name: "project-pipelines",
-      surface_id: "home",
-      action_id: "ticket.open",
       ticket_id: "ticket_123"
     }
   }
@@ -3880,7 +3879,7 @@ try {
               type: "button",
               props: {
                 label: "Run contract action",
-                action: { id: "contract.action" }
+                action: { id: "contract.action", payload: { workspace_id: "workspace-toolbar" } }
               }
             }
           ]
@@ -3928,7 +3927,8 @@ try {
                   cells: {
                     primitive: "toolbar",
                     status: "supported"
-                  }
+                  },
+                  action: { id: "contract.row.open", payload: { workspace_id: "workspace-alpha" } }
                 }
               ],
               empty_state: {
@@ -3946,7 +3946,8 @@ try {
             type: "empty_state",
             props: {
               title: "No pending contracts",
-              description: "All required application primitives validated."
+              description: "All required application primitives validated.",
+              primary_action: { id: "contract.empty.primary", payload: { workspace_id: "workspace-empty" } }
             }
           }
         ]
@@ -3985,6 +3986,22 @@ try {
     package_name: "botster.plugin-contract-matrix",
     surface_id: "contract.app",
     action_id: "contract.action"
+  });
+  assert.deepEqual(applicationPrimitiveState.snapshot.root.slots.children[0].slots.actions[0].props.action.payload, {
+    workspace_id: "workspace-toolbar"
+  });
+  const translatedTable = applicationPrimitiveState.snapshot.root.slots.children[2].slots.children[1];
+  assert.deepEqual(translatedTable.props.rows[0].action.params, {
+    package_name: "botster.plugin-contract-matrix",
+    surface_id: "contract.app",
+    action_id: "contract.row.open"
+  });
+  assert.deepEqual(translatedTable.props.rows[0].action.payload, {
+    workspace_id: "workspace-alpha"
+  });
+  const translatedEmptyState = applicationPrimitiveState.snapshot.root.slots.children[2].slots.children[2];
+  assert.deepEqual(translatedEmptyState.props.primary_action.payload, {
+    workspace_id: "workspace-empty"
   });
   assert.match(applicationPrimitiveMarkup, /<ion-card/);
   assert.match(applicationPrimitiveMarkup, /<ion-toolbar/);
@@ -4692,6 +4709,106 @@ try {
   assert.match(directListItemMarkup, /data-action-id="workspace\.open"/);
   assert.match(directListItemMarkup, /uinode-list-item-actions/);
   assert.doesNotMatch(directListItemMarkup, /Unsupported primitive: list_item/);
+
+  const interactionActions = [];
+  const interactionTree = ionicUiNodeRendererRegistry.render(
+    {
+      kind: "ui_tree_snapshot",
+      surface: "interaction-props.test",
+      version: "test",
+      root: {
+        id: "interaction-root",
+        primitive: "section",
+        props: { title: "Interaction props" },
+        slots: {
+          children: [
+            {
+              id: "interaction-empty",
+              primitive: "empty_state",
+              props: {
+                title: "No workspaces",
+                primary_action: { id: "workspace.create", label: "Create", payload: { workspace_id: "new-workspace" } },
+                secondary_action: { id: "workspace.import", label: "Import", payload: { workspace_id: "import-workspace" } }
+              }
+            },
+            {
+              id: "interaction-list",
+              primitive: "list",
+              props: {
+                aria_label: "Selectable workspaces",
+                selection: { mode: "single", selected: ["workspace-alpha"] }
+              },
+              slots: {
+                children: [
+                  {
+                    id: "workspace-alpha-row",
+                    primitive: "list_item",
+                    props: {
+                      value: "workspace-alpha",
+                      activation: { id: "workspace.activate", payload: { workspace_id: "workspace-alpha" } },
+                      action: { id: "workspace.open", label: "Open alpha", payload: { workspace_id: "workspace-alpha" } }
+                    },
+                    slots: {
+                      title: [{ id: "workspace-alpha-title", primitive: "text", props: { text: "Workspace alpha" } }]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              id: "interaction-table",
+              primitive: "table",
+              props: {
+                columns: [{ id: "workspace", label: "Workspace" }],
+                selection: { mode: "single", selected: ["row-alpha"] },
+                activation: { id: "workspace.row.activate", payload: { workspace_id: "row-activation" } },
+                row_action: { id: "workspace.row.default", label: "Open default", payload: { workspace_id: "row-default" } },
+                rows: [
+                  {
+                    id: "row-alpha",
+                    cells: { workspace: "Alpha" },
+                    action: { id: "workspace.row.open", label: "Open alpha", payload: { workspace_id: "workspace-alpha" } }
+                  },
+                  {
+                    id: "row-beta",
+                    cells: { workspace: "Beta" }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    createInMemoryEntityFrameStore(),
+    {
+      collectAction: (action, node) => interactionActions.push({ action, nodeId: node.id })
+    }
+  );
+  const interactionMarkup = renderToStaticMarkup(interactionTree);
+  assert.match(interactionMarkup, /data-action-id="workspace\.create"/);
+  assert.match(interactionMarkup, /data-action-id="workspace\.import"/);
+  assert.match(interactionMarkup, /data-activation-action-id="workspace\.activate"/);
+  assert.match(interactionMarkup, /data-action-id="workspace\.open"/);
+  assert.match(interactionMarkup, /aria-selected="true"/);
+  assert.match(interactionMarkup, /data-selected="true"/);
+  assert.match(interactionMarkup, /data-activation-action-id="workspace\.row\.activate"/);
+  assert.match(interactionMarkup, /data-action-id="workspace\.row\.open"/);
+  assert.match(interactionMarkup, /data-action-id="workspace\.row\.default"/);
+  assert.deepEqual(
+    interactionActions
+      .filter(({ action }) => action.id.startsWith("workspace."))
+      .map(({ action }) => [action.id, action.payload]),
+    [
+      ["workspace.create", { workspace_id: "new-workspace" }],
+      ["workspace.import", { workspace_id: "import-workspace" }],
+      ["workspace.activate", { workspace_id: "workspace-alpha" }],
+      ["workspace.open", { workspace_id: "workspace-alpha" }],
+      ["workspace.row.activate", { workspace_id: "row-activation" }],
+      ["workspace.row.open", { workspace_id: "workspace-alpha" }],
+      ["workspace.row.default", { workspace_id: "row-default" }]
+    ]
+  );
 
   const inlineLayoutMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(

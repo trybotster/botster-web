@@ -334,6 +334,12 @@ function readRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function readRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => item !== null && typeof item === "object" && !Array.isArray(item))
+    : [];
+}
+
 function readString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
@@ -434,21 +440,16 @@ function validatedPluginSurfaceSnapshotNode(value: unknown, packageName: string,
 
   const props = { ...readRecord(record.props) };
   const primitive = rawType;
-  const actionRecord = readRecord(props.action);
-  const actionId = readString(props.action) ?? readString(actionRecord.id);
-  if ((primitive === "button" || primitive === "action") && actionId) {
-    const actionTarget = readString(actionRecord.target);
-    props.action = {
-      id: actionId,
-      label: readString(actionRecord.label) ?? readString(props.label) ?? actionId,
-      ...(actionTarget ? { target: actionTarget } : {}),
-      params: {
-        ...readRecord(actionRecord.params),
-        package_name: packageName,
-        surface_id: surfaceId,
-        action_id: actionId
-      }
-    };
+  for (const actionProp of ["action", "primary_action", "secondary_action", "row_action", "activation"]) {
+    const action = pluginSurfaceActionBinding(props[actionProp], packageName, surfaceId, readString(props.label) || actionProp);
+    if (action) props[actionProp] = action;
+  }
+  const rows = readRecords(props.rows);
+  if (rows.length > 0) {
+    props.rows = rows.map((row) => {
+      const rowAction = pluginSurfaceActionBinding(row.action, packageName, surfaceId, readString(row.label) || readString(row.id) || "Row action");
+      return rowAction ? { ...row, action: rowAction } : row;
+    });
   }
   if ((primitive === "panel" || primitive === "section") && props.title && !props.label) {
     props.label = props.title;
@@ -479,6 +480,26 @@ function validatedPluginSurfaceSnapshotNode(value: unknown, packageName: string,
     primitive,
     props,
     ...(Object.keys(slots).length > 0 ? { slots } : {})
+  };
+}
+
+function pluginSurfaceActionBinding(value: unknown, packageName: string, surfaceId: string, fallbackLabel: string): Record<string, unknown> | undefined {
+  const actionRecord = readRecord(value);
+  const actionId = readString(value) ?? readString(actionRecord.id);
+  if (!actionId) return undefined;
+
+  const actionTarget = readString(actionRecord.target);
+  return {
+    id: actionId,
+    label: (readString(actionRecord.label) ?? fallbackLabel) || actionId,
+    ...(actionTarget ? { target: actionTarget } : {}),
+    ...(Object.hasOwn(actionRecord, "disabled") ? { disabled: actionRecord.disabled } : {}),
+    ...(Object.hasOwn(actionRecord, "payload") ? { payload: actionRecord.payload } : {}),
+    params: {
+      package_name: packageName,
+      surface_id: surfaceId,
+      action_id: actionId
+    }
   };
 }
 

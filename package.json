@@ -10,6 +10,7 @@
     "smoke:packaged-browser": "npm run build && node scripts/packaged-browser-smoke.mjs",
     "smoke:live-packaged-protocol": "npm run build && node scripts/live-packaged-protocol-harness.mjs",
     "smoke:plugin-contract-matrix": "npm run build && BOTSTER_LIVE_CONTRACT_MATRIX=1 node scripts/live-packaged-protocol-harness.mjs",
+    "smoke:plugin-payload-contract": "npm run build && BOTSTER_LIVE_CONTRACT_MATRIX=1 BOTSTER_LIVE_PAYLOAD_CONTRACT=1 BOTSTER_PLUGIN_PAYLOAD_CONTRACT_PACKAGE_PATH=fixtures/plugin-payload-contract node scripts/live-packaged-protocol-harness.mjs",
     "smoke:mounted-terminal-keyboard": "node scripts/mounted-terminal-keyboard-smoke.mjs",
     "test": "node scripts/check-daemon-protocol-drift.mjs && node src/App.test.mjs",
     "lint": "node ./node_modules/eslint/bin/eslint.js .",

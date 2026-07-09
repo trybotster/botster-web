@@ -12,6 +12,7 @@ export interface ActionBinding {
   id: SemanticActionId;
   target?: string;
   params?: Record<string, unknown>;
+  payload?: unknown;
   label?: string;
   disabled?: boolean;
 }

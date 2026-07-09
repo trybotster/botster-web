@@ -22,7 +22,7 @@ import {
   IonTitle,
   IonToolbar
 } from "@ionic/react";
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 
 import { defaultUiCapabilitySet } from "./capabilities";
 import type { ActionBinding } from "./actions";
@@ -384,7 +384,10 @@ function ionicTone(props: Record<string, unknown>, fallback = "medium"): string 
 }
 
 function actionFromProps(props: Record<string, unknown>, fallbackLabel: string): ActionBinding {
-  const action = props.action;
+  return actionFromValue(props.action, props, fallbackLabel);
+}
+
+function actionFromValue(action: unknown, props: Record<string, unknown>, fallbackLabel: string): ActionBinding {
   if (typeof action === "string") {
     return {
       id: action,
@@ -398,9 +401,56 @@ function actionFromProps(props: Record<string, unknown>, fallbackLabel: string):
     id: readString(actionRecord.id),
     target: readString(actionRecord.target, undefined),
     params: readRecord(actionRecord.params),
+    payload: Object.hasOwn(actionRecord, "payload") ? actionRecord.payload : undefined,
     label: readString(actionRecord.label, readString(props.label, fallbackLabel)),
     disabled: readBoolean(actionRecord.disabled, readBoolean(props.disabled))
   };
+}
+
+function actionButton(
+  action: ActionBinding,
+  node: UiNode,
+  options: UiNodeRenderOptions,
+  label: string,
+  className?: string,
+  stopPropagation = false
+): ReactNode {
+  options.collectAction?.(action, node);
+
+  return (
+    <IonButton
+      className={className}
+      data-action-id={action.id}
+      data-action-target={action.target}
+      disabled={action.disabled}
+      key={`${node.id}-${action.id}`}
+      onClick={(event) => {
+        if (stopPropagation) event.stopPropagation();
+        options.dispatchAction?.(action, node);
+      }}
+    >
+      {label}
+    </IonButton>
+  );
+}
+
+function selectedValueSet(selection: unknown): Set<string> {
+  const selected = readRecord(selection).selected;
+  return new Set(
+    (Array.isArray(selected) ? selected : [])
+      .filter((value) => typeof value === "string" || typeof value === "number")
+      .map((value) => String(value))
+  );
+}
+
+function isValueSelected(value: unknown, selectedValues: Set<string>): boolean {
+  return (typeof value === "string" || typeof value === "number") && selectedValues.has(String(value));
+}
+
+function dispatchActivationOnEnter(event: KeyboardEvent, action: ActionBinding | undefined, node: UiNode, options: UiNodeRenderOptions): void {
+  if (!action || action.disabled || event.key !== "Enter") return;
+  event.preventDefault();
+  options.dispatchAction?.(action, node);
 }
 
 function coreControlName(node: UiNode, props: Record<string, unknown>): string {
@@ -731,34 +781,44 @@ function renderNode(
         </IonCard>
       );
     case "empty_state":
-      return (
-        <div className="uinode-empty-state" data-ui-node-id={node.id} key={node.id} role="status">
-          <div className="uinode-empty-state-copy">
-            <h3>{readString(props.title, "Nothing to show")}</h3>
-            <p>{readString(props.body, readString(props.description))}</p>
+      {
+        const emptyStateActions = [
+          ["action", "Action"],
+          ["primary_action", "Primary action"],
+          ["secondary_action", "Secondary action"]
+        ].map(([propName, fallbackLabel]) => {
+          const action = actionFromValue(props[propName], {}, fallbackLabel);
+          return action.id ? actionButton(action, node, options, action.label ?? fallbackLabel) : null;
+        }).filter(Boolean);
+
+        return (
+          <div className="uinode-empty-state" data-ui-node-id={node.id} key={node.id} role="status">
+            <div className="uinode-empty-state-copy">
+              <h3>{readString(props.title, "Nothing to show")}</h3>
+              <p>{readString(props.body, readString(props.description))}</p>
+            </div>
+            {emptyStateActions.length > 0 || hasSlot(node, "actions") ? (
+              <IonButtons className="uinode-empty-state-actions">
+                {emptyStateActions}
+                {hasSlot(node, "actions") ? renderChildren(readSlot(node, "actions"), store, options, row, form) : null}
+              </IonButtons>
+            ) : null}
           </div>
-          {hasSlot(node, "actions") ? <IonButtons className="uinode-empty-state-actions">{renderChildren(readSlot(node, "actions"), store, options, row, form)}</IonButtons> : null}
-        </div>
-      );
+        );
+      }
     case "action": {
-      const action = readRecord(props.action);
-      const id = readString(action.id);
-      const label = readString(action.label, id);
-      options.collectAction?.({ id, target: readString(action.target, undefined), params: readRecord(action.params), label, disabled: readBoolean(action.disabled) }, node);
+      const action = actionFromProps(props, node.id);
+      const label = readString(action.label, action.id);
+      options.collectAction?.(action, node);
 
       return (
         <IonButton
           data-ui-node-id={node.id}
-          data-action-id={id}
-          data-action-target={readString(action.target, undefined)}
-          disabled={readBoolean(action.disabled)}
+          data-action-id={action.id}
+          data-action-target={action.target}
+          disabled={action.disabled}
           key={node.id}
-          onClick={() => {
-            options.dispatchAction?.(
-              { id, target: readString(action.target, undefined), params: readRecord(action.params), label, disabled: readBoolean(action.disabled) },
-              node
-            );
-          }}
+          onClick={() => options.dispatchAction?.(action, node)}
         >
           {label}
         </IonButton>
@@ -785,11 +845,24 @@ function renderNode(
       const rows = readRecords(props.items);
       const itemTemplate = readSlot(node, "item");
       const children = readChildren(node);
+      const selectedValues = selectedValueSet(props.selection);
+      const listChildren = children.map((child) => {
+        if (child.primitive !== "list_item") return child;
+        const childProps = readRecord(child.props);
+        if (!isValueSelected(childProps.value, selectedValues)) return child;
+        return {
+          ...child,
+          props: {
+            ...childProps,
+            selected: true
+          }
+        };
+      });
 
-      if (rows.length === 0 && children.length > 0) {
+      if (rows.length === 0 && listChildren.length > 0) {
         return (
           <IonList className="uinode-list" data-ui-node-id={node.id} aria-label={readString(props.label, readString(props.aria_label, "List"))} key={node.id}>
-            {renderChildren(children, store, options, row)}
+            {renderChildren(listChildren, store, options, row)}
           </IonList>
         );
       }
@@ -814,17 +887,38 @@ function renderNode(
     }
     case "list_item": {
       const hasEndContent = hasSlot(node, "meta") || hasSlot(node, "actions");
+      const activation = actionFromValue(props.activation, {}, "Activate");
+      const explicitAction = actionFromValue(props.action, {}, "Open");
+      const selected = readBoolean(props.selected);
+      if (activation.id) options.collectAction?.(activation, node);
       return (
-        <IonItem data-ui-node-id={node.id} key={node.id}>
+        <IonItem
+          aria-selected={selected}
+          button={Boolean(activation.id && !activation.disabled)}
+          className={selected ? "uinode-list-item selected" : "uinode-list-item"}
+          data-activation-action-id={activation.id || undefined}
+          data-selected={selected ? "true" : undefined}
+          data-ui-node-id={node.id}
+          key={node.id}
+          onClick={() => {
+            if (activation.id && !activation.disabled) options.dispatchAction?.(activation, node);
+          }}
+          onKeyDown={(event) => dispatchActivationOnEnter(event, activation.id ? activation : undefined, node, options)}
+        >
           <IonLabel className="uinode-list-item-label">
             <div className="uinode-list-item-title">{renderChildren(readSlot(node, "title"), store, options, row, form)}</div>
             {hasSlot(node, "subtitle") ? <div className="uinode-list-item-subtitle">{renderChildren(readSlot(node, "subtitle"), store, options, row, form)}</div> : null}
             {renderChildren(readChildren(node), store, options, row, form)}
           </IonLabel>
-          {hasEndContent ? (
+          {hasEndContent || explicitAction.id ? (
             <div className="uinode-list-item-end" slot="end">
               {hasSlot(node, "meta") ? <div className="uinode-list-item-meta">{renderChildren(readSlot(node, "meta"), store, options, row, form)}</div> : null}
               {hasSlot(node, "actions") ? <IonButtons className="uinode-list-item-actions">{renderChildren(readSlot(node, "actions"), store, options, row, form)}</IonButtons> : null}
+              {explicitAction.id ? (
+                <IonButtons className="uinode-list-item-actions">
+                  {actionButton(explicitAction, node, options, explicitAction.label ?? "Open", undefined, true)}
+                </IonButtons>
+              ) : null}
             </div>
           ) : null}
         </IonItem>
@@ -834,6 +928,10 @@ function renderNode(
       const columns = readTableColumns(props.columns);
       const rows = readRecords(props.rows);
       const emptyState = uiNodeFromRecord(props.empty_state);
+      const selectedValues = selectedValueSet(props.selection);
+      const tableActivation = actionFromValue(props.activation, {}, "Activate row");
+      const tableRowAction = actionFromValue(props.row_action, {}, "Row action");
+      if (tableActivation.id) options.collectAction?.(tableActivation, node);
 
       if (rows.length === 0) {
         return (
@@ -854,15 +952,38 @@ function renderNode(
               </div>
             ))}
           </div>
-          {rows.map((tableRow, index) => (
-            <div className="uinode-table-row" role="row" key={readString(tableRow.id, `${node.id}-${index}`)}>
-              {columns.map((column) => (
-                <div role="cell" key={column.key}>
-                  {String(readRecord(tableRow.cells)[column.key] ?? tableRow[column.key] ?? "")}
-                </div>
-              ))}
-            </div>
-          ))}
+          {rows.map((tableRow, index) => {
+            const rowId = readString(tableRow.id, `${node.id}-${index}`);
+            const rowAction = actionFromValue(tableRow.action, {}, "Row action");
+            const explicitAction = rowAction.id ? rowAction : tableRowAction;
+            const selected = isValueSelected(rowId, selectedValues);
+            return (
+              <div
+                aria-selected={selected}
+                className={selected ? "uinode-table-row selected" : "uinode-table-row"}
+                data-activation-action-id={tableActivation.id || undefined}
+                data-selected={selected ? "true" : undefined}
+                onClick={() => {
+                  if (tableActivation.id && !tableActivation.disabled) options.dispatchAction?.(tableActivation, node);
+                }}
+                onKeyDown={(event) => dispatchActivationOnEnter(event, tableActivation.id ? tableActivation : undefined, node, options)}
+                role="row"
+                tabIndex={tableActivation.id && !tableActivation.disabled ? 0 : undefined}
+                key={rowId}
+              >
+                {columns.map((column) => (
+                  <div role="cell" key={column.key}>
+                    {String(readRecord(tableRow.cells)[column.key] ?? tableRow[column.key] ?? "")}
+                  </div>
+                ))}
+                {explicitAction.id ? (
+                  <div className="uinode-table-row-actions" role="cell">
+                    {actionButton(explicitAction, node, options, explicitAction.label ?? "Row action", undefined, true)}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       );
     }
