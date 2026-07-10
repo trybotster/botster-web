@@ -975,6 +975,7 @@ const {
   compatibilityDiagnosticsFromFrame,
   connectionFailureDiagnostic,
   hubConnectionDiagnosticFromFrame,
+  hubCompatibilityDiagnosticId,
   hubStatusFamily,
   initialConnectionDiagnostics,
   minimumConformanceFixtureRevision,
@@ -3105,6 +3106,42 @@ assert.equal(optionalTerminalReadbackDiagnostic.source, "compatibility");
 assert.match(optionalTerminalReadbackDiagnostic.detail, /ticket_1783636830_504538/);
 assert.match(optionalTerminalReadbackDiagnostic.detail, /ticket_1783636761_760074/);
 assert.match(optionalTerminalReadbackDiagnostic.detail, /Attach\/Drain terminal history remains available/);
+
+const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [
+      {
+        id: "local-hub",
+        schema_version: 1,
+        compatibility: {
+          protocol: "botster-hub-daemon-v1",
+          protocol_version: 1,
+          features: [...requiredDaemonFeatures, "terminal_readback"],
+          conformance_fixture_revision: 1
+        }
+      }
+    ]
+  }
+});
+assert.equal(advertisedTerminalReadbackDiagnostics.length, 1);
+assert.equal(advertisedTerminalReadbackDiagnostics[0].id, hubCompatibilityDiagnosticId);
+assert.equal(advertisedTerminalReadbackDiagnostics[0].severity, "success");
+assert.equal(
+  advertisedTerminalReadbackDiagnostics.some(({ id }) => id === terminalReadbackOptionalDiagnosticId),
+  false
+);
+
+const hubReportedTerminalReadbackDiagnostic = hubConnectionDiagnosticFromFrame({
+  kind: "connection_diagnostic",
+  payload: {
+    kind: "unsupported_feature",
+    feature: "terminal_readback"
+  }
+});
+assert.equal(hubReportedTerminalReadbackDiagnostic.id, terminalReadbackOptionalDiagnosticId);
 
 const hubReportedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
