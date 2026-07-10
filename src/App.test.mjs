@@ -975,11 +975,15 @@ const {
   compatibilityDiagnosticsFromFrame,
   connectionFailureDiagnostic,
   hubConnectionDiagnosticFromFrame,
+  hubCompatibilityDiagnosticId,
   hubStatusFamily,
   initialConnectionDiagnostics,
+  minimumConformanceFixtureRevision,
   operatorErrorDiagnostic,
+  requiredDaemonFeatures,
   schemaVersionDiagnosticFromFrame,
   streamDisconnectedDiagnostic,
+  terminalReadbackOptionalDiagnosticId,
   terminalUnavailableDiagnostic,
   upsertDiagnostic,
   webRtcLifecycleDiagnostic,
@@ -3058,7 +3062,7 @@ assert.equal(missingCapabilityDiagnostic.title, "Hub capability missing");
 assert.match(missingCapabilityDiagnostic.detail, /terminal_streaming/);
 assert.equal(missingCapabilityDiagnostic.id, "hub-compatibility");
 
-const compatibleDescriptorDiagnostic = compatibilityDiagnosticsFromFrame({
+const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
   payload: {
     operation: "entity_snapshot",
@@ -3082,13 +3086,104 @@ const compatibleDescriptorDiagnostic = compatibilityDiagnosticsFromFrame({
       }
     ]
   }
-})[0];
+});
+const [compatibleDescriptorDiagnostic, optionalTerminalReadbackDiagnostic] = compatibleDescriptorDiagnostics;
+assert.deepEqual(requiredDaemonFeatures, [
+  "sessions",
+  "terminal_streaming",
+  "resize",
+  "plugin_surface_render",
+  "plugin_surface_action"
+]);
+assert.equal(requiredDaemonFeatures.includes("terminal_readback"), false);
+assert.equal(minimumConformanceFixtureRevision, 1);
+assert.equal(compatibleDescriptorDiagnostics.length, 2);
+assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
+assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
+assert.equal(optionalTerminalReadbackDiagnostic.id, terminalReadbackOptionalDiagnosticId);
+assert.equal(optionalTerminalReadbackDiagnostic.severity, "warning");
+assert.equal(optionalTerminalReadbackDiagnostic.source, "compatibility");
+assert.match(optionalTerminalReadbackDiagnostic.detail, /ticket_1783636830_504538/);
+assert.match(optionalTerminalReadbackDiagnostic.detail, /ticket_1783636761_760074/);
+assert.match(optionalTerminalReadbackDiagnostic.detail, /Attach\/Drain terminal history remains available/);
+
+const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [
+      {
+        id: "local-hub",
+        schema_version: 1,
+        compatibility: {
+          protocol: "botster-hub-daemon-v1",
+          protocol_version: 1,
+          features: [...requiredDaemonFeatures, "terminal_readback"],
+          conformance_fixture_revision: 1
+        }
+      }
+    ]
+  }
+});
+assert.equal(advertisedTerminalReadbackDiagnostics.length, 1);
+assert.equal(advertisedTerminalReadbackDiagnostics[0].id, hubCompatibilityDiagnosticId);
+assert.equal(advertisedTerminalReadbackDiagnostics[0].severity, "success");
+assert.equal(
+  advertisedTerminalReadbackDiagnostics.some(({ id }) => id === terminalReadbackOptionalDiagnosticId),
+  false
+);
+
+const hubReportedTerminalReadbackDiagnostic = hubConnectionDiagnosticFromFrame({
+  kind: "connection_diagnostic",
+  payload: {
+    kind: "unsupported_feature",
+    feature: "terminal_readback"
+  }
+});
+assert.equal(hubReportedTerminalReadbackDiagnostic.id, terminalReadbackOptionalDiagnosticId);
+
+const hubReportedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [
+      {
+        id: "local-hub",
+        schema_version: 1,
+        compatibility: {
+          protocol: "botster-hub-daemon-v1",
+          protocol_version: 1,
+          features: [
+            "sessions",
+            "terminal_streaming",
+            "resize",
+            "plugin_surface_render",
+            "plugin_surface_action"
+          ],
+          conformance_fixture_revision: 1
+        },
+        diagnostics: [
+          {
+            kind: "unsupported_feature",
+            feature: "terminal_readback",
+            message: "Terminal readback is unavailable"
+          }
+        ]
+      }
+    ]
+  }
+});
+assert.deepEqual(hubReportedTerminalReadbackDiagnostics, []);
+
 const transitionedCompatibilityDiagnostics = [
   descriptorUnavailableDiagnostic,
-  compatibleDescriptorDiagnostic
+  ...compatibleDescriptorDiagnostics
 ].reduce((diagnostics, diagnostic) => upsertDiagnostic(diagnostics, diagnostic), []);
-assert.equal(transitionedCompatibilityDiagnostics.length, 1);
+assert.equal(transitionedCompatibilityDiagnostics.length, 2);
 assert.equal(transitionedCompatibilityDiagnostics[0].title, "Hub compatibility descriptor compatible");
+assert.equal(transitionedCompatibilityDiagnostics[1].id, terminalReadbackOptionalDiagnosticId);
 
 const absentHubDiagnosticIds = [bridgeUnavailableDiagnostic(new Error("connect ECONNREFUSED"))].map(({ id }) => id);
 assert.deepEqual(absentHubDiagnosticIds, ["bridge-unavailable"]);
@@ -5545,6 +5640,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
         protocolMismatchDiagnostic,
         missingCapabilityDiagnostic,
         compatibleDescriptorDiagnostic,
+        optionalTerminalReadbackDiagnostic,
         streamDisconnectedDiagnostic(new Error("SSE closed")),
         actionFailureDiagnostic(
           { id: "botster.session.rename", target: "missing-real-hub-session" },
@@ -5566,6 +5662,8 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
   assert.match(diagnosticsMarkup, /Capability: terminal_streaming/);
   assert.match(diagnosticsMarkup, /Operation: spawn/);
   assert.match(diagnosticsMarkup, /Hub compatibility descriptor compatible/);
+  assert.match(diagnosticsMarkup, /Optional terminal readback unavailable/);
+  assert.match(diagnosticsMarkup, /Warning \/ compatibility/);
   assert.match(diagnosticsMarkup, /Hub compatibility descriptor unavailable/);
   assert.match(diagnosticsMarkup, /Hub protocol mismatch/);
   assert.match(diagnosticsMarkup, /Hub capability missing/);
@@ -5587,8 +5685,10 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
     })
   );
   assert.match(transitionedDiagnosticsMarkup, /Hub compatibility descriptor compatible/);
+  assert.match(transitionedDiagnosticsMarkup, /Optional terminal readback unavailable/);
   assert.doesNotMatch(transitionedDiagnosticsMarkup, /Hub compatibility descriptor unavailable/);
   assert.equal((transitionedDiagnosticsMarkup.match(/data-diagnostic-id="hub-compatibility"/g) ?? []).length, 1);
+  assert.equal((transitionedDiagnosticsMarkup.match(new RegExp(`data-diagnostic-id="${terminalReadbackOptionalDiagnosticId}"`, "g")) ?? []).length, 1);
 } finally {
   await vite.close();
 }
