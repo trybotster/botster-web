@@ -6,6 +6,7 @@ import type { WebrtcDaemonLifecycleEvent } from "./webrtcDaemonClient";
 export const expectedDaemonSchemaVersion = 1;
 export const hubStatusFamily = "botster-web.hub_status";
 export const hubCompatibilityDiagnosticId = "hub-compatibility";
+export const terminalReadbackOptionalDiagnosticId = "hub-diagnostic-unsupported_feature-terminal_readback";
 export const expectedDaemonProtocol = "botster-hub-daemon-v1";
 export const minimumDaemonProtocolVersion = 1;
 export const minimumConformanceFixtureRevision = 1;
@@ -442,7 +443,7 @@ export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): Conne
     ];
   }
 
-  return [
+  const diagnostics: ConnectionDiagnostic[] = [
     {
       id: hubCompatibilityDiagnosticId,
       title: "Hub compatibility descriptor compatible",
@@ -451,6 +452,19 @@ export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): Conne
       source: "compatibility"
     }
   ];
+
+  if (!features.includes("terminal_readback")) {
+    diagnostics.push({
+      id: terminalReadbackOptionalDiagnosticId,
+      title: "Optional terminal readback unavailable",
+      detail:
+        "Current Attach/Drain terminal history remains available. Optional terminal screen/snapshot readback is not advertised; typed client wiring is deferred to web ticket ticket_1783636830_504538 pending hub release ticket ticket_1783636761_760074.",
+      severity: "warning",
+      source: "compatibility"
+    });
+  }
+
+  return diagnostics;
 }
 
 function hubStatusRecordFromFrame(frame: HubControlFrame): Record<string, unknown> | undefined {
