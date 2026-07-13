@@ -67,7 +67,7 @@ export function TerminalViewHost({
 
         statusSubscription = terminalDataPlane.subscribeStatus?.(setAttachmentStatus);
         await bridge.attach(descriptor, terminalDataPlane);
-        uninstallLiveHarnessTerminalControls = installLiveHarnessTerminalControls(bridge, descriptor);
+        uninstallLiveHarnessTerminalControls = installLiveHarnessTerminalControls(bridge, descriptor, terminalDataPlane);
         setMountDiagnostic(undefined);
         container.dataset.terminalMount = "mounted";
       })
@@ -122,7 +122,8 @@ export function TerminalViewHost({
 
 function installLiveHarnessTerminalControls(
   bridge: TerminalViewBridge,
-  descriptor: TerminalViewDescriptor
+  descriptor: TerminalViewDescriptor,
+  dataPlane: TerminalDataPlaneAttachment
 ): () => void {
   const harness = (window as typeof window & {
     __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
@@ -130,6 +131,8 @@ function installLiveHarnessTerminalControls(
         focus(): Promise<void>;
         writeInput(data: string): Promise<void>;
         resize(rows: number, columns: number): Promise<void>;
+        readScreen(): ReturnType<NonNullable<TerminalDataPlaneAttachment["readScreen"]>>;
+        captureSnapshot(): ReturnType<NonNullable<TerminalDataPlaneAttachment["captureSnapshot"]>>;
       };
     };
   }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
@@ -139,7 +142,9 @@ function installLiveHarnessTerminalControls(
   const terminalControl = {
     focus: () => bridge.focus(descriptor),
     writeInput: (data: string) => bridge.writeInput(descriptor, data),
-    resize: (rows: number, columns: number) => bridge.resize(descriptor, rows, columns)
+    resize: (rows: number, columns: number) => bridge.resize(descriptor, rows, columns),
+    readScreen: async () => dataPlane.readScreen?.(),
+    captureSnapshot: async () => dataPlane.captureSnapshot?.()
   };
   harness.terminalControl = terminalControl;
 
