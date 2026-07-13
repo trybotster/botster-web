@@ -12,6 +12,7 @@ import {
   materializePluginContractMatrixFixture,
   metadata as hubTestSupportMetadata,
   pluginContractMatrixFixturePath,
+  readLateAttachHistoryConformanceFixture,
   verifyPackageAssets
 } from "@trybotster/hub-test-support";
 import ts from "typescript";
@@ -541,24 +542,29 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.2");
+assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.2");
+assert.equal(hubTestSupportMetadata.package_version, "0.1.3");
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 10);
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(hubTestSupportMetadata.application_primitives.surface_id, "contract.app");
 assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, [
   "button",
   "empty_state",
+  "form",
   "metric",
   "metric_grid",
   "panel",
   "section",
   "status_badge",
   "table",
+  "text_input",
   "toolbar"
 ]);
 assert.equal(applicationPrimitivesFixturePath(), pluginContractMatrixFixturePath());
 assert.equal(verifyPackageAssets().ok, true);
+const lateAttachHistoryConformanceFixture = readLateAttachHistoryConformanceFixture();
+assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 10);
 assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
 assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping daemon protocol drift check|check out \.\.\/botster-hub/);
 assert.match(liveProtocolHarnessScript, /@trybotster\/hub-test-support/);
@@ -3106,9 +3112,9 @@ assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
 assert.equal(optionalTerminalReadbackDiagnostic.id, terminalReadbackOptionalDiagnosticId);
 assert.equal(optionalTerminalReadbackDiagnostic.severity, "warning");
 assert.equal(optionalTerminalReadbackDiagnostic.source, "compatibility");
-assert.match(optionalTerminalReadbackDiagnostic.detail, /ticket_1783636830_504538/);
-assert.match(optionalTerminalReadbackDiagnostic.detail, /ticket_1783636761_760074/);
 assert.match(optionalTerminalReadbackDiagnostic.detail, /Attach\/Drain terminal history remains available/);
+assert.match(optionalTerminalReadbackDiagnostic.detail, /does not depend on it for any shipped behavior/);
+assert.doesNotMatch(optionalTerminalReadbackDiagnostic.detail, /ticket_/);
 
 const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -3290,6 +3296,167 @@ assert.deepEqual(terminalOutput.slice(0, 3), [
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
 assert.equal(terminalStatuses.some((status) => status.state === "attached" && status.message.includes("Historical terminal scrollback restored")), true);
 assert.equal(terminalStatuses.some((status) => status.state === "scrollback_unavailable"), false);
+
+const readbackRequests = [];
+const readScreenResponses = [
+  { session_id: realHubDogfoodSessionId, text: "hub-owned-screen\r\n" },
+  null,
+  undefined,
+  { session_id: "replacement-session", text: "wrong screen\r\n" }
+];
+const captureSnapshotResponses = [
+  { session_id: realHubDogfoodSessionId, rows: 24, cols: 80, payload_format: null, payload_bytes: 512 },
+  { session_id: realHubDogfoodSessionId, rows: 30, cols: 100, payload_bytes: 0 },
+  null,
+  undefined,
+  { session_id: "replacement-session", rows: 24, cols: 80, payload_bytes: 512 }
+];
+const readbackOutput = [];
+const readbackDataPlane = createRealHubTerminalDataPlane({
+  bridge: {
+    async request(request) {
+      if (request.type === "list_sessions") {
+        return {
+          kind: "sessions",
+          sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }],
+          events: []
+        };
+      }
+      readbackRequests.push(request);
+      if (request.type === "read_screen") {
+        const read_screen = readScreenResponses.shift();
+        return read_screen === undefined ? { kind: "read_screen", events: [] } : { kind: "read_screen", read_screen, events: [] };
+      }
+      if (request.type === "capture_snapshot") {
+        const capture_snapshot = captureSnapshotResponses.shift();
+        return capture_snapshot === undefined
+          ? { kind: "capture_snapshot", events: [] }
+          : { kind: "capture_snapshot", capture_snapshot, events: [] };
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal() {
+      return { unsubscribe() {} };
+    }
+  }
+});
+readbackDataPlane.subscribeOutput((data) => readbackOutput.push(data));
+await flushMicrotasks();
+assert.deepEqual(await readbackDataPlane.readScreen(), {
+  session_id: realHubDogfoodSessionId,
+  text: "hub-owned-screen\r\n"
+});
+assert.deepEqual(await readbackDataPlane.captureSnapshot(), {
+  session_id: realHubDogfoodSessionId,
+  rows: 24,
+  cols: 80,
+  payload_format: null,
+  payload_bytes: 512
+});
+assert.equal(await readbackDataPlane.readScreen(), undefined);
+assert.deepEqual(await readbackDataPlane.captureSnapshot(), {
+  session_id: realHubDogfoodSessionId,
+  rows: 30,
+  cols: 100,
+  payload_bytes: 0
+});
+assert.equal(await readbackDataPlane.readScreen(), undefined);
+assert.equal(await readbackDataPlane.captureSnapshot(), undefined);
+assert.equal(await readbackDataPlane.readScreen(), undefined);
+assert.equal(await readbackDataPlane.captureSnapshot(), undefined);
+assert.equal(await readbackDataPlane.captureSnapshot(), undefined);
+assert.deepEqual(readbackRequests, [
+  { type: "read_screen", session_id: realHubDogfoodSessionId },
+  { type: "capture_snapshot", session_id: realHubDogfoodSessionId },
+  { type: "read_screen", session_id: realHubDogfoodSessionId },
+  { type: "capture_snapshot", session_id: realHubDogfoodSessionId },
+  { type: "read_screen", session_id: realHubDogfoodSessionId },
+  { type: "capture_snapshot", session_id: realHubDogfoodSessionId },
+  { type: "read_screen", session_id: realHubDogfoodSessionId },
+  { type: "capture_snapshot", session_id: realHubDogfoodSessionId },
+  { type: "capture_snapshot", session_id: realHubDogfoodSessionId }
+]);
+assert.deepEqual(readbackOutput, []);
+
+for (const readbackType of ["read_screen", "capture_snapshot"]) {
+  let resolveReadback;
+  const staleDataPlane = createRealHubTerminalDataPlane({
+    bridge: {
+      async request(request) {
+        if (request.type === readbackType) {
+          return new Promise((resolve) => {
+            resolveReadback = resolve;
+          });
+        }
+        if (request.type === "list_sessions") {
+          return {
+            kind: "sessions",
+            sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }],
+            events: []
+          };
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal() {
+        return { unsubscribe() {} };
+      }
+    }
+  });
+  const pendingReadback = readbackType === "read_screen"
+    ? staleDataPlane.readScreen()
+    : staleDataPlane.captureSnapshot();
+  await flushMicrotasks();
+  await staleDataPlane.detach();
+  const replacementSubscription = staleDataPlane.subscribeOutput(() => undefined);
+  await flushMicrotasks();
+  resolveReadback(readbackType === "read_screen"
+    ? {
+        kind: "read_screen",
+        read_screen: { session_id: realHubDogfoodSessionId, text: "late screen\r\n" },
+        events: []
+      }
+    : {
+        kind: "capture_snapshot",
+        capture_snapshot: { session_id: realHubDogfoodSessionId, rows: 24, cols: 80, payload_bytes: 512 },
+        events: []
+      });
+  assert.equal(await pendingReadback, undefined, "late reply from a previous attachment must be discarded after re-subscribe");
+  replacementSubscription.unsubscribe();
+}
+
+for (const [events, expectedOutput] of [
+  [lateAttachHistoryConformanceFixture.history_then_live, ["history-before-live\r\n", "live-after-attach\r\n"]],
+  [lateAttachHistoryConformanceFixture.no_history_then_live, ["live-without-history\r\n"]]
+]) {
+  const sessionId = events[0].session_id;
+  const subscriptionId = events[0].subscription_id;
+  const fixtureOutput = [];
+  const fixtureDataPlane = createRealHubTerminalDataPlane({
+    sessionId,
+    subscriptionId,
+    bridge: {
+      async request(request) {
+        if (request.type === "list_sessions") {
+          return {
+            kind: "sessions",
+            sessions: [{ session_id: sessionId, lifecycle: "running" }],
+            events: []
+          };
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal(nextSessionId, nextSubscriptionId, onEvent) {
+        assert.equal(nextSessionId, sessionId);
+        assert.equal(nextSubscriptionId, subscriptionId);
+        events.forEach(onEvent);
+        return { unsubscribe() {} };
+      }
+    }
+  });
+  fixtureDataPlane.subscribeOutput((data) => fixtureOutput.push(data));
+  await waitFor(() => fixtureOutput.length === expectedOutput.length);
+  assert.deepEqual(fixtureOutput, expectedOutput);
+}
 
 const reattachedTerminalOutput = [];
 const reattachedTerminalSubscription = terminalDataPlane.subscribeOutput((data) => reattachedTerminalOutput.push(data));

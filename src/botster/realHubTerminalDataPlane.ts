@@ -6,7 +6,7 @@ import type {
 } from "./terminal";
 import type { DaemonBridgeClient } from "./realHubDogfoodTransport";
 import { realHubDogfoodSessionId, realHubDogfoodSubscriptionId } from "./realHubDogfoodTransport";
-import type { DaemonEvent } from "./realHubDaemonDto";
+import type { DaemonCaptureSnapshot, DaemonEvent, DaemonReadScreen } from "./realHubDaemonDto";
 
 const maxAttachAttempts = 80;
 const attachRetryDelayMs = 250;
@@ -33,6 +33,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private pendingResize: { rows: number; columns: number } | undefined;
   private detached = false;
   private restoredHistory = false;
+  private attachmentGeneration = 0;
 
   constructor(private readonly options: RealHubTerminalDataPlaneOptions) {
     this.sessionId = options.sessionId ?? realHubDogfoodSessionId;
@@ -97,7 +98,34 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     await this.flushPendingResize();
   }
 
+  async readScreen(): Promise<DaemonReadScreen | undefined> {
+    const attachmentGeneration = this.attachmentGeneration;
+    const response = await this.options.bridge.request({
+      type: "read_screen",
+      session_id: this.sessionId
+    });
+    const readScreen = response.read_screen ?? undefined;
+    if (!this.isCurrentAttachment(attachmentGeneration) || readScreen?.session_id !== this.sessionId) {
+      return undefined;
+    }
+    return readScreen;
+  }
+
+  async captureSnapshot(): Promise<DaemonCaptureSnapshot | undefined> {
+    const attachmentGeneration = this.attachmentGeneration;
+    const response = await this.options.bridge.request({
+      type: "capture_snapshot",
+      session_id: this.sessionId
+    });
+    const captureSnapshot = response.capture_snapshot ?? undefined;
+    if (!this.isCurrentAttachment(attachmentGeneration) || captureSnapshot?.session_id !== this.sessionId) {
+      return undefined;
+    }
+    return captureSnapshot;
+  }
+
   async detach(): Promise<void> {
+    this.attachmentGeneration += 1;
     this.detached = true;
     this.closeStream();
     this.listeners.clear();
@@ -124,6 +152,10 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     });
 
     return this.attachPromise;
+  }
+
+  private isCurrentAttachment(attachmentGeneration: number): boolean {
+    return !this.detached && this.attachmentGeneration === attachmentGeneration;
   }
 
   private async attachWhenSessionIsVisible(): Promise<void> {

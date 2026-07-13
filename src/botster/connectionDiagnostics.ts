@@ -458,7 +458,7 @@ export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): Conne
       id: terminalReadbackOptionalDiagnosticId,
       title: "Optional terminal readback unavailable",
       detail:
-        "Current Attach/Drain terminal history remains available. Optional terminal screen/snapshot readback is not advertised; typed client wiring is deferred to web ticket ticket_1783636830_504538 pending hub release ticket ticket_1783636761_760074.",
+        "Current Attach/Drain terminal history remains available. This hub does not advertise optional terminal screen/snapshot readback; botster-web does not depend on it for any shipped behavior.",
       severity: "warning",
       source: "compatibility"
     });

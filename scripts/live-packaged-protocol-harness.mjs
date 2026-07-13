@@ -197,6 +197,30 @@ try {
       `expected one send_input for ${echoProbe}, observed ${sendInputRequestsAfterEcho - sendInputRequestsBeforeEcho}`
     );
   }
+
+  const readScreen = await callTerminalControl(page, "readScreen");
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_screen" }, "read_screen request");
+  if (
+    readScreen?.session_id !== "botster-web-dogfood-session" ||
+    !readScreen.text?.includes(`botster-web-dogfood-echo:${echoProbe}`)
+  ) {
+    throw new Error(`unexpected read_screen response: ${JSON.stringify(readScreen)}`);
+  }
+
+  const captureSnapshot = await callTerminalControl(page, "captureSnapshot");
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "capture_snapshot" }, "capture_snapshot request");
+  if (
+    captureSnapshot?.session_id !== "botster-web-dogfood-session" ||
+    !Number.isInteger(captureSnapshot.rows) ||
+    captureSnapshot.rows <= 0 ||
+    !Number.isInteger(captureSnapshot.cols) ||
+    captureSnapshot.cols <= 0 ||
+    !Number.isInteger(captureSnapshot.payload_bytes) ||
+    captureSnapshot.payload_bytes < 0 ||
+    (captureSnapshot.payload_format != null && typeof captureSnapshot.payload_format !== "string")
+  ) {
+    throw new Error(`unexpected capture_snapshot response: ${JSON.stringify(captureSnapshot)}`);
+  }
   await waitForTerminalAttachState(page, ["attached"]);
 
   const requestedResize = await latestTerminalResize(page);
@@ -542,9 +566,9 @@ async function reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId)
 
 async function callTerminalControl(page, method, ...args) {
   await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl));
-  await page.evaluate(
+  return page.evaluate(
     async ({ method: nextMethod, args: nextArgs }) => {
-      await globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl[nextMethod](...nextArgs);
+      return globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl[nextMethod](...nextArgs);
     },
     { method, args }
   );

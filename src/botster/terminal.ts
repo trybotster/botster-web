@@ -1,3 +1,5 @@
+import type { DaemonCaptureSnapshot, DaemonReadScreen } from "./realHubDaemonDto";
+
 export interface TerminalViewDescriptor {
   sessionId: string;
   renderer: "restty";
@@ -26,6 +28,8 @@ export interface TerminalDataPlaneAttachment {
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription;
   subscribeStatus?(listener: (status: TerminalAttachmentStatus) => void): TerminalSubscription;
   resize?(rows: number, columns: number): void | Promise<void>;
+  readScreen?(): Promise<DaemonReadScreen | undefined>;
+  captureSnapshot?(): Promise<DaemonCaptureSnapshot | undefined>;
   detach?(): void | Promise<void>;
 }
 
