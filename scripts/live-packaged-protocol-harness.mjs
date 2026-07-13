@@ -6,10 +6,12 @@ import { connect, createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { chromium } from "playwright";
+import { createServer as createViteServer } from "vite";
 
 const host = "127.0.0.1";
 const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
+const appRouteFromPathname = await loadProductionAppRouteFromPathname();
 const workspacesPackagePath = resolveOptionalPackagePath(
   [process.env.BOTSTER_WORKSPACES_PACKAGE_PATH, process.env.BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH],
   "botster-workspaces"
@@ -1092,7 +1094,13 @@ async function assertRawSecretNotVisible(page) {
 async function assertPluginSurfaceRouteReloadAndDirectLoad(page, target) {
   const routeDescriptor = await pluginSurfaceRouteDescriptor(page, target);
   const fallbackPath = `/apps/${encodeURIComponent(target.packageName)}/${encodeURIComponent(target.surfaceId)}`;
-  const expectedPathname = new URL(routeDescriptor.routePath ?? fallbackPath, appUrl).pathname;
+  const descriptorRoute = routeDescriptor.routePath
+    ? appRouteFromPathname(routeDescriptor.routePath)
+    : undefined;
+  const acceptedRoutePath = descriptorRoute?.view === "apps" && descriptorRoute.packageName
+    ? routeDescriptor.routePath
+    : fallbackPath;
+  const expectedPathname = new URL(acceptedRoutePath, appUrl).pathname;
 
   await page.waitForURL((url) => url.pathname === expectedPathname, { timeout: 15_000 }).catch((error) => {
     throw new Error(
@@ -1135,7 +1143,7 @@ async function pluginSurfaceRouteDescriptor(page, target) {
     const packageRecord = packages.find((record) =>
       (record.package_name ?? record.name ?? record.id) === packageName
     );
-    const surfaces = packageRecord?.surfaces ?? packageRecord?.app_surfaces ?? [];
+    const surfaces = packageRecord?.app_surfaces ?? [];
     const surfaceRecord = surfaces.find((record) => (record.surface_id ?? record.id) === surfaceId);
     return {
       routePath: typeof surfaceRecord?.route_path === "string" && surfaceRecord.route_path.length > 0
@@ -1145,6 +1153,29 @@ async function pluginSurfaceRouteDescriptor(page, target) {
       surfaceRecord
     };
   }, target);
+}
+
+async function loadProductionAppRouteFromPathname() {
+  const vite = await createViteServer({
+    configFile: false,
+    resolve: {
+      alias: {
+        "@ionic/react": resolve(packageRoot, "src/botster/__fixtures__/IonicReactSsrMock.tsx")
+      }
+    },
+    optimizeDeps: {
+      noDiscovery: true
+    },
+    server: { middlewareMode: true },
+    appType: "custom",
+    logLevel: "error"
+  });
+  try {
+    const appModule = await vite.ssrLoadModule("/src/App.tsx");
+    return appModule.appRouteFromPathname;
+  } finally {
+    await vite.close();
+  }
 }
 
 async function assertSelectedAppSurfaceRendered(page, target) {
