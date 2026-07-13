@@ -471,8 +471,6 @@ assert.match(terminalHost, /data-terminal-attach-state/);
 assert.match(terminalHost, /subscribeStatus/);
 assert.match(terminalHost, /bridge\.attach/);
 assert.match(terminalHost, /focus: \(\) => bridge\.focus\(descriptor\)/);
-assert.match(terminalHost, /readScreen: async \(\) => dataPlane\.readScreen\?\.\(\)/);
-assert.match(terminalHost, /captureSnapshot: async \(\) => dataPlane\.captureSnapshot\?\.\(\)/);
 assert.match(terminalHost, /bridge\.unmount/);
 assert.match(terminalHost, /delete harness\.terminalControl/);
 assert.match(terminalHost, /terminalMount/);
@@ -3114,9 +3112,9 @@ assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
 assert.equal(optionalTerminalReadbackDiagnostic.id, terminalReadbackOptionalDiagnosticId);
 assert.equal(optionalTerminalReadbackDiagnostic.severity, "warning");
 assert.equal(optionalTerminalReadbackDiagnostic.source, "compatibility");
-assert.match(optionalTerminalReadbackDiagnostic.detail, /ticket_1783636830_504538/);
-assert.match(optionalTerminalReadbackDiagnostic.detail, /ticket_1783636761_760074/);
 assert.match(optionalTerminalReadbackDiagnostic.detail, /Attach\/Drain terminal history remains available/);
+assert.match(optionalTerminalReadbackDiagnostic.detail, /does not depend on it for any shipped behavior/);
+assert.doesNotMatch(optionalTerminalReadbackDiagnostic.detail, /ticket_/);
 
 const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -3390,7 +3388,17 @@ for (const readbackType of ["read_screen", "capture_snapshot"]) {
             resolveReadback = resolve;
           });
         }
+        if (request.type === "list_sessions") {
+          return {
+            kind: "sessions",
+            sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }],
+            events: []
+          };
+        }
         return { kind: "events", events: [] };
+      },
+      streamTerminal() {
+        return { unsubscribe() {} };
       }
     }
   });
@@ -3399,6 +3407,8 @@ for (const readbackType of ["read_screen", "capture_snapshot"]) {
     : staleDataPlane.captureSnapshot();
   await flushMicrotasks();
   await staleDataPlane.detach();
+  const replacementSubscription = staleDataPlane.subscribeOutput(() => undefined);
+  await flushMicrotasks();
   resolveReadback(readbackType === "read_screen"
     ? {
         kind: "read_screen",
@@ -3410,7 +3420,8 @@ for (const readbackType of ["read_screen", "capture_snapshot"]) {
         capture_snapshot: { session_id: realHubDogfoodSessionId, rows: 24, cols: 80, payload_bytes: 512 },
         events: []
       });
-  assert.equal(await pendingReadback, undefined);
+  assert.equal(await pendingReadback, undefined, "late reply from a previous attachment must be discarded after re-subscribe");
+  replacementSubscription.unsubscribe();
 }
 
 for (const [events, expectedOutput] of [

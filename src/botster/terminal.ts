@@ -1,4 +1,4 @@
-import type { DaemonCaptureSnapshot, DaemonReadScreen } from "./generated/daemon-protocol";
+import type { DaemonCaptureSnapshot, DaemonReadScreen } from "./realHubDaemonDto";
 
 export interface TerminalViewDescriptor {
   sessionId: string;
