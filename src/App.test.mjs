@@ -3484,6 +3484,7 @@ try {
       SpawnTargetListItem,
       PluginSurfaceRoutePage,
       PluginSettingsPanel,
+      appRouteFromPathname,
       compareSpawnTargetRows,
       compareInstalledPackageRows,
       packageAppSurfaces,
@@ -3503,6 +3504,36 @@ try {
     vite.ssrLoadModule("/src/packageConfigurationForm.ts"),
     vite.ssrLoadModule("/src/App.tsx")
   ]);
+
+  const descriptorAppRoute = appRouteFromPathname("/packages/acme%20tools/surfaces/home%2Fmain");
+  const fallbackAppRoute = appRouteFromPathname("/apps/acme%20tools/home%2Fmain");
+  assert.deepEqual(descriptorAppRoute, {
+    view: "apps",
+    packageName: "acme tools",
+    surfaceId: "home/main",
+    settings: false
+  });
+  assert.deepEqual(fallbackAppRoute, descriptorAppRoute);
+  assert.deepEqual(appRouteFromPathname("/packages/acme%20tools/settings"), {
+    view: "apps",
+    packageName: "acme tools",
+    settings: true
+  });
+  assert.deepEqual(appRouteFromPathname("/packages/acme%20tools/entrypoints/web"), {
+    view: "apps",
+    packageName: "acme tools"
+  });
+  assert.deepEqual(appRouteFromPathname("/packages/acme%20tools/surfaces"), {
+    view: "apps",
+    packageName: "acme tools"
+  });
+  assert.deepEqual(appRouteFromPathname("/packages/acme%20tools/surfaces/home/extra"), {
+    view: "apps",
+    packageName: "acme tools",
+    surfaceId: "home",
+    settings: false
+  });
+  assert.deepEqual(appRouteFromPathname("/not-an-app-route"), { view: "dashboard" });
 
   function findReactElement(node, predicate) {
     if (Array.isArray(node)) {
