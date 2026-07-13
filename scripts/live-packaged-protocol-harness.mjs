@@ -6,10 +6,12 @@ import { connect, createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { chromium } from "playwright";
+import { createServer as createViteServer } from "vite";
 
 const host = "127.0.0.1";
 const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
+const appRouteFromPathname = await loadProductionAppRouteFromPathname();
 const workspacesPackagePath = resolveOptionalPackagePath(
   [process.env.BOTSTER_WORKSPACES_PACKAGE_PATH, process.env.BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH],
   "botster-workspaces"
@@ -1090,16 +1092,90 @@ async function assertRawSecretNotVisible(page) {
 }
 
 async function assertPluginSurfaceRouteReloadAndDirectLoad(page, target) {
-  const routePath = `/apps/${target.packageName}/${target.surfaceId}`;
-  const routeUrl = new URL(routePath, appUrl);
-  const expectedUrl = withDogfoodMode(routeUrl);
+  const routeDescriptor = await pluginSurfaceRouteDescriptor(page, target);
+  const fallbackPath = `/apps/${encodeURIComponent(target.packageName)}/${encodeURIComponent(target.surfaceId)}`;
+  const descriptorRoute = routeDescriptor.routePath
+    ? appRouteFromPathname(routeDescriptor.routePath)
+    : undefined;
+  const acceptedRoutePath = descriptorRoute?.view === "apps" && descriptorRoute.packageName
+    ? routeDescriptor.routePath
+    : fallbackPath;
+  const expectedPathname = new URL(acceptedRoutePath, appUrl).pathname;
 
-  await page.waitForURL(new RegExp(`${routePath.replaceAll("/", "\\/")}`), { timeout: 15_000 });
+  await page.waitForURL((url) => url.pathname === expectedPathname, { timeout: 15_000 }).catch((error) => {
+    throw new Error(
+      `first-party app route mismatch; observed=${JSON.stringify(page.url())} expected_pathname=${JSON.stringify(expectedPathname)} descriptor=${JSON.stringify(routeDescriptor, null, 2)}: ${error.message}`
+    );
+  });
+  const capturedUrl = page.url();
   await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_render", package_name: target.packageName, surface_id: target.surfaceId },
+    "reloaded first-party app plugin_surface_render request"
+  );
   await assertSelectedAppSurfaceRendered(page, target);
 
-  await page.goto(expectedUrl, { waitUntil: "domcontentloaded" });
+  await page.goto(capturedUrl, { waitUntil: "domcontentloaded" });
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_render", package_name: target.packageName, surface_id: target.surfaceId },
+    "direct-loaded first-party app plugin_surface_render request"
+  );
   await assertSelectedAppSurfaceRendered(page, target);
+}
+
+async function pluginSurfaceRouteDescriptor(page, target) {
+  return page.evaluate(({ packageName, surfaceId }) => {
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    const packages = [];
+    for (const entry of events) {
+      if (entry.kind === "daemon_response" && entry.payload?.kind === "packages") {
+        packages.push(...(entry.payload.packages ?? []));
+      }
+      if (entry.kind === "hub_frame" && entry.payload?.kind === "entity_snapshot") {
+        const payload = entry.payload.payload;
+        if (payload?.family === "botster-web.package") {
+          packages.push(...(payload.records ?? []));
+        }
+      }
+    }
+    const packageRecord = packages.find((record) =>
+      (record.package_name ?? record.name ?? record.id) === packageName
+    );
+    const surfaces = packageRecord?.app_surfaces ?? [];
+    const surfaceRecord = surfaces.find((record) => (record.surface_id ?? record.id) === surfaceId);
+    return {
+      routePath: typeof surfaceRecord?.route_path === "string" && surfaceRecord.route_path.length > 0
+        ? surfaceRecord.route_path
+        : undefined,
+      packageRecord,
+      surfaceRecord
+    };
+  }, target);
+}
+
+async function loadProductionAppRouteFromPathname() {
+  const vite = await createViteServer({
+    configFile: false,
+    resolve: {
+      alias: {
+        "@ionic/react": resolve(packageRoot, "src/botster/__fixtures__/IonicReactSsrMock.tsx")
+      }
+    },
+    optimizeDeps: {
+      noDiscovery: true
+    },
+    server: { middlewareMode: true },
+    appType: "custom",
+    logLevel: "error"
+  });
+  try {
+    const appModule = await vite.ssrLoadModule("/src/App.tsx");
+    return appModule.appRouteFromPathname;
+  } finally {
+    await vite.close();
+  }
 }
 
 async function assertSelectedAppSurfaceRendered(page, target) {

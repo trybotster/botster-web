@@ -109,7 +109,7 @@ const appViewPaths: Record<AppView, string> = {
   diagnostics: "/diagnostics"
 };
 
-function appRouteFromPathname(pathname: string): AppRoute {
+export function appRouteFromPathname(pathname: string): AppRoute {
   const normalizedPath = pathname.replace(/\/+$/, "") || "/";
   if (normalizedPath === appViewPaths.diagnostics || normalizedPath.startsWith(`${appViewPaths.diagnostics}/`)) return { view: "diagnostics" };
   if (normalizedPath === appViewPaths["spawn-points"] || normalizedPath.startsWith(`${appViewPaths["spawn-points"]}/`)) return { view: "spawn-points" };
