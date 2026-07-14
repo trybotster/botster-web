@@ -2180,7 +2180,8 @@ try {
     maximumConcurrentAssemblies: 16,
     requestTimeoutMs: 10_000,
     assemblyBookkeepingBytes: 256,
-    chunkBookkeepingBytes: 64
+    chunkBookkeepingBytes: 64,
+    completedMessageBookkeepingBytes: 64
   });
 
   const largeResponseChannel = createFakeDataChannel();
@@ -2245,6 +2246,51 @@ try {
   duplicateChannel.emitMessage(JSON.stringify(duplicateChunks[0]));
   for (const chunk of duplicateChunks.slice(1)) duplicateChannel.emitMessage(JSON.stringify(chunk));
   assert.deepEqual(await duplicatePromise, duplicateResponse);
+
+  const completedReplayChannels = [createFakeDataChannel(), createFakeDataChannel()];
+  const completedReplayClient = createWebrtcTestClient(completedReplayChannels, localWebrtcBootstrapFixture);
+  const completedResponse = { kind: "apps", apps: [], events: [], diagnostics: [] };
+  const completedPromise = completedReplayClient.request({ type: "list_apps" });
+  await waitForTestCondition(() => completedReplayChannels[0].sent.length === 1);
+  const completedChunks = await emitChunkedTestResponse(
+    completedReplayChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    completedResponse,
+    { messageId: "completed-response" }
+  );
+  assert.deepEqual(await completedPromise, completedResponse);
+
+  const replayTargetPromise = completedReplayClient.request({ type: "list_sessions" });
+  const replayTargetRejection = assert.rejects(
+    replayTargetPromise,
+    (error) => error instanceof WebrtcDaemonClientError && /message id was already completed/.test(error.message)
+  );
+  await waitForTestCondition(() => completedReplayChannels[0].sent.length === 2);
+  completedReplayChannels[0].emitMessage(JSON.stringify(completedChunks[0]));
+  await replayTargetRejection;
+
+  const completedReplayRecovery = completedReplayClient.request({ type: "status" });
+  await waitForTestCondition(() => completedReplayChannels[1].sent.length === 1);
+  await emitChunkedTestResponse(
+    completedReplayChannels[1],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "status",
+      status: null,
+      sessions: [],
+      packages: [],
+      package_decision: null,
+      lifecycle: [],
+      plugin_tools: [],
+      plugin_tool_result: null,
+      events: [],
+      cleanup: null,
+      coordination: null,
+      error: null
+    },
+    { messageId: "completed-response" }
+  );
+  assert.equal((await completedReplayRecovery).kind, "status");
 
   const conflictingChannels = [createFakeDataChannel(), createFakeDataChannel()];
   const conflictingClient = createWebrtcTestClient(conflictingChannels, localWebrtcBootstrapFixture);

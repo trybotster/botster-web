@@ -77,7 +77,8 @@ export const localWebrtcResponseChunkLimits = Object.freeze({
   maximumConcurrentAssemblies: 16,
   requestTimeoutMs: 10_000,
   assemblyBookkeepingBytes: 256,
-  chunkBookkeepingBytes: 64
+  chunkBookkeepingBytes: 64,
+  completedMessageBookkeepingBytes: 64
 });
 
 const requestTimeoutMs = localWebrtcResponseChunkLimits.requestTimeoutMs;
@@ -205,6 +206,7 @@ class WebrtcDaemonTransport {
   private readonly pageHideHandler: (() => void) | undefined;
   private readonly pendingRequests: PendingRequest[] = [];
   private readonly responseAssemblies = new Map<string, ResponseAssembly>();
+  private readonly completedMessageIds = new Set<string>();
   private peerConnection: RTCPeerConnection | undefined;
   private dataChannel: RTCDataChannel | undefined;
   private cryptoKey: CryptoKey | undefined;
@@ -438,6 +440,9 @@ class WebrtcDaemonTransport {
     }
 
     const chunk = parseResponseChunk(data);
+    if (this.completedMessageIds.has(chunk.message_id)) {
+      throw webrtcFailure("data-plane", "local WebRTC response chunk message id was already completed");
+    }
     let assembly = this.responseAssemblies.get(chunk.message_id);
     if (!assembly) {
       const pending = this.pendingRequests.find((entry) => entry.generation === generation && entry.messageId === undefined);
@@ -505,38 +510,36 @@ class WebrtcDaemonTransport {
 
     let envelopeJson = "";
     for (let index = 0; index < assembly.chunkCount; index += 1) {
-      const payload = assembly.chunks.get(index);
-      if (payload === undefined) {
-        throw webrtcFailure("data-plane", "local WebRTC response assembly is missing a chunk");
-      }
-      envelopeJson += payload;
+      envelopeJson += assembly.chunks.get(index) as string;
     }
     if (utf8ByteLength(envelopeJson) !== assembly.totalBytes) {
       throw webrtcFailure("data-plane", "local WebRTC response assembly is not byte-exact");
     }
 
-    this.releaseAssembly(chunk.message_id, assembly);
     const key = this.cryptoKey;
     if (!key) throw webrtcFailure("encryption", "local WebRTC response key is unavailable");
 
+    let response: DaemonResponse;
     try {
-      const response = await decryptDaemonResponse(key, envelopeJson);
-      if (generation !== this.peerGeneration || this.pendingRequests[0] !== assembly.pending) return;
-      this.pendingRequests.shift();
-      const finishedAt = Date.now();
-      recordLiveHarnessEvent("webrtc_response_assembly", {
-        request_type: assembly.pending.requestType,
-        generation,
-        total_bytes: assembly.totalBytes,
-        chunk_count: assembly.chunkCount,
-        started_at: assembly.startedAt,
-        finished_at: finishedAt,
-        duration_ms: finishedAt - assembly.startedAt
-      });
-      assembly.pending.resolve(response);
+      response = await decryptDaemonResponse(key, envelopeJson);
     } catch (error) {
       throw webrtcFailure("encryption", `local WebRTC response decryption failed: ${errorMessage(error)}`);
     }
+    if (generation !== this.peerGeneration || this.pendingRequests[0] !== assembly.pending) return;
+    this.releaseAssembly(chunk.message_id, assembly);
+    this.retainCompletedMessageId(chunk.message_id);
+    this.pendingRequests.shift();
+    const finishedAt = Date.now();
+    recordLiveHarnessEvent("webrtc_response_assembly", {
+      request_type: assembly.pending.requestType,
+      generation,
+      total_bytes: assembly.totalBytes,
+      chunk_count: assembly.chunkCount,
+      started_at: assembly.startedAt,
+      finished_at: finishedAt,
+      duration_ms: finishedAt - assembly.startedAt
+    });
+    assembly.pending.resolve(response);
   }
 
   private validateAssemblyChunk(
@@ -567,11 +570,20 @@ class WebrtcDaemonTransport {
     this.aggregateRetainedBytes -= assembly.retainedBytes;
   }
 
+  private retainCompletedMessageId(messageId: string): void {
+    const retainedBytes =
+      localWebrtcResponseChunkLimits.completedMessageBookkeepingBytes + utf8ByteLength(messageId);
+    this.ensureAggregateBudget(retainedBytes);
+    this.completedMessageIds.add(messageId);
+    this.aggregateRetainedBytes += retainedBytes;
+  }
+
   private clearAssemblies(): void {
     for (const assembly of this.responseAssemblies.values()) {
       window.clearTimeout(assembly.timeout);
     }
     this.responseAssemblies.clear();
+    this.completedMessageIds.clear();
     this.aggregateRetainedBytes = 0;
   }
 
