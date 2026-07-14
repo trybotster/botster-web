@@ -225,7 +225,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     if (event.type === "snapshot" || event.type === "scrollback") {
-      if (typeof event.data === "string") {
+      if (typeof event.data === "string" && event.data.length > 0) {
         this.restoredHistory = true;
         this.emitStatus(historyRestoredStatus(event.type));
         this.emitOutput(event.data, event.type);

@@ -559,10 +559,10 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.4");
+assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.5");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.4");
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 11);
+assert.equal(hubTestSupportMetadata.package_version, "0.1.5");
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 12);
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(hubTestSupportMetadata.application_primitives.surface_id, "contract.app");
 assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, [
@@ -581,7 +581,19 @@ assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, 
 assert.equal(applicationPrimitivesFixturePath(), pluginContractMatrixFixturePath());
 assert.equal(verifyPackageAssets().ok, true);
 const lateAttachHistoryConformanceFixture = readLateAttachHistoryConformanceFixture();
-assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 11);
+assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 12);
+assert.deepEqual(
+  lateAttachHistoryConformanceFixture.history_then_live.map((event) =>
+    event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
+  ),
+  ["attach_state:attaching", "snapshot", "attach_state:attached", "terminal_output", "process_exit"]
+);
+assert.deepEqual(
+  lateAttachHistoryConformanceFixture.no_history_then_live.map((event) =>
+    event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
+  ),
+  ["attach_state:attaching", "attach_state:attached", "terminal_output", "process_exit"]
+);
 const localWebrtcResponseChunkFixture = readLocalWebrtcResponseChunkConformanceFixture();
 assert.equal(localWebrtcResponseChunkFixture.version, 1);
 assert.equal(localWebrtcResponseChunkFixture.maximum_frame_bytes_exclusive, 65_536);
@@ -615,6 +627,10 @@ assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
 assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping daemon protocol drift check|check out \.\.\/botster-hub/);
 assert.match(liveProtocolHarnessScript, /@trybotster\/hub-test-support/);
 assert.match(liveProtocolHarnessScript, /materializePluginContractMatrixFixture/);
+assert.match(liveProtocolHarnessScript, /assertTerminalAttachChronology/);
+assert.match(liveProtocolHarnessScript, /attach_state:attaching/);
+assert.match(liveProtocolHarnessScript, /attach_state:attached/);
+assert.match(liveProtocolHarnessScript, /binaryProvenanceFor/);
 assert.doesNotMatch(
   liveProtocolHarnessScript,
   /BOTSTER_HUB_SOURCE_DIR \? join\(process\.env\.BOTSTER_HUB_SOURCE_DIR, "fixtures\/plugins\/plugin-contract-matrix"\)/
@@ -3866,6 +3882,7 @@ for (const [events, expectedOutput] of [
   const sessionId = events[0].session_id;
   const subscriptionId = events[0].subscription_id;
   const fixtureOutput = [];
+  const fixtureTimeline = [];
   const fixtureDataPlane = createRealHubTerminalDataPlane({
     sessionId,
     subscriptionId,
@@ -3888,9 +3905,38 @@ for (const [events, expectedOutput] of [
       }
     }
   });
-  fixtureDataPlane.subscribeOutput((data) => fixtureOutput.push(data));
+  fixtureDataPlane.subscribeStatus((status) => {
+    fixtureTimeline.push(`status:${status.state}:${status.message}`);
+  });
+  fixtureDataPlane.subscribeOutput((data) => {
+    fixtureOutput.push(data);
+    fixtureTimeline.push(`output:${data}`);
+  });
   await waitFor(() => fixtureOutput.length === expectedOutput.length);
   assert.deepEqual(fixtureOutput, expectedOutput);
+
+  const attachingIndex = fixtureTimeline.findIndex((entry) => entry.startsWith("status:attaching:"));
+  const protocolAttachedIndex = fixtureTimeline.findIndex((entry) =>
+    entry === "status:attached:Terminal stream attached; waiting for available output."
+  );
+  const liveOutputIndex = fixtureTimeline.findIndex((entry) => entry === `output:${expectedOutput.at(-1)}`);
+  assert.equal(attachingIndex >= 0, true);
+  assert.equal(protocolAttachedIndex > attachingIndex, true);
+  assert.equal(liveOutputIndex > protocolAttachedIndex, true);
+
+  if (expectedOutput.length === 2) {
+    const restoredStatusIndex = fixtureTimeline.findIndex((entry) =>
+      entry.includes("Historical terminal snapshot restored from renderable daemon data.")
+    );
+    const historyOutputIndex = fixtureTimeline.findIndex((entry) => entry === `output:${expectedOutput[0]}`);
+    assert.equal(restoredStatusIndex > attachingIndex, true);
+    assert.equal(historyOutputIndex > restoredStatusIndex, true);
+    assert.equal(protocolAttachedIndex > historyOutputIndex, true);
+  } else {
+    const liveOnlyIndex = fixtureTimeline.findIndex((entry) => entry.startsWith("status:live_only:"));
+    assert.equal(liveOnlyIndex > protocolAttachedIndex, true);
+    assert.equal(liveOutputIndex > liveOnlyIndex, true);
+  }
 }
 
 const reattachedTerminalOutput = [];
@@ -3928,6 +3974,13 @@ const byteOnlyTerminalDataPlane = createRealHubTerminalDataPlane({
         bytes: 19
       });
       onEvent({
+        type: "snapshot",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        data: "",
+        bytes: 19
+      });
+      onEvent({
         type: "terminal_output",
         session_id: sessionId,
         subscription_id: subscriptionId,
@@ -3944,6 +3997,11 @@ byteOnlyTerminalDataPlane.subscribeOutput((data) => byteOnlyTerminalOutput.push(
 await waitFor(() => byteOnlyTerminalOutput.some((data) => data.includes("byte-only-live-output")));
 assert.deepEqual(byteOnlyTerminalOutput, ["byte-only-live-output\r\n"]);
 assert.equal(byteOnlyTerminalStatuses.some((status) => status.state === "scrollback_unavailable"), true);
+assert.equal(byteOnlyTerminalStatuses.at(-1).state, "scrollback_unavailable");
+assert.equal(
+  byteOnlyTerminalStatuses.some((status) => status.message.includes("restored from renderable daemon data")),
+  false
+);
 assert.match(
   byteOnlyTerminalStatuses.find((status) => status.state === "scrollback_unavailable").message,
   /cannot render that snapshot format yet/
