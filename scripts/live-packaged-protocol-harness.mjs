@@ -165,7 +165,8 @@ try {
   await waitForSessionAttachable(page, true);
   await page.getByText("Attachable").waitFor();
   await waitForTerminalSession(page, "botster-web-dogfood-session");
-  await waitForTerminalOutput(page, "botster-web-dogfood-ready");
+  await proveLiveTerminalAfterAttach(page, `${echoProbe}-attach-0`);
+  attachChronology.push({ cycle: 0, ...await assertTerminalAttachChronology(page, "botster-web-dogfood-session") });
 
   let previousGrantId = await latestLocalWebrtcGrantId(page);
   for (const cycle of [1, 2]) {
@@ -177,8 +178,7 @@ try {
     await waitForTerminalSession(page, "botster-web-dogfood-session");
     const assemblyTelemetry = await waitForHistoricalTerminalRestore(page);
     if (transportMode === "webrtc") responseAssemblyTelemetry.push({ cycle, ...assemblyTelemetry });
-    await waitForTerminalOutput(page, "botster-web-dogfood-ready");
-    await waitForTerminalRendererWrite(page, "botster-web-dogfood-ready");
+    await proveLiveTerminalAfterAttach(page, `${echoProbe}-attach-${cycle}`);
     attachChronology.push({ cycle, ...await assertTerminalAttachChronology(page, "botster-web-dogfood-session") });
   }
 
@@ -207,9 +207,10 @@ try {
 
   const readScreen = await callTerminalControl(page, "readScreen");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_screen" }, "read_screen request");
+  const unwrappedReadScreenText = readScreen?.text?.replace(/[\r\n]/g, "");
   if (
     readScreen?.session_id !== "botster-web-dogfood-session" ||
-    !readScreen.text?.includes(`botster-web-dogfood-echo:${echoProbe}`)
+    !unwrappedReadScreenText?.includes(`botster-web-dogfood-echo:${echoProbe}`)
   ) {
     throw new Error(`unexpected read_screen response: ${JSON.stringify(readScreen)}`);
   }
@@ -265,6 +266,10 @@ try {
     diagnosticMessage += `\nhub stdout:\n${hubStdout}\nhub stderr:\n${hubStderr}`;
   }
   if (harnessState) {
+    const terminalStreamEvents = harnessState.events?.filter((entry) => entry.kind.startsWith("terminal_stream_")) ?? [];
+    if (terminalStreamEvents.length > 0) {
+      diagnosticMessage += `\nterminal stream events:\n${JSON.stringify(terminalStreamEvents, null, 2)}`;
+    }
     diagnosticMessage += `\nharness state:\n${JSON.stringify(harnessState, null, 2)}`;
   }
   const browserFailureMessage = browserFailureSummary({ consoleEvents, pageErrors, responseErrors });
@@ -1731,6 +1736,18 @@ async function waitForTerminalRendererWrite(page, text) {
   ).catch((error) => {
     throw new Error(`timed out waiting for mounted terminal renderer write ${text}: ${error.message}`);
   });
+}
+
+async function proveLiveTerminalAfterAttach(page, probe) {
+  await waitForTerminalAttachState(page, ["attached"]);
+  await callTerminalControl(page, "writeInput", `${probe}\n`);
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "send_input", data: `${probe}\n` },
+    `post-attach live input ${probe}`
+  );
+  await waitForTerminalOutput(page, `botster-web-dogfood-echo:${probe}`);
+  await waitForTerminalRendererWrite(page, `botster-web-dogfood-echo:${probe}`);
 }
 
 async function waitForTerminalCanvas(page) {

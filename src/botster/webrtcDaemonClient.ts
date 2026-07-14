@@ -153,7 +153,15 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
       let timer: number | undefined;
 
       const emitEvents = (response: DaemonResponse) => {
-        for (const event of response.events ?? []) {
+        const events = response.events ?? [];
+        if (events.length > 0) {
+          recordLiveHarnessEvent("terminal_stream_batch", {
+            event_types: events.map((event) =>
+              event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
+            )
+          });
+        }
+        for (const event of events) {
           recordLiveHarnessEvent("daemon_event", event);
           eventListeners.forEach((listener) => listener(event));
           onEvent(event);
@@ -167,7 +175,11 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
           const response = await transport.request({ type: "drain", session_id: sessionId });
           if (closed) return;
           emitEvents(response);
-        } catch {
+        } catch (error) {
+          recordLiveHarnessEvent("terminal_stream_error", {
+            stage: "drain",
+            message: error instanceof Error ? error.message : String(error)
+          });
           closed = true;
           return;
         }
@@ -184,7 +196,11 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
           emitEvents(response);
           void drain();
         })
-        .catch(() => {
+        .catch((error: unknown) => {
+          recordLiveHarnessEvent("terminal_stream_error", {
+            stage: "attach",
+            message: error instanceof Error ? error.message : String(error)
+          });
           closed = true;
         });
 
