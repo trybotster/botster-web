@@ -68,6 +68,7 @@ let page;
 const consoleEvents = [];
 const pageErrors = [];
 const responseErrors = [];
+const responseAssemblyTelemetry = [];
 
 try {
   if (transportMode === "webrtc") {
@@ -170,7 +171,8 @@ try {
     await waitForSessionAttachable(page, true);
     await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
     await waitForTerminalSession(page, "botster-web-dogfood-session");
-    await waitForHistoricalTerminalRestore(page);
+    const assemblyTelemetry = await waitForHistoricalTerminalRestore(page);
+    if (transportMode === "webrtc") responseAssemblyTelemetry.push({ cycle, ...assemblyTelemetry });
     await waitForTerminalOutput(page, "botster-web-dogfood-ready");
     await waitForTerminalRendererWrite(page, "botster-web-dogfood-ready");
   }
@@ -241,7 +243,10 @@ try {
   await assertNoUnknownSession(page);
   assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
   await requestDaemonShutdown();
-  console.log(`live packaged protocol harness passed (${transportMode})`);
+  console.log(
+    `live packaged protocol harness passed (${transportMode}) ` +
+      JSON.stringify({ response_assembly_telemetry: responseAssemblyTelemetry })
+  );
 } catch (error) {
   const harnessState = page
     ? await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__).catch(() => undefined)
@@ -1766,6 +1771,30 @@ async function waitForHistoricalTerminalRestore(page) {
     );
   });
   await waitForTerminalRendererWrite(page, historyPayload);
+  if (transportMode !== "webrtc") return undefined;
+
+  const telemetry = await page.evaluate(() => {
+    const assemblies = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_response_assembly")
+      .map((entry) => entry.payload)
+      .filter((payload) =>
+        ["attach", "drain"].includes(payload?.request_type) &&
+        Number.isInteger(payload?.total_bytes) &&
+        Number.isInteger(payload?.chunk_count) &&
+        Number.isFinite(payload?.duration_ms)
+      );
+    return assemblies.toSorted((left, right) => right.total_bytes - left.total_bytes)[0] ?? null;
+  });
+  if (!telemetry || telemetry.total_bytes <= 0 || telemetry.chunk_count < 1) {
+    throw new Error(`historical terminal restore did not traverse WebRTC response chunk framing: ${JSON.stringify(telemetry)}`);
+  }
+  if (telemetry.duration_ms >= 10_000) {
+    throw new Error(`historical terminal response assembly exceeded its request deadline: ${JSON.stringify(telemetry)}`);
+  }
+  if (telemetry.duration_ms > 8_000) {
+    throw new Error(`historical terminal response assembly lacks 2,000 ms timeout headroom: ${JSON.stringify(telemetry)}`);
+  }
+  return telemetry;
 }
 
 async function waitForResizeProof(page, requestedResize) {
