@@ -391,8 +391,14 @@ assert.match(liveProtocolHarnessScript, /loadProductionAppRouteFromPathname/);
 assert.match(liveProtocolHarnessScript, /appRouteFromPathname\(routeDescriptor\.routePath\)/);
 assert.match(liveProtocolHarnessScript, /packageRecord\?\.app_surfaces/);
 assert.match(liveProtocolHarnessScript, /proveLiveTerminalAfterAttach/);
-assert.match(liveProtocolHarnessScript, /const echoProbe = "botster-web-dogfood-live-input"/);
-assert.match(liveProtocolHarnessScript, /\$\{echoProbe\}-attach-/);
+assert.match(liveProtocolHarnessScript, /const echoProbe = "keys"/);
+assert.match(liveProtocolHarnessScript, /const attachProbe = "botster-web-dogfood-attach-probe"/);
+assert.match(liveProtocolHarnessScript, /\$\{attachProbe\}-/);
+assert.match(liveProtocolHarnessScript, /sequence: initialEvents\.map/);
+assert.doesNotMatch(liveProtocolHarnessScript, /unwrappedReadScreenText|replace\(\/\[\\r\\n\]\//);
+assert.match(liveProtocolHarnessScript, /package_version: packageVersion/);
+assert.doesNotMatch(webrtcDaemonClient, /terminal_stream_batch/);
+assert.match(webrtcDaemonClient, /terminal_stream_error/);
 assert.match(liveProtocolHarnessScript, /page\.reload/);
 assert.match(liveProtocolHarnessScript, /reloadSamePackageUrlAndAssertWebrtc/);
 assert.match(liveProtocolHarnessScript, /latestLocalWebrtcGrantId/);
@@ -630,8 +636,7 @@ assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping 
 assert.match(liveProtocolHarnessScript, /@trybotster\/hub-test-support/);
 assert.match(liveProtocolHarnessScript, /materializePluginContractMatrixFixture/);
 assert.match(liveProtocolHarnessScript, /assertTerminalAttachChronology/);
-assert.match(liveProtocolHarnessScript, /attach_state:attaching/);
-assert.match(liveProtocolHarnessScript, /attach_state:attached/);
+assert.match(liveProtocolHarnessScript, /event\.type === "attach_state" \? `\$\{event\.type\}:\$\{event\.state\}`/);
 assert.match(liveProtocolHarnessScript, /binaryProvenanceFor/);
 assert.doesNotMatch(
   liveProtocolHarnessScript,
@@ -3970,6 +3975,12 @@ const byteOnlyTerminalDataPlane = createRealHubTerminalDataPlane({
     },
     streamTerminal(sessionId, subscriptionId, onEvent) {
       onEvent({
+        type: "attach_state",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        state: "attaching"
+      });
+      onEvent({
         type: "snapshot",
         session_id: sessionId,
         subscription_id: subscriptionId,
@@ -3981,6 +3992,12 @@ const byteOnlyTerminalDataPlane = createRealHubTerminalDataPlane({
         subscription_id: subscriptionId,
         data: "",
         bytes: 19
+      });
+      onEvent({
+        type: "attach_state",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        state: "attached"
       });
       onEvent({
         type: "terminal_output",

@@ -154,13 +154,6 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
 
       const emitEvents = (response: DaemonResponse) => {
         const events = response.events ?? [];
-        if (events.length > 0) {
-          recordLiveHarnessEvent("terminal_stream_batch", {
-            event_types: events.map((event) =>
-              event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
-            )
-          });
-        }
         for (const event of events) {
           recordLiveHarnessEvent("daemon_event", event);
           eventListeners.forEach((listener) => listener(event));
