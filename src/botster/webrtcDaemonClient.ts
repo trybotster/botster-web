@@ -4,6 +4,7 @@ import type {
   DaemonBridgeResponseEnvelope,
   DaemonEvent,
   DaemonLocalWebrtcBootstrap,
+  DaemonLocalWebrtcResponseChunk,
   DaemonRequest,
   DaemonResponse,
   JsonValue
@@ -38,8 +39,23 @@ export type WebrtcDaemonLifecycleEvent =
 export const webRtcDaemonLifecycleEventName = "botster:webrtc-daemon-lifecycle";
 
 type PendingRequest = {
+  generation: number;
+  requestType: string;
+  messageId?: string;
   resolve(response: DaemonResponse): void;
   reject(error: unknown): void;
+};
+
+type ResponseAssembly = {
+  generation: number;
+  pending: PendingRequest;
+  chunkCount: number;
+  totalBytes: number;
+  chunks: Map<number, string>;
+  receivedBytes: number;
+  retainedBytes: number;
+  startedAt: number;
+  timeout: number;
 };
 
 export type WebrtcDaemonFailureStage = "bootstrap" | "signaling" | "transport" | "encryption" | "data-plane";
@@ -54,7 +70,19 @@ export class WebrtcDaemonClientError extends Error {
   }
 }
 
-const requestTimeoutMs = 10_000;
+export const localWebrtcResponseChunkLimits = Object.freeze({
+  maximumFrameBytesExclusive: 65_536,
+  maximumResponseBytes: 16_777_216,
+  maximumAggregateRetainedBytes: 32 * 1_024 * 1_024,
+  maximumConcurrentAssemblies: 16,
+  maximumCompletedMessageIds: 64,
+  requestTimeoutMs: 10_000,
+  assemblyBookkeepingBytes: 256,
+  chunkBookkeepingBytes: 64,
+  completedMessageBookkeepingBytes: 64
+});
+
+const requestTimeoutMs = localWebrtcResponseChunkLimits.requestTimeoutMs;
 const drainIntervalMs = 25;
 
 function createRequestIdGenerator(prefix: string) {
@@ -136,7 +164,9 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
         if (closed) return;
 
         try {
-          emitEvents(await transport.request({ type: "drain", session_id: sessionId }));
+          const response = await transport.request({ type: "drain", session_id: sessionId });
+          if (closed) return;
+          emitEvents(response);
         } catch {
           closed = true;
           return;
@@ -150,6 +180,7 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
       void transport
         .request({ type: "attach", session_id: sessionId, subscription_id: subscriptionId })
         .then((response) => {
+          if (closed) return;
           emitEvents(response);
           void drain();
         })
@@ -175,6 +206,8 @@ class WebrtcDaemonTransport {
   private readonly peerConnectionFactory: () => RTCPeerConnection;
   private readonly pageHideHandler: (() => void) | undefined;
   private readonly pendingRequests: PendingRequest[] = [];
+  private readonly responseAssemblies = new Map<string, ResponseAssembly>();
+  private readonly completedMessageIds = new Set<string>();
   private peerConnection: RTCPeerConnection | undefined;
   private dataChannel: RTCDataChannel | undefined;
   private cryptoKey: CryptoKey | undefined;
@@ -182,6 +215,8 @@ class WebrtcDaemonTransport {
   private encryptedStreamReady = false;
   private disconnected = false;
   private closing = false;
+  private peerGeneration = 0;
+  private aggregateRetainedBytes = 0;
 
   constructor(private readonly options: WebrtcDaemonClientOptions) {
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
@@ -216,26 +251,18 @@ class WebrtcDaemonTransport {
     } catch (error) {
       throw webrtcFailure("encryption", `local WebRTC request encryption failed: ${errorMessage(error)}`);
     }
-    try {
-      channel.send(JSON.stringify(envelope));
-      if (!this.encryptedStreamReady) {
-        this.encryptedStreamReady = true;
-        this.emitLifecycle({ type: "encrypted-stream-ready", requestType: request.type });
-      }
-    } catch (error) {
-      throw webrtcFailure("data-plane", `local WebRTC data-plane send failed for ${request.type}: ${errorMessage(error)}`);
-    }
-
     return new Promise<DaemonResponse>((resolve, reject) => {
+      const generation = this.peerGeneration;
       const timeout = window.setTimeout(() => {
-        const index = this.pendingRequests.findIndex((entry) => entry.resolve === resolve);
-        if (index >= 0) {
-          this.pendingRequests.splice(index, 1);
-        }
-        reject(webrtcFailure("data-plane", `local WebRTC request timed out: ${request.type}`));
+        this.failPeerGeneration(
+          generation,
+          webrtcFailure("data-plane", `local WebRTC request timed out: ${request.type}`)
+        );
       }, requestTimeoutMs);
 
-      this.pendingRequests.push({
+      const pending: PendingRequest = {
+        generation,
+        requestType: request.type,
         resolve: (response) => {
           window.clearTimeout(timeout);
           resolve(response);
@@ -244,7 +271,22 @@ class WebrtcDaemonTransport {
           window.clearTimeout(timeout);
           reject(error);
         }
-      });
+      };
+      this.pendingRequests.push(pending);
+
+      try {
+        channel.send(JSON.stringify(envelope));
+        if (!this.encryptedStreamReady) {
+          this.encryptedStreamReady = true;
+          this.emitLifecycle({ type: "encrypted-stream-ready", requestType: request.type });
+        }
+      } catch (error) {
+        const index = this.pendingRequests.indexOf(pending);
+        if (index >= 0) this.pendingRequests.splice(index, 1);
+        pending.reject(
+          webrtcFailure("data-plane", `local WebRTC data-plane send failed for ${request.type}: ${errorMessage(error)}`)
+        );
+      }
     });
   }
 
@@ -285,6 +327,7 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("transport", `local WebRTC peer connection failed: ${errorMessage(error)}`);
     }
     this.peerConnection = peerConnection;
+    const generation = ++this.peerGeneration;
     let dataChannel: RTCDataChannel;
     try {
       dataChannel = peerConnection.createDataChannel("botster-daemon", {
@@ -296,19 +339,26 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("transport", `local WebRTC data channel creation failed: ${errorMessage(error)}`);
     }
     this.dataChannel = dataChannel;
+    let messageQueue = Promise.resolve();
     dataChannel.addEventListener("message", (event) => {
-      void this.handleMessage(event.data).catch((error: unknown) => this.failPending(error));
+      if (!this.isCurrentPeer(generation, peerConnection, dataChannel)) return;
+      messageQueue = messageQueue
+        .then(() => this.handleMessage(event.data, generation))
+        .catch((error: unknown) => this.failPeerGeneration(generation, error));
     });
     dataChannel.addEventListener("open", () => {
+      if (!this.isCurrentPeer(generation, peerConnection, dataChannel)) return;
       recordLiveHarnessEvent("webrtc_data_channel", { state: "open" });
       this.emitLifecycle({ type: "data-channel-open" });
     });
     dataChannel.addEventListener("close", () => {
+      if (!this.isCurrentPeer(generation, peerConnection, dataChannel)) return;
       recordLiveHarnessEvent("webrtc_data_channel", { state: "closed" });
       this.emitLifecycle({ type: "data-channel-closed" });
       this.handleTransportClosed(webrtcFailure("transport", "local WebRTC data channel closed"));
     });
     dataChannel.addEventListener("error", () => {
+      if (!this.isCurrentPeer(generation, peerConnection, dataChannel)) return;
       recordLiveHarnessEvent("webrtc_data_channel", { state: "error" });
       this.emitLifecycle({ type: "data-channel-error" });
       this.handleTransportClosed(webrtcFailure("transport", "local WebRTC data channel failed"));
@@ -382,17 +432,187 @@ class WebrtcDaemonTransport {
     return this.options.bootstrap;
   }
 
-  private async handleMessage(data: unknown): Promise<void> {
-    const key = this.cryptoKey;
-    const pending = this.pendingRequests.shift();
-    if (!key || !pending) return;
-
-    try {
-      const response = await decryptDaemonResponse(key, String(data));
-      pending.resolve(response);
-    } catch (error) {
-      pending.reject(webrtcFailure("encryption", `local WebRTC response decryption failed: ${errorMessage(error)}`));
+  private async handleMessage(data: unknown, generation: number): Promise<void> {
+    if (typeof data !== "string") {
+      throw webrtcFailure("data-plane", "local WebRTC response chunk frame must be a string");
     }
+    if (utf8ByteLength(data) >= localWebrtcResponseChunkLimits.maximumFrameBytesExclusive) {
+      throw webrtcFailure("data-plane", "local WebRTC response chunk frame exceeds the transport limit");
+    }
+
+    const chunk = parseResponseChunk(data);
+    if (this.completedMessageIds.has(chunk.message_id)) {
+      throw webrtcFailure("data-plane", "local WebRTC response chunk message id was already completed");
+    }
+    let assembly = this.responseAssemblies.get(chunk.message_id);
+    if (!assembly) {
+      const pending = this.pendingRequests.find((entry) => entry.generation === generation && entry.messageId === undefined);
+      if (!pending) {
+        throw webrtcFailure("data-plane", "local WebRTC response chunk has no pending request");
+      }
+      if (this.responseAssemblies.size >= localWebrtcResponseChunkLimits.maximumConcurrentAssemblies) {
+        throw webrtcFailure("data-plane", "local WebRTC response assembly limit exceeded");
+      }
+
+      const retainedBytes =
+        localWebrtcResponseChunkLimits.assemblyBookkeepingBytes +
+        localWebrtcResponseChunkLimits.chunkBookkeepingBytes +
+        utf8ByteLength(chunk.payload);
+      this.ensureAggregateBudget(retainedBytes);
+      pending.messageId = chunk.message_id;
+      const startedAt = Date.now();
+      assembly = {
+        generation,
+        pending,
+        chunkCount: chunk.chunk_count,
+        totalBytes: chunk.total_bytes,
+        chunks: new Map([[chunk.chunk_index, chunk.payload]]),
+        receivedBytes: utf8ByteLength(chunk.payload),
+        retainedBytes,
+        startedAt,
+        timeout: window.setTimeout(() => {
+          this.failPeerGeneration(
+            generation,
+            webrtcFailure("data-plane", `local WebRTC response assembly timed out: ${pending.requestType}`)
+          );
+        }, requestTimeoutMs)
+      };
+      this.responseAssemblies.set(chunk.message_id, assembly);
+      this.aggregateRetainedBytes += retainedBytes;
+    } else {
+      this.validateAssemblyChunk(assembly, chunk, generation);
+      const existingPayload = assembly.chunks.get(chunk.chunk_index);
+      if (existingPayload !== undefined) {
+        if (existingPayload !== chunk.payload) {
+          throw webrtcFailure("data-plane", "local WebRTC response chunk conflicts with a duplicate index");
+        }
+        return;
+      }
+
+      const payloadBytes = utf8ByteLength(chunk.payload);
+      const retainedBytes = localWebrtcResponseChunkLimits.chunkBookkeepingBytes + payloadBytes;
+      this.ensureAggregateBudget(retainedBytes);
+      assembly.chunks.set(chunk.chunk_index, chunk.payload);
+      assembly.receivedBytes += payloadBytes;
+      assembly.retainedBytes += retainedBytes;
+      this.aggregateRetainedBytes += retainedBytes;
+    }
+
+    if (assembly.receivedBytes > assembly.totalBytes) {
+      throw webrtcFailure("data-plane", "local WebRTC response chunk bytes exceed declared total");
+    }
+    if (assembly.chunks.size !== assembly.chunkCount) return;
+    if (assembly.receivedBytes !== assembly.totalBytes) {
+      throw webrtcFailure("data-plane", "local WebRTC response chunk bytes do not match declared total");
+    }
+    if (this.pendingRequests[0] !== assembly.pending) {
+      throw webrtcFailure("data-plane", "local WebRTC response completed outside pending request order");
+    }
+
+    let envelopeJson = "";
+    for (let index = 0; index < assembly.chunkCount; index += 1) {
+      envelopeJson += assembly.chunks.get(index) as string;
+    }
+    if (utf8ByteLength(envelopeJson) !== assembly.totalBytes) {
+      throw webrtcFailure("data-plane", "local WebRTC response assembly is not byte-exact");
+    }
+
+    const key = this.cryptoKey;
+    if (!key) throw webrtcFailure("encryption", "local WebRTC response key is unavailable");
+
+    let response: DaemonResponse;
+    try {
+      response = await decryptDaemonResponse(key, envelopeJson);
+    } catch (error) {
+      throw webrtcFailure("encryption", `local WebRTC response decryption failed: ${errorMessage(error)}`);
+    }
+    if (generation !== this.peerGeneration || this.pendingRequests[0] !== assembly.pending) return;
+    this.releaseAssembly(chunk.message_id, assembly);
+    this.retainCompletedMessageId(chunk.message_id);
+    this.pendingRequests.shift();
+    const finishedAt = Date.now();
+    recordLiveHarnessEvent("webrtc_response_assembly", {
+      request_type: assembly.pending.requestType,
+      generation,
+      total_bytes: assembly.totalBytes,
+      chunk_count: assembly.chunkCount,
+      started_at: assembly.startedAt,
+      finished_at: finishedAt,
+      duration_ms: finishedAt - assembly.startedAt
+    });
+    assembly.pending.resolve(response);
+  }
+
+  private validateAssemblyChunk(
+    assembly: ResponseAssembly,
+    chunk: DaemonLocalWebrtcResponseChunk,
+    generation: number
+  ): void {
+    if (
+      assembly.generation !== generation ||
+      assembly.chunkCount !== chunk.chunk_count ||
+      assembly.totalBytes !== chunk.total_bytes
+    ) {
+      throw webrtcFailure("data-plane", "local WebRTC response chunk metadata conflicts with its assembly");
+    }
+  }
+
+  private ensureAggregateBudget(additionalBytes: number): void {
+    if (
+      additionalBytes > localWebrtcResponseChunkLimits.maximumAggregateRetainedBytes - this.aggregateRetainedBytes
+    ) {
+      throw webrtcFailure("data-plane", "local WebRTC response aggregate retained-byte limit exceeded");
+    }
+  }
+
+  private releaseAssembly(messageId: string, assembly: ResponseAssembly): void {
+    window.clearTimeout(assembly.timeout);
+    this.responseAssemblies.delete(messageId);
+    this.aggregateRetainedBytes -= assembly.retainedBytes;
+  }
+
+  private retainCompletedMessageId(messageId: string): void {
+    while (
+      this.completedMessageIds.size >= localWebrtcResponseChunkLimits.maximumCompletedMessageIds
+    ) {
+      const oldestMessageId = this.completedMessageIds.values().next().value as string;
+      this.completedMessageIds.delete(oldestMessageId);
+      this.aggregateRetainedBytes -=
+        localWebrtcResponseChunkLimits.completedMessageBookkeepingBytes + utf8ByteLength(oldestMessageId);
+    }
+
+    const retainedBytes =
+      localWebrtcResponseChunkLimits.completedMessageBookkeepingBytes + utf8ByteLength(messageId);
+    this.ensureAggregateBudget(retainedBytes);
+    this.completedMessageIds.add(messageId);
+    this.aggregateRetainedBytes += retainedBytes;
+  }
+
+  private clearAssemblies(): void {
+    for (const assembly of this.responseAssemblies.values()) {
+      window.clearTimeout(assembly.timeout);
+    }
+    this.responseAssemblies.clear();
+    this.completedMessageIds.clear();
+    this.aggregateRetainedBytes = 0;
+  }
+
+  private isCurrentPeer(
+    generation: number,
+    peerConnection: RTCPeerConnection,
+    dataChannel: RTCDataChannel
+  ): boolean {
+    return (
+      generation === this.peerGeneration &&
+      peerConnection === this.peerConnection &&
+      dataChannel === this.dataChannel
+    );
+  }
+
+  private failPeerGeneration(generation: number, error: unknown): void {
+    if (generation !== this.peerGeneration) return;
+    this.resetPeerState();
+    this.failPending(error);
   }
 
   private failPending(error: unknown): void {
@@ -414,6 +634,7 @@ class WebrtcDaemonTransport {
     this.connectPromise = undefined;
     this.cryptoKey = undefined;
     this.encryptedStreamReady = false;
+    this.clearAssemblies();
 
     if (this.closing) return;
     this.closing = true;
@@ -443,6 +664,55 @@ function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string" && error) return error;
   return "unknown error";
+}
+
+function parseResponseChunk(frame: string): DaemonLocalWebrtcResponseChunk {
+  let value: unknown;
+  try {
+    value = JSON.parse(frame);
+  } catch {
+    throw webrtcFailure("data-plane", "local WebRTC response chunk is not valid JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw webrtcFailure("data-plane", "local WebRTC response chunk must be an object");
+  }
+
+  const chunk = value as Record<string, unknown>;
+  if (chunk.version !== 1) {
+    throw webrtcFailure("data-plane", "local WebRTC response chunk version is unsupported");
+  }
+  if (typeof chunk.message_id !== "string" || chunk.message_id.length === 0) {
+    throw webrtcFailure("data-plane", "local WebRTC response chunk message id is invalid");
+  }
+  if (!isIntegerInRange(chunk.chunk_count, 1, Number.MAX_SAFE_INTEGER)) {
+    throw webrtcFailure("data-plane", "local WebRTC response chunk count is invalid");
+  }
+  if (!isIntegerInRange(chunk.total_bytes, 1, localWebrtcResponseChunkLimits.maximumResponseBytes)) {
+    throw webrtcFailure("data-plane", "local WebRTC response total bytes are invalid");
+  }
+  if (chunk.chunk_count > chunk.total_bytes) {
+    throw webrtcFailure("data-plane", "local WebRTC response chunk count exceeds total bytes");
+  }
+  if (!isIntegerInRange(chunk.chunk_index, 0, chunk.chunk_count - 1)) {
+    throw webrtcFailure("data-plane", "local WebRTC response chunk index is invalid");
+  }
+  if (typeof chunk.payload !== "string") {
+    throw webrtcFailure("data-plane", "local WebRTC response chunk payload is empty or invalid");
+  }
+  const payloadBytes = utf8ByteLength(chunk.payload);
+  if (payloadBytes === 0 || payloadBytes > chunk.total_bytes) {
+    throw webrtcFailure("data-plane", "local WebRTC response chunk payload bytes are invalid");
+  }
+
+  return chunk as unknown as DaemonLocalWebrtcResponseChunk;
+}
+
+function isIntegerInRange(value: unknown, minimum: number, maximum: number): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= maximum;
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 async function encryptDaemonRequest(key: CryptoKey, request: DaemonRequest): Promise<AesGcmEnvelope> {

@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createServer as createNetServer } from "node:net";
 import { spawn } from "node:child_process";
@@ -13,6 +14,7 @@ import {
   metadata as hubTestSupportMetadata,
   pluginContractMatrixFixturePath,
   readLateAttachHistoryConformanceFixture,
+  readLocalWebrtcResponseChunkConformanceFixture,
   verifyPackageAssets
 } from "@trybotster/hub-test-support";
 import ts from "typescript";
@@ -25,6 +27,7 @@ const { dogfoodBridgeShutdownPlan, resolveDogfoodBridgeMode } = await import(
 );
 
 const hostForTests = "127.0.0.1";
+let nextTestResponseMessageId = 0;
 
 const [
   main,
@@ -498,6 +501,7 @@ assert.match(readme, /Installed package runtime prefers the hub-issued local Web
 assert.match(architecture, /src\/botster\/webrtcDaemonClient\.ts/);
 assert.match(architecture, /AesGcmEnvelope/);
 assert.match(generatedDaemonProtocol, /export interface AesGcmEnvelope/);
+assert.match(generatedDaemonProtocol, /export interface DaemonLocalWebrtcResponseChunk/);
 assert.match(generatedDaemonProtocol, /type: "local_webrtc_signal"/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "issue_local_webrtc_bootstrap"; package_name: string; entrypoint_id: string; origin: string \}/);
 assert.match(generatedDaemonProtocol, /DaemonLocalWebrtcBootstrap/);
@@ -517,6 +521,19 @@ assert.match(realHubDogfoodTransport, /key === "grant_secret" \? "\[redacted\]" 
 assert.match(webrtcDaemonClient, /crypto\.subtle\.encrypt/);
 assert.match(webrtcDaemonClient, /crypto\.subtle\.decrypt/);
 assert.match(webrtcDaemonClient, /AesGcmEnvelope/);
+assert.match(webrtcDaemonClient, /DaemonLocalWebrtcResponseChunk/);
+assert.match(webrtcDaemonClient, /maximumFrameBytesExclusive: 65_536/);
+assert.match(webrtcDaemonClient, /maximumResponseBytes: 16_777_216/);
+assert.match(webrtcDaemonClient, /maximumAggregateRetainedBytes: 32 \* 1_024 \* 1_024/);
+assert.match(webrtcDaemonClient, /maximumConcurrentAssemblies: 16/);
+assert.match(webrtcDaemonClient, /chunks: new Map/);
+assert.doesNotMatch(webrtcDaemonClient, /new Array\([^)]*chunk/i);
+assert.doesNotMatch(webrtcDaemonClient, /decryptDaemonResponse\(key, String\(data\)\)/);
+assert.match(liveProtocolHarnessScript, /webrtc_response_assembly/);
+assert.match(liveProtocolHarnessScript, /response_assembly_telemetry/);
+assert.match(liveProtocolHarnessScript, /telemetry\.duration_ms > 8_000/);
+assert.match(architecture, /Every response frame is a generated `DaemonLocalWebrtcResponseChunk`/);
+assert.match(readme, /Release acceptance repeats the full command five times/);
 assert.match(readme, /botster-web-dogfood-size:<rows>x<cols>/);
 assert.match(readme, /botster-web-dogfood-exit/);
 assert.match(readme, /botster-package\.json/);
@@ -542,10 +559,10 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.3");
+assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.4");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.3");
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 10);
+assert.equal(hubTestSupportMetadata.package_version, "0.1.4");
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 11);
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(hubTestSupportMetadata.application_primitives.surface_id, "contract.app");
 assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, [
@@ -564,7 +581,36 @@ assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, 
 assert.equal(applicationPrimitivesFixturePath(), pluginContractMatrixFixturePath());
 assert.equal(verifyPackageAssets().ok, true);
 const lateAttachHistoryConformanceFixture = readLateAttachHistoryConformanceFixture();
-assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 10);
+assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 11);
+const localWebrtcResponseChunkFixture = readLocalWebrtcResponseChunkConformanceFixture();
+assert.equal(localWebrtcResponseChunkFixture.version, 1);
+assert.equal(localWebrtcResponseChunkFixture.maximum_frame_bytes_exclusive, 65_536);
+assert.equal(localWebrtcResponseChunkFixture.maximum_response_bytes, 16_777_216);
+const largeGeneratedChunkFixture = localWebrtcResponseChunkFixture.scenarios.large_generated;
+const generatedFixturePayload = repeatUtf8Pattern(
+  largeGeneratedChunkFixture.pattern,
+  largeGeneratedChunkFixture.total_bytes
+);
+const generatedFixtureChunks = chunkUtf8Payload(generatedFixturePayload, largeGeneratedChunkFixture.chunk_payload_bytes);
+assert.equal(Buffer.byteLength(generatedFixturePayload), 262_145);
+assert.equal(generatedFixtureChunks.length, 22);
+assert.equal(generatedFixtureChunks.length, largeGeneratedChunkFixture.expected_chunk_count);
+const reorderedGeneratedFixtureChunks = generatedFixtureChunks.map((payload, chunk_index) => ({
+  version: 1,
+  message_id: largeGeneratedChunkFixture.message_id,
+  chunk_index,
+  chunk_count: generatedFixtureChunks.length,
+  total_bytes: largeGeneratedChunkFixture.total_bytes,
+  payload
+})).toReversed();
+assert.equal(
+  createHash("sha256").update(reassembleFixtureChunks(reorderedGeneratedFixtureChunks)).digest("hex"),
+  "06d24e206edb54bed524319b1127725b46e20ea4aae5934688599abd42fa4317"
+);
+assert.equal(
+  reassembleFixtureChunks(localWebrtcResponseChunkFixture.scenarios.over_budget_operator_error),
+  "encrypted-operator-error"
+);
 assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
 assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping daemon protocol drift check|check out \.\.\/botster-hub/);
 assert.match(liveProtocolHarnessScript, /@trybotster\/hub-test-support/);
@@ -968,6 +1014,7 @@ const { createRealHubTerminalDataPlane } = requireRuntime("./botster/realHubTerm
 const {
   createLocalWebrtcBootstrapRefresher,
   createWebrtcDaemonClient,
+  localWebrtcResponseChunkLimits,
   WebrtcDaemonClientError,
   webRtcDaemonLifecycleEventName
 } = requireRuntime("./botster/webrtcDaemonClient.js");
@@ -2092,17 +2139,15 @@ try {
   assert.doesNotMatch(dataChannel.sent[0], /"type":"status"/);
   const outboundEnvelope = JSON.parse(dataChannel.sent[0]);
   assert.deepEqual(Object.keys(outboundEnvelope).sort(), ["ciphertext", "nonce", "version"]);
-  dataChannel.emitMessage(await encryptTestEnvelope(
-    refreshedBootstraps[0].grant_secret,
+  await emitChunkedTestResponse(dataChannel, refreshedBootstraps[0].grant_secret,
     { kind: "status", status: null, sessions: [], packages: [], package_decision: null, lifecycle: [], plugin_tools: [], plugin_tool_result: null, events: [], cleanup: null, coordination: null, error: null }
-  ));
+  );
   assert.equal((await responsePromise).kind, "status");
   const secondResponsePromise = webrtcClient.request({ type: "list_sessions" });
   await waitForTestCondition(() => dataChannel.sent.length > 1);
-  dataChannel.emitMessage(await encryptTestEnvelope(
-    refreshedBootstraps[0].grant_secret,
-    { kind: "sessions", sessions: [], events: [], diagnostics: [] }
-  ));
+  await emitChunkedTestResponse(dataChannel, refreshedBootstraps[0].grant_secret, {
+    kind: "sessions", sessions: [], events: [], diagnostics: []
+  });
   assert.equal((await secondResponsePromise).kind, "sessions");
   assert.equal(
     lifecycleEvents.filter((event) => event.detail.type === "encrypted-stream-ready").length,
@@ -2119,15 +2164,405 @@ try {
     await decryptTestEnvelope(refreshedBootstraps[1].grant_secret, dataChannels[1].sent[0]),
     { type: "list_apps" }
   );
-  dataChannels[1].emitMessage(await encryptTestEnvelope(
-    refreshedBootstraps[1].grant_secret,
-    { kind: "apps", apps: [], events: [], diagnostics: [] }
-  ));
+  await emitChunkedTestResponse(dataChannels[1], refreshedBootstraps[1].grant_secret, {
+    kind: "apps", apps: [], events: [], diagnostics: []
+  });
   assert.equal((await reconnectResponsePromise).kind, "apps");
   assert.equal(
     lifecycleEvents.filter((event) => event.detail.type === "encrypted-stream-ready").length,
     2
   );
+
+  assert.deepEqual(localWebrtcResponseChunkLimits, {
+    maximumFrameBytesExclusive: 65_536,
+    maximumResponseBytes: 16_777_216,
+    maximumAggregateRetainedBytes: 32 * 1_024 * 1_024,
+    maximumConcurrentAssemblies: 16,
+    maximumCompletedMessageIds: 64,
+    requestTimeoutMs: 10_000,
+    assemblyBookkeepingBytes: 256,
+    chunkBookkeepingBytes: 64,
+    completedMessageBookkeepingBytes: 64
+  });
+
+  const largeResponseChannel = createFakeDataChannel();
+  const largeResponseClient = createWebrtcTestClient([largeResponseChannel], localWebrtcBootstrapFixture);
+  const largeOperatorMessage = "large-response-".repeat(24_000);
+  const largeResponse = {
+    kind: "operator_error",
+    error: {
+      code: "large_response_test",
+      request_id: "large-response-request",
+      operation: "status",
+      message: largeOperatorMessage
+    },
+    events: []
+  };
+  const largeResponsePromise = largeResponseClient.request({ type: "status" });
+  await waitForTestCondition(() => largeResponseChannel.sent.length === 1);
+  const largeResponseChunks = await emitChunkedTestResponse(
+    largeResponseChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    largeResponse,
+    { chunkPayloadBytes: 12_288, reordered: true, messageId: "large-production-response" }
+  );
+  assert.ok(Buffer.byteLength(largeOperatorMessage) > 256 * 1_024);
+  assert.ok(largeResponseChunks.length > 1);
+  assert.deepEqual(await largeResponsePromise, largeResponse);
+
+  const operatorErrorChannel = createFakeDataChannel();
+  const operatorErrorClient = createWebrtcTestClient([operatorErrorChannel], localWebrtcBootstrapFixture);
+  const operatorErrorResponse = {
+    kind: "operator_error",
+    error: {
+      code: "response_too_large",
+      request_id: "operator-error-request",
+      operation: "capture_snapshot",
+      message: "daemon response exceeded its sender budget"
+    },
+    events: []
+  };
+  const operatorErrorPromise = operatorErrorClient.request({ type: "status" });
+  await waitForTestCondition(() => operatorErrorChannel.sent.length === 1);
+  const operatorErrorChunks = await emitChunkedTestResponse(
+    operatorErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    operatorErrorResponse,
+    { messageId: "operator-error-response" }
+  );
+  assert.equal(operatorErrorChunks.length, 1);
+  assert.deepEqual(await operatorErrorPromise, operatorErrorResponse);
+
+  const duplicateChannel = createFakeDataChannel();
+  const duplicateClient = createWebrtcTestClient([duplicateChannel], localWebrtcBootstrapFixture);
+  const duplicateResponse = { kind: "sessions", sessions: [], events: [], diagnostics: [] };
+  const duplicatePromise = duplicateClient.request({ type: "list_sessions" });
+  await waitForTestCondition(() => duplicateChannel.sent.length === 1);
+  const duplicateChunks = await chunkedTestResponse(
+    localWebrtcBootstrapFixture.grant_secret,
+    duplicateResponse,
+    { chunkPayloadBytes: 40, messageId: "identical-duplicate-response" }
+  );
+  duplicateChannel.emitMessage(JSON.stringify(duplicateChunks[0]));
+  duplicateChannel.emitMessage(JSON.stringify(duplicateChunks[0]));
+  for (const chunk of duplicateChunks.slice(1)) duplicateChannel.emitMessage(JSON.stringify(chunk));
+  assert.deepEqual(await duplicatePromise, duplicateResponse);
+
+  const completedReplayChannels = [createFakeDataChannel(), createFakeDataChannel()];
+  const completedReplayClient = createWebrtcTestClient(completedReplayChannels, localWebrtcBootstrapFixture);
+  const completedResponse = { kind: "apps", apps: [], events: [], diagnostics: [] };
+  const completedPromise = completedReplayClient.request({ type: "list_apps" });
+  await waitForTestCondition(() => completedReplayChannels[0].sent.length === 1);
+  const completedChunks = await emitChunkedTestResponse(
+    completedReplayChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    completedResponse,
+    { messageId: "completed-response" }
+  );
+  assert.deepEqual(await completedPromise, completedResponse);
+
+  const replayTargetPromise = completedReplayClient.request({ type: "list_sessions" });
+  const replayTargetRejection = assert.rejects(
+    replayTargetPromise,
+    (error) => error instanceof WebrtcDaemonClientError && /message id was already completed/.test(error.message)
+  );
+  await waitForTestCondition(() => completedReplayChannels[0].sent.length === 2);
+  completedReplayChannels[0].emitMessage(JSON.stringify(completedChunks[0]));
+  await replayTargetRejection;
+
+  const completedReplayRecovery = completedReplayClient.request({ type: "status" });
+  await waitForTestCondition(() => completedReplayChannels[1].sent.length === 1);
+  await emitChunkedTestResponse(
+    completedReplayChannels[1],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "status",
+      status: null,
+      sessions: [],
+      packages: [],
+      package_decision: null,
+      lifecycle: [],
+      plugin_tools: [],
+      plugin_tool_result: null,
+      events: [],
+      cleanup: null,
+      coordination: null,
+      error: null
+    },
+    { messageId: "completed-response" }
+  );
+  assert.equal((await completedReplayRecovery).kind, "status");
+
+  const boundedCompletedLedgerChannel = createFakeDataChannel();
+  const boundedCompletedLedgerClient = createWebrtcTestClient(
+    [boundedCompletedLedgerChannel],
+    localWebrtcBootstrapFixture
+  );
+  const longMessageIdSuffix = "x".repeat(60_000);
+  for (let index = 0; index < 600; index += 1) {
+    const responsePromise = boundedCompletedLedgerClient.request({ type: "list_apps" });
+    await waitForTestCondition(() => boundedCompletedLedgerChannel.sent.length === index + 1);
+    await emitChunkedTestResponse(
+      boundedCompletedLedgerChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      completedResponse,
+      { messageId: `bounded-completed-response-${index}-${longMessageIdSuffix}` }
+    );
+    assert.deepEqual(await responsePromise, completedResponse);
+  }
+  assert.equal(boundedCompletedLedgerChannel.readyState, "open");
+
+  const conflictingChannels = [createFakeDataChannel(), createFakeDataChannel()];
+  const conflictingClient = createWebrtcTestClient(conflictingChannels, localWebrtcBootstrapFixture);
+  const conflictingPromise = conflictingClient.request({ type: "status" });
+  const conflictingRejection = assert.rejects(
+    conflictingPromise,
+    (error) => error instanceof WebrtcDaemonClientError && /conflicts with a duplicate index/.test(error.message)
+  );
+  await waitForTestCondition(() => conflictingChannels[0].sent.length === 1);
+  const conflictingChunks = await chunkedTestResponse(
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "events", events: [] },
+    { chunkPayloadBytes: 40, messageId: "conflicting-duplicate-response" }
+  );
+  conflictingChannels[0].emitMessage(JSON.stringify(conflictingChunks[0]));
+  conflictingChannels[0].emitMessage(JSON.stringify({ ...conflictingChunks[0], payload: `${conflictingChunks[0].payload}x` }));
+  await conflictingRejection;
+  const recoveredPromise = conflictingClient.request({ type: "list_apps" });
+  await waitForTestCondition(() => conflictingChannels[1].sent.length === 1);
+  conflictingChannels[0].emitMessage("not-json-from-obsolete-peer");
+  await emitChunkedTestResponse(
+    conflictingChannels[1],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "apps", apps: [], events: [], diagnostics: [] },
+    { messageId: "recovered-response" }
+  );
+  assert.equal((await recoveredPromise).kind, "apps");
+
+  const legacyFrameChannel = createFakeDataChannel();
+  const legacyFrameClient = createWebrtcTestClient([legacyFrameChannel], localWebrtcBootstrapFixture);
+  const legacyFramePromise = legacyFrameClient.request({ type: "status" });
+  const legacyFrameRejection = assert.rejects(
+    legacyFramePromise,
+    (error) => error instanceof WebrtcDaemonClientError && /message id is invalid/.test(error.message)
+  );
+  await waitForTestCondition(() => legacyFrameChannel.sent.length === 1);
+  legacyFrameChannel.emitMessage(await encryptTestEnvelope(
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "events", events: [] }
+  ));
+  await legacyFrameRejection;
+
+  const oversizedFrameChannel = createFakeDataChannel();
+  const oversizedFrameClient = createWebrtcTestClient([oversizedFrameChannel], localWebrtcBootstrapFixture);
+  const oversizedFramePromise = oversizedFrameClient.request({ type: "status" });
+  const oversizedFrameRejection = assert.rejects(
+    oversizedFramePromise,
+    (error) => error instanceof WebrtcDaemonClientError && /frame exceeds the transport limit/.test(error.message)
+  );
+  await waitForTestCondition(() => oversizedFrameChannel.sent.length === 1);
+  oversizedFrameChannel.emitMessage("x".repeat(65_536));
+  await oversizedFrameRejection;
+
+  const malformedCases = [
+    {},
+    { version: 2, message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 1, message_id: "", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 1, message_id: "x", chunk_index: -1, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 1, message_id: "x", chunk_index: 0, chunk_count: 2, total_bytes: 1, payload: "x" },
+    { version: 1, message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 16_777_217, payload: "x" },
+    { version: 1, message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "" },
+    { version: 1, message_id: 1, chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 1, message_id: "x", chunk_index: 0, chunk_count: "1", total_bytes: 1, payload: "x" },
+    { version: 1, message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: 1 }
+  ];
+  for (const [index, malformedChunk] of malformedCases.entries()) {
+    const malformedChannel = createFakeDataChannel();
+    const malformedClient = createWebrtcTestClient([malformedChannel], localWebrtcBootstrapFixture);
+    const malformedPromise = malformedClient.request({ type: "status" });
+    const malformedRejection = assert.rejects(malformedPromise, WebrtcDaemonClientError);
+    await waitForTestCondition(() => malformedChannel.sent.length === 1);
+    malformedChannel.emitMessage(index === 0 ? "not-json" : JSON.stringify(malformedChunk));
+    await malformedRejection;
+  }
+
+  const concurrentChannel = createFakeDataChannel();
+  const concurrentClient = createWebrtcTestClient([concurrentChannel], localWebrtcBootstrapFixture);
+  const concurrentPromises = Array.from({ length: 17 }, () => concurrentClient.request({ type: "status" }));
+  const concurrentRejection = Promise.all(concurrentPromises.map((promise) => assert.rejects(promise, WebrtcDaemonClientError)));
+  await waitForTestCondition(() => concurrentChannel.sent.length === 17);
+  for (let index = 0; index < 17; index += 1) {
+    concurrentChannel.emitMessage(JSON.stringify({
+      version: 1,
+      message_id: `concurrent-response-${index}`,
+      chunk_index: 0,
+      chunk_count: 2,
+      total_bytes: 2,
+      payload: "x"
+    }));
+  }
+  await concurrentRejection;
+
+  const mismatchChannel = createFakeDataChannel();
+  const mismatchClient = createWebrtcTestClient([mismatchChannel], localWebrtcBootstrapFixture);
+  const mismatchPromise = mismatchClient.request({ type: "status" });
+  const mismatchRejection = assert.rejects(
+    mismatchPromise,
+    (error) => error instanceof WebrtcDaemonClientError && /do not match declared total/.test(error.message)
+  );
+  await waitForTestCondition(() => mismatchChannel.sent.length === 1);
+  mismatchChannel.emitMessage(JSON.stringify({
+    version: 1,
+    message_id: "total-mismatch",
+    chunk_index: 0,
+    chunk_count: 1,
+    total_bytes: 2,
+    payload: "x"
+  }));
+  await mismatchRejection;
+
+  const metadataChannel = createFakeDataChannel();
+  const metadataClient = createWebrtcTestClient([metadataChannel], localWebrtcBootstrapFixture);
+  const metadataPromise = metadataClient.request({ type: "status" });
+  const metadataRejection = assert.rejects(
+    metadataPromise,
+    (error) => error instanceof WebrtcDaemonClientError && /metadata conflicts/.test(error.message)
+  );
+  await waitForTestCondition(() => metadataChannel.sent.length === 1);
+  metadataChannel.emitMessage(JSON.stringify({
+    version: 1,
+    message_id: "metadata-conflict",
+    chunk_index: 0,
+    chunk_count: 2,
+    total_bytes: 2,
+    payload: "x"
+  }));
+  metadataChannel.emitMessage(JSON.stringify({
+    version: 1,
+    message_id: "metadata-conflict",
+    chunk_index: 1,
+    chunk_count: 3,
+    total_bytes: 3,
+    payload: "x"
+  }));
+  await metadataRejection;
+
+  const aggregateChannel = createFakeDataChannel();
+  const aggregateClient = createWebrtcTestClient([aggregateChannel], localWebrtcBootstrapFixture);
+  const aggregatePromises = Array.from({ length: 3 }, () => aggregateClient.request({ type: "status" }));
+  const aggregateRejection = Promise.all(aggregatePromises.map((promise) => assert.rejects(
+    promise,
+    (error) => error instanceof WebrtcDaemonClientError && /aggregate retained-byte limit exceeded/.test(error.message)
+  )));
+  await waitForTestCondition(() => aggregateChannel.sent.length === 3);
+  const aggregatePayload = "x".repeat(60_000);
+  let aggregateChunkIndex = 0;
+  while (aggregateChannel.readyState === "open") {
+    for (let assemblyIndex = 0; assemblyIndex < 3; assemblyIndex += 1) {
+      aggregateChannel.emitMessage(JSON.stringify({
+        version: 1,
+        message_id: `aggregate-response-${assemblyIndex}`,
+        chunk_index: aggregateChunkIndex,
+        chunk_count: 1_000,
+        total_bytes: 16_777_216,
+        payload: aggregatePayload
+      }));
+    }
+    aggregateChunkIndex += 1;
+    if (aggregateChunkIndex % 20 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    if (aggregateChunkIndex > 1_000) assert.fail("aggregate retained-byte limit did not reject bounded state");
+  }
+  await aggregateRejection;
+
+  const timeoutChannels = [createFakeDataChannel(), createFakeDataChannel()];
+  const timeoutClient = createWebrtcTestClient(timeoutChannels, localWebrtcBootstrapFixture);
+  const originalWindowSetTimeout = globalThis.window.setTimeout;
+  const originalWindowClearTimeout = globalThis.window.clearTimeout;
+  const controlledTimers = new Map();
+  let nextControlledTimer = 0;
+  globalThis.window.setTimeout = (callback) => {
+    const timer = ++nextControlledTimer;
+    controlledTimers.set(timer, callback);
+    return timer;
+  };
+  globalThis.window.clearTimeout = (timer) => controlledTimers.delete(timer);
+  try {
+    const timeoutPromise = timeoutClient.request({ type: "status" });
+    const timeoutRejection = assert.rejects(
+      timeoutPromise,
+      (error) => error instanceof WebrtcDaemonClientError && /assembly timed out/.test(error.message)
+    );
+    await waitForTestCondition(() => timeoutChannels[0].sent.length === 1);
+    timeoutChannels[0].emitMessage(JSON.stringify({
+      version: 1,
+      message_id: "incomplete-timeout-response",
+      chunk_index: 0,
+      chunk_count: 2,
+      total_bytes: 2,
+      payload: "x"
+    }));
+    await flushMicrotasks();
+    const assemblyTimeout = [...controlledTimers.values()].at(-1);
+    assert.equal(typeof assemblyTimeout, "function");
+    assemblyTimeout();
+    await timeoutRejection;
+
+    const afterTimeoutPromise = timeoutClient.request({ type: "list_apps" });
+    await waitForTestCondition(() => timeoutChannels[1].sent.length === 1);
+    timeoutChannels[0].emitMessage(JSON.stringify({
+      version: 1,
+      message_id: "incomplete-timeout-response",
+      chunk_index: 1,
+      chunk_count: 2,
+      total_bytes: 2,
+      payload: "y"
+    }));
+    await emitChunkedTestResponse(
+      timeoutChannels[1],
+      localWebrtcBootstrapFixture.grant_secret,
+      { kind: "apps", apps: [], events: [], diagnostics: [] },
+      { messageId: "after-timeout-response" }
+    );
+    assert.equal((await afterTimeoutPromise).kind, "apps");
+  } finally {
+    globalThis.window.setTimeout = originalWindowSetTimeout;
+    globalThis.window.clearTimeout = originalWindowClearTimeout;
+  }
+
+  const staleAttachChannel = createFakeDataChannel();
+  const staleAttachClient = createWebrtcTestClient([staleAttachChannel], localWebrtcBootstrapFixture);
+  const staleAttachEvents = [];
+  const staleAttachment = staleAttachClient.streamTerminal(
+    "stale-attach-session",
+    "stale-attach-subscription",
+    (event) => staleAttachEvents.push(event)
+  );
+  await waitForTestCondition(() => staleAttachChannel.sent.length === 1);
+  staleAttachment.unsubscribe();
+  await waitForTestCondition(() => staleAttachChannel.sent.length === 2);
+  await emitChunkedTestResponse(
+    staleAttachChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "events",
+      events: [{
+        type: "snapshot",
+        session_id: "stale-attach-session",
+        subscription_id: "stale-attach-subscription",
+        data: "must-not-render",
+        bytes: 15
+      }]
+    },
+    { messageId: "stale-attach-response" }
+  );
+  await emitChunkedTestResponse(
+    staleAttachChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "events", events: [] },
+    { messageId: "stale-detach-response" }
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(staleAttachEvents, []);
 
   const invalidBootstrapClient = createWebrtcDaemonClient({
     bootstrap: {
@@ -2263,10 +2698,10 @@ try {
     session_id: realHubDogfoodSessionId,
     data: "webrtc-mounted-input\n"
   });
-  mountedRealWebrtcDataChannel.emitMessage(await encryptTestEnvelope(
+  await emitChunkedTestResponse(mountedRealWebrtcDataChannel,
     localWebrtcBootstrapFixture.grant_secret,
     { kind: "events", events: [] }
-  ));
+  );
   await mountedRealWebrtcWritePromise;
   await mountedRealWebrtcBridge.detach({ sessionId: realHubDogfoodSessionId, renderer: "restty" });
 } finally {
@@ -6148,6 +6583,73 @@ function createFakePeerConnection(dataChannel) {
     addEventListener() {},
     removeEventListener() {}
   };
+}
+
+function createWebrtcTestClient(dataChannels, bootstrap) {
+  let nextDataChannel = 0;
+  return createWebrtcDaemonClient({
+    bootstrap,
+    peerConnectionFactory: () => createFakePeerConnection(dataChannels[nextDataChannel++]),
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        payload: {
+          local_webrtc_answer: {
+            grant_id: bootstrap.grant_id,
+            answer: { type: "answer", sdp: "answer-sdp" }
+          }
+        }
+      })
+    })
+  });
+}
+
+function repeatUtf8Pattern(pattern, totalBytes) {
+  const patternBytes = Buffer.from(pattern);
+  const output = Buffer.alloc(totalBytes);
+  for (let offset = 0; offset < totalBytes; offset += patternBytes.length) {
+    patternBytes.copy(output, offset, 0, Math.min(patternBytes.length, totalBytes - offset));
+  }
+  return output.toString("utf8");
+}
+
+function chunkUtf8Payload(payload, chunkPayloadBytes) {
+  const bytes = Buffer.from(payload);
+  const chunks = [];
+  for (let offset = 0; offset < bytes.length; offset += chunkPayloadBytes) {
+    chunks.push(bytes.subarray(offset, offset + chunkPayloadBytes).toString("utf8"));
+  }
+  return chunks;
+}
+
+function reassembleFixtureChunks(chunks) {
+  return chunks
+    .toSorted((left, right) => left.chunk_index - right.chunk_index)
+    .map((chunk) => chunk.payload)
+    .join("");
+}
+
+async function emitChunkedTestResponse(dataChannel, secret, response, options = {}) {
+  const chunks = await chunkedTestResponse(secret, response, options);
+  const orderedChunks = options.reordered ? chunks.toReversed() : chunks;
+  for (const chunk of orderedChunks) {
+    dataChannel.emitMessage(JSON.stringify(chunk));
+  }
+  return chunks;
+}
+
+async function chunkedTestResponse(secret, response, options = {}) {
+  const envelope = await encryptTestEnvelope(secret, response);
+  const chunkPayloadBytes = options.chunkPayloadBytes ?? envelope.length;
+  const payloads = chunkUtf8Payload(envelope, chunkPayloadBytes);
+  return payloads.map((payload, chunkIndex) => ({
+    version: 1,
+    message_id: options.messageId ?? `response-test-${++nextTestResponseMessageId}`,
+    chunk_index: chunkIndex,
+    chunk_count: payloads.length,
+    total_bytes: Buffer.byteLength(envelope),
+    payload
+  }));
 }
 
 async function encryptTestEnvelope(secret, payload) {
