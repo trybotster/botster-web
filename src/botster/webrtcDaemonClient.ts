@@ -75,6 +75,7 @@ export const localWebrtcResponseChunkLimits = Object.freeze({
   maximumResponseBytes: 16_777_216,
   maximumAggregateRetainedBytes: 32 * 1_024 * 1_024,
   maximumConcurrentAssemblies: 16,
+  maximumCompletedMessageIds: 64,
   requestTimeoutMs: 10_000,
   assemblyBookkeepingBytes: 256,
   chunkBookkeepingBytes: 64,
@@ -571,6 +572,15 @@ class WebrtcDaemonTransport {
   }
 
   private retainCompletedMessageId(messageId: string): void {
+    while (
+      this.completedMessageIds.size >= localWebrtcResponseChunkLimits.maximumCompletedMessageIds
+    ) {
+      const oldestMessageId = this.completedMessageIds.values().next().value as string;
+      this.completedMessageIds.delete(oldestMessageId);
+      this.aggregateRetainedBytes -=
+        localWebrtcResponseChunkLimits.completedMessageBookkeepingBytes + utf8ByteLength(oldestMessageId);
+    }
+
     const retainedBytes =
       localWebrtcResponseChunkLimits.completedMessageBookkeepingBytes + utf8ByteLength(messageId);
     this.ensureAggregateBudget(retainedBytes);

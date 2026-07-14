@@ -2178,6 +2178,7 @@ try {
     maximumResponseBytes: 16_777_216,
     maximumAggregateRetainedBytes: 32 * 1_024 * 1_024,
     maximumConcurrentAssemblies: 16,
+    maximumCompletedMessageIds: 64,
     requestTimeoutMs: 10_000,
     assemblyBookkeepingBytes: 256,
     chunkBookkeepingBytes: 64,
@@ -2291,6 +2292,25 @@ try {
     { messageId: "completed-response" }
   );
   assert.equal((await completedReplayRecovery).kind, "status");
+
+  const boundedCompletedLedgerChannel = createFakeDataChannel();
+  const boundedCompletedLedgerClient = createWebrtcTestClient(
+    [boundedCompletedLedgerChannel],
+    localWebrtcBootstrapFixture
+  );
+  const longMessageIdSuffix = "x".repeat(60_000);
+  for (let index = 0; index < 600; index += 1) {
+    const responsePromise = boundedCompletedLedgerClient.request({ type: "list_apps" });
+    await waitForTestCondition(() => boundedCompletedLedgerChannel.sent.length === index + 1);
+    await emitChunkedTestResponse(
+      boundedCompletedLedgerChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      completedResponse,
+      { messageId: `bounded-completed-response-${index}-${longMessageIdSuffix}` }
+    );
+    assert.deepEqual(await responsePromise, completedResponse);
+  }
+  assert.equal(boundedCompletedLedgerChannel.readyState, "open");
 
   const conflictingChannels = [createFakeDataChannel(), createFakeDataChannel()];
   const conflictingClient = createWebrtcTestClient(conflictingChannels, localWebrtcBootstrapFixture);
