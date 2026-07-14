@@ -298,7 +298,9 @@ assert.match(generatedDaemonProtocol, /export interface DaemonPackageProcess/);
 assert.match(generatedDaemonProtocol, /pid\?: number;/);
 assert.match(generatedDaemonProtocol, /diagnostics\?: DaemonDiagnostic\[\]/);
 assert.match(generatedDaemonProtocol, /export type DaemonEvent/);
-assert.match(generatedDaemonProtocol, /\| \{ type: "snapshot"; session_id: string; subscription_id: string; data: string; bytes: number \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "snapshot"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "scrollback"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number \}/);
+assert.doesNotMatch(generatedDaemonProtocol, /type: "(?:snapshot|scrollback)"[^\n]*data: string/);
 assert.doesNotMatch(realHubDaemonDto, /compressed\?: boolean|encoding\?: string/);
 assert.match(realHubDogfoodTransport, /kind: "daemon_request"/);
 assert.match(realHubDogfoodTransport, /reply\.kind !== "daemon_response"/);
@@ -346,10 +348,11 @@ assert.match(realHubTerminalDataPlane, /type: "send_input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
 assert.match(realHubTerminalDataPlane, /this\.emitOutput\(event\.data, "output"\)/);
-assert.match(realHubTerminalDataPlane, /this\.emitOutput\(event\.data, event\.type\)/);
+assert.match(realHubTerminalDataPlane, /type: "read_screen"/);
+assert.match(realHubTerminalDataPlane, /this\.emitOutput\(readScreen\.text, "read_screen"\)/);
+assert.match(realHubTerminalDataPlane, /bufferHydratingOutput/);
+assert.doesNotMatch(realHubTerminalDataPlane, /event\.data, event\.type|restoredHistory|scrollback_unavailable/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("attach_state"/);
-assert.match(realHubTerminalDataPlane, /scrollback_unavailable/);
-assert.match(realHubTerminalDataPlane, /Historical terminal \$\{kind\} restored/);
 assert.match(realHubTerminalDataPlane, /type: "detach"/);
 assert.match(realHubTerminalDataPlane, /const maxAttachAttempts = \d+/);
 assert.match(realHubTerminalDataPlane, /attempt <= maxAttachAttempts/);
@@ -404,7 +407,9 @@ assert.match(liveProtocolHarnessScript, /reloadSamePackageUrlAndAssertWebrtc/);
 assert.match(liveProtocolHarnessScript, /latestLocalWebrtcGrantId/);
 assert.doesNotMatch(liveProtocolHarnessScript, /type: "stop_package_entrypoint"/);
 assert.match(liveProtocolHarnessScript, /waitForSessionAttachable\(page, true\)/);
-assert.match(liveProtocolHarnessScript, /waitForHistoricalTerminalRestore/);
+assert.match(liveProtocolHarnessScript, /waitForAutomaticTerminalRestore/);
+assert.match(liveProtocolHarnessScript, /assertMinimumHubCompatibility/);
+assert.match(liveProtocolHarnessScript, /required revision 14 with terminal_readback/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalRendererWrite/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalCanvas/);
 assert.match(liveProtocolHarnessScript, /waitForDaemonRequestCount/);
@@ -567,10 +572,10 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.5");
+assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.7");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.5");
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 12);
+assert.equal(hubTestSupportMetadata.package_version, "0.1.7");
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 14);
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(hubTestSupportMetadata.application_primitives.surface_id, "contract.app");
 assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, [
@@ -589,7 +594,7 @@ assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, 
 assert.equal(applicationPrimitivesFixturePath(), pluginContractMatrixFixturePath());
 assert.equal(verifyPackageAssets().ok, true);
 const lateAttachHistoryConformanceFixture = readLateAttachHistoryConformanceFixture();
-assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 12);
+assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 14);
 assert.deepEqual(
   lateAttachHistoryConformanceFixture.history_then_live.map((event) =>
     event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
@@ -602,6 +607,14 @@ assert.deepEqual(
   ),
   ["attach_state:attaching", "attach_state:attached", "terminal_output", "process_exit"]
 );
+for (const event of lateAttachHistoryConformanceFixture.history_then_live) {
+  if (event.type !== "snapshot" && event.type !== "scrollback") continue;
+  assert.equal(event.payload_encoding, "base64");
+  assert.equal(Buffer.from(event.payload_base64, "base64").byteLength, event.bytes);
+  assert.equal("data" in event, false);
+}
+assert.equal(lateAttachHistoryConformanceFixture.read_screen_text, "history-before-live\r\n");
+assert.equal(lateAttachHistoryConformanceFixture.no_history_read_screen_text, "");
 const localWebrtcResponseChunkFixture = readLocalWebrtcResponseChunkConformanceFixture();
 assert.equal(localWebrtcResponseChunkFixture.version, 1);
 assert.equal(localWebrtcResponseChunkFixture.maximum_frame_bytes_exclusive, 65_536);
@@ -1062,7 +1075,6 @@ const {
   requiredDaemonFeatures,
   schemaVersionDiagnosticFromFrame,
   streamDisconnectedDiagnostic,
-  terminalReadbackOptionalDiagnosticId,
   terminalUnavailableDiagnostic,
   upsertDiagnostic,
   webRtcLifecycleDiagnostic,
@@ -1495,10 +1507,11 @@ const bridge = {
               "sessions",
               "terminal_streaming",
               "resize",
+              "terminal_readback",
               "plugin_surface_render",
               "plugin_surface_action"
             ],
-            conformance_fixture_revision: 1
+            conformance_fixture_revision: 14
           },
           host_id: "dogfood-host",
           host_display_name: "Dogfood Hub",
@@ -1921,6 +1934,17 @@ const bridge = {
       };
     }
 
+    if (request.type === "read_screen") {
+      return {
+        kind: "read_screen",
+        read_screen: {
+          session_id: request.session_id,
+          text: "hub-owned-screen\r\n"
+        },
+        events: []
+      };
+    }
+
     return { kind: "events", events: [] };
   },
   streamTerminal(sessionId, subscriptionId, onEvent) {
@@ -1929,21 +1953,21 @@ const bridge = {
       type: "attach_state",
       session_id: sessionId,
       subscription_id: subscriptionId,
-      state: "attached"
+      state: "attaching"
     });
     onEvent({
       type: "snapshot",
       session_id: sessionId,
       subscription_id: subscriptionId,
-      data: "snapshot-history\r\n",
-      bytes: 18
+      payload_base64: "AP9HVFkB",
+      payload_encoding: "base64",
+      bytes: 6
     });
     onEvent({
-      type: "scrollback",
+      type: "attach_state",
       session_id: sessionId,
       subscription_id: subscriptionId,
-      data: "scrollback-history\r\n",
-      bytes: 20
+      state: "attached"
     });
     onEvent({
       type: "terminal_output",
@@ -3210,6 +3234,7 @@ assert.deepEqual(realRuntime.entities.get("botster-web.hub_status", "local-hub")
   "sessions",
   "terminal_streaming",
   "resize",
+  "terminal_readback",
   "plugin_surface_render",
   "plugin_surface_action"
 ]);
@@ -3495,10 +3520,11 @@ const protocolMismatchDiagnostic = compatibilityDiagnosticsFromFrame({
             "sessions",
             "terminal_streaming",
             "resize",
+            "terminal_readback",
             "plugin_surface_render",
             "plugin_surface_action"
           ],
-          conformance_fixture_revision: 1
+          conformance_fixture_revision: 14
         }
       }
     ]
@@ -3519,7 +3545,7 @@ const missingCapabilityDiagnostic = compatibilityDiagnosticsFromFrame({
           protocol: "botster-hub-daemon-v1",
           protocol_version: 1,
           features: ["sessions"],
-          conformance_fixture_revision: 1
+          conformance_fixture_revision: 14
         }
       }
     ]
@@ -3527,7 +3553,30 @@ const missingCapabilityDiagnostic = compatibilityDiagnosticsFromFrame({
 })[0];
 assert.equal(missingCapabilityDiagnostic.title, "Hub capability missing");
 assert.match(missingCapabilityDiagnostic.detail, /terminal_streaming/);
+assert.match(missingCapabilityDiagnostic.detail, /terminal_readback/);
 assert.equal(missingCapabilityDiagnostic.id, "hub-compatibility");
+
+const outdatedConformanceDiagnostic = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [
+      {
+        id: "local-hub",
+        schema_version: 1,
+        compatibility: {
+          protocol: "botster-hub-daemon-v1",
+          protocol_version: 1,
+          features: requiredDaemonFeatures,
+          conformance_fixture_revision: 13
+        }
+      }
+    ]
+  }
+})[0];
+assert.equal(outdatedConformanceDiagnostic.title, "Hub conformance fixture mismatch");
+assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 14/);
 
 const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -3545,34 +3594,29 @@ const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
             "sessions",
             "terminal_streaming",
             "resize",
+            "terminal_readback",
             "plugin_surface_render",
             "plugin_surface_action"
           ],
-          conformance_fixture_revision: 1
+          conformance_fixture_revision: 14
         }
       }
     ]
   }
 });
-const [compatibleDescriptorDiagnostic, optionalTerminalReadbackDiagnostic] = compatibleDescriptorDiagnostics;
+const [compatibleDescriptorDiagnostic] = compatibleDescriptorDiagnostics;
 assert.deepEqual(requiredDaemonFeatures, [
   "sessions",
   "terminal_streaming",
   "resize",
+  "terminal_readback",
   "plugin_surface_render",
   "plugin_surface_action"
 ]);
-assert.equal(requiredDaemonFeatures.includes("terminal_readback"), false);
-assert.equal(minimumConformanceFixtureRevision, 1);
-assert.equal(compatibleDescriptorDiagnostics.length, 2);
+assert.equal(minimumConformanceFixtureRevision, 14);
+assert.equal(compatibleDescriptorDiagnostics.length, 1);
 assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
 assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
-assert.equal(optionalTerminalReadbackDiagnostic.id, terminalReadbackOptionalDiagnosticId);
-assert.equal(optionalTerminalReadbackDiagnostic.severity, "warning");
-assert.equal(optionalTerminalReadbackDiagnostic.source, "compatibility");
-assert.match(optionalTerminalReadbackDiagnostic.detail, /Attach\/Drain terminal history remains available/);
-assert.match(optionalTerminalReadbackDiagnostic.detail, /does not depend on it for any shipped behavior/);
-assert.doesNotMatch(optionalTerminalReadbackDiagnostic.detail, /ticket_/);
 
 const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -3586,8 +3630,8 @@ const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame(
         compatibility: {
           protocol: "botster-hub-daemon-v1",
           protocol_version: 1,
-          features: [...requiredDaemonFeatures, "terminal_readback"],
-          conformance_fixture_revision: 1
+          features: requiredDaemonFeatures,
+          conformance_fixture_revision: 14
         }
       }
     ]
@@ -3596,10 +3640,6 @@ const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame(
 assert.equal(advertisedTerminalReadbackDiagnostics.length, 1);
 assert.equal(advertisedTerminalReadbackDiagnostics[0].id, hubCompatibilityDiagnosticId);
 assert.equal(advertisedTerminalReadbackDiagnostics[0].severity, "success");
-assert.equal(
-  advertisedTerminalReadbackDiagnostics.some(({ id }) => id === terminalReadbackOptionalDiagnosticId),
-  false
-);
 
 const hubReportedTerminalReadbackDiagnostic = hubConnectionDiagnosticFromFrame({
   kind: "connection_diagnostic",
@@ -3608,7 +3648,7 @@ const hubReportedTerminalReadbackDiagnostic = hubConnectionDiagnosticFromFrame({
     feature: "terminal_readback"
   }
 });
-assert.equal(hubReportedTerminalReadbackDiagnostic.id, terminalReadbackOptionalDiagnosticId);
+assert.equal(hubReportedTerminalReadbackDiagnostic.id, "hub-diagnostic-unsupported_feature-terminal_readback");
 
 const hubReportedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -3626,10 +3666,11 @@ const hubReportedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame
             "sessions",
             "terminal_streaming",
             "resize",
+            "terminal_readback",
             "plugin_surface_render",
             "plugin_surface_action"
           ],
-          conformance_fixture_revision: 1
+          conformance_fixture_revision: 14
         },
         diagnostics: [
           {
@@ -3648,9 +3689,8 @@ const transitionedCompatibilityDiagnostics = [
   descriptorUnavailableDiagnostic,
   ...compatibleDescriptorDiagnostics
 ].reduce((diagnostics, diagnostic) => upsertDiagnostic(diagnostics, diagnostic), []);
-assert.equal(transitionedCompatibilityDiagnostics.length, 2);
+assert.equal(transitionedCompatibilityDiagnostics.length, 1);
 assert.equal(transitionedCompatibilityDiagnostics[0].title, "Hub compatibility descriptor compatible");
-assert.equal(transitionedCompatibilityDiagnostics[1].id, terminalReadbackOptionalDiagnosticId);
 
 const absentHubDiagnosticIds = [bridgeUnavailableDiagnostic(new Error("connect ECONNREFUSED"))].map(({ id }) => id);
 assert.deepEqual(absentHubDiagnosticIds, ["bridge-unavailable"]);
@@ -3746,14 +3786,12 @@ assert.equal(bridgeRequests.some((request) => request.type === "send_input" && r
 assert.equal(bridgeRequests.some((request) => request.type === "resize" && request.rows === 24 && request.cols === 80), true);
 assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
-assert.deepEqual(terminalOutput.slice(0, 3), [
-  "snapshot-history\r\n",
-  "scrollback-history\r\n",
+assert.deepEqual(terminalOutput.slice(0, 2), [
+  "hub-owned-screen\r\n",
   "botster-web-dogfood-ready\r\n"
 ]);
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
-assert.equal(terminalStatuses.some((status) => status.state === "attached" && status.message.includes("Historical terminal scrollback restored")), true);
-assert.equal(terminalStatuses.some((status) => status.state === "scrollback_unavailable"), false);
+assert.equal(terminalStatuses.some((status) => status.state === "attached" && status.message.includes("Visible terminal screen restored")), true);
 
 const readbackRequests = [];
 const readScreenResponses = [
@@ -3882,9 +3920,9 @@ for (const readbackType of ["read_screen", "capture_snapshot"]) {
   replacementSubscription.unsubscribe();
 }
 
-for (const [events, expectedOutput] of [
-  [lateAttachHistoryConformanceFixture.history_then_live, ["history-before-live\r\n", "live-after-attach\r\n"]],
-  [lateAttachHistoryConformanceFixture.no_history_then_live, ["live-without-history\r\n"]]
+for (const [events, readScreenText, expectedOutput] of [
+  [lateAttachHistoryConformanceFixture.history_then_live, lateAttachHistoryConformanceFixture.read_screen_text, ["history-before-live\r\n", "live-after-attach\r\n"]],
+  [lateAttachHistoryConformanceFixture.no_history_then_live, lateAttachHistoryConformanceFixture.no_history_read_screen_text, ["live-without-history\r\n"]]
 ]) {
   const sessionId = events[0].session_id;
   const subscriptionId = events[0].subscription_id;
@@ -3899,6 +3937,13 @@ for (const [events, expectedOutput] of [
           return {
             kind: "sessions",
             sessions: [{ session_id: sessionId, lifecycle: "running" }],
+            events: []
+          };
+        }
+        if (request.type === "read_screen") {
+          return {
+            kind: "read_screen",
+            read_screen: { session_id: sessionId, text: readScreenText },
             events: []
           };
         }
@@ -3933,18 +3978,122 @@ for (const [events, expectedOutput] of [
 
   if (expectedOutput.length === 2) {
     const restoredStatusIndex = fixtureTimeline.findIndex((entry) =>
-      entry.includes("Historical terminal snapshot restored from renderable daemon data.")
+      entry.includes("Visible terminal screen restored from daemon readback.")
     );
     const historyOutputIndex = fixtureTimeline.findIndex((entry) => entry === `output:${expectedOutput[0]}`);
     assert.equal(restoredStatusIndex > attachingIndex, true);
     assert.equal(historyOutputIndex > restoredStatusIndex, true);
-    assert.equal(protocolAttachedIndex > historyOutputIndex, true);
+    assert.equal(historyOutputIndex > protocolAttachedIndex, true);
+    assert.equal(liveOutputIndex > historyOutputIndex, true);
   } else {
     const liveOnlyIndex = fixtureTimeline.findIndex((entry) => entry.startsWith("status:live_only:"));
     assert.equal(liveOnlyIndex > protocolAttachedIndex, true);
     assert.equal(liveOutputIndex > liveOnlyIndex, true);
   }
 }
+
+let resolveDelayedScreen;
+const delayedHydrationOutput = [];
+const delayedHydrationDataPlane = createRealHubTerminalDataPlane({
+  sessionId: "delayed-hydration-session",
+  subscriptionId: "delayed-hydration-subscription",
+  bridge: {
+    async request(request) {
+      if (request.type === "list_sessions") {
+        return {
+          kind: "sessions",
+          sessions: [{ session_id: "delayed-hydration-session", lifecycle: "running" }],
+          events: []
+        };
+      }
+      if (request.type === "read_screen") {
+        return new Promise((resolve) => {
+          resolveDelayedScreen = resolve;
+        });
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(sessionId, subscriptionId, onEvent) {
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
+      onEvent({
+        type: "snapshot",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        payload_base64: "AP9HVFkB",
+        payload_encoding: "base64",
+        bytes: 6
+      });
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+      onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: "live-one\r\n" });
+      onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: "live-two\r\n" });
+      return { unsubscribe() {} };
+    }
+  }
+});
+delayedHydrationDataPlane.subscribeOutput((data) => delayedHydrationOutput.push(data));
+await waitFor(() => typeof resolveDelayedScreen === "function");
+assert.deepEqual(delayedHydrationOutput, []);
+resolveDelayedScreen({
+  kind: "read_screen",
+  read_screen: { session_id: "delayed-hydration-session", text: "visible-screen\r\n" },
+  events: []
+});
+await waitFor(() => delayedHydrationOutput.length === 3);
+assert.deepEqual(delayedHydrationOutput, ["visible-screen\r\n", "live-one\r\n", "live-two\r\n"]);
+
+let resolveStaleAutomaticScreen;
+let staleAutomaticStreamCount = 0;
+let staleAutomaticReadCount = 0;
+const staleAutomaticOutput = [];
+const staleAutomaticDataPlane = createRealHubTerminalDataPlane({
+  sessionId: "stale-automatic-session",
+  subscriptionId: "stale-automatic-subscription",
+  bridge: {
+    async request(request) {
+      if (request.type === "list_sessions") {
+        return {
+          kind: "sessions",
+          sessions: [{ session_id: "stale-automatic-session", lifecycle: "running" }],
+          events: []
+        };
+      }
+      if (request.type === "read_screen") {
+        staleAutomaticReadCount += 1;
+        if (staleAutomaticReadCount === 1) {
+          return new Promise((resolve) => {
+            resolveStaleAutomaticScreen = resolve;
+          });
+        }
+        return {
+          kind: "read_screen",
+          read_screen: { session_id: "stale-automatic-session", text: "current-screen\r\n" },
+          events: []
+        };
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(sessionId, subscriptionId, onEvent) {
+      staleAutomaticStreamCount += 1;
+      const live = staleAutomaticStreamCount === 1 ? "stale-live\r\n" : "current-live\r\n";
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+      onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: live });
+      return { unsubscribe() {} };
+    }
+  }
+});
+const staleAutomaticFirstSubscription = staleAutomaticDataPlane.subscribeOutput((data) => staleAutomaticOutput.push(data));
+await waitFor(() => typeof resolveStaleAutomaticScreen === "function");
+staleAutomaticFirstSubscription.unsubscribe();
+const staleAutomaticSecondSubscription = staleAutomaticDataPlane.subscribeOutput((data) => staleAutomaticOutput.push(data));
+await waitFor(() => staleAutomaticOutput.includes("current-live\r\n"));
+resolveStaleAutomaticScreen({
+  kind: "read_screen",
+  read_screen: { session_id: "stale-automatic-session", text: "stale-screen\r\n" },
+  events: []
+});
+await flushMicrotasks();
+assert.deepEqual(staleAutomaticOutput, ["current-screen\r\n", "current-live\r\n"]);
+staleAutomaticSecondSubscription.unsubscribe();
 
 const reattachedTerminalOutput = [];
 const reattachedTerminalSubscription = terminalDataPlane.subscribeOutput((data) => reattachedTerminalOutput.push(data));
@@ -3971,6 +4120,13 @@ const byteOnlyTerminalDataPlane = createRealHubTerminalDataPlane({
           events: []
         };
       }
+      if (request.type === "read_screen") {
+        return {
+          kind: "read_screen",
+          read_screen: { session_id: realHubDogfoodSessionId, text: "" },
+          events: []
+        };
+      }
       return { kind: "events", events: [] };
     },
     streamTerminal(sessionId, subscriptionId, onEvent) {
@@ -3984,14 +4140,9 @@ const byteOnlyTerminalDataPlane = createRealHubTerminalDataPlane({
         type: "snapshot",
         session_id: sessionId,
         subscription_id: subscriptionId,
-        bytes: 19
-      });
-      onEvent({
-        type: "snapshot",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        data: "",
-        bytes: 19
+        payload_base64: "AP9HVFkB",
+        payload_encoding: "base64",
+        bytes: 6
       });
       onEvent({
         type: "attach_state",
@@ -4015,16 +4166,11 @@ byteOnlyTerminalDataPlane.subscribeStatus((status) => byteOnlyTerminalStatuses.p
 byteOnlyTerminalDataPlane.subscribeOutput((data) => byteOnlyTerminalOutput.push(data));
 await waitFor(() => byteOnlyTerminalOutput.some((data) => data.includes("byte-only-live-output")));
 assert.deepEqual(byteOnlyTerminalOutput, ["byte-only-live-output\r\n"]);
-assert.equal(byteOnlyTerminalStatuses.some((status) => status.state === "scrollback_unavailable"), true);
-assert.equal(byteOnlyTerminalStatuses.at(-1).state, "scrollback_unavailable");
 assert.equal(
-  byteOnlyTerminalStatuses.some((status) => status.message.includes("restored from renderable daemon data")),
+  byteOnlyTerminalStatuses.some((status) => status.message.includes("Visible terminal screen restored")),
   false
 );
-assert.match(
-  byteOnlyTerminalStatuses.find((status) => status.state === "scrollback_unavailable").message,
-  /cannot render that snapshot format yet/
-);
+assert.equal(byteOnlyTerminalStatuses.some((status) => status.state === "live_only"), true);
 
 const delayedBridgeRequests = [];
 const delayedBridgeTerminalStreams = [];
@@ -6353,7 +6499,6 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
         protocolMismatchDiagnostic,
         missingCapabilityDiagnostic,
         compatibleDescriptorDiagnostic,
-        optionalTerminalReadbackDiagnostic,
         streamDisconnectedDiagnostic(new Error("SSE closed")),
         actionFailureDiagnostic(
           { id: "botster.session.rename", target: "missing-real-hub-session" },
@@ -6375,8 +6520,6 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
   assert.match(diagnosticsMarkup, /Capability: terminal_streaming/);
   assert.match(diagnosticsMarkup, /Operation: spawn/);
   assert.match(diagnosticsMarkup, /Hub compatibility descriptor compatible/);
-  assert.match(diagnosticsMarkup, /Optional terminal readback unavailable/);
-  assert.match(diagnosticsMarkup, /Warning \/ compatibility/);
   assert.match(diagnosticsMarkup, /Hub compatibility descriptor unavailable/);
   assert.match(diagnosticsMarkup, /Hub protocol mismatch/);
   assert.match(diagnosticsMarkup, /Hub capability missing/);
@@ -6398,10 +6541,8 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
     })
   );
   assert.match(transitionedDiagnosticsMarkup, /Hub compatibility descriptor compatible/);
-  assert.match(transitionedDiagnosticsMarkup, /Optional terminal readback unavailable/);
   assert.doesNotMatch(transitionedDiagnosticsMarkup, /Hub compatibility descriptor unavailable/);
   assert.equal((transitionedDiagnosticsMarkup.match(/data-diagnostic-id="hub-compatibility"/g) ?? []).length, 1);
-  assert.equal((transitionedDiagnosticsMarkup.match(new RegExp(`data-diagnostic-id="${terminalReadbackOptionalDiagnosticId}"`, "g")) ?? []).length, 1);
 } finally {
   await vite.close();
 }
