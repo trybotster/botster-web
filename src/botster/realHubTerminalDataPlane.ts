@@ -208,7 +208,9 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     if (event.type === "attach_state") {
-      this.emitStatus(attachStateStatus(event.state));
+      if (event.state !== "attached" || this.currentStatus.state !== "scrollback_unavailable") {
+        this.emitStatus(attachStateStatus(event.state));
+      }
       recordLiveHarnessTerminal("attach_state", { state: event.state });
       return;
     }
@@ -225,7 +227,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     if (event.type === "snapshot" || event.type === "scrollback") {
-      if (typeof event.data === "string") {
+      if (typeof event.data === "string" && event.data.length > 0) {
         this.restoredHistory = true;
         this.emitStatus(historyRestoredStatus(event.type));
         this.emitOutput(event.data, event.type);
@@ -238,7 +240,10 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     if (event.type === "terminal_output") {
-      if (this.currentStatus.state === "attaching" || (this.currentStatus.state === "attached" && !this.restoredHistory)) {
+      if (
+        this.currentStatus.state !== "scrollback_unavailable" &&
+        (this.currentStatus.state === "attaching" || (this.currentStatus.state === "attached" && !this.restoredHistory))
+      ) {
         this.emitStatus({
           state: "live_only",
           message: "Terminal stream attached live; no historical scrollback was delivered by the daemon."

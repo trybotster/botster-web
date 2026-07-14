@@ -30,7 +30,8 @@ const payloadContractPackagePath = payloadContractMode
   : undefined;
 let port = Number.parseInt(process.env.BOTSTER_WEB_DOGFOOD_BRIDGE_PORT ?? String(await findAvailablePort()), 10);
 let bridgeUrl = `http://${host}:${port}`;
-const echoProbe = "botster-web-dogfood-live-input";
+const echoProbe = "keys";
+const attachProbe = "botster-web-dogfood-attach-probe";
 const transportMode = process.env.BOTSTER_LIVE_PACKAGED_TRANSPORT ?? "webrtc";
 
 if (!["webrtc", "bridge"].includes(transportMode)) {
@@ -69,9 +70,13 @@ const consoleEvents = [];
 const pageErrors = [];
 const responseErrors = [];
 const responseAssemblyTelemetry = [];
+const attachChronology = [];
+let binaryProvenance;
 
 try {
   if (transportMode === "webrtc") {
+    binaryProvenance = await loadBinaryProvenance();
+    console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
     appUrl = await startWebrtcPackageRuntime();
   } else {
     bridgeProcess = startBridgeProcess();
@@ -161,7 +166,8 @@ try {
   await waitForSessionAttachable(page, true);
   await page.getByText("Attachable").waitFor();
   await waitForTerminalSession(page, "botster-web-dogfood-session");
-  await waitForTerminalOutput(page, "botster-web-dogfood-ready");
+  await proveLiveTerminalAfterAttach(page, `${attachProbe}-0`);
+  attachChronology.push({ cycle: 0, ...await assertTerminalAttachChronology(page, "botster-web-dogfood-session") });
 
   let previousGrantId = await latestLocalWebrtcGrantId(page);
   for (const cycle of [1, 2]) {
@@ -173,8 +179,8 @@ try {
     await waitForTerminalSession(page, "botster-web-dogfood-session");
     const assemblyTelemetry = await waitForHistoricalTerminalRestore(page);
     if (transportMode === "webrtc") responseAssemblyTelemetry.push({ cycle, ...assemblyTelemetry });
-    await waitForTerminalOutput(page, "botster-web-dogfood-ready");
-    await waitForTerminalRendererWrite(page, "botster-web-dogfood-ready");
+    await proveLiveTerminalAfterAttach(page, `${attachProbe}-${cycle}`);
+    attachChronology.push({ cycle, ...await assertTerminalAttachChronology(page, "botster-web-dogfood-session") });
   }
 
   const sendInputRequestsBeforeEcho = await daemonRequestCount(page, {
@@ -245,7 +251,11 @@ try {
   await requestDaemonShutdown();
   console.log(
     `live packaged protocol harness passed (${transportMode}) ` +
-      JSON.stringify({ response_assembly_telemetry: responseAssemblyTelemetry })
+      JSON.stringify({
+        binary_provenance: binaryProvenance,
+        attach_chronology: attachChronology,
+        response_assembly_telemetry: responseAssemblyTelemetry
+      })
   );
 } catch (error) {
   const harnessState = page
@@ -256,6 +266,10 @@ try {
     diagnosticMessage += `\nhub stdout:\n${hubStdout}\nhub stderr:\n${hubStderr}`;
   }
   if (harnessState) {
+    const terminalStreamEvents = harnessState.events?.filter((entry) => entry.kind.startsWith("terminal_stream_")) ?? [];
+    if (terminalStreamEvents.length > 0) {
+      diagnosticMessage += `\nterminal stream events:\n${JSON.stringify(terminalStreamEvents, null, 2)}`;
+    }
     diagnosticMessage += `\nharness state:\n${JSON.stringify(harnessState, null, 2)}`;
   }
   const browserFailureMessage = browserFailureSummary({ consoleEvents, pageErrors, responseErrors });
@@ -1724,6 +1738,18 @@ async function waitForTerminalRendererWrite(page, text) {
   });
 }
 
+async function proveLiveTerminalAfterAttach(page, probe) {
+  await waitForTerminalAttachState(page, ["attached"]);
+  await callTerminalControl(page, "writeInput", `${probe}\n`);
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "send_input", data: `${probe}\n` },
+    `post-attach live input ${probe}`
+  );
+  await waitForTerminalOutput(page, `botster-web-dogfood-echo:${probe}`);
+  await waitForTerminalRendererWrite(page, `botster-web-dogfood-echo:${probe}`);
+}
+
 async function waitForTerminalCanvas(page) {
   await page.waitForFunction(
     () => {
@@ -1795,6 +1821,92 @@ async function waitForHistoricalTerminalRestore(page) {
     throw new Error(`historical terminal response assembly lacks 2,000 ms timeout headroom: ${JSON.stringify(telemetry)}`);
   }
   return telemetry;
+}
+
+async function assertTerminalAttachChronology(page, sessionId) {
+  const chronology = await page.waitForFunction(
+    ({ expectedSessionId }) => {
+      const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) => entry.kind === "daemon_event")
+        .map((entry) => entry.payload)
+        .filter((event) =>
+          event?.session_id === expectedSessionId &&
+          typeof event.subscription_id === "string" &&
+          ["attach_state", "snapshot", "scrollback", "terminal_output"].includes(event.type)
+        );
+      const subscriptionIds = [...new Set(events.map((event) => event.subscription_id))];
+
+      for (const subscriptionId of subscriptionIds) {
+        const subscriptionEvents = events.filter((event) => event.subscription_id === subscriptionId);
+        for (let attachingIndex = 0; attachingIndex < subscriptionEvents.length; attachingIndex += 1) {
+          const attaching = subscriptionEvents[attachingIndex];
+          if (attaching.type !== "attach_state" || attaching.state !== "attaching") continue;
+
+          const attachedIndex = subscriptionEvents.findIndex(
+            (event, index) =>
+              index > attachingIndex && event.type === "attach_state" && event.state === "attached"
+          );
+          if (attachedIndex < 0) continue;
+
+          const liveIndex = subscriptionEvents.findIndex(
+            (event, index) =>
+              index > attachedIndex && event.type === "terminal_output" &&
+              typeof event.data === "string" && event.data.length > 0
+          );
+          if (liveIndex < 0) continue;
+
+          const initialEvents = subscriptionEvents.slice(attachingIndex, liveIndex + 1);
+          const attachedOffset = attachedIndex - attachingIndex;
+          const earlyLive = initialEvents.findIndex(
+            (event, index) => index < attachedOffset && event.type === "terminal_output"
+          );
+          if (earlyLive >= 0) {
+            return {
+              error: "terminal output arrived before attached",
+              subscription_id: subscriptionId,
+              observed: initialEvents
+            };
+          }
+          const lateHistory = initialEvents.findIndex(
+            (event, index) => index > attachedOffset &&
+              (event.type === "snapshot" || event.type === "scrollback")
+          );
+          if (lateHistory >= 0) {
+            return {
+              error: "snapshot/scrollback arrived after attached and before live output",
+              subscription_id: subscriptionId,
+              observed: initialEvents
+            };
+          }
+
+          return {
+            subscription_id: subscriptionId,
+            sequence: initialEvents.map((event) =>
+              event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
+            ),
+            history: initialEvents
+              .filter((event) => event.type === "snapshot" || event.type === "scrollback")
+              .map((event) => ({
+                type: event.type,
+                bytes: event.bytes ?? null,
+                renderable: typeof event.data === "string" && event.data.length > 0
+              }))
+          };
+        }
+      }
+
+      return null;
+    },
+    { expectedSessionId: sessionId },
+    { timeout: 45_000 }
+  ).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(`timed out waiting for subscription-scoped attach chronology: ${error.message}`);
+  });
+
+  if (chronology.error) {
+    throw new Error(`invalid subscription-scoped attach chronology: ${JSON.stringify(chronology)}`);
+  }
+  return chronology;
 }
 
 async function waitForResizeProof(page, requestedResize) {
@@ -2079,6 +2191,40 @@ async function startWebrtcPackageRuntime() {
   );
   await waitForHtmlShell(withDogfoodMode(url));
   return url;
+}
+
+async function loadBinaryProvenance() {
+  if (!process.env.BOTSTER_HUB_BIN) {
+    throw new Error("WebRTC live packaged protocol harness requires BOTSTER_HUB_BIN so it can own an isolated hub.");
+  }
+  if (!process.env.BOTSTER_SESSION_WORKER_BIN) {
+    throw new Error(
+      "WebRTC live packaged protocol harness requires BOTSTER_SESSION_WORKER_BIN so readiness evidence identifies the exact worker binary."
+    );
+  }
+
+  return {
+    hub: await binaryProvenanceFor(process.env.BOTSTER_HUB_BIN, "botster-hub"),
+    session_worker: await binaryProvenanceFor(process.env.BOTSTER_SESSION_WORKER_BIN, "botster-session-worker")
+  };
+}
+
+async function binaryProvenanceFor(binaryPath, label) {
+  const resolvedPath = resolve(binaryPath);
+  const manifestPath = resolve(dirname(resolvedPath), "../..", "Cargo.toml");
+  if (!existsSync(resolvedPath)) {
+    throw new Error(`${label} provenance binary does not exist: path=${resolvedPath}`);
+  }
+  if (!existsSync(manifestPath)) {
+    return { path: resolvedPath, package_version: null, package_version_source: null };
+  }
+  const manifest = readFileSync(manifestPath, "utf8");
+  const packageVersion = manifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? null;
+  return {
+    path: resolvedPath,
+    package_version: packageVersion,
+    package_version_source: packageVersion ? manifestPath : null
+  };
 }
 
 function spawnHubProcess(dataDir) {
