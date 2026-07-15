@@ -18,7 +18,7 @@ export interface TerminalSubscription {
 }
 
 export interface TerminalAttachmentStatus {
-  state: "attaching" | "attached" | "live_only" | "scrollback_unavailable" | "exited" | "failed";
+  state: "attaching" | "attached" | "live_only" | "exited" | "failed";
   message: string;
 }
 

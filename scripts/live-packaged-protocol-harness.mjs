@@ -125,6 +125,7 @@ try {
   await page.getByText("Local hub workbench").waitFor();
   await waitForTransportLabel(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "status request");
+  await assertMinimumHubCompatibility(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
   if (transportMode === "webrtc") {
@@ -166,6 +167,7 @@ try {
   await waitForSessionAttachable(page, true);
   await page.getByText("Attachable").waitFor();
   await waitForTerminalSession(page, "botster-web-dogfood-session");
+  responseAssemblyTelemetry.push({ cycle: 0, ...await waitForAutomaticTerminalRestore(page) });
   await proveLiveTerminalAfterAttach(page, `${attachProbe}-0`);
   attachChronology.push({ cycle: 0, ...await assertTerminalAttachChronology(page, "botster-web-dogfood-session") });
 
@@ -177,8 +179,7 @@ try {
     await waitForSessionAttachable(page, true);
     await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
     await waitForTerminalSession(page, "botster-web-dogfood-session");
-    const assemblyTelemetry = await waitForHistoricalTerminalRestore(page);
-    if (transportMode === "webrtc") responseAssemblyTelemetry.push({ cycle, ...assemblyTelemetry });
+    responseAssemblyTelemetry.push({ cycle, ...await waitForAutomaticTerminalRestore(page) });
     await proveLiveTerminalAfterAttach(page, `${attachProbe}-${cycle}`);
     attachChronology.push({ cycle, ...await assertTerminalAttachChronology(page, "botster-web-dogfood-session") });
   }
@@ -259,7 +260,26 @@ try {
   );
 } catch (error) {
   const harnessState = page
-    ? await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__).catch(() => undefined)
+    ? await page.evaluate(() => {
+        const state = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+        if (!state) return undefined;
+        const redactEntry = (entry) => {
+          const payload = entry?.payload;
+          if (!payload || typeof payload !== "object") return entry;
+          const redactedPayload = { ...payload };
+          if (typeof redactedPayload.payload_base64 === "string") {
+            redactedPayload.payload_base64 = `[redacted ${redactedPayload.payload_base64.length} base64 chars]`;
+          }
+          if (typeof redactedPayload.data === "string" && redactedPayload.data.length > 512) {
+            redactedPayload.data = `${redactedPayload.data.slice(0, 160)}… [redacted ${redactedPayload.data.length - 160} chars]`;
+          }
+          return { ...entry, payload: redactedPayload };
+        };
+        return {
+          events: (state.events ?? []).map(redactEntry),
+          terminal: (state.terminal ?? []).map(redactEntry)
+        };
+      }).catch(() => undefined)
     : undefined;
   let diagnosticMessage = `${error.message}\nbridge stdout:\n${bridgeStdout}\nbridge stderr:\n${bridgeStderr}`;
   if (hubStdout || hubStderr) {
@@ -1621,6 +1641,41 @@ async function waitForTransportLabel(page) {
   });
 }
 
+async function assertMinimumHubCompatibility(page) {
+  const compatibility = await page.waitForFunction(
+    () => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const entry = events[index];
+        if (entry.kind === "daemon_response" && entry.payload?.kind === "status") {
+          return entry.payload?.status?.compatibility ?? null;
+        }
+        if (
+          entry.kind === "hub_frame" &&
+          entry.payload?.kind === "entity_snapshot" &&
+          entry.payload?.payload?.family === "botster-web.hub_status"
+        ) {
+          return entry.payload.payload.records?.find((record) => record?.id === "local-hub")?.compatibility ?? null;
+        }
+      }
+      return null;
+    },
+    undefined,
+    { timeout: 15_000 }
+  ).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(`timed out waiting for hub compatibility descriptor: ${error.message}`);
+  });
+
+  const revision = compatibility?.conformance_fixture_revision;
+  const features = Array.isArray(compatibility?.features) ? compatibility.features : [];
+  if (!Number.isInteger(revision) || revision < 14 || !features.includes("terminal_readback")) {
+    throw new Error(
+      `incompatible hub for revision-14 terminal history: observed revision ${String(revision)}, ` +
+      `required revision 14 with terminal_readback`
+    );
+  }
+}
+
 async function waitForRemoteAccessPackageConfiguration(page) {
   await page.waitForFunction(
     () => {
@@ -1765,46 +1820,33 @@ async function waitForTerminalCanvas(page) {
   });
 }
 
-async function waitForHistoricalTerminalRestore(page) {
-  const historyPayload = await page.waitForFunction(
+async function waitForAutomaticTerminalRestore(page) {
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_screen" }, "automatic read_screen request");
+  const restoration = await page.waitForFunction(
     () => {
-      const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).find(
+      const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).findLast(
         (entry) =>
           entry.kind === "output" &&
-          (entry.payload?.source === "snapshot" || entry.payload?.source === "scrollback") &&
-          typeof entry.payload?.data === "string"
+          entry.payload?.source === "read_screen" &&
+          typeof entry.payload?.data === "string" &&
+          entry.payload.data.length > 0
       );
-      return entry?.payload?.data ?? null;
+      return entry ? { text: entry.payload.data, chars: entry.payload.data.length } : null;
     },
     undefined,
     { timeout: 15_000 }
-  ).then((handle) => handle.jsonValue()).catch(async (error) => {
-    const observedHistoryEvents = await page.evaluate(() =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-        .filter((entry) => entry.kind === "daemon_event")
-        .map((entry) => entry.payload)
-        .filter((payload) => payload?.type === "snapshot" || payload?.type === "scrollback")
-    );
-
-    if (observedHistoryEvents.length === 0) {
-      throw new Error(
-        `timed out waiting for snapshot.data/scrollback.data after refresh Attach; no snapshot or scrollback daemon events were observed: ${error.message}`
-      );
-    }
-
-    throw new Error(
-      `timed out waiting for renderable snapshot.data/scrollback.data after refresh Attach; observed history events: ${JSON.stringify(observedHistoryEvents, null, 2)}`
-    );
+  ).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(`timed out waiting for automatic ReadScreen restoration: ${error.message}`);
   });
-  await waitForTerminalRendererWrite(page, historyPayload);
-  if (transportMode !== "webrtc") return undefined;
+  await waitForTerminalRendererWrite(page, restoration.text);
+  if (transportMode !== "webrtc") return { restored_chars: restoration.chars };
 
   const telemetry = await page.evaluate(() => {
     const assemblies = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
       .filter((entry) => entry.kind === "webrtc_response_assembly")
       .map((entry) => entry.payload)
       .filter((payload) =>
-        ["attach", "drain"].includes(payload?.request_type) &&
+        payload?.request_type === "read_screen" &&
         Number.isInteger(payload?.total_bytes) &&
         Number.isInteger(payload?.chunk_count) &&
         Number.isFinite(payload?.duration_ms)
@@ -1812,7 +1854,7 @@ async function waitForHistoricalTerminalRestore(page) {
     return assemblies.toSorted((left, right) => right.total_bytes - left.total_bytes)[0] ?? null;
   });
   if (!telemetry || telemetry.total_bytes <= 0 || telemetry.chunk_count < 1) {
-    throw new Error(`historical terminal restore did not traverse WebRTC response chunk framing: ${JSON.stringify(telemetry)}`);
+    throw new Error(`ReadScreen restoration did not traverse WebRTC response chunk framing: ${JSON.stringify(telemetry)}`);
   }
   if (telemetry.duration_ms >= 10_000) {
     throw new Error(`historical terminal response assembly exceeded its request deadline: ${JSON.stringify(telemetry)}`);
@@ -1820,7 +1862,7 @@ async function waitForHistoricalTerminalRestore(page) {
   if (telemetry.duration_ms > 8_000) {
     throw new Error(`historical terminal response assembly lacks 2,000 ms timeout headroom: ${JSON.stringify(telemetry)}`);
   }
-  return telemetry;
+  return { restored_chars: restoration.chars, response_assembly: telemetry };
 }
 
 async function assertTerminalAttachChronology(page, sessionId) {
@@ -1878,6 +1920,22 @@ async function assertTerminalAttachChronology(page, sessionId) {
               observed: initialEvents
             };
           }
+          const invalidHistory = initialEvents.find((event) => {
+            if (event.type !== "snapshot" && event.type !== "scrollback") return false;
+            if (event.payload_encoding !== "base64" || typeof event.payload_base64 !== "string") return true;
+            try {
+              return globalThis.atob(event.payload_base64).length !== event.bytes;
+            } catch {
+              return true;
+            }
+          });
+          if (invalidHistory) {
+            return {
+              error: "snapshot/scrollback payload is not valid binary-safe revision-14 metadata",
+              subscription_id: subscriptionId,
+              observed: initialEvents.map((event) => ({ type: event.type, state: event.state, bytes: event.bytes }))
+            };
+          }
 
           return {
             subscription_id: subscriptionId,
@@ -1889,7 +1947,7 @@ async function assertTerminalAttachChronology(page, sessionId) {
               .map((event) => ({
                 type: event.type,
                 bytes: event.bytes ?? null,
-                renderable: typeof event.data === "string" && event.data.length > 0
+                payload_encoding: event.payload_encoding
               }))
           };
         }

@@ -10,7 +10,15 @@ import type { DaemonCaptureSnapshot, DaemonEvent, DaemonReadScreen } from "./rea
 
 const maxAttachAttempts = 80;
 const attachRetryDelayMs = 250;
+const maxHydrationBufferBytes = 16_777_216;
 let nextSubscriptionSequence = 1;
+
+interface ScreenHydration {
+  generation: number;
+  bufferedOutput: string[];
+  bufferedBytes: number;
+  pendingExit?: number | null;
+}
 
 export interface RealHubTerminalDataPlaneOptions {
   bridge: DaemonBridgeClient;
@@ -32,8 +40,10 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private attachPromise: Promise<void> | undefined;
   private pendingResize: { rows: number; columns: number } | undefined;
   private detached = false;
-  private restoredHistory = false;
   private attachmentGeneration = 0;
+  private hydration: ScreenHydration | undefined;
+  private hydratedGeneration: number | undefined;
+  private restoredVisibleScreenGeneration: number | undefined;
 
   constructor(private readonly options: RealHubTerminalDataPlaneOptions) {
     this.sessionId = options.sessionId ?? realHubDogfoodSessionId;
@@ -53,9 +63,6 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription {
     this.listeners.add(listener);
     this.detached = false;
-    if (!this.streamSubscription) {
-      this.restoredHistory = false;
-    }
     this.emitStatus({
       state: "attaching",
       message: "Attaching terminal stream."
@@ -125,7 +132,6 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   async detach(): Promise<void> {
-    this.attachmentGeneration += 1;
     this.detached = true;
     this.closeStream();
     this.listeners.clear();
@@ -167,11 +173,17 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
       const response = await this.options.bridge.request({ type: "list_sessions" });
       const session = response.sessions?.find((entry) => entry.session_id === this.sessionId);
       if (session && session.lifecycle !== "exited") {
-        this.streamSubscription = this.options.bridge.streamTerminal!(
+        const attachmentGeneration = ++this.attachmentGeneration;
+        const streamSubscription = this.options.bridge.streamTerminal!(
           this.sessionId,
           this.subscriptionId,
-          (event) => this.emitTerminalEvent(event)
+          (event) => this.emitTerminalEvent(event, attachmentGeneration)
         );
+        if (!this.isCurrentAttachment(attachmentGeneration)) {
+          streamSubscription.unsubscribe();
+          return;
+        }
+        this.streamSubscription = streamSubscription;
         recordLiveHarnessTerminal("attach", { attempt });
         await this.flushPendingResize();
         return;
@@ -187,6 +199,10 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private closeStream(): void {
     this.streamSubscription?.unsubscribe();
     this.streamSubscription = undefined;
+    this.attachmentGeneration += 1;
+    this.hydration = undefined;
+    this.hydratedGeneration = undefined;
+    this.restoredVisibleScreenGeneration = undefined;
   }
 
   private async flushPendingResize(): Promise<void> {
@@ -202,62 +218,157 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     });
   }
 
-  private emitTerminalEvent(event: DaemonEvent): void {
+  private emitTerminalEvent(event: DaemonEvent, attachmentGeneration: number): void {
+    if (!this.isCurrentAttachment(attachmentGeneration)) {
+      return;
+    }
+
     if (!isTerminalStreamEvent(event) || event.session_id !== this.sessionId || event.subscription_id !== this.subscriptionId) {
       return;
     }
 
     if (event.type === "attach_state") {
-      if (event.state !== "attached" || this.currentStatus.state !== "scrollback_unavailable") {
-        this.emitStatus(attachStateStatus(event.state));
+      this.emitStatus(attachStateStatus(event.state));
+      if (event.state === "attached") {
+        this.beginScreenHydration(attachmentGeneration);
       }
       recordLiveHarnessTerminal("attach_state", { state: event.state });
       return;
     }
 
     if (event.type === "process_exit") {
-      this.emitStatus({
-        state: "exited",
-        message: typeof event.code === "number"
-          ? `Terminal process exited with ${event.code}.`
-          : "Terminal process exited."
-      });
-      recordLiveHarnessTerminal("process_exit", { code: event.code });
+      if (this.hydration?.generation === attachmentGeneration) {
+        this.hydration.pendingExit = event.code;
+        return;
+      }
+      this.emitProcessExit(event.code);
       return;
     }
 
     if (event.type === "snapshot" || event.type === "scrollback") {
-      if (typeof event.data === "string" && event.data.length > 0) {
-        this.restoredHistory = true;
-        this.emitStatus(historyRestoredStatus(event.type));
-        this.emitOutput(event.data, event.type);
-        return;
-      }
-
-      this.emitStatus(historyUnavailableStatus(event));
-      recordLiveHarnessTerminal(event.type, { bytes: event.bytes });
+      recordLiveHarnessTerminal(event.type, {
+        bytes: event.bytes,
+        payload_encoding: event.payload_encoding
+      });
       return;
     }
 
     if (event.type === "terminal_output") {
+      if (this.hydration?.generation === attachmentGeneration) {
+        this.bufferHydratingOutput(event.data, this.hydration);
+        return;
+      }
       if (
-        this.currentStatus.state !== "scrollback_unavailable" &&
-        (this.currentStatus.state === "attaching" || (this.currentStatus.state === "attached" && !this.restoredHistory))
+        this.currentStatus.state === "attaching" ||
+        (this.currentStatus.state === "attached" && this.restoredVisibleScreenGeneration !== attachmentGeneration)
       ) {
         this.emitStatus({
           state: "live_only",
-          message: "Terminal stream attached live; no historical scrollback was delivered by the daemon."
+          message: "Terminal stream attached live; no visible screen content was restored."
         });
       }
       this.emitOutput(event.data, "output");
     }
   }
 
-  private emitOutput(data: TerminalOutput, kind: "output" | "snapshot" | "scrollback"): void {
+  private beginScreenHydration(attachmentGeneration: number): void {
+    if (this.hydratedGeneration === attachmentGeneration) {
+      return;
+    }
+
+    this.hydratedGeneration = attachmentGeneration;
+    const hydration: ScreenHydration = {
+      generation: attachmentGeneration,
+      bufferedOutput: [],
+      bufferedBytes: 0
+    };
+    this.hydration = hydration;
+    void this.hydrateVisibleScreen(hydration);
+  }
+
+  private async hydrateVisibleScreen(hydration: ScreenHydration): Promise<void> {
+    try {
+      const response = await this.options.bridge.request({
+        type: "read_screen",
+        session_id: this.sessionId
+      });
+      const readScreen = response.read_screen ?? undefined;
+      if (!this.isCurrentAttachment(hydration.generation) || this.hydration !== hydration) {
+        return;
+      }
+      if (readScreen && readScreen.session_id !== this.sessionId) {
+        throw new Error(`Terminal screen readback returned session ${readScreen.session_id}; expected ${this.sessionId}.`);
+      }
+
+      this.hydration = undefined;
+      if (readScreen?.text) {
+        this.restoredVisibleScreenGeneration = hydration.generation;
+        this.emitStatus({
+          state: "attached",
+          message: "Visible terminal screen restored from daemon readback."
+        });
+        this.emitOutput(readScreen.text, "read_screen");
+      } else if (hydration.bufferedOutput.length > 0) {
+        this.emitStatus({
+          state: "live_only",
+          message: "Terminal stream attached live; no visible screen content was restored."
+        });
+      }
+
+      for (const data of hydration.bufferedOutput) {
+        this.emitOutput(data, "output");
+      }
+      if (hydration.pendingExit !== undefined) {
+        this.emitProcessExit(hydration.pendingExit);
+      }
+    } catch (error: unknown) {
+      if (!this.isCurrentAttachment(hydration.generation) || this.hydration !== hydration) {
+        return;
+      }
+      this.hydration = undefined;
+      this.emitStatus({
+        state: "failed",
+        message: error instanceof Error ? error.message : "Terminal screen readback failed."
+      });
+      recordLiveHarnessTerminal("read_screen_failed", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+      this.closeStream();
+    }
+  }
+
+  private bufferHydratingOutput(data: string, hydration: ScreenHydration): void {
+    const bufferedBytes = hydration.bufferedBytes + new TextEncoder().encode(data).byteLength;
+    if (bufferedBytes > maxHydrationBufferBytes) {
+      this.hydration = undefined;
+      this.emitStatus({
+        state: "failed",
+        message: "Terminal screen readback exceeded the live-output buffer limit."
+      });
+      recordLiveHarnessTerminal("read_screen_buffer_exceeded", { buffered_bytes: bufferedBytes });
+      this.closeStream();
+      return;
+    }
+
+    hydration.bufferedOutput.push(data);
+    hydration.bufferedBytes = bufferedBytes;
+  }
+
+  private emitOutput(data: TerminalOutput, kind: "output" | "read_screen"): void {
     for (const listener of this.listeners) {
       listener(data);
     }
     recordLiveHarnessTerminal("output", { data, source: kind });
+  }
+
+  private emitProcessExit(code: number | null): void {
+    this.emitStatus({
+      state: "exited",
+      message: typeof code === "number"
+        ? `Terminal process exited with ${code}.`
+        : "Terminal process exited."
+    });
+    recordLiveHarnessTerminal("process_exit", { code });
   }
 
   private emitStatus(status: TerminalAttachmentStatus): void {
@@ -291,27 +402,6 @@ function attachStateStatus(state: string): TerminalAttachmentStatus {
   return {
     state: "attaching",
     message: `Terminal stream state: ${state}.`
-  };
-}
-
-function historyRestoredStatus(kind: "snapshot" | "scrollback"): TerminalAttachmentStatus {
-  return {
-    state: "attached",
-    message: `Historical terminal ${kind} restored from renderable daemon data.`
-  };
-}
-
-function historyUnavailableStatus(event: Extract<DaemonEvent, { type: "snapshot" | "scrollback" }>): TerminalAttachmentStatus {
-  if ((event.bytes ?? 0) > 0) {
-    return {
-      state: "scrollback_unavailable",
-      message: "Historical scrollback was delivered as a daemon snapshot, but botster-web cannot render that snapshot format yet. Live output is attached."
-    };
-  }
-
-  return {
-    state: "live_only",
-    message: "Terminal stream attached live; no historical scrollback was delivered by the daemon."
   };
 }
 
