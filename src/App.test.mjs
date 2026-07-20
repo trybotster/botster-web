@@ -15,6 +15,7 @@ import {
   pluginContractMatrixFixturePath,
   readLateAttachHistoryConformanceFixture,
   readLocalWebrtcResponseChunkConformanceFixture,
+  readModeFlagsConformanceFixture,
   verifyPackageAssets
 } from "@trybotster/hub-test-support";
 import ts from "typescript";
@@ -242,6 +243,7 @@ assert.doesNotMatch(realHubDaemonDto, /export interface DaemonResponse\s*\{/);
 assert.doesNotMatch(realHubDaemonDto, /export interface DaemonPackage\s*\{/);
 assert.doesNotMatch(realHubDaemonDto, /export type DaemonEvent\s*=/);
 assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client Rust serde DTOs/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "read_mode_flags"; session_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_apps" \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_package_navigation" \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_packages" \}/);
@@ -297,6 +299,10 @@ assert.match(generatedDaemonProtocol, /missing_required\?: string\[\];/);
 assert.match(generatedDaemonProtocol, /export interface DaemonPackageProcess/);
 assert.match(generatedDaemonProtocol, /pid\?: number;/);
 assert.match(generatedDaemonProtocol, /diagnostics\?: DaemonDiagnostic\[\]/);
+assert.match(generatedDaemonProtocol, /mode_flags\?: DaemonModeFlags \| null;/);
+assert.match(generatedDaemonProtocol, /export interface DaemonModeFlags/);
+assert.match(generatedDaemonProtocol, /mouse_mode: number;/);
+assert.match(generatedDaemonProtocol, /\| "read_mode_flags"/);
 assert.match(generatedDaemonProtocol, /export type DaemonEvent/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "snapshot"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "scrollback"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number \}/);
@@ -572,10 +578,10 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.7");
+assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.8");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.7");
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 14);
+assert.equal(hubTestSupportMetadata.package_version, "0.1.8");
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 15);
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(hubTestSupportMetadata.application_primitives.surface_id, "contract.app");
 assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, [
@@ -593,8 +599,29 @@ assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, 
 ]);
 assert.equal(applicationPrimitivesFixturePath(), pluginContractMatrixFixturePath());
 assert.equal(verifyPackageAssets().ok, true);
+const modeFlagsConformanceFixture = readModeFlagsConformanceFixture();
+assert.equal(modeFlagsConformanceFixture.conformance_fixture_revision, 15);
+assert.deepEqual(modeFlagsConformanceFixture.request, {
+  type: "read_mode_flags",
+  session_id: "mode-flags-fixture-session"
+});
+assert.deepEqual(modeFlagsConformanceFixture.mouse_off, {
+  response_kind: "read_mode_flags",
+  mode_flags: { session_id: "mode-flags-fixture-session", mouse_mode: 0 }
+});
+assert.deepEqual(modeFlagsConformanceFixture.mouse_on, {
+  response_kind: "read_mode_flags",
+  mode_flags: { session_id: "mode-flags-fixture-session", mouse_mode: 9 }
+});
+for (const failure of [modeFlagsConformanceFixture.unknown_session, modeFlagsConformanceFixture.backend_failure]) {
+  assert.equal(failure.response_kind, "operator_error");
+  assert.equal(failure.operation, "read_mode_flags");
+  assert.equal(failure.mode_flags, null);
+}
+assert.equal(modeFlagsConformanceFixture.unknown_session.error_code, "unknown_session");
+assert.equal(modeFlagsConformanceFixture.backend_failure.error_code, "runtime_error");
 const lateAttachHistoryConformanceFixture = readLateAttachHistoryConformanceFixture();
-assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 14);
+assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 15);
 assert.deepEqual(
   lateAttachHistoryConformanceFixture.history_then_live.map((event) =>
     event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
@@ -1058,6 +1085,7 @@ const { DefaultTerminalViewBridge } = requireRuntime("./botster/terminal.js");
 const {
   generatedDaemonRequestFixtures,
   generatedAppResponseFixture,
+  generatedModeFlagsResponseFixture,
   generatedPackageNavigationResponseFixture,
   generatedPackageResponseFixture
 } = requireRuntime("./botster/__fixtures__/generatedDaemonProtocol.js");
@@ -1082,6 +1110,7 @@ const {
 } = requireRuntime("./botster/connectionDiagnostics.js");
 
 assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), [
+  "read_mode_flags",
   "list_apps",
   "list_package_navigation",
   "list_packages",
@@ -1102,6 +1131,9 @@ assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), 
   "plugin_surface_render",
   "plugin_surface_action"
 ]);
+assert.deepEqual(generatedDaemonRequestFixtures[0], modeFlagsConformanceFixture.request);
+assert.equal(generatedModeFlagsResponseFixture.kind, modeFlagsConformanceFixture.mouse_on.response_kind);
+assert.deepEqual(generatedModeFlagsResponseFixture.mode_flags, modeFlagsConformanceFixture.mouse_on.mode_flags);
 assert.deepEqual(
   generatedDaemonRequestFixtures.find((request) => request.type === "set_package_configuration" && request.package_name === "project-pipelines"),
   {

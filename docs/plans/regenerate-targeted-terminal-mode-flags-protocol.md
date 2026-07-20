@@ -66,10 +66,10 @@ Precondition evidence:
 Implementation checks:
 
 1. Install the exact release and confirm `package.json` and lockfile resolve only that version.
-2. Compare `src/botster/generated/daemon-protocol.ts` byte-for-byte with both the installed package artifact and the merged hub-client generated artifact at `06f1fa7`; both comparisons must be clean.
-3. Run `npm test`. This must prove the default package-backed drift check, package metadata/assets, revision-15 conformance scenarios, new request/response recognition, and existing web regression suite without overrides.
-4. Run the drift check and full test again with `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL` pointing to the merged hub-client generated artifact; no skip or drift warning is acceptable.
-5. Run `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check`.
+2. Compare `src/botster/generated/daemon-protocol.ts` byte-for-byte with the installed package artifact and require SHA-256 `5b13c8f337d7cf420aa8badce34d3d469e28ef5d1e7536068ba1cb4be6eb55a7`, matching the package metadata validated by `verifyPackageAssets()`. When `~/Projects/botster-hub` is available, also materialize `06f1fa7:crates/botster-hub-client/generated/daemon-protocol.ts` and compare it byte-for-byte; if that external checkout is absent, record the corroborating source comparison as skipped with the reason rather than weakening the mandatory package-backed proof.
+3. Run `npm test`. This must prove the default package-backed drift check, package metadata/assets, revision-15 conformance scenarios, runtime request/response fixture assertions, and existing web regression suite without overrides. A green `npm test` alone does not prove that `DaemonResponse` accepts the typed ModeFlags fixture.
+4. When the merged hub-client source artifact is available, run the drift check and full test again with `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL` pointing to it; no skip or drift warning is acceptable for a supplied path.
+5. Run `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check`. `npm run typecheck` and `npm run build` are the mandatory, non-waivable compile-time proof for the `satisfies DaemonResponse` fixture.
 6. Inspect the final diff: generated protocol changes must match the four expected generated additions, package/lock changes must be limited to the exact release, and no UI/runtime consumer or unrelated protocol changes may appear.
 
 No live browser or hub smoke is required: the ticket intentionally changes only generated representability and conformance recognition, not a runtime request path. Existing repo gates remain mandatory.
