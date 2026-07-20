@@ -19,7 +19,7 @@
    - `DaemonModeFlags` carries `session_id: string` and `mouse_mode: number` (the TypeScript representation of Rust `u8`);
    - `DaemonResponseKind` gains `"read_mode_flags"`.
 3. Extend the existing generated-protocol fixture/test seam only enough to prove compile-time and runtime recognition: include the targeted request and a `satisfies DaemonResponse` response fixture with the new kind, session attribution, and numeric mouse mode. Consume the package's revision-15 mode-flags conformance fixture in `src/App.test.mjs` to assert mouse-off `0`, mouse-on `9`, unknown-session error, backend error, and null failure payloads.
-4. Update the README's pinned package/revision statement to the published version and revision 15, while stating that ModeFlags is generated protocol scaffolding and has no web UI consumer yet. Preserve the existing revision-14 terminal attachment/runtime requirement.
+4. Update the README and architecture documentation's pinned package/revision statements to the published version and revision 15, while stating that ModeFlags is generated protocol scaffolding and has no web UI consumer yet. Preserve the existing revision-14 terminal attachment/runtime requirement, and bind both documents to the pinned package version/revision in the existing test seam.
 
 This is intentionally scaffold-only at runtime. The production type entry point is `src/botster/realHubDaemonDto.ts`, which re-exports the generated DTOs used by browser daemon adapters; this ticket makes the response representable there but deliberately adds no request invocation, polling, or rendering path.
 
@@ -45,6 +45,7 @@ This is intentionally scaffold-only at runtime. The production type entry point 
 - `src/botster/__fixtures__/generatedDaemonProtocol.ts`: narrow typed request/response recognition fixtures; no duplicate type declarations.
 - `src/App.test.mjs`: package metadata/revision, protocol tokens, conformance scenarios, and typed fixture assertions.
 - `README.md`: current package/revision statement plus explicit scaffold-only disposition.
+- `docs/architecture.md`: current published package/revision statement while preserving the minimum revision-14 compatibility policy.
 - `src/botster/realHubDaemonDto.ts`: unchanged production re-export seam that proves the generated surface is wired into the browser client type boundary.
 - `scripts/check-daemon-protocol-drift.mjs`: expected unchanged; it already fails hard against the installed authoritative package and accepts an explicit source artifact for verification.
 

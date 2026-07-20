@@ -1,7 +1,6 @@
 import type { DaemonRequest, DaemonResponse } from "../realHubDaemonDto";
 
 export const generatedDaemonRequestFixtures = [
-  { type: "read_mode_flags", session_id: "mode-flags-fixture-session" },
   { type: "list_apps" },
   { type: "list_package_navigation" },
   { type: "list_packages" },
@@ -49,7 +48,8 @@ export const generatedDaemonRequestFixtures = [
     surface_id: "home",
     action_id: "ticket.open",
     payload: { ticket_id: "ticket_1" }
-  }
+  },
+  { type: "read_mode_flags", session_id: "mode-flags-fixture-session" }
 ] satisfies DaemonRequest[];
 
 export const generatedModeFlagsResponseFixture = {

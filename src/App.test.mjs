@@ -578,10 +578,17 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-assert.equal(packageJson.devDependencies["@trybotster/hub-test-support"], "0.1.8");
+const hubTestSupportVersion = packageJson.devDependencies["@trybotster/hub-test-support"];
+assert.equal(hubTestSupportVersion, "0.1.8");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.package_version, "0.1.8");
 assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 15);
+const publishedHubTestSupportCoordinate = `@trybotster/hub-test-support@${hubTestSupportVersion}`;
+const publishedConformanceRevision = `conformance revision ${hubTestSupportMetadata.conformance_fixture_revision}`;
+assert.equal(readme.includes(publishedHubTestSupportCoordinate), true);
+assert.equal(architecture.includes(publishedHubTestSupportCoordinate), true);
+assert.equal(readme.includes(publishedConformanceRevision), true);
+assert.equal(architecture.includes(publishedConformanceRevision), true);
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(hubTestSupportMetadata.application_primitives.surface_id, "contract.app");
 assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, [
@@ -1110,7 +1117,6 @@ const {
 } = requireRuntime("./botster/connectionDiagnostics.js");
 
 assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), [
-  "read_mode_flags",
   "list_apps",
   "list_package_navigation",
   "list_packages",
@@ -1129,9 +1135,13 @@ assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), 
   "disable_package",
   "remove_package",
   "plugin_surface_render",
-  "plugin_surface_action"
+  "plugin_surface_action",
+  "read_mode_flags"
 ]);
-assert.deepEqual(generatedDaemonRequestFixtures[0], modeFlagsConformanceFixture.request);
+assert.deepEqual(
+  generatedDaemonRequestFixtures.find((request) => request.type === "read_mode_flags"),
+  modeFlagsConformanceFixture.request
+);
 assert.equal(generatedModeFlagsResponseFixture.kind, modeFlagsConformanceFixture.mouse_on.response_kind);
 assert.deepEqual(generatedModeFlagsResponseFixture.mode_flags, modeFlagsConformanceFixture.mouse_on.mode_flags);
 assert.deepEqual(
