@@ -48,8 +48,28 @@ export const generatedDaemonRequestFixtures = [
     surface_id: "home",
     action_id: "ticket.open",
     payload: { ticket_id: "ticket_1" }
-  }
+  },
+  { type: "read_mode_flags", session_id: "mode-flags-fixture-session" }
 ] satisfies DaemonRequest[];
+
+export const generatedModeFlagsResponseFixture = {
+  kind: "read_mode_flags",
+  status: null,
+  sessions: [],
+  mode_flags: {
+    session_id: "mode-flags-fixture-session",
+    mouse_mode: 9
+  },
+  packages: [],
+  package_decision: null,
+  lifecycle: [],
+  plugin_tools: [],
+  plugin_tool_result: null,
+  events: [],
+  cleanup: null,
+  coordination: null,
+  error: null
+} satisfies DaemonResponse;
 
 export const generatedPackageResponseFixture = {
   kind: "packages",
