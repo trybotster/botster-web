@@ -5,10 +5,11 @@ import { tmpdir } from "node:os";
 import { extname, join, normalize, relative, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { dogfoodBridgeShutdownPlan, resolveDogfoodBridgeMode } from "./dogfoodBridgeMode.mjs";
+import { localPackageServerShutdownPlan, resolveLocalPackageServerMode } from "./localPackageServerMode.mjs";
 
 const protocol = "botster-hub-daemon-v1";
-const port = Number.parseInt(process.env.BOTSTER_WEB_DOGFOOD_BRIDGE_PORT ?? "41739", 10);
+const signalingRequestTypes = new Set(["issue_local_webrtc_bootstrap", "local_webrtc_signal"]);
+const port = Number.parseInt(process.env.BOTSTER_WEB_PACKAGE_SERVER_PORT ?? "41739", 10);
 const host = "127.0.0.1";
 const packageRoot = process.cwd();
 const distRoot = join(packageRoot, "dist");
@@ -18,21 +19,21 @@ const existingHubConfigured = Boolean(process.env.BOTSTER_HUB_SOCKET || process.
 const generatedDataDir = existingHubConfigured || process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR
   ? undefined
   : await mkdtemp(join(tmpdir(), "botster-web-dogfood-"));
-const bridgeMode = resolveDogfoodBridgeMode(process.env, { generatedDataDir });
+const serverMode = resolveLocalPackageServerMode(process.env, { generatedDataDir });
 
-if (!bridgeMode.ok) {
+if (!serverMode.ok) {
   if (generatedDataDir) {
     await rm(generatedDataDir, { recursive: true, force: true });
   }
-  console.error(bridgeMode.error);
+  console.error(serverMode.error);
   process.exit(1);
 }
 
 let hubExit;
 let hub;
 
-if (bridgeMode.ownsHub) {
-  hub = spawn(bridgeMode.hubBin, bridgeMode.hubArgs, {
+if (serverMode.ownsHub) {
+  hub = spawn(serverMode.hubBin, serverMode.hubArgs, {
     stdio: ["ignore", "pipe", "pipe"]
   });
 
@@ -49,7 +50,7 @@ if (bridgeMode.ownsHub) {
   });
 }
 
-await waitForSocket(bridgeMode.socketPath, () => hubExit, bridgeMode.diagnosticLabel);
+await waitForSocket(serverMode.socketPath, () => hubExit, serverMode.diagnosticLabel);
 
 let localUrl;
 
@@ -65,12 +66,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && request.url === "/health") {
-    writeJson(response, 200, { ...bridgeMode.health, local_url: localUrl });
-    return;
-  }
-
-  if (request.method === "GET" && request.url?.startsWith("/terminal")) {
-    await streamTerminal(request, response);
+    writeJson(response, 200, { ...serverMode.health, local_url: localUrl });
     return;
   }
 
@@ -98,47 +94,38 @@ const server = createServer(async (request, response) => {
       writeJson(response, 400, {
         kind: "daemon_response",
         request_id: envelope.request_id ?? "invalid",
-        payload: operatorError("invalid_bridge_payload", "bridge", "Expected daemon_request envelope with DaemonRequest payload")
+        payload: operatorError("invalid_package_server_payload", "server", "Expected daemon_request envelope with DaemonRequest payload")
       });
       return;
     }
 
-    if (envelope.payload.type === "daemon_shutdown" && !bridgeMode.ownsHub) {
-      server.close();
-      writeJson(response, 200, {
+    if (!signalingRequestTypes.has(envelope.payload.type)) {
+      writeJson(response, 400, {
         kind: "daemon_response",
         request_id: envelope.request_id,
         payload: operatorError(
-          "existing_hub_shutdown_ignored",
-          "daemon_shutdown",
-          "Existing-hub bridge mode does not shut down the attached hub"
+          "unsupported_package_server_request",
+          envelope.payload.type,
+          "The package server only accepts WebRTC bootstrap and signaling requests."
         )
       });
       return;
     }
 
-    const payload = deterministicBotsterWebSurfaceResponse(envelope.payload)
-      ?? await sendDaemonRequest(bridgeMode.socketPath, envelope.payload);
+    const payload = await sendDaemonRequest(serverMode.socketPath, envelope.payload);
     writeJson(response, 200, {
       kind: "daemon_response",
       request_id: envelope.request_id,
       payload
     });
-    if (envelope.payload.type === "daemon_shutdown") {
-      server.close();
-      const shutdownPlan = dogfoodBridgeShutdownPlan(bridgeMode);
-      if (shutdownPlan.removeDataDir) {
-        await rm(bridgeMode.dataDir, { recursive: true, force: true });
-      }
-    }
   } catch (error) {
     writeJson(response, 500, {
       kind: "daemon_response",
-      request_id: "bridge-error",
+      request_id: "package-server-error",
       payload: operatorError(
-        "bridge_request_failed",
-        "bridge",
-        error instanceof Error ? error.message : "Bridge request failed"
+        "package_server_request_failed",
+        "package_server",
+        error instanceof Error ? error.message : "Package server request failed"
       )
     });
   }
@@ -148,14 +135,13 @@ server.listen(port, host, () => {
   localUrl = boundServerOrigin(server);
   void publishReadyLaunchResult(localUrl)
     .then(() => {
-      console.log(`botster-web real hub dogfood bridge listening at ${localUrl}/request`);
+      console.log(`botster-web local package server listening at ${localUrl}/request`);
       console.log(`botster-web package UI available at ${localUrl}/`);
-      console.log(`botster-web package real-hub UI available at ${localUrl}/?dogfood=real-hub`);
-      console.log(`mode: ${bridgeMode.diagnosticLabel}`);
-      if (bridgeMode.mode === "spawned_hub") {
-        console.log(`isolated data dir: ${bridgeMode.dataDir}`);
+      console.log(`mode: ${serverMode.diagnosticLabel}`);
+      if (serverMode.mode === "spawned_hub") {
+        console.log(`isolated data dir: ${serverMode.dataDir}`);
       } else {
-        console.log(`attached socket: configured ${bridgeMode.source}`);
+        console.log(`attached socket: configured ${serverMode.source}`);
       }
     })
     .catch(() => {
@@ -190,10 +176,10 @@ async function publishReadyLaunchResult(url) {
 
 const shutdown = async () => {
   server.close();
-  const shutdownPlan = dogfoodBridgeShutdownPlan(bridgeMode);
+  const shutdownPlan = localPackageServerShutdownPlan(serverMode);
   if (shutdownPlan.sendDaemonShutdown) {
     try {
-      await sendDaemonRequest(bridgeMode.socketPath, { type: "daemon_shutdown" });
+      await sendDaemonRequest(serverMode.socketPath, { type: "daemon_shutdown" });
     } catch {
       if (shutdownPlan.terminateHubProcess) {
         hub?.kill("SIGTERM");
@@ -202,7 +188,7 @@ const shutdown = async () => {
   }
 
   if (shutdownPlan.removeDataDir) {
-    await rm(bridgeMode.dataDir, { recursive: true, force: true });
+    await rm(serverMode.dataDir, { recursive: true, force: true });
   }
 };
 
@@ -380,84 +366,6 @@ function contentTypeFor(filePath) {
   }
 }
 
-async function streamTerminal(request, response) {
-  const url = new URL(request.url, `http://${host}:${port}`);
-  const sessionId = url.searchParams.get("session_id");
-  const subscriptionId = url.searchParams.get("subscription_id");
-
-  if (!sessionId || !subscriptionId) {
-    writeJson(response, 400, { error: "missing terminal stream identifiers" });
-    return;
-  }
-
-  response.writeHead(200, {
-    "content-type": "text/event-stream",
-    "cache-control": "no-store",
-    connection: "keep-alive"
-  });
-
-  let socket;
-  let closed = false;
-  let draining = false;
-
-  const cleanup = async () => {
-    if (closed) return;
-    closed = true;
-    if (socket) {
-      try {
-        socket.write(`${JSON.stringify({ type: "detach", session_id: sessionId, subscription_id: subscriptionId })}\n`);
-        await readSocketLine(socket);
-      } catch {
-        // Best effort cleanup; daemon also detaches subscriptions on socket disconnect.
-      }
-      socket.end();
-    }
-  };
-
-  request.on("close", () => {
-    void cleanup();
-  });
-
-  try {
-    socket = await openDaemonSocket(bridgeMode.socketPath);
-    socket.write(`${JSON.stringify({ type: "attach", session_id: sessionId, subscription_id: subscriptionId })}\n`);
-    emitDaemonEvents(response, JSON.parse(await readSocketLine(socket)).events ?? []);
-
-    const drain = async () => {
-      if (closed || draining) return;
-      draining = true;
-      try {
-        socket.write(`${JSON.stringify({ type: "drain", session_id: sessionId })}\n`);
-        const reply = JSON.parse(await readSocketLine(socket));
-        emitDaemonEvents(response, reply.events ?? []);
-        if ((reply.events ?? []).some((event) => event.type === "process_exit")) {
-          await cleanup();
-          response.end();
-        }
-      } catch (error) {
-        sendSseEvent(response, "daemon_error", {
-          message: error instanceof Error ? error.message : "terminal stream drain failed"
-        });
-        await cleanup();
-        response.end();
-      } finally {
-        draining = false;
-        if (!closed) {
-          setTimeout(drain, 25);
-        }
-      }
-    };
-
-    void drain();
-  } catch (error) {
-    sendSseEvent(response, "daemon_error", {
-      message: error instanceof Error ? error.message : "terminal stream attach failed"
-    });
-    await cleanup();
-    response.end();
-  }
-}
-
 async function openDaemonSocket(path) {
   const socket = connect(path);
   await once(socket, "connect");
@@ -471,70 +379,6 @@ async function openDaemonSocket(path) {
   }
 
   return socket;
-}
-
-function emitDaemonEvents(response, events) {
-  for (const event of events) {
-    sendSseEvent(response, "daemon_event", event);
-  }
-}
-
-function deterministicBotsterWebSurfaceResponse(daemonRequest) {
-  if (
-    daemonRequest.type !== "plugin_surface_render" ||
-    daemonRequest.package_name !== "botster-web" ||
-    !["dogfood-app", "dogfood-settings"].includes(daemonRequest.surface_id)
-  ) {
-    return undefined;
-  }
-
-  const settings = daemonRequest.surface_id === "dogfood-settings";
-  const bodyText = settings
-    ? "Deterministic settings surface rendered by the botster-web validation package."
-    : "Deterministic app surface rendered by the botster-web validation package.";
-  return {
-    kind: "plugin_surface",
-    status: null,
-    sessions: [],
-    packages: [],
-    package_decision: null,
-    lifecycle: [],
-    plugin_tools: [],
-    plugin_tool_result: null,
-    plugin_surface: {
-      package_name: "botster-web",
-      surface_id: daemonRequest.surface_id,
-      body: bodyText,
-      ui_tree_snapshot: {
-        package_name: "botster-web",
-        surface_id: daemonRequest.surface_id,
-        body: {
-          id: `botster-web-${daemonRequest.surface_id}-root`,
-          primitive: "section",
-          props: { label: settings ? "botster-web Settings" : "botster-web App" },
-          slots: {
-            children: [
-              {
-                id: `botster-web-${daemonRequest.surface_id}-copy`,
-                primitive: "text",
-                props: { text: bodyText }
-              }
-            ]
-          }
-        }
-      }
-    },
-    events: [],
-    cleanup: null,
-    coordination: null,
-    error: null,
-    diagnostics: []
-  };
-}
-
-function sendSseEvent(response, event, data) {
-  response.write(`event: ${event}\n`);
-  response.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 async function readSocketLine(socket) {
@@ -622,7 +466,7 @@ function operatorError(code, operation, message) {
     coordination: null,
     error: {
       code,
-      request_id: "botster-web-dogfood-bridge",
+      request_id: "botster-web-package-server",
       operation,
       message
     }

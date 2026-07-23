@@ -2,13 +2,12 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { connect, createServer as createNetServer } from "node:net";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { createServer as createViteServer } from "vite";
 
-const host = "127.0.0.1";
 const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
 const appRouteFromPathname = await loadProductionAppRouteFromPathname();
@@ -28,15 +27,8 @@ const payloadContractPackageName = "botster.plugin-payload-contract";
 const payloadContractPackagePath = payloadContractMode
   ? resolvePayloadContractPackagePath()
   : undefined;
-let port = Number.parseInt(process.env.BOTSTER_WEB_DOGFOOD_BRIDGE_PORT ?? String(await findAvailablePort()), 10);
-let bridgeUrl = `http://${host}:${port}`;
 const echoProbe = "keys";
 const attachProbe = "botster-web-dogfood-attach-probe";
-const transportMode = process.env.BOTSTER_LIVE_PACKAGED_TRANSPORT ?? "webrtc";
-
-if (!["webrtc", "bridge"].includes(transportMode)) {
-  throw new Error("BOTSTER_LIVE_PACKAGED_TRANSPORT must be unset, webrtc, or bridge");
-}
 
 if (!process.env.BOTSTER_HUB_BIN && !process.env.BOTSTER_HUB_SOCKET && !process.env.BOTSTER_HUB_DATA_DIR) {
   throw new Error(
@@ -52,17 +44,12 @@ if (!workspacesPackagePath) {
   );
 }
 
-let bridgeProcess;
-let bridgeStdout = "";
-let bridgeStderr = "";
 let hubProcess;
 let hubStdout = "";
 let hubStderr = "";
-const ownsWebrtcDataDir = transportMode === "webrtc" && !process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR;
-const webrtcDataDir = transportMode === "webrtc"
-  ? process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR ?? await mkdtemp(join(tmpdir(), "botster-web-webrtc-dogfood-"))
-  : undefined;
-let appUrl = `${bridgeUrl}/?dogfood=real-hub`;
+const ownsWebrtcDataDir = !process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR;
+const webrtcDataDir = process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR ?? await mkdtemp(join(tmpdir(), "botster-web-webrtc-dogfood-"));
+let appUrl;
 
 let browser;
 let page;
@@ -74,25 +61,12 @@ const attachChronology = [];
 let binaryProvenance;
 
 try {
-  if (transportMode === "webrtc") {
-    binaryProvenance = await loadBinaryProvenance();
-    console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
-    appUrl = await startWebrtcPackageRuntime();
-  } else {
-    bridgeProcess = startBridgeProcess();
-    await waitForHttpOk(`${bridgeUrl}/health`, () => bridgeProcess?.exitCode !== null ? `bridge exited before readiness (code=${bridgeProcess.exitCode})` : undefined);
-    await waitForHtmlShell(`${bridgeUrl}/?dogfood=real-hub`);
-    if (contractMatrixMode || payloadContractMode) {
-      await prepareContractPackagesThroughBridge();
-    } else {
-      await prepareProjectPipelinesPackage();
-    }
-  }
+  binaryProvenance = await loadBinaryProvenance();
+  console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
+  appUrl = await startWebrtcPackageRuntime();
 
   browser = await chromium.launch({
-    args: transportMode === "webrtc"
-      ? ["--disable-features=WebRtcHideLocalIpsWithMdns", "--force-webrtc-ip-handling-policy=default_public_and_private_interfaces"]
-      : []
+    args: ["--disable-features=WebRtcHideLocalIpsWithMdns", "--force-webrtc-ip-handling-policy=default_public_and_private_interfaces"]
   });
   page = await browser.newPage();
   await page.addInitScript(() => {
@@ -120,17 +94,15 @@ try {
     }
   });
 
-  await page.goto(withDogfoodMode(appUrl), { waitUntil: "domcontentloaded" });
+  await page.goto(appUrl, { waitUntil: "domcontentloaded" });
   await openDiagnosticsView(page);
-  await page.getByText("Local hub workbench").waitFor();
+  await page.getByText("Local Botster health").waitFor();
   await waitForTransportLabel(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "status request");
   await assertMinimumHubCompatibility(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
-  if (transportMode === "webrtc") {
-    await waitForRemoteAccessPackageConfiguration(page);
-  }
+  await waitForRemoteAccessPackageConfiguration(page);
   await waitForHarnessEvent(
     page,
     { kind: "daemon_request", type: "subscribe_entities", entity_type: "session" },
@@ -143,9 +115,7 @@ try {
   );
   await assertNoLegacySessionHydration(page);
   await openAppsView(page);
-  if (transportMode === "webrtc") {
-    await assertRemoteAccessSettingsDispatch(page);
-  }
+  await assertRemoteAccessSettingsDispatch(page);
   if (contractMatrixMode) {
     await exercisePluginContractMatrix(page);
     if (payloadContractMode) {
@@ -154,32 +124,41 @@ try {
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
     await requestDaemonShutdown();
     console.log(payloadContractMode
-      ? `plugin payload contract smoke passed (${transportMode})`
-      : `plugin contract matrix smoke passed (${transportMode})`);
+      ? "plugin payload contract smoke passed (webrtc)"
+      : "plugin contract matrix smoke passed (webrtc)");
     process.exit(0);
   }
-  if (transportMode === "bridge") {
-    await exerciseFirstPartyPackageConfiguration(page);
-    await openAppsView(page);
-  }
-  await openFirstPartyUiAppSurface(page, transportMode);
+  await openFirstPartyUiAppSurface(page, "webrtc");
   if (process.env.BOTSTER_LIVE_SURFACE_ONLY === "1") {
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
     await requestDaemonShutdown();
     console.log("live packaged protocol surface proof passed");
     process.exit(0);
   }
-  await openDiagnosticsView(page);
-
-  await page.getByRole("button", { name: "Spawn botster-web-dogfood-session to terminal" }).click();
-  await page.getByText("Pending").first().waitFor();
+  await openHomeView(page);
+  const startSessionButton = page.getByRole("button", { name: "Start session", exact: true });
+  await observeStartSessionButtonTransitions(page);
+  await startSessionButton.click();
+  await page.waitForFunction(() =>
+    globalThis.__BOTSTER_START_SESSION_TRANSITIONS__?.some(
+      (transition) => transition.text.includes("Starting…") && transition.disabled
+    )
+  );
+  const pendingTransition = await page.evaluate(() =>
+    globalThis.__BOTSTER_START_SESSION_TRANSITIONS__?.find(
+      (transition) => transition.text.includes("Starting…") && transition.disabled
+    )
+  );
+  if (!pendingTransition?.disabled) {
+    throw new Error("Start session button did not disable while the spawn request was pending");
+  }
+  await page.getByRole("status").filter({ hasText: /Dispatching|Start requested/ }).waitFor();
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "spawn" }, "spawn request");
   await waitForSessionStatus(page, "running");
+  await openDiagnosticsView(page);
   await waitForSessionAttachable(page, true);
   await page.getByText("Attachable").waitFor();
-  if (transportMode === "webrtc") {
-    await proveExternalSessionLifecycle(page);
-  }
+  await proveExternalSessionLifecycle(page);
   await waitForTerminalSession(page, "botster-web-dogfood-session");
   responseAssemblyTelemetry.push({ cycle: 0, ...await waitForAutomaticTerminalRestore(page) });
   await proveLiveTerminalAfterAttach(page, `${attachProbe}-0`);
@@ -271,7 +250,7 @@ try {
   assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
   await requestDaemonShutdown();
   console.log(
-    `live packaged protocol harness passed (${transportMode}) ` +
+    "live packaged protocol harness passed (webrtc) " +
       JSON.stringify({
         binary_provenance: binaryProvenance,
         attach_chronology: attachChronology,
@@ -301,7 +280,7 @@ try {
         };
       }).catch(() => undefined)
     : undefined;
-  let diagnosticMessage = `${error.message}\nbridge stdout:\n${bridgeStdout}\nbridge stderr:\n${bridgeStderr}`;
+  let diagnosticMessage = error.message;
   if (hubStdout || hubStderr) {
     diagnosticMessage += `\nhub stdout:\n${hubStdout}\nhub stderr:\n${hubStderr}`;
   }
@@ -323,13 +302,6 @@ try {
   throw error;
 } finally {
   await browser?.close();
-  if (bridgeProcess && bridgeProcess.exitCode === null) {
-    bridgeProcess.kill("SIGTERM");
-    await Promise.race([
-      once(bridgeProcess, "exit"),
-      new Promise((resolve) => setTimeout(resolve, 2_000))
-    ]);
-  }
   if (hubProcess && hubProcess.exitCode === null) {
     hubProcess.kill("SIGTERM");
     await Promise.race([
@@ -345,145 +317,41 @@ try {
   }
 }
 
-async function requestDaemonShutdown() {
-  if (transportMode === "webrtc") {
-    if (webrtcDataDir) {
-      await runHubCommand(["shutdown", "--data-dir", webrtcDataDir]).catch((error) => {
-        if (hubProcess?.exitCode === null) {
-          throw error;
-        }
-      });
+async function observeStartSessionButtonTransitions(page) {
+  await page.evaluate(() => {
+    const button = [...globalThis.document.querySelectorAll("ion-button")]
+      .find((candidate) => candidate.textContent?.trim() === "Start session");
+    if (!button) {
+      throw new Error("Start session IonButton was not present");
     }
-    return;
-  }
 
-  const requestUrl = new URL("/request", appUrl).toString();
-  const response = await fetch(requestUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      kind: "daemon_request",
-      request_id: "live-packaged-protocol-shutdown",
-      payload: { type: "daemon_shutdown" }
-    })
-  });
-  if (!response.ok) {
-    throw new Error(`daemon shutdown request failed with HTTP ${response.status}`);
-  }
-}
-
-async function prepareProjectPipelinesPackage() {
-  const packagePath = resolveProjectPipelinesPackagePath();
-  const installPayload = await sendBridgeDaemonRequest("install-project-pipelines-package", {
-    type: "install_package_local_path",
-    path: packagePath
-  });
-  if (daemonPackageHasConfigurationField(installPayload, "project-pipelines", "api_token")) {
-    await sendBridgeDaemonRequest("seed-project-pipelines-configuration", {
-      type: "set_package_configuration",
-      package_name: "project-pipelines",
-      values: {
-        api_token: { type: "secret", state: "write_only" }
-      }
+    globalThis.__BOTSTER_START_SESSION_TRANSITIONS__ = [];
+    const record = () => {
+      const nativeButton = button.shadowRoot?.querySelector("button");
+      globalThis.__BOTSTER_START_SESSION_TRANSITIONS__.push({
+        text: button.textContent?.trim() ?? "",
+        disabled:
+          button.hasAttribute("disabled") ||
+          button.getAttribute("aria-disabled") === "true" ||
+          nativeButton?.disabled === true
+      });
+    };
+    new globalThis.MutationObserver(record).observe(button, {
+      attributes: true,
+      childList: true,
+      characterData: true,
+      subtree: true
     });
-  }
-  await sendBridgeDaemonRequest("enable-project-pipelines-package", {
-    type: "enable_package",
-    package_name: "project-pipelines"
-  });
-  await prepareWorkspacesPackageThroughBridge();
-}
-
-async function prepareWorkspacesPackageThroughBridge() {
-  if (!workspacesPackagePath) return;
-
-  await sendBridgeDaemonRequest("install-workspaces-package", {
-    type: "install_package_local_path",
-    path: workspacesPackagePath
-  });
-  await sendBridgeDaemonRequest("enable-workspaces-package", {
-    type: "enable_package",
-    package_name: "botster-workspaces"
+    record();
   });
 }
 
-async function prepareContractPackagesThroughBridge() {
-  if (contractMatrixMode && contractMatrixPackagePath) {
-    await sendBridgeDaemonRequest("install-plugin-contract-matrix-package", {
-      type: "install_package_local_path",
-      path: contractMatrixPackagePath
-    });
-    await sendBridgeDaemonRequest("configure-plugin-contract-matrix-package", {
-      type: "set_package_configuration",
-      package_name: contractMatrixPackageName,
-      values: {
-        endpoint: { type: "url", value: contractMatrixSeedEndpoint },
-        mode: { type: "select", value: "write" },
-        api_token: { type: "secret", state: "write_only" }
-      }
-    });
-    await sendBridgeDaemonRequest("enable-plugin-contract-matrix-package", {
-      type: "enable_package",
-      package_name: contractMatrixPackageName
-    });
-  }
-
-  if (payloadContractMode && payloadContractPackagePath) {
-    await sendBridgeDaemonRequest("install-plugin-payload-contract-package", {
-      type: "install_package_local_path",
-      path: payloadContractPackagePath
-    });
-    await sendBridgeDaemonRequest("enable-plugin-payload-contract-package", {
-      type: "enable_package",
-      package_name: payloadContractPackageName
-    });
-  }
-}
-
-function daemonPackageHasConfigurationField(payload, packageName, fieldId) {
-  const packages = payload?.packages ?? [];
-  return packages.some((packageRecord) => {
-    const recordName = packageRecord?.package_name ?? packageRecord?.name ?? packageRecord?.id;
-    if (recordName !== packageName) return false;
-    return (packageRecord?.configuration?.fields ?? []).some((field) => field?.key === fieldId || field?.id === fieldId);
+async function requestDaemonShutdown() {
+  await runHubCommand(["shutdown", "--data-dir", webrtcDataDir]).catch((error) => {
+    if (hubProcess?.exitCode === null) {
+      throw error;
+    }
   });
-}
-
-async function sendBridgeDaemonRequest(requestId, payload) {
-  const response = await fetch(`${bridgeUrl}/request`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      kind: "daemon_request",
-      request_id: requestId,
-      payload
-    })
-  });
-  const envelope = await response.json().catch(() => undefined);
-  const daemonPayload = envelope?.payload;
-  if (!response.ok || daemonPayload?.error) {
-    throw new Error(
-      `live harness daemon request ${requestId} failed: http=${response.status} payload=${JSON.stringify(daemonPayload)}`
-    );
-  }
-  return daemonPayload;
-}
-
-function resolveProjectPipelinesPackagePath() {
-  const configuredPath =
-    process.env.BOTSTER_PROJECT_PIPELINES_PACKAGE_PATH ?? process.env.BOTSTER_LIVE_PROJECT_PIPELINES_PACKAGE_PATH;
-  const candidates = [
-    configuredPath,
-    process.env.BOTSTER_HUB_SOURCE_DIR ? join(process.env.BOTSTER_HUB_SOURCE_DIR, "examples/project-pipelines") : undefined,
-    process.env.BOTSTER_HUB_BIN ? resolve(dirname(process.env.BOTSTER_HUB_BIN), "../..", "examples/project-pipelines") : undefined
-  ].filter(Boolean);
-  const packagePath = candidates.find((candidate) => existsSync(join(candidate, "botster-package.json")));
-  if (!packagePath) {
-    throw new Error(
-      `live harness could not find examples/project-pipelines package; checked ${JSON.stringify(candidates)}`
-    );
-  }
-  return packagePath;
 }
 
 async function resolveContractMatrixPackagePath() {
@@ -569,20 +437,15 @@ function resolveRequiredPackagePath(candidates, packageName, envName) {
 }
 
 async function refreshPackageRuntime(page) {
-  if (transportMode !== "webrtc") {
-    await page.reload({ waitUntil: "domcontentloaded" });
-    return;
-  }
-
   await page.reload({ waitUntil: "domcontentloaded" });
 }
 
 async function revisitPackageRuntime(page) {
-  await page.goto(withDogfoodMode(appUrl), { waitUntil: "domcontentloaded" });
+  await page.goto(appUrl, { waitUntil: "domcontentloaded" });
 }
 
 async function reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId, previousEntitySubscriptionId) {
-  const expectedUrl = withDogfoodMode(appUrl);
+  const expectedUrl = appUrl;
   const beforeUrl = page.url();
   if (new URL(beforeUrl).origin !== new URL(expectedUrl).origin) {
     throw new Error(`same-URL reload cycle ${cycle} started on unexpected origin: page=${beforeUrl} app=${expectedUrl}`);
@@ -664,9 +527,18 @@ async function openAppsView(page) {
   await page.getByTestId("apps-view").waitFor();
 }
 
+async function openHomeView(page) {
+  await page.getByLabel("Botster workbench").getByRole("button", { name: "Home", exact: true }).click();
+  await page.getByTestId("dashboard-view").waitFor();
+}
+
 async function openDiagnosticsView(page) {
   await page.getByLabel("Botster workbench").getByRole("button", { name: "Diagnostics", exact: true }).click();
   await page.getByTestId("diagnostics-view").waitFor();
+  const developerDetails = page.locator("details.developer-diagnostics");
+  if (!(await developerDetails.evaluate((details) => details.open))) {
+    await developerDetails.locator("summary").click();
+  }
 }
 
 function installedList(page) {
@@ -788,7 +660,7 @@ function escapedRoutePathPattern(routePath) {
 }
 
 async function navigateToContractSurface(page, surfaceId) {
-  await page.goto(withDogfoodMode(new URL(contractSurfaceRoutePath(surfaceId), appUrl)), {
+  await page.goto(new URL(contractSurfaceRoutePath(surfaceId), appUrl).toString(), {
     waitUntil: "domcontentloaded"
   });
 }
@@ -800,9 +672,6 @@ async function assertContractSurfaceRoute(page, surfaceId, visibleText) {
     { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: surfaceId },
     `${surfaceId} plugin_surface_render request`
   );
-  if (transportMode === "bridge") {
-    await waitForValidatedPluginSurfaceSnapshot(page, surfaceId);
-  }
   await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
   await page.getByText(visibleText).waitFor({ timeout: 45_000 });
   await assertSelectedSurfaceNotLoading(page, surfaceId);
@@ -810,7 +679,7 @@ async function assertContractSurfaceRoute(page, surfaceId, visibleText) {
 
 async function assertContractSurfaceRouteReloadAndDirectLoad(page, surfaceId, visibleText) {
   const routePath = contractSurfaceRoutePath(surfaceId);
-  const routeUrl = withDogfoodMode(new URL(routePath, appUrl));
+  const routeUrl = new URL(routePath, appUrl).toString();
 
   await page.waitForURL(new RegExp(escapedRoutePathPattern(routePath)), { timeout: 15_000 });
   await page.reload({ waitUntil: "domcontentloaded" });
@@ -831,39 +700,6 @@ async function assertSelectedSurfaceNotLoading(page, surfaceId) {
   ).catch(async (error) => {
     const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
     throw new Error(`${surfaceId} remained in a loading/rendering state; text=${JSON.stringify(selectedText)}: ${error.message}`);
-  });
-}
-
-async function waitForValidatedPluginSurfaceSnapshot(page, surfaceId) {
-  await page.waitForFunction(
-    ({ nextPackageName, nextSurfaceId }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
-        const pluginSurface = entry.kind === "daemon_response"
-          ? entry.payload?.plugin_surface ?? {}
-          : entry.kind === "hub_frame" && entry.payload?.kind === "action_result"
-            ? entry.payload?.payload?.result?.plugin_surface ?? {}
-            : {};
-        const snapshot = pluginSurface.ui_tree_snapshot ?? {};
-        return pluginSurface.package_name === nextPackageName &&
-          pluginSurface.surface_id === nextSurfaceId &&
-          snapshot.package_name === nextPackageName &&
-          snapshot.surface_id === nextSurfaceId &&
-          Boolean(snapshot.body);
-      }),
-    { nextPackageName: contractMatrixPackageName, nextSurfaceId: surfaceId },
-    { timeout: 45_000 }
-  ).catch(async (error) => {
-    const observedResponses = await page.evaluate((nextPackageName) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-        .map((entry) => entry.kind === "daemon_response"
-          ? entry.payload?.plugin_surface
-          : entry.kind === "hub_frame" && entry.payload?.kind === "action_result"
-            ? entry.payload?.payload?.result?.plugin_surface
-            : undefined)
-        .filter((pluginSurface) => pluginSurface?.package_name === nextPackageName),
-      contractMatrixPackageName
-    );
-    throw new Error(`${surfaceId} did not receive a hub validated plugin_surface.ui_tree_snapshot; observed=${JSON.stringify(observedResponses, null, 2)}: ${error.message}`);
   });
 }
 
@@ -908,9 +744,6 @@ async function exerciseContractMatrixSettings(page) {
     { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: "contract.settings" },
     "contract.settings plugin_surface_render request"
   );
-  if (transportMode === "bridge") {
-    await waitForValidatedPluginSurfaceSnapshot(page, "contract.settings");
-  }
   await assertContractSettingsSummary(page, [
     `endpoint=${contractMatrixSeedEndpoint} mode=write api_token_state=redacted`,
     "endpoint=https://example.invalid/plugin-contract-matrix mode=read api_token_state="
@@ -1098,7 +931,7 @@ async function waitForContractActionResult(page, { accepted, expectedTexts, labe
 }
 
 async function navigateToPayloadContractSurface(page, surfaceId) {
-  await page.goto(withDogfoodMode(new URL(`/packages/${payloadContractPackageName}/surfaces/${surfaceId}`, appUrl)), {
+  await page.goto(new URL(`/packages/${payloadContractPackageName}/surfaces/${surfaceId}`, appUrl).toString(), {
     waitUntil: "domcontentloaded"
   });
   await waitForHarnessEvent(
@@ -1106,9 +939,6 @@ async function navigateToPayloadContractSurface(page, surfaceId) {
     { kind: "daemon_request", type: "plugin_surface_render", package_name: payloadContractPackageName, surface_id: surfaceId },
     `${surfaceId} plugin_surface_render request`
   );
-  if (transportMode === "bridge") {
-    await waitForValidatedPluginSurfaceSnapshot(page, surfaceId);
-  }
 }
 
 async function waitForPayloadContractActionResult(page, { actionId, expectedPayload, label }) {
@@ -1297,97 +1127,6 @@ async function assertSelectedAppSurfaceRendered(page, target) {
   });
 }
 
-async function exerciseFirstPartyPackageConfiguration(page) {
-  const endpoint = "https://example.invalid/live-web-configuration";
-
-  if (!await pagePackageHasConfigurationFields(page, "project-pipelines", ["operator_endpoint", "pipeline_mode", "api_token"])) {
-    await openPackageSettings(page, "project-pipelines");
-    await page.getByTestId("plugin-settings-route").waitFor();
-    await page.getByText(/Project Pipelines Settings|No settings surface registered/).first().waitFor();
-    await closePackageSettingsRoute(page);
-    return;
-  }
-
-  await openPackageSettings(page, "project-pipelines");
-  await page.getByText("Package configuration").waitFor();
-  await page.getByText("Operator endpoint").waitFor();
-  await page.getByText("Pipeline mode").waitFor();
-  await page.getByText("API token").waitFor();
-  await page.locator("ion-input[data-configuration-field='operator_endpoint'] input").fill(endpoint);
-  await setIonicSelectValue(page, "pipeline_mode", "github");
-  const listPackagesBeforeSave = await daemonRequestCount(page, { type: "list_packages" });
-  await page.locator("[data-testid='package-configuration-save']").click();
-  await waitForPackageConfigurationRequest(page, {
-    packageName: "project-pipelines",
-    values: {
-      operator_endpoint: { type: "url", value: endpoint },
-      pipeline_mode: { type: "select", value: "github" }
-    },
-    omittedKeys: ["api_token"]
-  });
-  await waitForDaemonRequestCount(
-    page,
-    { type: "list_packages" },
-    listPackagesBeforeSave + 1,
-    "post-save package refresh request"
-  );
-
-  await closePackageSettingsRoute(page);
-  await page.getByText("Package configuration").waitFor({ state: "detached" });
-  await openPackageSettings(page, "project-pipelines");
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await page.getByTestId("plugin-settings-route").waitFor();
-  await expectIonicTextInputValue(page, "operator_endpoint", endpoint);
-  await expectIonicSelectValue(page, "pipeline_mode", "github");
-
-  const requestCountBeforeInvalidSave = await daemonRequestCount(page, { type: "set_package_configuration" });
-  await setIonicSelectValue(page, "pipeline_mode", "invalid-mode");
-  await page.locator("[data-testid='package-configuration-save']").click();
-  await waitForDaemonRequestCount(
-    page,
-    { type: "set_package_configuration" },
-    requestCountBeforeInvalidSave + 1,
-    "invalid package configuration save request"
-  );
-  await waitForPackageConfigurationRequest(page, {
-    packageName: "project-pipelines",
-    values: {
-      pipeline_mode: { type: "select", value: "invalid-mode" }
-    }
-  });
-  await closePackageSettingsRoute(page);
-  await page.getByText("Package configuration").waitFor({ state: "detached" });
-  await openDiagnosticsView(page);
-  await page.getByText("select_option_unknown").first().waitFor({ timeout: 15_000 });
-  await page.getByText("invalid-mode").first().waitFor({ timeout: 15_000 });
-}
-
-async function pagePackageHasConfigurationFields(page, packageName, fieldIds) {
-  return await page.evaluate(({ packageName, fieldIds }) => {
-    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-    const packages = [];
-    for (const entry of events) {
-      if (entry.kind === "daemon_response" && entry.payload?.kind === "packages") {
-        packages.push(...(entry.payload.packages ?? []));
-      }
-      if (entry.kind === "hub_frame" && entry.payload?.kind === "entity_snapshot") {
-        const payload = entry.payload.payload;
-        if (payload?.family === "botster-web.package") {
-          packages.push(...(payload.records ?? []));
-        }
-      }
-    }
-    const packageRecord = packages.find((record) =>
-      (record.package_name ?? record.name ?? record.id) === packageName
-    );
-    if (!packageRecord) return false;
-    const rawFields = packageRecord.configuration?.fields ?? packageRecord.configuration?.schema?.fields ?? [];
-    const projectedFields = packageRecord.configuration_fields ?? [];
-    const availableFieldIds = new Set([...rawFields, ...projectedFields].map((field) => field.key ?? field.id));
-    return fieldIds.every((fieldId) => availableFieldIds.has(fieldId));
-  }, { packageName, fieldIds });
-}
-
 async function openPackageSettings(page, packageName) {
   await openAppsView(page);
   const installed = installedList(page);
@@ -1420,30 +1159,6 @@ async function setIonicSelectValue(page, fieldId, value) {
     },
     value
   );
-}
-
-async function expectIonicSelectValue(page, fieldId, value) {
-  await page.waitForFunction(
-    ({ nextFieldId, nextValue }) =>
-      globalThis.document.querySelector(`ion-select[data-configuration-field='${nextFieldId}']`)?.value === nextValue,
-    { nextFieldId: fieldId, nextValue: value },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
-    const actualValue = await page.locator(`ion-select[data-configuration-field='${fieldId}']`).evaluate((select) => select.value).catch(() => undefined);
-    throw new Error(`timed out waiting for ${fieldId} select value ${value}; actual=${JSON.stringify(actualValue)}: ${error.message}`);
-  });
-}
-
-async function expectIonicTextInputValue(page, fieldId, value) {
-  await page.waitForFunction(
-    ({ nextFieldId, nextValue }) =>
-      globalThis.document.querySelector(`ion-input[data-configuration-field='${nextFieldId}'] input`)?.value === nextValue,
-    { nextFieldId: fieldId, nextValue: value },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
-    const actualValue = await page.locator(`ion-input[data-configuration-field='${fieldId}'] input`).inputValue().catch(() => undefined);
-    throw new Error(`timed out waiting for ${fieldId} input value ${value}; actual=${JSON.stringify(actualValue)}: ${error.message}`);
-  });
 }
 
 async function waitForPackageConfigurationRequest(page, { packageName, values, omittedKeys = [] }) {
@@ -1752,8 +1467,8 @@ async function assertNoGrantSecretLeak(page, cycle) {
 }
 
 async function waitForTransportLabel(page) {
-  const expectedDataPlane = transportMode === "webrtc" ? "WebRTC DataChannel" : "Bridge/SSE";
-  const expectedLayer = transportMode === "webrtc" ? "Local WebRTC signaling via bridge" : "Bridge/SSE terminal transport active";
+  const expectedDataPlane = "WebRTC DataChannel";
+  const expectedLayer = "Local WebRTC signaling ready";
   await page.waitForFunction(
     ({ expectedDataPlane, expectedLayer }) => {
       const text = globalThis.document.body?.innerText ?? "";
@@ -1964,7 +1679,6 @@ async function waitForAutomaticTerminalRestore(page) {
     throw new Error(`timed out waiting for automatic ReadScreen restoration: ${error.message}`);
   });
   await waitForTerminalRendererWrite(page, restoration.text);
-  if (transportMode !== "webrtc") return { restored_chars: restoration.chars };
 
   const telemetry = await page.evaluate(() => {
     const assemblies = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
@@ -2271,30 +1985,6 @@ async function assertNoUnknownSession(page) {
   }
 }
 
-function startBridgeProcess() {
-  const child = spawn(
-    process.execPath,
-    [new URL("./real-hub-dogfood-bridge.mjs", import.meta.url).pathname],
-    {
-      cwd: packageRoot,
-      env: bridgeEnvironment(),
-      stdio: ["ignore", "pipe", "pipe"]
-    }
-  );
-
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    bridgeStdout += chunk;
-    process.stdout.write(chunk);
-  });
-  child.stderr.on("data", (chunk) => {
-    bridgeStderr += chunk;
-    process.stderr.write(chunk);
-  });
-  return child;
-}
-
 async function startWebrtcPackageRuntime() {
   if (!process.env.BOTSTER_HUB_BIN) {
     throw new Error("WebRTC live packaged protocol harness requires BOTSTER_HUB_BIN so it can own an isolated hub.");
@@ -2328,7 +2018,7 @@ async function startWebrtcPackageRuntime() {
     package_name: "botster-web",
     entrypoint_id: "web-client",
     environment_overrides: {
-      BOTSTER_WEB_DOGFOOD_BRIDGE_PORT: String(port)
+      BOTSTER_WEB_PACKAGE_SERVER_PORT: "0"
     }
   });
   const url = await waitForPackageAppUrl(socketPath);
@@ -2336,7 +2026,7 @@ async function startWebrtcPackageRuntime() {
   await waitForHttpOk(new URL("/health", url).toString(), () =>
     hubProcess?.exitCode !== null ? `hub exited before package runtime readiness (code=${hubProcess.exitCode})` : undefined
   );
-  await waitForHtmlShell(withDogfoodMode(url));
+  await waitForHtmlShell(url);
   return url;
 }
 
@@ -2511,12 +2201,6 @@ async function waitForSocket(socketPath, exitMessage) {
   throw lastError ?? new Error(`timed out waiting for hub socket ${socketPath}`);
 }
 
-function withDogfoodMode(url) {
-  const nextUrl = new URL(url);
-  nextUrl.searchParams.set("dogfood", "real-hub");
-  return nextUrl.toString();
-}
-
 async function waitForHttpOk(url, exitMessage) {
   const deadline = Date.now() + 15_000;
   let lastError;
@@ -2574,31 +2258,4 @@ function browserFailureSummary({ consoleEvents, pageErrors, responseErrors }) {
     return `live packaged protocol harness failed:\n${failures.join("\n")}`;
   }
   return undefined;
-}
-
-function bridgeEnvironment() {
-  const env = {
-    ...process.env,
-    BOTSTER_WEB_DOGFOOD_BRIDGE_PORT: String(port)
-  };
-
-  if (env.BOTSTER_HUB_BIN) {
-    delete env.BOTSTER_HUB_SOCKET;
-    delete env.BOTSTER_HUB_DATA_DIR;
-  }
-
-  return env;
-}
-
-async function findAvailablePort() {
-  const server = createNetServer();
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, host, resolve);
-  });
-  const address = server.address();
-  const assignedPort = typeof address === "object" && address ? address.port : 0;
-  server.close();
-  await once(server, "close");
-  return assignedPort;
 }

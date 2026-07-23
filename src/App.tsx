@@ -36,16 +36,16 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addOutline,
+  arrowBackOutline,
   cogOutline,
   constructOutline,
   cubeOutline,
-  gitBranchOutline,
   keyOutline,
   layersOutline,
   listCircleOutline,
   openOutline,
+  playOutline,
   powerOutline,
-  pricetagOutline,
   refreshOutline,
   serverOutline
 } from "ionicons/icons";
@@ -96,10 +96,9 @@ type AppRoute =
   | { view: "diagnostics" };
 
 const navigationItems: Array<{ label: string; icon: string; view: AppView }> = [
-  { label: "Dashboard", icon: layersOutline, view: "dashboard" },
+  { label: "Home", icon: layersOutline, view: "dashboard" },
   { label: "Apps", icon: cubeOutline, view: "apps" },
-  { label: "Spawn points", icon: serverOutline, view: "spawn-points" },
-  { label: "Diagnostics", icon: listCircleOutline, view: "diagnostics" }
+  { label: "Workspaces", icon: serverOutline, view: "spawn-points" }
 ];
 
 const appViewPaths: Record<AppView, string> = {
@@ -719,6 +718,14 @@ function parseMetadata(input: string): Record<string, string> {
   );
 }
 
+function workspaceIdFromLabel(label: string): string {
+  return label
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 export function compareSpawnTargetRows(left: Record<string, unknown>, right: Record<string, unknown>): number {
   const leftEnabled = left.enabled !== false ? 0 : 1;
   const rightEnabled = right.enabled !== false ? 0 : 1;
@@ -746,9 +753,8 @@ export function SpawnTargetListItem({
     <IonItem className="spawn-target-item">
       <IonLabel>
         <h2>{label}</h2>
-        <p>{targetId}</p>
         <p>{root}</p>
-        <p>{kind}</p>
+        <p className="workspace-technical-detail">{targetId} · {kind}</p>
       </IonLabel>
       <IonBadge color={enabled ? "success" : "medium"} slot="end">
         {enabled ? "Enabled" : "Disabled"}
@@ -775,9 +781,8 @@ export default function App() {
         ? normalizeLocalWebrtcBootstrap((window as BotsterPackageWindow).__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__)
         : undefined;
       return createDogfoodRuntimeConfig({
-        env: import.meta.env,
         locationHref: window.location.href,
-        ...(packageRuntime ? { bridgeUrl: `${window.location.origin}/request` } : {}),
+        ...(packageRuntime ? { signalingUrl: `${window.location.origin}/request` } : {}),
         packageRuntime,
         localWebrtcBootstrap
       });
@@ -796,7 +801,12 @@ export default function App() {
     "dogfood.action_status": dogfoodRuntime.statusText
   });
   const [diagnostics, setDiagnostics] = useState<ConnectionDiagnostic[]>(() =>
-    initialConnectionDiagnostics(dogfoodRuntime.mode, dogfoodRuntime.statusText, dogfoodRuntime.terminalDataPlaneKind)
+    initialConnectionDiagnostics(
+      dogfoodRuntime.mode,
+      dogfoodRuntime.statusText,
+      dogfoodRuntime.terminalDataPlaneKind,
+      dogfoodRuntime.startupError
+    )
   );
   const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "session" | "draft", HubEntityLoadStatus>>({
     app: "not_loaded",
@@ -818,6 +828,7 @@ export default function App() {
   const lastPluginRouteRenderKey = useRef<string | undefined>(undefined);
   const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
   const [pendingSessionId, setPendingSessionId] = useState<string | undefined>();
+  const pendingSessionIdRef = useRef<string | undefined>(undefined);
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
     setLocalState((current) => ({ ...current, ...patch }));
@@ -909,6 +920,11 @@ export default function App() {
     const unsubscribeFrames = runtimeClient.hub.onFrame(() => {
       if (!cancelled) {
         setFrameVersion((version) => version + 1);
+        const pendingId = pendingSessionIdRef.current;
+        if (pendingId && runtimeClient.entities.get("botster-web.session", pendingId)) {
+          pendingSessionIdRef.current = undefined;
+          setPendingSessionId(undefined);
+        }
       }
     });
     const unsubscribeDiagnostics = runtimeClient.hub.onFrame((frame) => {
@@ -973,12 +989,19 @@ export default function App() {
 
   const dispatchAction = useCallback(
     (action: ActionBinding) => {
-      const isSpawnAction = action.id === "botster.session.select" && action.target === realHubDogfoodSessionId;
+      const isSpawnAction = action.id === "botster.session.select";
       const statusKey = isSpawnAction ? "dogfood.action_status" : "dogfood.diagnostic_action_status";
-      if (isSpawnAction) setPendingSessionId(realHubDogfoodSessionId);
+      if (isSpawnAction) {
+        const pendingId = action.target ?? realHubDogfoodSessionId;
+        pendingSessionIdRef.current = pendingId;
+        setPendingSessionId(pendingId);
+      }
       updateLocalState({ [statusKey]: `Dispatching ${action.id}` });
       void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
-        if (isSpawnAction) setPendingSessionId(undefined);
+        if (isSpawnAction && !result.accepted) {
+          pendingSessionIdRef.current = undefined;
+          setPendingSessionId(undefined);
+        }
         const isAttachAction = action.id === "botster.session.attach";
         if (result.accepted && isAttachAction && action.target) {
           setSelectedRealHubTerminalSessionId(action.target);
@@ -1024,7 +1047,10 @@ export default function App() {
         });
         recordDiagnostic(actionFailureDiagnostic(action, result));
       }).catch((error: unknown) => {
-        if (isSpawnAction) setPendingSessionId(undefined);
+        if (isSpawnAction) {
+          pendingSessionIdRef.current = undefined;
+          setPendingSessionId(undefined);
+        }
         updateLocalState({
           [statusKey]: error instanceof Error ? error.message : `Rejected ${action.id}`
         });
@@ -1091,8 +1117,9 @@ export default function App() {
   const submitSpawnTargetForm = useCallback(() => {
     if (!spawnTargetForm) return;
     const root = spawnTargetForm.root.trim();
-    const targetId = spawnTargetForm.targetId.trim();
-    if (!root || (spawnTargetForm.mode === "edit" && !spawnTargetForm.originalTargetId)) return;
+    const label = spawnTargetForm.label.trim();
+    const targetId = spawnTargetForm.targetId.trim() || workspaceIdFromLabel(label);
+    if (!root || !label || !targetId || (spawnTargetForm.mode === "edit" && !spawnTargetForm.originalTargetId)) return;
 
     const requestType = spawnTargetForm.mode === "create" ? "create_spawn_target" : "update_spawn_target";
     dispatchAction({
@@ -1103,7 +1130,7 @@ export default function App() {
         daemon_request: {
           request_type: requestType,
           target_id: spawnTargetForm.mode === "create" ? targetId || undefined : spawnTargetForm.originalTargetId,
-          label: spawnTargetForm.label.trim() || undefined,
+          label,
           root,
           enabled: spawnTargetForm.enabled,
           kind: spawnTargetForm.kind.trim() || "directory",
@@ -1413,12 +1440,13 @@ export default function App() {
   }, [navigateToHubRoutePath, navigateToPluginSurface]);
   const packageNavigationShortcuts = packageNavigation;
   const sessions = runtimeClient.entities.list("botster-web.session");
-  const sessionsWithPending = pendingSessionId && !sessions.some((session) => session.id === pendingSessionId)
+  const sessionStartPending = pendingSessionId !== undefined && !sessions.some((session) => session.id === pendingSessionId);
+  const sessionsWithPending = sessionStartPending
     ? [
         ...sessions,
         {
-          id: pendingSessionId,
-          title: pendingSessionId,
+          id: pendingSessionId!,
+          title: pendingSessionId!,
           status: "pending",
           attachable: false,
           attach_status: "Waiting for authoritative hub session state",
@@ -1426,6 +1454,22 @@ export default function App() {
         }
       ]
     : sessions;
+  const startPrimarySession = useCallback(() => {
+    const fixtureTarget = sessions.find((session) => session.status !== "running")?.id;
+    dispatchAction({
+      id: "botster.session.select",
+      target: dogfoodRuntime.mode === "fixture" ? String(fixtureTarget ?? "session-local-1") : realHubDogfoodSessionId,
+      label: "Start session",
+      params: { mode: "local" }
+    });
+  }, [dispatchAction, dogfoodRuntime.mode, sessions]);
+  const attachSession = useCallback((sessionId: string) => {
+    dispatchAction({
+      id: "botster.session.attach",
+      target: sessionId,
+      label: "Open session"
+    });
+  }, [dispatchAction]);
   const attachableDogfoodSession = sessions.find((session) => session.id === realHubDogfoodSessionId && isAttachableSession(session));
   const selectedRealHubSession = selectedRealHubTerminalSessionId
     ? sessions.find((session) => session.id === selectedRealHubTerminalSessionId)
@@ -1436,7 +1480,7 @@ export default function App() {
   const activeRealHubTerminalSessionId = selectedTerminalSessionId ?? defaultTerminalSessionId;
   const terminalDescriptor: TerminalViewDescriptor | undefined = useMemo(
     () =>
-      dogfoodRuntime.mode === "real-hub" || dogfoodRuntime.mode === "webrtc"
+      dogfoodRuntime.mode === "webrtc"
         ? activeRealHubTerminalSessionId
           ? { sessionId: activeRealHubTerminalSessionId, renderer: terminalRenderer }
           : undefined
@@ -1454,11 +1498,25 @@ export default function App() {
     typeof localState["dogfood.action_status"] === "string"
       ? localState["dogfood.action_status"]
       : dogfoodRuntime.statusText;
+  const showSessionStartFeedback = sessionStartPending || actionStatus !== dogfoodRuntime.statusText;
   const diagnosticActionStatus =
     typeof localState["dogfood.diagnostic_action_status"] === "string"
       ? localState["dogfood.diagnostic_action_status"]
       : "No diagnostic action has been dispatched.";
   const blockingDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "danger");
+  const warningDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "warning");
+  const hubStateLoading = [entityLoadStatus.package, entityLoadStatus.session].some((status) => status === "not_loaded" || status === "loading");
+  const sessionStartDisabled = hubStateLoading || sessionStartPending || blockingDiagnostics.length > 0;
+  const healthLabel = blockingDiagnostics.length > 0
+    ? "Needs attention"
+    : hubStateLoading
+      ? "Connecting"
+      : dogfoodRuntime.mode === "fixture"
+        ? "Preview"
+        : warningDiagnostics.length > 0
+          ? "Connected with warnings"
+          : "Connected";
+  const healthColor = blockingDiagnostics.length > 0 ? "danger" : hubStateLoading || dogfoodRuntime.mode === "fixture" ? "medium" : warningDiagnostics.length > 0 ? "warning" : "success";
   const pluginAppRouteActive = activeView === "apps" && Boolean(routePluginSurface);
   const terminalPanel = terminalDescriptor && terminalDataPlane ? (
     <TerminalViewHost
@@ -1512,54 +1570,109 @@ export default function App() {
                 loadStatus={entityLoadStatus.packageNavigation}
                 onOpen={openPackageNavigation}
               />
+              <div className="sidebar-section sidebar-advanced">
+                <p className="sidebar-section-label">Advanced</p>
+                <IonMenuToggle autoHide={false}>
+                  <button
+                    type="button"
+                    className={activeView === "diagnostics" ? "nav-item active" : "nav-item"}
+                    aria-current={activeView === "diagnostics" ? "page" : undefined}
+                    onClick={() => navigateToView("diagnostics")}
+                  >
+                    <IonIcon icon={listCircleOutline} aria-hidden="true" />
+                    <span>Diagnostics</span>
+                  </button>
+                </IonMenuToggle>
+              </div>
             </nav>
           </IonContent>
         </IonMenu>
 
         <IonPage id="main-content">
-          {!pluginAppRouteActive ? (
-            <IonHeader className="app-header">
-              <IonToolbar>
-                <IonButtons slot="start">
-                  <IonMenuButton />
-                </IonButtons>
-                <IonTitle>botster-web</IonTitle>
-                <IonButtons slot="end" className="toolbar-status">
-                    <IonChip color="medium" outline>
-                      <IonIcon icon={gitBranchOutline} aria-hidden="true" />
-                      <IonLabel>{botsterWebClientContract.label}</IonLabel>
-                    </IonChip>
-                    <IonChip color={dogfoodRuntime.mode === "fixture" ? "medium" : "success"} outline>
-                      <IonLabel>{dogfoodRuntime.mode}</IonLabel>
-                    </IonChip>
-                </IonButtons>
-              </IonToolbar>
-            </IonHeader>
-          ) : null}
+          <IonHeader className="app-header">
+            <IonToolbar>
+              <IonButtons slot="start">
+                <IonMenuButton />
+                {pluginAppRouteActive ? (
+                  <IonButton aria-label="Back to Apps" fill="clear" onClick={() => navigateToView("apps")}>
+                    <IonIcon icon={arrowBackOutline} slot="icon-only" aria-hidden="true" />
+                  </IonButton>
+                ) : null}
+              </IonButtons>
+              <IonTitle>Botster</IonTitle>
+              <IonButtons slot="end" className="toolbar-status">
+                <IonButton fill="clear" color={healthColor} onClick={() => navigateToView("diagnostics")}>
+                  <IonBadge color={healthColor}>{healthLabel}</IonBadge>
+                </IonButton>
+              </IonButtons>
+            </IonToolbar>
+          </IonHeader>
 
           <IonContent fullscreen className={pluginAppRouteActive ? "plugin-app-content" : undefined}>
             <main className={pluginAppRouteActive ? "workspace-shell plugin-workspace-shell" : "workspace-shell"}>
               {activeView === "dashboard" ? (
                 <section className="view-stack" aria-labelledby="dashboard-heading" data-testid="dashboard-view">
-                  <div className="page-heading">
+                  <section className="home-hero">
                     <div>
-                      <p className="eyebrow">Home</p>
-                      <h1 id="dashboard-heading">Dashboard</h1>
+                      <p className="eyebrow">Local Botster</p>
+                      <h1 id="dashboard-heading">Your sessions</h1>
+                      <p>Start something new or return to work already running on this device.</p>
                     </div>
-                    <IonBadge color={blockingDiagnostics.length > 0 ? "danger" : "success"}>
-                      {blockingDiagnostics.length > 0 ? `${blockingDiagnostics.length} blocked` : "Ready"}
-                    </IonBadge>
+                    <IonButton onClick={startPrimarySession} disabled={sessionStartDisabled}>
+                      <IonIcon icon={playOutline} slot="start" aria-hidden="true" />
+                      {sessionStartPending ? "Starting…" : "Start session"}
+                    </IonButton>
+                  </section>
+                  {showSessionStartFeedback ? (
+                    <p className="home-session-status" role="status" aria-live="polite">{actionStatus}</p>
+                  ) : null}
+                  <section className="workflow-section home-sessions" aria-labelledby="recent-sessions-heading">
+                    <div className="section-heading">
+                      <div>
+                        <p className="eyebrow">Recent work</p>
+                        <h2 id="recent-sessions-heading">Sessions</h2>
+                      </div>
+                      <IonBadge color="medium">{sessionsWithPending.length}</IonBadge>
+                    </div>
+                    {entityLoadStatus.session === "error" ? (
+                      <p className="entity-empty">Sessions could not be loaded. Check Diagnostics for connection details.</p>
+                    ) : sessionsWithPending.length > 0 ? (
+                      <IonList lines="full" aria-label="Sessions">
+                        {sessionsWithPending.map((session) => {
+                          const sessionId = String(session.id);
+                          const attachable = isAttachableSession(session);
+                          return (
+                            <IonItem key={sessionId}>
+                              <IonIcon icon={serverOutline} slot="start" aria-hidden="true" />
+                              <IonLabel>
+                                <h2>{stringValue(session.title, sessionId)}</h2>
+                                <p>{stringValue(session.status, "Unknown status")}</p>
+                              </IonLabel>
+                              {attachable ? (
+                                <IonButton slot="end" fill="outline" onClick={() => attachSession(sessionId)}>Open</IonButton>
+                              ) : null}
+                            </IonItem>
+                          );
+                        })}
+                      </IonList>
+                    ) : (
+                      <div className="home-empty-state">
+                        <h3>No sessions yet</h3>
+                        <p>Start a session to begin working with Botster.</p>
+                      </div>
+                    )}
+                  </section>
+                  <div className="home-shortcuts" aria-label="Set up Botster">
+                    <button type="button" onClick={() => navigateToView("apps")}>
+                      <IonIcon icon={cubeOutline} aria-hidden="true" />
+                      <span><strong>Apps</strong><small>Open installed tools and extensions</small></span>
+                    </button>
+                    <button type="button" onClick={() => navigateToView("spawn-points")}>
+                      <IonIcon icon={serverOutline} aria-hidden="true" />
+                      <span><strong>Workspaces</strong><small>Choose where sessions can run</small></span>
+                    </button>
                   </div>
-                  <IonList lines="full" aria-label="Primary destinations">
-                    <IonItem button onClick={() => navigateToView("apps")}>
-                      <IonIcon icon={cubeOutline} slot="start" aria-hidden="true" />
-                      <IonLabel>Apps</IonLabel>
-                    </IonItem>
-                    <IonItem button onClick={() => navigateToView("diagnostics")}>
-                      <IonIcon icon={listCircleOutline} slot="start" aria-hidden="true" />
-                      <IonLabel>Diagnostics</IonLabel>
-                    </IonItem>
-                  </IonList>
+                  {dogfoodRuntime.mode !== "fixture" && activeRealHubTerminalSessionId ? terminalPanel : null}
                 </section>
               ) : null}
 
@@ -1647,19 +1760,20 @@ export default function App() {
                   <section className="view-stack" aria-labelledby="spawn-points-heading" data-testid="spawn-points-view">
                     <div className="page-heading">
                       <div>
-                        <p className="eyebrow">Hub</p>
-                        <h1 id="spawn-points-heading">Spawn points</h1>
+                        <p className="eyebrow">Local setup</p>
+                        <h1 id="spawn-points-heading">Workspaces</h1>
+                        <p className="page-description">Folders where Botster is allowed to start sessions.</p>
                       </div>
                       <IonButton onClick={openCreateSpawnTarget}>
                         <IonIcon icon={addOutline} slot="start" aria-hidden="true" />
-                        Add
+                        Add workspace
                       </IonButton>
                     </div>
                     {entityLoadStatus.spawnTarget === "error" ? (
-                      <IonNote color="danger">Spawn points could not be loaded from the hub.</IonNote>
+                      <IonNote color="danger">Workspaces could not be loaded from Botster.</IonNote>
                     ) : null}
                     {spawnTargets.length > 0 ? (
-                      <IonList lines="full" aria-label="Spawn points">
+                      <IonList lines="full" aria-label="Workspaces">
                         {spawnTargets.map((target) => (
                           <SpawnTargetListItem
                             key={String(target.id)}
@@ -1671,13 +1785,13 @@ export default function App() {
                       </IonList>
                     ) : (
                       <article className="workflow-section">
-                        <div className="section-heading">
-                          <div>
-                            <p className="eyebrow">Spawn points</p>
-                            <h2>No spawn points</h2>
+                          <div className="section-heading">
+                            <div>
+                              <p className="eyebrow">Workspaces</p>
+                              <h2>No workspaces yet</h2>
+                            </div>
                           </div>
-                        </div>
-                        <p className="entity-empty">Add a directory that the hub can use as an admitted spawn target.</p>
+                          <p className="entity-empty">Add a folder where Botster can start local sessions.</p>
                       </article>
                     )}
                   </section>
@@ -1703,8 +1817,14 @@ export default function App() {
                     sessions={sessionsWithPending}
                     sessionLoadStatus={entityLoadStatus.session}
                     actionStatus={actionStatus}
+                    onStartSession={startPrimarySession}
+                    startDisabled={sessionStartDisabled}
+                    startPending={sessionStartPending}
                   />
-                  <IonGrid className="workspace-grid" aria-label="Diagnostic workspace">
+                  <details className="developer-diagnostics">
+                    <summary>Developer details</summary>
+                    <p>Protocol, renderer, entity-frame, and terminal details for troubleshooting.</p>
+                  <IonGrid className="workspace-grid" aria-label="Developer diagnostic details">
                     <IonRow>
                       <IonCol size="12" sizeLg="8">
                         <div className="local-hub-main">
@@ -1807,6 +1927,7 @@ export default function App() {
                       </IonCol>
                     </IonRow>
                   </IonGrid>
+                  </details>
                 </section>
               ) : null}
             </main>
@@ -1821,32 +1942,6 @@ export default function App() {
               </IonHeader>
               <IonContent className="ion-padding">
                 <div className="add-package-flow">
-                  <IonList lines="full" aria-label="Add package">
-                    <IonItem>
-                      <IonInput
-                        label="Marketplace registry path"
-                        labelPlacement="stacked"
-                        value={marketplaceRegistryPath}
-                        placeholder="/path/to/marketplace.json"
-                        onIonInput={(event) => setMarketplaceRegistryPath(String(event.detail.value ?? ""))}
-                      />
-                      <IonButton slot="end" disabled={!marketplaceRegistryPath.trim()} onClick={loadMarketplaceRegistry}>
-                        Browse
-                      </IonButton>
-                    </IonItem>
-                    <IonItem>
-                      <IonInput
-                        label="Local package path"
-                        labelPlacement="stacked"
-                        value={localPackagePath}
-                        placeholder="/path/to/plugin"
-                        onIonInput={(event) => setLocalPackagePath(String(event.detail.value ?? ""))}
-                      />
-                      <IonButton slot="end" disabled={!localPackagePath.trim()} onClick={installLocalPackage}>
-                        Install
-                      </IonButton>
-                    </IonItem>
-                  </IonList>
                   {availablePackages.length > 0 ? (
                     <IonList lines="full" aria-label="Marketplace packages">
                       <IonListHeader>
@@ -1861,14 +1956,50 @@ export default function App() {
                         />
                       ))}
                     </IonList>
-                  ) : null}
+                  ) : (
+                    <div className="marketplace-empty">
+                      <IonIcon icon={cubeOutline} aria-hidden="true" />
+                      <h2>No marketplace connected</h2>
+                      <p>Marketplace extensions will appear here when a source is configured.</p>
+                    </div>
+                  )}
+                  <details className="advanced-install-options">
+                    <summary>Install from local files</summary>
+                    <p>Developer option for installing an extension from this device.</p>
+                    <IonList lines="full" aria-label="Local installation options">
+                      <IonItem>
+                        <IonInput
+                          label="Marketplace registry file"
+                          labelPlacement="stacked"
+                          value={marketplaceRegistryPath}
+                          placeholder="/path/to/marketplace.json"
+                          onIonInput={(event) => setMarketplaceRegistryPath(String(event.detail.value ?? ""))}
+                        />
+                        <IonButton slot="end" disabled={!marketplaceRegistryPath.trim()} onClick={loadMarketplaceRegistry}>
+                          Load
+                        </IonButton>
+                      </IonItem>
+                      <IonItem>
+                        <IonInput
+                          label="Extension folder"
+                          labelPlacement="stacked"
+                          value={localPackagePath}
+                          placeholder="/path/to/extension"
+                          onIonInput={(event) => setLocalPackagePath(String(event.detail.value ?? ""))}
+                        />
+                        <IonButton slot="end" disabled={!localPackagePath.trim()} onClick={installLocalPackage}>
+                          Install
+                        </IonButton>
+                      </IonItem>
+                    </IonList>
+                  </details>
                 </div>
               </IonContent>
-              </IonModal>
-              <IonModal isOpen={Boolean(spawnTargetForm)} onDidDismiss={() => setSpawnTargetForm(undefined)}>
+            </IonModal>
+            <IonModal isOpen={Boolean(spawnTargetForm)} onDidDismiss={() => setSpawnTargetForm(undefined)}>
                 <IonHeader>
                   <IonToolbar>
-                    <IonTitle>{spawnTargetForm?.mode === "edit" ? "Edit spawn point" : "Add spawn point"}</IonTitle>
+                  <IonTitle>{spawnTargetForm?.mode === "edit" ? "Edit workspace" : "Add workspace"}</IonTitle>
                     <IonButtons slot="end">
                       <IonButton onClick={() => setSpawnTargetForm(undefined)}>Close</IonButton>
                     </IonButtons>
@@ -1880,41 +2011,21 @@ export default function App() {
                       <IonList lines="full" aria-label="Spawn point form">
                         <IonItem>
                           <IonInput
-                            label="Target ID"
-                            labelPlacement="stacked"
-                            value={spawnTargetForm.targetId}
-                            disabled={spawnTargetForm.mode === "edit"}
-                            placeholder="project-main"
-                            onIonInput={(event) => setSpawnTargetForm((current) => current ? { ...current, targetId: String(event.detail.value ?? "") } : current)}
-                          />
-                        </IonItem>
-                        <IonItem>
-                          <IonInput
-                            label="Label"
+                            label="Workspace name"
                             labelPlacement="stacked"
                             value={spawnTargetForm.label}
-                            placeholder="Project main"
+                            placeholder="My project"
                             onIonInput={(event) => setSpawnTargetForm((current) => current ? { ...current, label: String(event.detail.value ?? "") } : current)}
                           />
                         </IonItem>
                         <IonItem>
                           <IonInput
-                            label="Root directory"
+                            label="Folder"
                             labelPlacement="stacked"
                             value={spawnTargetForm.root}
                             placeholder="/path/to/project"
                             onIonInput={(event) => setSpawnTargetForm((current) => current ? { ...current, root: String(event.detail.value ?? "") } : current)}
                           />
-                        </IonItem>
-                        <IonItem>
-                          <IonSelect
-                            label="Kind"
-                            labelPlacement="stacked"
-                            value={spawnTargetForm.kind}
-                            onIonChange={(event) => setSpawnTargetForm((current) => current ? { ...current, kind: String(event.detail.value ?? "directory") } : current)}
-                          >
-                            <IonSelectOption value="directory">Directory</IonSelectOption>
-                          </IonSelect>
                         </IonItem>
                         <IonItem>
                           <IonCheckbox
@@ -1924,26 +2035,38 @@ export default function App() {
                             Enabled
                           </IonCheckbox>
                         </IonItem>
-                        <IonItem>
-                          <IonTextarea
-                            label="Metadata"
-                            labelPlacement="stacked"
-                            value={spawnTargetForm.metadata}
-                            autoGrow
-                            placeholder={"owner=platform\npurpose=agents"}
-                            onIonInput={(event) => setSpawnTargetForm((current) => current ? { ...current, metadata: String(event.detail.value ?? "") } : current)}
-                          />
-                        </IonItem>
                       </IonList>
+                      <details className="advanced-workspace-options">
+                        <summary>Advanced options</summary>
+                        <IonList lines="full" aria-label="Advanced workspace options">
+                          <IonItem>
+                            <IonInput
+                              label="Identifier"
+                              labelPlacement="stacked"
+                              value={spawnTargetForm.targetId}
+                              disabled={spawnTargetForm.mode === "edit"}
+                              placeholder={workspaceIdFromLabel(spawnTargetForm.label) || "my-project"}
+                              onIonInput={(event) => setSpawnTargetForm((current) => current ? { ...current, targetId: String(event.detail.value ?? "") } : current)}
+                            />
+                          </IonItem>
+                          <IonItem>
+                            <IonTextarea
+                              label="Metadata"
+                              labelPlacement="stacked"
+                              value={spawnTargetForm.metadata}
+                              autoGrow
+                              placeholder={"owner=platform\npurpose=agents"}
+                              onIonInput={(event) => setSpawnTargetForm((current) => current ? { ...current, metadata: String(event.detail.value ?? "") } : current)}
+                            />
+                          </IonItem>
+                        </IonList>
+                      </details>
                       <div className="modal-actions">
                         <IonButton
-                          disabled={!spawnTargetForm.root.trim() || (spawnTargetForm.mode === "edit" ? !spawnTargetForm.originalTargetId : false)}
+                          disabled={!spawnTargetForm.label.trim() || !spawnTargetForm.root.trim() || (spawnTargetForm.mode === "edit" ? !spawnTargetForm.originalTargetId : false)}
                           onClick={submitSpawnTargetForm}
                         >
                           {spawnTargetForm.mode === "edit" ? "Save" : "Create"}
-                        </IonButton>
-                        <IonButton fill="clear" onClick={() => setSpawnTargetForm(undefined)}>
-                          Cancel
                         </IonButton>
                       </div>
                     </div>
@@ -1955,7 +2078,7 @@ export default function App() {
         </IonSplitPane>
         <IonAlert
           isOpen={Boolean(deleteSpawnTarget)}
-          header="Delete spawn point"
+          header="Delete workspace"
           message={deleteSpawnTarget ? `Delete ${stringValue(deleteSpawnTarget.label, String(deleteSpawnTarget.id))}?` : undefined}
           buttons={[
             {
@@ -2197,39 +2320,35 @@ export function PluginListItem({ app, onOpen, onSettings }: PluginListItemProps)
   const hasUi = appSurfaces.length > 0;
   const hasSettings = settingsSurfaces.length > 0;
   const hasManagement = hasSettings || actions.length > 0;
-  const packageKind = hasUi ? "App" : "Plugin";
+  const packageKind = hasUi ? "App" : "Extension";
 
   return (
     <IonItem
-      button
+      button={hasUi}
       detail={hasUi}
-      onClick={() => onOpen(app)}
+      onClick={hasUi ? () => onOpen(app) : undefined}
     >
       <IonIcon slot="start" icon={cubeOutline} color="primary" aria-hidden="true" />
       <IonLabel>
         <h2 title={stringValue(app.title, String(app.id))}>{appDisplayName(app.title, String(app.id))}</h2>
-        <p>
-          {packageKind}{" "}
-          <IonIcon icon={pricetagOutline} aria-hidden="true" /> {stringValue(app.version, "unknown")}
-          {" "}
-          <IonIcon icon={keyOutline} aria-hidden="true" /> {capabilityCountLabel(app.capability_summary)}
-        </p>
+        <p>Version {stringValue(app.version, "unknown")} · {capabilityCountLabel(app.capability_summary)}</p>
       </IonLabel>
       <IonBadge slot="end" color={hasUi ? "primary" : "medium"}>
         {packageKind}
       </IonBadge>
-      <IonButton
-        slot="end"
-        fill="clear"
-        disabled={!hasManagement}
-        aria-label={`Settings for ${appDisplayName(app.title, String(app.id))}`}
-        onClick={(event) => {
-          event.stopPropagation();
-          onSettings(app);
-        }}
-      >
-        <IonIcon icon={cogOutline} slot="icon-only" aria-hidden="true" />
-      </IonButton>
+      {hasManagement ? (
+        <IonButton
+          slot="end"
+          fill="clear"
+          aria-label={`Settings for ${appDisplayName(app.title, String(app.id))}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onSettings(app);
+          }}
+        >
+          <IonIcon icon={cogOutline} slot="icon-only" aria-hidden="true" />
+        </IonButton>
+      ) : null}
     </IonItem>
   );
 }
@@ -2307,15 +2426,7 @@ export function PluginSettingsPanel({ app, onAction, onOpenSurface }: PluginSett
             </IonItem>
           );
         })
-      ) : (
-        <IonItem disabled>
-          <IonIcon slot="start" icon={constructOutline} aria-hidden="true" />
-          <IonLabel>
-            <h2>Configure</h2>
-            <p>No settings surface registered</p>
-          </IonLabel>
-        </IonItem>
-      )}
+      ) : null}
       {actions.map((record) => {
         const action = packageActionBinding(record);
         return (
@@ -2627,10 +2738,11 @@ function compareInstalledAppRows(left: Record<string, unknown>, right: Record<st
 
 function capabilityCountLabel(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || value === "No requested capabilities") {
-    return "0";
+    return "No special access";
   }
 
-  return String(value.split(",").filter((part) => part.trim().length > 0).length);
+  const count = value.split(",").filter((part) => part.trim().length > 0).length;
+  return `${count} permission${count === 1 ? "" : "s"}`;
 }
 
 export type PackageSurfaceRecord = Record<string, unknown> & {

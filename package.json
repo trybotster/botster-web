@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "node ./node_modules/vite/bin/vite.js --host 127.0.0.1",
     "build": "node ./node_modules/typescript/bin/tsc -b && node ./node_modules/vite/bin/vite.js build",
-    "dogfood:hub": "node scripts/real-hub-dogfood-bridge.mjs",
-    "smoke:packaged-browser": "npm run build && node scripts/packaged-browser-smoke.mjs",
+    "serve:package": "node scripts/local-package-server.mjs",
+    "smoke:browser-runtime": "npm run build && node scripts/browser-runtime-smoke.mjs",
     "smoke:live-packaged-protocol": "npm run build && node scripts/live-packaged-protocol-harness.mjs",
     "smoke:plugin-contract-matrix": "npm run build && BOTSTER_LIVE_CONTRACT_MATRIX=1 node scripts/live-packaged-protocol-harness.mjs",
     "smoke:plugin-payload-contract": "npm run build && BOTSTER_LIVE_CONTRACT_MATRIX=1 BOTSTER_LIVE_PAYLOAD_CONTRACT=1 BOTSTER_PLUGIN_PAYLOAD_CONTRACT_PACKAGE_PATH=fixtures/plugin-payload-contract node scripts/live-packaged-protocol-harness.mjs",

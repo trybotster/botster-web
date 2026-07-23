@@ -3,8 +3,6 @@ import { hubStatusFamily } from "./connectionDiagnostics";
 import type { EntityFrame } from "./entities";
 import type { HubControlFrame, HubControlFrameHandler, HubControlTransport } from "./protocol";
 import type {
-  DaemonBridgeRequestEnvelope,
-  DaemonBridgeResponseEnvelope,
   DaemonApp,
   DaemonDiagnostic,
   DaemonEntityFrame,
@@ -64,76 +62,6 @@ export interface DaemonBridgeClient {
     subscriptionId: string,
     onEvent: (event: DaemonEvent) => void
   ): { unsubscribe(): void };
-}
-
-export interface HttpDaemonBridgeClientOptions {
-  url: string;
-  terminalUrl?: string;
-  fetchImpl?: typeof fetch;
-  requestIdGenerator?: () => string;
-}
-
-export function createHttpDaemonBridgeClient({
-  url,
-  terminalUrl = url.replace(/\/request$/, "/terminal"),
-  fetchImpl = fetch,
-  requestIdGenerator = createRequestIdGenerator("daemon-request")
-}: HttpDaemonBridgeClientOptions): DaemonBridgeClient {
-  const eventListeners = new Set<(event: DaemonEvent) => void>();
-
-  return {
-    async request(request) {
-      recordLiveHarnessEvent("daemon_request", request);
-      const envelope: DaemonBridgeRequestEnvelope = {
-        kind: "daemon_request",
-        request_id: requestIdGenerator(),
-        payload: request
-      };
-      const response = await fetchImpl(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(envelope)
-      });
-
-      if (!response.ok) {
-        throw new Error(`real hub bridge request failed with HTTP ${response.status}`);
-      }
-
-      const reply = (await response.json()) as DaemonBridgeResponseEnvelope;
-      if (reply.kind !== "daemon_response") {
-        throw new Error("real hub bridge returned an unexpected transport envelope");
-      }
-
-      recordLiveHarnessEvent("daemon_response", reply.payload);
-      return reply.payload;
-    },
-    subscribeEvents(onEvent) {
-      eventListeners.add(onEvent);
-      return {
-        unsubscribe: () => {
-          eventListeners.delete(onEvent);
-        }
-      };
-    },
-    streamTerminal(sessionId, subscriptionId, onEvent) {
-      const terminalStreamUrl = new URL(terminalUrl, window.location.href);
-      terminalStreamUrl.searchParams.set("session_id", sessionId);
-      terminalStreamUrl.searchParams.set("subscription_id", subscriptionId);
-      const source = new EventSource(terminalStreamUrl.toString());
-      source.addEventListener("daemon_event", (event) => {
-        const daemonEvent = JSON.parse(event.data) as DaemonEvent;
-        recordLiveHarnessEvent("daemon_event", daemonEvent);
-        eventListeners.forEach((listener) => listener(daemonEvent));
-        onEvent(daemonEvent);
-      });
-
-      return {
-        unsubscribe: () => {
-          source.close();
-        }
-      };
-    }
-  };
 }
 
 export interface RealHubDogfoodTransportOptions {
@@ -1443,11 +1371,6 @@ function responseDiagnostics(response: DaemonResponse): DaemonDiagnostic[] {
 
 export function defaultSpawnCommand(): string {
   return "printf 'botster-web-dogfood-ready\\n'; while IFS= read -r line; do if [ \"$line\" = 'botster-web-dogfood-size' ]; then set -- $(stty size 2>/dev/null || printf '0 0'); printf 'botster-web-dogfood-size:%sx%s\\n' \"$1\" \"$2\"; elif [ \"$line\" = 'botster-web-dogfood-exit' ]; then printf 'botster-web-dogfood-exiting\\n'; exit 0; else printf 'botster-web-dogfood-echo:%s\\n' \"$line\"; fi; done";
-}
-
-function createRequestIdGenerator(prefix: string) {
-  let next = 1;
-  return () => `${prefix}-${next++}`;
 }
 
 function recordLiveHarnessEvent(kind: string, payload: unknown): void {

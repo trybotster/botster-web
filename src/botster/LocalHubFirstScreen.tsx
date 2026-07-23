@@ -1,4 +1,4 @@
-import { IonBadge } from "@ionic/react";
+import { IonBadge, IonButton } from "@ionic/react";
 
 import { realHubDogfoodSessionId } from "./realHubDogfoodTransport";
 import type { ConnectionDiagnostic } from "./connectionDiagnostics";
@@ -15,6 +15,9 @@ export interface LocalHubFirstScreenProps {
   sessions: EntityRecord[];
   sessionLoadStatus: HubEntityLoadStatus;
   actionStatus: string;
+  onStartSession: () => void;
+  startDisabled?: boolean;
+  startPending?: boolean;
 }
 
 interface StatusSummary {
@@ -33,7 +36,10 @@ export function LocalHubFirstScreen({
   packageLoadStatus,
   sessions,
   sessionLoadStatus,
-  actionStatus
+  actionStatus,
+  onStartSession,
+  startDisabled = false,
+  startPending = false
 }: LocalHubFirstScreenProps) {
   const summaries = hubStatusSummaries({
     mode,
@@ -49,23 +55,24 @@ export function LocalHubFirstScreen({
   return (
     <section className="local-hub-first-screen" aria-labelledby="local-hub-status-heading">
       <div className="local-hub-status-lead">
-        <p className="eyebrow">Local hub status</p>
-        <h1 id="local-hub-status-heading">Local hub workbench</h1>
+        <p className="eyebrow">System status</p>
+        <h1 id="local-hub-status-heading">Local Botster health</h1>
         <p>
-          Hub, bridge, package registry, session state, spawn action, and terminal
-          health are visible here without opening the browser console.
+          Connection, extensions, sessions, and terminal availability for this device.
         </p>
       </div>
       <div className="local-hub-primary-action" aria-label="Primary local hub action">
         <div>
-          <p className="eyebrow">Primary action</p>
-          <h2>Start local hub session</h2>
+          <p className="eyebrow">Session</p>
+          <h2>Start a local session</h2>
           <p>
-            Runs the local hub startup command. Output appears in the terminal panel.
+            Starts a session in your local Botster workspace.
           </p>
           <p className="local-hub-action-state">{visibleStatusText(actionStatus)}</p>
         </div>
-        <IonBadge color="primary">Primary</IonBadge>
+        <IonButton onClick={onStartSession} disabled={startDisabled}>
+          {startPending ? "Starting…" : "Start session"}
+        </IonButton>
       </div>
       <div className="local-hub-status-grid" aria-label="Local hub health summary">
         {summaries.map((summary) => (
@@ -91,8 +98,12 @@ function hubStatusSummaries({
   sessions,
   sessionLoadStatus,
   actionStatus
-}: LocalHubFirstScreenProps): StatusSummary[] {
-  const bridgeDiagnostic = diagnostics.find((diagnostic) => diagnostic.source === "bridge" && diagnostic.severity === "danger");
+}: Omit<LocalHubFirstScreenProps, "onStartSession">): StatusSummary[] {
+  const transportDiagnostic = diagnostics.find(
+    (diagnostic) =>
+      (diagnostic.source === "server" || diagnostic.source === "signaling" || diagnostic.source === "webrtc") &&
+      diagnostic.severity === "danger"
+  );
   const hubDiagnostic = highestSeverityDiagnostic(
     diagnostics.filter((diagnostic) => diagnostic.source === "stream" || diagnostic.source === "compatibility")
   );
@@ -103,7 +114,7 @@ function hubStatusSummaries({
     highestSeverityDiagnostic(actionDiagnostics);
   const runningSession = sessions.find((session) => session.id === realHubDogfoodSessionId && session.status === "running");
   const pendingSession = sessions.find((session) => session.id === realHubDogfoodSessionId && session.status === "pending");
-  const localHubMode = mode === "real-hub" || mode === "webrtc";
+  const localHubMode = mode === "webrtc";
 
   return [
     {
@@ -111,18 +122,18 @@ function hubStatusSummaries({
       label: "Hub",
       state: hubDiagnostic
         ? stateLabel(hubDiagnostic.severity)
-        : bridgeDiagnostic
+        : transportDiagnostic
           ? "Blocked"
           : localHubMode ? "Connecting" : "Fixture",
-      detail: hubDiagnostic?.detail ?? bridgeDiagnostic?.detail ?? statusText,
-      severity: hubDiagnostic?.severity ?? bridgeDiagnostic?.severity ?? "info"
+      detail: hubDiagnostic?.detail ?? transportDiagnostic?.detail ?? statusText,
+      severity: hubDiagnostic?.severity ?? transportDiagnostic?.severity ?? "info"
     },
     {
-      key: "bridge",
-      label: mode === "webrtc" ? "Transport" : "Bridge",
-      state: bridgeDiagnostic ? "Blocked" : localHubMode ? "Ready" : "Fixture",
-      detail: bridgeDiagnostic?.detail ?? statusText,
-      severity: bridgeDiagnostic?.severity ?? (localHubMode ? "success" : "info")
+      key: "transport",
+      label: "Transport",
+      state: transportDiagnostic ? "Blocked" : localHubMode ? "Ready" : "Fixture",
+      detail: transportDiagnostic?.detail ?? statusText,
+      severity: transportDiagnostic?.severity ?? (localHubMode ? "success" : "info")
     },
     packageSummary(packages, packageLoadStatus),
     sessionSummary(sessions, sessionLoadStatus),

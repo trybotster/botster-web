@@ -28,7 +28,7 @@ export interface WebrtcDaemonClientOptions {
 
 export interface LocalWebrtcBootstrapRefreshOptions {
   bootstrap: LocalWebrtcBootstrap;
-  bridgeUrl: string;
+  signalingUrl: string;
   fetchImpl?: typeof fetch;
   requestIdGenerator?: () => string;
 }
@@ -109,7 +109,7 @@ function createRequestIdGenerator(prefix: string) {
 
 export function createLocalWebrtcBootstrapRefresher({
   bootstrap,
-  bridgeUrl,
+  signalingUrl,
   fetchImpl = fetch,
   requestIdGenerator = createRequestIdGenerator("local-webrtc-bootstrap")
 }: LocalWebrtcBootstrapRefreshOptions): () => Promise<LocalWebrtcBootstrap | undefined> {
@@ -118,7 +118,7 @@ export function createLocalWebrtcBootstrapRefresher({
       type: "issue_local_webrtc_bootstrap",
       package_name: bootstrap.package_name,
       entrypoint_id: bootstrap.entrypoint_id,
-      origin: new URL(bridgeUrl, window.location.href).origin
+      origin: new URL(signalingUrl, window.location.href).origin
     };
     recordLiveHarnessEvent("daemon_request", request);
     const envelope: DaemonBridgeRequestEnvelope = {
@@ -126,7 +126,7 @@ export function createLocalWebrtcBootstrapRefresher({
       request_id: requestIdGenerator(),
       payload: request
     };
-    const response = await fetchImpl(bridgeUrl, {
+    const response = await fetchImpl(signalingUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(envelope)

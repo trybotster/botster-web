@@ -1,6 +1,5 @@
 import { createLocalDogfoodTransport } from "./localDogfoodTransport";
 import {
-  createHttpDaemonBridgeClient,
   createRealHubDogfoodTransport,
   realHubDogfoodSessionId,
   type DaemonBridgeClient
@@ -9,20 +8,19 @@ import { createRealHubTerminalDataPlane } from "./realHubTerminalDataPlane";
 import {
   createLocalWebrtcBootstrapRefresher,
   createWebrtcDaemonClient,
-  type LocalWebrtcBootstrap
+  type LocalWebrtcBootstrap,
+  WebrtcDaemonClientError
 } from "./webrtcDaemonClient";
 import type { HubControlTransport } from "./protocol";
 import { MockTerminalDataPlane, type TerminalDataPlaneAttachment, type TerminalViewDescriptor } from "./terminal";
 
-export type DogfoodModeName = "fixture" | "real-hub" | "webrtc";
-export type TerminalDataPlaneKind = "mock" | "real-hub" | "webrtc";
+export type DogfoodModeName = "fixture" | "webrtc";
+export type TerminalDataPlaneKind = "mock" | "webrtc";
 
 export function terminalDataPlaneLabel(kind: TerminalDataPlaneKind): string {
   switch (kind) {
     case "webrtc":
       return "WebRTC DataChannel";
-    case "real-hub":
-      return "Bridge/SSE";
     case "mock":
       return "Fixture";
   }
@@ -35,36 +33,41 @@ export interface DogfoodRuntimeConfig {
   terminalDescriptor: TerminalViewDescriptor;
   terminalDataPlane: TerminalDataPlaneAttachment;
   terminalDataPlaneKind: TerminalDataPlaneKind;
+  startupError?: WebrtcDaemonClientError;
   createTerminalDataPlane(sessionId: string): TerminalDataPlaneAttachment;
 }
 
 export interface DogfoodRuntimeConfigOptions {
-  env: Record<string, string | boolean | undefined>;
   locationHref: string;
   bridge?: DaemonBridgeClient;
-  bridgeUrl?: string;
+  signalingUrl?: string;
   packageRuntime?: boolean;
   localWebrtcBootstrap?: LocalWebrtcBootstrap;
 }
 
-const realModeQueryValue = "real-hub";
-const defaultBridgeUrl = "http://127.0.0.1:41739/request";
 const fixtureSessionId = "terminal_view_smoke_session";
 
 export function createDogfoodRuntimeConfig(options: DogfoodRuntimeConfigOptions): DogfoodRuntimeConfig {
-  if (options.packageRuntime && options.localWebrtcBootstrap) {
-    const bridgeUrl = options.bridgeUrl ?? `${new URL(options.locationHref, "http://botster-web.local/").origin}/request`;
-    const bridge = options.bridge ?? createWebrtcDaemonClient({
-      bootstrap: options.localWebrtcBootstrap,
-      refreshBootstrap: createLocalWebrtcBootstrapRefresher({
-        bootstrap: options.localWebrtcBootstrap,
-        bridgeUrl
-      })
-    });
+  if (options.packageRuntime) {
+    const signalingUrl = options.signalingUrl ?? `${new URL(options.locationHref, "http://botster-web.local/").origin}/request`;
+    const startupError = options.localWebrtcBootstrap
+      ? undefined
+      : new WebrtcDaemonClientError("bootstrap", "Botster package runtime requires a valid local WebRTC bootstrap grant.");
+    const bridge = options.bridge ?? (
+      options.localWebrtcBootstrap
+        ? createWebrtcDaemonClient({
+            bootstrap: options.localWebrtcBootstrap,
+            refreshBootstrap: createLocalWebrtcBootstrapRefresher({
+              bootstrap: options.localWebrtcBootstrap,
+              signalingUrl
+            })
+          })
+        : unavailableDaemonClient(startupError!)
+    );
 
     return {
       mode: "webrtc",
-      statusText: "Connected to local hub over WebRTC",
+      statusText: startupError ? "Local WebRTC bootstrap unavailable" : "Connected to local hub over WebRTC",
       transport: createRealHubDogfoodTransport({ bridge }),
       terminalDescriptor: {
         sessionId: realHubDogfoodSessionId,
@@ -72,23 +75,7 @@ export function createDogfoodRuntimeConfig(options: DogfoodRuntimeConfigOptions)
       },
       terminalDataPlane: createRealHubTerminalDataPlane({ bridge }),
       terminalDataPlaneKind: "webrtc",
-      createTerminalDataPlane: (sessionId) => createRealHubTerminalDataPlane({ bridge, sessionId })
-    };
-  }
-
-  if (isRealHubDogfoodEnabled(options)) {
-    const bridge = options.bridge ?? createHttpDaemonBridgeClient({ url: options.bridgeUrl ?? defaultBridgeUrl });
-
-    return {
-      mode: "real-hub",
-      statusText: "Connected to isolated real hub bridge",
-      transport: createRealHubDogfoodTransport({ bridge }),
-      terminalDescriptor: {
-        sessionId: realHubDogfoodSessionId,
-        renderer: "restty"
-      },
-      terminalDataPlane: createRealHubTerminalDataPlane({ bridge }),
-      terminalDataPlaneKind: "real-hub",
+      startupError,
       createTerminalDataPlane: (sessionId) => createRealHubTerminalDataPlane({ bridge, sessionId })
     };
   }
@@ -115,9 +102,8 @@ export function createDogfoodRuntimeConfig(options: DogfoodRuntimeConfigOptions)
   };
 }
 
-export function isRealHubDogfoodEnabled(options: Pick<DogfoodRuntimeConfigOptions, "env" | "locationHref" | "packageRuntime">): boolean {
-  const envEnabled = options.env.VITE_BOTSTER_REAL_HUB_DOGFOOD === "1" || options.env.VITE_BOTSTER_REAL_HUB_DOGFOOD === true;
-  const url = new URL(options.locationHref, "http://botster-web.local/");
-  const realModeRequested = url.searchParams.get("dogfood") === realModeQueryValue;
-  return Boolean(options.packageRuntime) || (envEnabled && realModeRequested);
+function unavailableDaemonClient(error: WebrtcDaemonClientError): DaemonBridgeClient {
+  return {
+    request: () => Promise.reject(error)
+  };
 }

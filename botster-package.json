@@ -45,7 +45,7 @@
       "kind": "web_app",
       "launch_mode": "background",
       "command": "node",
-      "args": ["scripts/real-hub-dogfood-bridge.mjs"],
+      "args": ["scripts/local-package-server.mjs"],
       "working_directory": { "policy": "package_root" },
       "injections": [
         {

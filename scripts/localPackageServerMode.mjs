@@ -1,6 +1,6 @@
 import { isAbsolute, join, resolve } from "node:path";
 
-export function resolveDogfoodBridgeMode(env, options = {}) {
+export function resolveLocalPackageServerMode(env, options = {}) {
   const cwd = options.cwd ?? process.cwd();
   const generatedDataDir = options.generatedDataDir;
   const existingSocket = resolvePath(env.BOTSTER_HUB_SOCKET, cwd);
@@ -12,7 +12,7 @@ export function resolveDogfoodBridgeMode(env, options = {}) {
     return {
       ok: false,
       error:
-        "BOTSTER_HUB_SOCKET/BOTSTER_HUB_DATA_DIR cannot be combined with BOTSTER_WEB_DOGFOOD_DATA_DIR; existing-hub mode never owns bridge data-dir cleanup."
+        "BOTSTER_HUB_SOCKET/BOTSTER_HUB_DATA_DIR cannot be combined with BOTSTER_WEB_DOGFOOD_DATA_DIR; existing-hub mode never owns package-server data-dir cleanup."
     };
   }
 
@@ -57,7 +57,7 @@ export function resolveDogfoodBridgeMode(env, options = {}) {
   if (!dataDir) {
     return {
       ok: false,
-      error: "spawned bridge mode requires a data directory."
+      error: "spawned package-server mode requires a data directory."
     };
   }
 
@@ -91,7 +91,7 @@ export function resolveDogfoodBridgeMode(env, options = {}) {
   };
 }
 
-export function dogfoodBridgeShutdownPlan(config) {
+export function localPackageServerShutdownPlan(config) {
   return {
     sendDaemonShutdown: config.ownsHub,
     terminateHubProcess: config.ownsHub,

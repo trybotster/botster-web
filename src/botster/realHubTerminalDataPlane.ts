@@ -148,7 +148,7 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     if (!this.options.bridge.streamTerminal) {
-      throw new Error("real hub bridge does not expose a streaming terminal attach");
+      throw new Error("WebRTC client does not expose terminal streaming.");
     }
 
     if (!this.attachPromise) {
