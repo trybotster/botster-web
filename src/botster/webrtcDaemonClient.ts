@@ -2,9 +2,11 @@ import type {
   AesGcmEnvelope,
   DaemonBridgeRequestEnvelope,
   DaemonBridgeResponseEnvelope,
+  DaemonEntityFrame,
   DaemonEvent,
   DaemonLocalWebrtcBootstrap,
-  DaemonLocalWebrtcResponseChunk,
+  DaemonLocalWebrtcDeliveryChunk,
+  DaemonLocalWebrtcDeliveryKind,
   DaemonRequest,
   DaemonResponse,
   JsonValue
@@ -21,6 +23,7 @@ export interface WebrtcDaemonClientOptions {
   refreshBootstrap?: () => Promise<LocalWebrtcBootstrap | undefined>;
   peerConnectionFactory?: () => RTCPeerConnection;
   onLifecycle?: (event: WebrtcDaemonLifecycleEvent) => void;
+  entitySubscriptionIdGenerator?: (entityType: string, generation: number) => string;
 }
 
 export interface LocalWebrtcBootstrapRefreshOptions {
@@ -48,7 +51,8 @@ type PendingRequest = {
 
 type ResponseAssembly = {
   generation: number;
-  pending: PendingRequest;
+  deliveryKind: DaemonLocalWebrtcDeliveryKind;
+  pending?: PendingRequest;
   chunkCount: number;
   totalBytes: number;
   chunks: Map<number, string>;
@@ -56,6 +60,19 @@ type ResponseAssembly = {
   retainedBytes: number;
   startedAt: number;
   timeout: number;
+};
+
+type EntitySubscription = {
+  entityType: string;
+  listener(frame: DaemonEntityFrame): void;
+  generation?: number;
+  subscriptionId?: string;
+  snapshotSeq?: number;
+  ready?: Promise<void>;
+  resolveReady?: () => void;
+  rejectReady?: (error: unknown) => void;
+  resubscribing: boolean;
+  closed: boolean;
 };
 
 export type WebrtcDaemonFailureStage = "bootstrap" | "signaling" | "transport" | "encryption" | "data-plane";
@@ -148,6 +165,9 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
         }
       };
     },
+    subscribeEntityFrames(entityType, onFrame) {
+      return transport.subscribeEntityFrames(entityType, onFrame);
+    },
     streamTerminal(sessionId, subscriptionId, onEvent) {
       let closed = false;
       let timer: number | undefined;
@@ -217,6 +237,7 @@ class WebrtcDaemonTransport {
   private readonly pendingRequests: PendingRequest[] = [];
   private readonly responseAssemblies = new Map<string, ResponseAssembly>();
   private readonly completedMessageIds = new Set<string>();
+  private readonly entitySubscriptions = new Set<EntitySubscription>();
   private peerConnection: RTCPeerConnection | undefined;
   private dataChannel: RTCDataChannel | undefined;
   private cryptoKey: CryptoKey | undefined;
@@ -297,6 +318,33 @@ class WebrtcDaemonTransport {
         );
       }
     });
+  }
+
+  subscribeEntityFrames(
+    entityType: string,
+    listener: (frame: DaemonEntityFrame) => void
+  ): { ready: Promise<void>; unsubscribe(): void } {
+    const subscription: EntitySubscription = {
+      entityType,
+      listener,
+      resubscribing: false,
+      closed: false
+    };
+    this.entitySubscriptions.add(subscription);
+    const ready = this.ensureEntitySubscription(subscription);
+
+    return {
+      ready,
+      unsubscribe: () => {
+        if (subscription.closed) return;
+        subscription.closed = true;
+        this.entitySubscriptions.delete(subscription);
+        const subscriptionId = subscription.subscriptionId;
+        if (subscriptionId) {
+          void this.request({ type: "unsubscribe_entities", subscription_id: subscriptionId }).catch(() => undefined);
+        }
+      }
+    };
   }
 
   private connect(): Promise<void> {
@@ -424,6 +472,11 @@ class WebrtcDaemonTransport {
     } catch (error) {
       throw webrtcFailure("transport", `local WebRTC transport failed: ${errorMessage(error)}`);
     }
+    queueMicrotask(() => {
+      for (const subscription of this.entitySubscriptions) {
+        void this.startEntitySubscription(subscription, generation);
+      }
+    });
   }
 
   private async resolveBootstrap(): Promise<LocalWebrtcBootstrap> {
@@ -449,15 +502,17 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("data-plane", "local WebRTC response chunk frame exceeds the transport limit");
     }
 
-    const chunk = parseResponseChunk(data);
+    const chunk = parseDeliveryChunk(data);
     if (this.completedMessageIds.has(chunk.message_id)) {
       throw webrtcFailure("data-plane", "local WebRTC response chunk message id was already completed");
     }
     let assembly = this.responseAssemblies.get(chunk.message_id);
     if (!assembly) {
-      const pending = this.pendingRequests.find((entry) => entry.generation === generation && entry.messageId === undefined);
-      if (!pending) {
-        throw webrtcFailure("data-plane", "local WebRTC response chunk has no pending request");
+      const pending = chunk.delivery_kind === "daemon_response"
+        ? this.pendingRequests.find((entry) => entry.generation === generation && entry.messageId === undefined)
+        : undefined;
+      if (chunk.delivery_kind === "daemon_response" && !pending) {
+        throw webrtcFailure("data-plane", "local WebRTC daemon response chunk has no pending request");
       }
       if (this.responseAssemblies.size >= localWebrtcResponseChunkLimits.maximumConcurrentAssemblies) {
         throw webrtcFailure("data-plane", "local WebRTC response assembly limit exceeded");
@@ -468,10 +523,11 @@ class WebrtcDaemonTransport {
         localWebrtcResponseChunkLimits.chunkBookkeepingBytes +
         utf8ByteLength(chunk.payload);
       this.ensureAggregateBudget(retainedBytes);
-      pending.messageId = chunk.message_id;
+      if (pending) pending.messageId = chunk.message_id;
       const startedAt = Date.now();
       assembly = {
         generation,
+        deliveryKind: chunk.delivery_kind,
         pending,
         chunkCount: chunk.chunk_count,
         totalBytes: chunk.total_bytes,
@@ -482,7 +538,10 @@ class WebrtcDaemonTransport {
         timeout: window.setTimeout(() => {
           this.failPeerGeneration(
             generation,
-            webrtcFailure("data-plane", `local WebRTC response assembly timed out: ${pending.requestType}`)
+            webrtcFailure(
+              "data-plane",
+              `local WebRTC ${chunk.delivery_kind} assembly timed out${pending ? `: ${pending.requestType}` : ""}`
+            )
           );
         }, requestTimeoutMs)
       };
@@ -514,7 +573,7 @@ class WebrtcDaemonTransport {
     if (assembly.receivedBytes !== assembly.totalBytes) {
       throw webrtcFailure("data-plane", "local WebRTC response chunk bytes do not match declared total");
     }
-    if (this.pendingRequests[0] !== assembly.pending) {
+    if (assembly.pending && this.pendingRequests[0] !== assembly.pending) {
       throw webrtcFailure("data-plane", "local WebRTC response completed outside pending request order");
     }
 
@@ -529,19 +588,39 @@ class WebrtcDaemonTransport {
     const key = this.cryptoKey;
     if (!key) throw webrtcFailure("encryption", "local WebRTC response key is unavailable");
 
-    let response: DaemonResponse;
+    let payload: DaemonResponse | DaemonEntityFrame;
     try {
-      response = await decryptDaemonResponse(key, envelopeJson);
+      payload = await decryptDaemonPayload(key, envelopeJson);
     } catch (error) {
       throw webrtcFailure("encryption", `local WebRTC response decryption failed: ${errorMessage(error)}`);
     }
-    if (generation !== this.peerGeneration || this.pendingRequests[0] !== assembly.pending) return;
+    if (
+      generation !== this.peerGeneration ||
+      (assembly.pending && this.pendingRequests[0] !== assembly.pending)
+    ) return;
     this.releaseAssembly(chunk.message_id, assembly);
     this.retainCompletedMessageId(chunk.message_id);
-    this.pendingRequests.shift();
     const finishedAt = Date.now();
+    if (assembly.deliveryKind === "daemon_entity_frame") {
+      recordLiveHarnessEvent("webrtc_entity_frame_assembly", {
+        generation,
+        total_bytes: assembly.totalBytes,
+        chunk_count: assembly.chunkCount,
+        started_at: assembly.startedAt,
+        finished_at: finishedAt,
+        duration_ms: finishedAt - assembly.startedAt
+      });
+      this.receiveEntityFrame(payload as DaemonEntityFrame, generation);
+      return;
+    }
+
+    const pending = assembly.pending;
+    if (!pending) {
+      throw webrtcFailure("data-plane", "local WebRTC daemon response assembly lost its pending request");
+    }
+    this.pendingRequests.shift();
     recordLiveHarnessEvent("webrtc_response_assembly", {
-      request_type: assembly.pending.requestType,
+      request_type: pending.requestType,
       generation,
       total_bytes: assembly.totalBytes,
       chunk_count: assembly.chunkCount,
@@ -549,16 +628,17 @@ class WebrtcDaemonTransport {
       finished_at: finishedAt,
       duration_ms: finishedAt - assembly.startedAt
     });
-    assembly.pending.resolve(response);
+    pending.resolve(payload as DaemonResponse);
   }
 
   private validateAssemblyChunk(
     assembly: ResponseAssembly,
-    chunk: DaemonLocalWebrtcResponseChunk,
+    chunk: DaemonLocalWebrtcDeliveryChunk,
     generation: number
   ): void {
     if (
       assembly.generation !== generation ||
+      assembly.deliveryKind !== chunk.delivery_kind ||
       assembly.chunkCount !== chunk.chunk_count ||
       assembly.totalBytes !== chunk.total_bytes
     ) {
@@ -633,6 +713,9 @@ class WebrtcDaemonTransport {
   private handleTransportClosed(error: unknown): void {
     this.resetPeerState();
     this.failPending(error);
+    if (!this.disconnected && this.entitySubscriptions.size > 0) {
+      queueMicrotask(() => void this.reconnectEntitySubscriptions());
+    }
   }
 
   private resetPeerState(): void {
@@ -644,6 +727,12 @@ class WebrtcDaemonTransport {
     this.cryptoKey = undefined;
     this.encryptedStreamReady = false;
     this.clearAssemblies();
+    for (const subscription of this.entitySubscriptions) {
+      subscription.generation = undefined;
+      subscription.subscriptionId = undefined;
+      subscription.snapshotSeq = undefined;
+      subscription.resubscribing = false;
+    }
 
     if (this.closing) return;
     this.closing = true;
@@ -663,6 +752,136 @@ class WebrtcDaemonTransport {
       window.dispatchEvent(new CustomEvent(webRtcDaemonLifecycleEventName, { detail: event }));
     }
   }
+
+  private async reconnectEntitySubscriptions(): Promise<void> {
+    try {
+      await this.connect();
+    } catch (error) {
+      recordLiveHarnessEvent("webrtc_entity_subscription_error", {
+        stage: "reconnect",
+        message: errorMessage(error)
+      });
+    }
+  }
+
+  private ensureEntitySubscription(subscription: EntitySubscription): Promise<void> {
+    return this.connect().then(() => this.startEntitySubscription(subscription, this.peerGeneration));
+  }
+
+  private startEntitySubscription(subscription: EntitySubscription, generation: number): Promise<void> {
+    if (subscription.closed || generation !== this.peerGeneration) return Promise.resolve();
+    if (subscription.generation === generation && subscription.ready) return subscription.ready;
+
+    const subscriptionId = this.options.entitySubscriptionIdGenerator?.(subscription.entityType, generation)
+      ?? `${subscription.entityType}-${generation}-${crypto.randomUUID()}`;
+    subscription.generation = generation;
+    subscription.subscriptionId = subscriptionId;
+    subscription.snapshotSeq = undefined;
+    if (!subscription.ready) {
+      subscription.ready = new Promise<void>((resolve, reject) => {
+        subscription.resolveReady = resolve;
+        subscription.rejectReady = reject;
+      });
+    }
+    recordLiveHarnessEvent("webrtc_entity_subscription", {
+      state: "requested",
+      entity_type: subscription.entityType,
+      subscription_id: subscriptionId,
+      generation
+    });
+    void this.request({
+      type: "subscribe_entities",
+      entity_type: subscription.entityType,
+      subscription_id: subscriptionId
+    }).then((response) => {
+      if (response.error) throw new Error(response.error.message);
+      if (response.kind !== "entity_subscribed") {
+        throw new Error(`entity subscription returned ${response.kind}`);
+      }
+    }).catch((error: unknown) => {
+      if (subscription.generation !== generation || subscription.subscriptionId !== subscriptionId) return;
+      subscription.rejectReady?.(error);
+      recordLiveHarnessEvent("webrtc_entity_subscription_error", {
+        stage: "subscribe",
+        entity_type: subscription.entityType,
+        subscription_id: subscriptionId,
+        generation,
+        message: errorMessage(error)
+      });
+    });
+    return subscription.ready;
+  }
+
+  private receiveEntityFrame(frame: DaemonEntityFrame, generation: number): void {
+    const subscription = Array.from(this.entitySubscriptions).find(
+      (candidate) =>
+        !candidate.closed &&
+        candidate.generation === generation &&
+        candidate.subscriptionId === frame.subscription_id &&
+        candidate.entityType === frame.entity_type
+    );
+    if (!subscription) {
+      recordLiveHarnessEvent("webrtc_entity_frame_discarded", {
+        reason: "stale_generation_or_subscription",
+        generation,
+        subscription_id: frame.subscription_id,
+        entity_type: frame.entity_type,
+        type: frame.type
+      });
+      return;
+    }
+
+    if (frame.type === "entity_snapshot") {
+      subscription.snapshotSeq = frame.snapshot_seq;
+      subscription.resolveReady?.();
+      recordLiveHarnessEvent("webrtc_entity_subscription", {
+        state: "ready",
+        entity_type: frame.entity_type,
+        subscription_id: frame.subscription_id,
+        generation,
+        snapshot_seq: frame.snapshot_seq,
+        resync_reason: frame.resync_reason ?? null
+      });
+      subscription.listener(frame);
+      return;
+    }
+
+    const currentSequence = subscription.snapshotSeq;
+    if (currentSequence === undefined || frame.snapshot_seq !== currentSequence + 1) {
+      void this.resubscribeEntity(subscription, generation, currentSequence === undefined ? "delta_before_snapshot" : "sequence_gap");
+      return;
+    }
+
+    subscription.snapshotSeq = frame.snapshot_seq;
+    subscription.listener(frame);
+  }
+
+  private async resubscribeEntity(
+    subscription: EntitySubscription,
+    generation: number,
+    reason: string
+  ): Promise<void> {
+    if (subscription.resubscribing || subscription.closed || generation !== this.peerGeneration) return;
+    subscription.resubscribing = true;
+    const previousSubscriptionId = subscription.subscriptionId;
+    recordLiveHarnessEvent("webrtc_entity_frame_discarded", {
+      reason,
+      generation,
+      subscription_id: previousSubscriptionId,
+      entity_type: subscription.entityType
+    });
+    try {
+      if (previousSubscriptionId) {
+        await this.request({ type: "unsubscribe_entities", subscription_id: previousSubscriptionId }).catch(() => undefined);
+      }
+      subscription.generation = undefined;
+      subscription.subscriptionId = undefined;
+      subscription.snapshotSeq = undefined;
+      await this.startEntitySubscription(subscription, generation);
+    } finally {
+      subscription.resubscribing = false;
+    }
+  }
 }
 
 function webrtcFailure(stage: WebrtcDaemonFailureStage, message: string): WebrtcDaemonClientError {
@@ -675,7 +894,7 @@ function errorMessage(error: unknown): string {
   return "unknown error";
 }
 
-function parseResponseChunk(frame: string): DaemonLocalWebrtcResponseChunk {
+function parseDeliveryChunk(frame: string): DaemonLocalWebrtcDeliveryChunk {
   let value: unknown;
   try {
     value = JSON.parse(frame);
@@ -687,8 +906,11 @@ function parseResponseChunk(frame: string): DaemonLocalWebrtcResponseChunk {
   }
 
   const chunk = value as Record<string, unknown>;
-  if (chunk.version !== 1) {
-    throw webrtcFailure("data-plane", "local WebRTC response chunk version is unsupported");
+  if (chunk.version !== 2) {
+    throw webrtcFailure("data-plane", "local WebRTC delivery chunk version is unsupported");
+  }
+  if (chunk.delivery_kind !== "daemon_response" && chunk.delivery_kind !== "daemon_entity_frame") {
+    throw webrtcFailure("data-plane", "local WebRTC delivery chunk kind is unsupported");
   }
   if (typeof chunk.message_id !== "string" || chunk.message_id.length === 0) {
     throw webrtcFailure("data-plane", "local WebRTC response chunk message id is invalid");
@@ -713,7 +935,7 @@ function parseResponseChunk(frame: string): DaemonLocalWebrtcResponseChunk {
     throw webrtcFailure("data-plane", "local WebRTC response chunk payload bytes are invalid");
   }
 
-  return chunk as unknown as DaemonLocalWebrtcResponseChunk;
+  return chunk as unknown as DaemonLocalWebrtcDeliveryChunk;
 }
 
 function isIntegerInRange(value: unknown, minimum: number, maximum: number): value is number {
@@ -735,14 +957,17 @@ async function encryptDaemonRequest(key: CryptoKey, request: DaemonRequest): Pro
   };
 }
 
-async function decryptDaemonResponse(key: CryptoKey, envelopeJson: string): Promise<DaemonResponse> {
+async function decryptDaemonPayload<T extends DaemonResponse | DaemonEntityFrame>(
+  key: CryptoKey,
+  envelopeJson: string
+): Promise<T> {
   const envelope = JSON.parse(envelopeJson) as AesGcmEnvelope;
   const plaintext = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: toArrayBuffer(base64Decode(envelope.nonce)) },
     key,
     toArrayBuffer(base64Decode(envelope.ciphertext))
   );
-  return JSON.parse(new TextDecoder().decode(plaintext)) as DaemonResponse;
+  return JSON.parse(new TextDecoder().decode(plaintext)) as T;
 }
 
 async function importStreamKey(secret: string): Promise<CryptoKey> {

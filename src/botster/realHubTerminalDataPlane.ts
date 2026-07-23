@@ -8,8 +8,6 @@ import type { DaemonBridgeClient } from "./realHubDogfoodTransport";
 import { realHubDogfoodSessionId, realHubDogfoodSubscriptionId } from "./realHubDogfoodTransport";
 import type { DaemonCaptureSnapshot, DaemonEvent, DaemonReadScreen } from "./realHubDaemonDto";
 
-const maxAttachAttempts = 80;
-const attachRetryDelayMs = 250;
 const maxHydrationBufferBytes = 16_777_216;
 let nextSubscriptionSequence = 1;
 
@@ -153,9 +151,15 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
       throw new Error("real hub bridge does not expose a streaming terminal attach");
     }
 
-    this.attachPromise ??= this.attachWhenSessionIsVisible().finally(() => {
-      this.attachPromise = undefined;
-    });
+    if (!this.attachPromise) {
+      const attachPromise = this.attachToAuthoritativeSession();
+      this.attachPromise = attachPromise;
+      void attachPromise.finally(() => {
+        if (this.attachPromise === attachPromise) {
+          this.attachPromise = undefined;
+        }
+      });
+    }
 
     return this.attachPromise;
   }
@@ -164,41 +168,30 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return !this.detached && this.attachmentGeneration === attachmentGeneration;
   }
 
-  private async attachWhenSessionIsVisible(): Promise<void> {
-    for (let attempt = 1; attempt <= maxAttachAttempts; attempt += 1) {
-      if (this.streamSubscription || (this.detached && this.listeners.size === 0) || this.listeners.size === 0) {
-        return;
-      }
-
-      const response = await this.options.bridge.request({ type: "list_sessions" });
-      const session = response.sessions?.find((entry) => entry.session_id === this.sessionId);
-      if (session && session.lifecycle !== "exited") {
-        const attachmentGeneration = ++this.attachmentGeneration;
-        const streamSubscription = this.options.bridge.streamTerminal!(
-          this.sessionId,
-          this.subscriptionId,
-          (event) => this.emitTerminalEvent(event, attachmentGeneration)
-        );
-        if (!this.isCurrentAttachment(attachmentGeneration)) {
-          streamSubscription.unsubscribe();
-          return;
-        }
-        this.streamSubscription = streamSubscription;
-        recordLiveHarnessTerminal("attach", { attempt });
-        await this.flushPendingResize();
-        return;
-      }
-
-      recordLiveHarnessTerminal("attach_retry", { attempt });
-      await wait(attachRetryDelayMs);
+  private async attachToAuthoritativeSession(): Promise<void> {
+    if (this.streamSubscription || (this.detached && this.listeners.size === 0) || this.listeners.size === 0) {
+      return;
     }
 
-    throw new Error(`timed out waiting for session ${this.sessionId} before terminal attach`);
+    const attachmentGeneration = ++this.attachmentGeneration;
+    const streamSubscription = this.options.bridge.streamTerminal!(
+      this.sessionId,
+      this.subscriptionId,
+      (event) => this.emitTerminalEvent(event, attachmentGeneration)
+    );
+    if (!this.isCurrentAttachment(attachmentGeneration)) {
+      streamSubscription.unsubscribe();
+      return;
+    }
+    this.streamSubscription = streamSubscription;
+    recordLiveHarnessTerminal("attach", { attempt: 1 });
+    await this.flushPendingResize();
   }
 
   private closeStream(): void {
     this.streamSubscription?.unsubscribe();
     this.streamSubscription = undefined;
+    this.attachPromise = undefined;
     this.attachmentGeneration += 1;
     this.hydration = undefined;
     this.hydratedGeneration = undefined;
@@ -378,10 +371,6 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
     recordLiveHarnessTerminal("status", status);
   }
-}
-
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isTerminalStreamEvent(event: DaemonEvent): event is Extract<

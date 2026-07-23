@@ -102,6 +102,7 @@ function hubStatusSummaries({
     actionDiagnostics.find((diagnostic) => diagnostic.title === "Hub action failed") ??
     highestSeverityDiagnostic(actionDiagnostics);
   const runningSession = sessions.find((session) => session.id === realHubDogfoodSessionId && session.status === "running");
+  const pendingSession = sessions.find((session) => session.id === realHubDogfoodSessionId && session.status === "pending");
   const localHubMode = mode === "real-hub" || mode === "webrtc";
 
   return [
@@ -128,10 +129,12 @@ function hubStatusSummaries({
     {
       key: "spawn",
       label: "Spawn action",
-      state: actionDiagnostic ? "Blocked" : runningSession ? "Running" : spawnRequested(actionStatus) ? "Requested" : "Ready",
+      state: actionDiagnostic ? "Blocked" : runningSession ? "Running" : pendingSession ? "Pending" : spawnRequested(actionStatus) ? "Requested" : "Ready",
       detail: actionDiagnostic?.detail ??
         (runningSession
           ? "The local hub session is running; output appears in the terminal panel."
+          : pendingSession
+            ? "Start requested locally; waiting for the authoritative hub session snapshot or delta."
           : "Creates a local hub session with the command shown above."),
       severity: actionDiagnostic?.severity ?? (runningSession ? "success" : "info")
     },
@@ -220,11 +223,14 @@ function sessionSummary(sessions: EntityRecord[], loadStatus: HubEntityLoadStatu
   }
 
   const running = sessions.filter((record) => record.status === "running");
+  const pending = sessions.filter((record) => record.status === "pending");
   return {
     key: "sessions",
     label: "Sessions",
-    state: running.length > 0 ? "Running" : "Loaded",
-    detail: `${sessions.length} session record${sessions.length === 1 ? "" : "s"} loaded; ${running.length} running.`,
+    state: running.length > 0 ? "Running" : pending.length > 0 ? "Pending" : "Loaded",
+    detail: pending.length > 0
+      ? `${pending.length} client-local spawn pending; authoritative session state has not arrived yet.`
+      : `${sessions.length} session record${sessions.length === 1 ? "" : "s"} loaded; ${running.length} running.`,
     severity: running.length > 0 ? "success" : "info"
   };
 }

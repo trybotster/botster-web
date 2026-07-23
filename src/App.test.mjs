@@ -14,8 +14,9 @@ import {
   metadata as hubTestSupportMetadata,
   pluginContractMatrixFixturePath,
   readLateAttachHistoryConformanceFixture,
-  readLocalWebrtcResponseChunkConformanceFixture,
+  readLocalWebrtcDeliveryChunkConformanceFixture,
   readModeFlagsConformanceFixture,
+  readSessionLifecycleSubscriptionConformanceFixture,
   verifyPackageAssets
 } from "@trybotster/hub-test-support";
 import ts from "typescript";
@@ -360,8 +361,8 @@ assert.match(realHubTerminalDataPlane, /bufferHydratingOutput/);
 assert.doesNotMatch(realHubTerminalDataPlane, /event\.data, event\.type|restoredHistory|scrollback_unavailable/);
 assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("attach_state"/);
 assert.match(realHubTerminalDataPlane, /type: "detach"/);
-assert.match(realHubTerminalDataPlane, /const maxAttachAttempts = \d+/);
-assert.match(realHubTerminalDataPlane, /attempt <= maxAttachAttempts/);
+assert.match(realHubTerminalDataPlane, /attachToAuthoritativeSession/);
+assert.doesNotMatch(realHubTerminalDataPlane, /type: "list_sessions"/);
 assert.match(realHubTerminalDataPlane, /this\.listeners\.size === 0/);
 assert.match(connectionDiagnostics, /expectedDaemonSchemaVersion = 1/);
 assert.match(connectionDiagnostics, /schemaVersionDiagnosticFromFrame/);
@@ -435,7 +436,8 @@ assert.match(liveProtocolHarnessScript, /waitForResizeProof/);
 assert.match(liveProtocolHarnessScript, /assertNoUnknownSession/);
 assert.match(liveProtocolHarnessScript, /last observed/);
 assert.match(liveProtocolHarnessScript, /botster-web-dogfood-exiting/);
-assert.match(liveProtocolHarnessScript, /process_exit/);
+assert.match(liveProtocolHarnessScript, /proveExternalSessionLifecycle/);
+assert.match(liveProtocolHarnessScript, /entity_remove/);
 assert.match(liveProtocolHarnessScript, /waitForSessionStatus/);
 assert.match(liveProtocolHarnessScript, /hub_frame/);
 assert.match(liveProtocolHarnessScript, /botster-web\.session/);
@@ -520,7 +522,7 @@ assert.match(readme, /Installed package runtime prefers the hub-issued local Web
 assert.match(architecture, /src\/botster\/webrtcDaemonClient\.ts/);
 assert.match(architecture, /AesGcmEnvelope/);
 assert.match(generatedDaemonProtocol, /export interface AesGcmEnvelope/);
-assert.match(generatedDaemonProtocol, /export interface DaemonLocalWebrtcResponseChunk/);
+assert.match(generatedDaemonProtocol, /export interface DaemonLocalWebrtcDeliveryChunk/);
 assert.match(generatedDaemonProtocol, /type: "local_webrtc_signal"/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "issue_local_webrtc_bootstrap"; package_name: string; entrypoint_id: string; origin: string \}/);
 assert.match(generatedDaemonProtocol, /DaemonLocalWebrtcBootstrap/);
@@ -540,7 +542,7 @@ assert.match(realHubDogfoodTransport, /key === "grant_secret" \? "\[redacted\]" 
 assert.match(webrtcDaemonClient, /crypto\.subtle\.encrypt/);
 assert.match(webrtcDaemonClient, /crypto\.subtle\.decrypt/);
 assert.match(webrtcDaemonClient, /AesGcmEnvelope/);
-assert.match(webrtcDaemonClient, /DaemonLocalWebrtcResponseChunk/);
+assert.match(webrtcDaemonClient, /DaemonLocalWebrtcDeliveryChunk/);
 assert.match(webrtcDaemonClient, /maximumFrameBytesExclusive: 65_536/);
 assert.match(webrtcDaemonClient, /maximumResponseBytes: 16_777_216/);
 assert.match(webrtcDaemonClient, /maximumAggregateRetainedBytes: 32 \* 1_024 \* 1_024/);
@@ -551,7 +553,7 @@ assert.doesNotMatch(webrtcDaemonClient, /decryptDaemonResponse\(key, String\(dat
 assert.match(liveProtocolHarnessScript, /webrtc_response_assembly/);
 assert.match(liveProtocolHarnessScript, /response_assembly_telemetry/);
 assert.match(liveProtocolHarnessScript, /telemetry\.duration_ms > 8_000/);
-assert.match(architecture, /Every response frame is a generated `DaemonLocalWebrtcResponseChunk`/);
+assert.match(architecture, /Every delivery frame is a generated `DaemonLocalWebrtcDeliveryChunk`/);
 assert.match(readme, /Release acceptance repeats the full command five times/);
 assert.match(readme, /botster-web-dogfood-size:<rows>x<cols>/);
 assert.match(readme, /botster-web-dogfood-exit/);
@@ -579,10 +581,10 @@ const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 const hubTestSupportVersion = packageJson.devDependencies["@trybotster/hub-test-support"];
-assert.equal(hubTestSupportVersion, "0.1.8");
+assert.equal(hubTestSupportVersion, "0.1.10");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.8");
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 15);
+assert.equal(hubTestSupportMetadata.package_version, "0.1.10");
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 17);
 const publishedHubTestSupportCoordinate = `@trybotster/hub-test-support@${hubTestSupportVersion}`;
 const publishedConformanceRevision = `conformance revision ${hubTestSupportMetadata.conformance_fixture_revision}`;
 assert.equal(readme.includes(publishedHubTestSupportCoordinate), true);
@@ -607,7 +609,7 @@ assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, 
 assert.equal(applicationPrimitivesFixturePath(), pluginContractMatrixFixturePath());
 assert.equal(verifyPackageAssets().ok, true);
 const modeFlagsConformanceFixture = readModeFlagsConformanceFixture();
-assert.equal(modeFlagsConformanceFixture.conformance_fixture_revision, 15);
+assert.equal(modeFlagsConformanceFixture.conformance_fixture_revision, 17);
 assert.deepEqual(modeFlagsConformanceFixture.request, {
   type: "read_mode_flags",
   session_id: "mode-flags-fixture-session"
@@ -628,7 +630,7 @@ for (const failure of [modeFlagsConformanceFixture.unknown_session, modeFlagsCon
 assert.equal(modeFlagsConformanceFixture.unknown_session.error_code, "unknown_session");
 assert.equal(modeFlagsConformanceFixture.backend_failure.error_code, "runtime_error");
 const lateAttachHistoryConformanceFixture = readLateAttachHistoryConformanceFixture();
-assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 15);
+assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 17);
 assert.deepEqual(
   lateAttachHistoryConformanceFixture.history_then_live.map((event) =>
     event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
@@ -649,11 +651,15 @@ for (const event of lateAttachHistoryConformanceFixture.history_then_live) {
 }
 assert.equal(lateAttachHistoryConformanceFixture.read_screen_text, "history-before-live\r\n");
 assert.equal(lateAttachHistoryConformanceFixture.no_history_read_screen_text, "");
-const localWebrtcResponseChunkFixture = readLocalWebrtcResponseChunkConformanceFixture();
-assert.equal(localWebrtcResponseChunkFixture.version, 1);
-assert.equal(localWebrtcResponseChunkFixture.maximum_frame_bytes_exclusive, 65_536);
-assert.equal(localWebrtcResponseChunkFixture.maximum_response_bytes, 16_777_216);
-const largeGeneratedChunkFixture = localWebrtcResponseChunkFixture.scenarios.large_generated;
+const localWebrtcDeliveryChunkFixture = readLocalWebrtcDeliveryChunkConformanceFixture();
+assert.equal(localWebrtcDeliveryChunkFixture.version, 2);
+assert.equal(localWebrtcDeliveryChunkFixture.maximum_frame_bytes_exclusive, 65_536);
+assert.equal(localWebrtcDeliveryChunkFixture.maximum_delivery_bytes, 16_777_216);
+assert.deepEqual(
+  new Set(localWebrtcDeliveryChunkFixture.scenarios.daemon_entity_frame.map((chunk) => chunk.delivery_kind)),
+  new Set(["daemon_entity_frame"])
+);
+const largeGeneratedChunkFixture = localWebrtcDeliveryChunkFixture.scenarios.large_generated;
 const generatedFixturePayload = repeatUtf8Pattern(
   largeGeneratedChunkFixture.pattern,
   largeGeneratedChunkFixture.total_bytes
@@ -663,7 +669,8 @@ assert.equal(Buffer.byteLength(generatedFixturePayload), 262_145);
 assert.equal(generatedFixtureChunks.length, 22);
 assert.equal(generatedFixtureChunks.length, largeGeneratedChunkFixture.expected_chunk_count);
 const reorderedGeneratedFixtureChunks = generatedFixtureChunks.map((payload, chunk_index) => ({
-  version: 1,
+  version: 2,
+  delivery_kind: "daemon_response",
   message_id: largeGeneratedChunkFixture.message_id,
   chunk_index,
   chunk_count: generatedFixtureChunks.length,
@@ -675,9 +682,12 @@ assert.equal(
   "06d24e206edb54bed524319b1127725b46e20ea4aae5934688599abd42fa4317"
 );
 assert.equal(
-  reassembleFixtureChunks(localWebrtcResponseChunkFixture.scenarios.over_budget_operator_error),
+  reassembleFixtureChunks(localWebrtcDeliveryChunkFixture.scenarios.over_budget_operator_error),
   "encrypted-operator-error"
 );
+const sessionLifecycleFixture = readSessionLifecycleSubscriptionConformanceFixture();
+assert.equal(sessionLifecycleFixture.conformance_fixture_revision, 17);
+assert.equal(sessionLifecycleFixture.fresh_subscription.requires_authoritative_snapshot_before_deltas, true);
 assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
 assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping daemon protocol drift check|check out \.\.\/botster-hub/);
 assert.match(liveProtocolHarnessScript, /@trybotster\/hub-test-support/);
@@ -1076,6 +1086,7 @@ const { createDogfoodRuntimeConfig, terminalDataPlaneLabel } = requireRuntime(".
 const {
   createHttpDaemonBridgeClient,
   createRealHubDogfoodTransport,
+  daemonEntityFrame,
   daemonResponseFrames,
   defaultSpawnCommand,
   realHubDogfoodSessionId
@@ -1534,6 +1545,8 @@ function entrypointActions(package_name, entrypoint_id) {
 
 const bridgeRequests = [];
 const bridgeTerminalStreams = [];
+const bridgeEntitySubscriptions = [];
+let authoritativeSessionItems = [];
 const bridge = {
   async request(request) {
     bridgeRequests.push(request);
@@ -1941,6 +1954,14 @@ const bridge = {
     }
 
     if (request.type === "spawn") {
+      authoritativeSessionItems = [{
+        session_uuid: request.session_id,
+        registry_state: "active",
+        lifecycle: "running",
+        rows: 24,
+        cols: 80,
+        updated_at: 1
+      }];
       return {
         kind: "spawned",
         sessions: [{ session_id: request.session_id, lifecycle: "running" }],
@@ -1988,6 +2009,30 @@ const bridge = {
     }
 
     return { kind: "events", events: [] };
+  },
+  subscribeEntityFrames(entityType, onFrame) {
+    let resolveReady;
+    const ready = new Promise((resolve) => {
+      resolveReady = resolve;
+    });
+    const subscription = { entityType, onFrame, unsubscribed: false };
+    bridgeEntitySubscriptions.push(subscription);
+    queueMicrotask(() => {
+      onFrame({
+        type: "entity_snapshot",
+        subscription_id: "bridge-session-generation-1",
+        entity_type: entityType,
+        snapshot_seq: 0,
+        items: authoritativeSessionItems
+      });
+      resolveReady();
+    });
+    return {
+      ready,
+      unsubscribe() {
+        subscription.unsubscribed = true;
+      }
+    };
   },
   streamTerminal(sessionId, subscriptionId, onEvent) {
     bridgeTerminalStreams.push({ sessionId, subscriptionId });
@@ -2262,6 +2307,251 @@ try {
     2
   );
 
+  const entityChannels = [createFakeDataChannel(), createFakeDataChannel()];
+  let nextEntitySubscriptionId = 0;
+  const entityClient = createWebrtcTestClient(entityChannels, localWebrtcBootstrapFixture, {
+    entitySubscriptionIdGenerator: (_entityType, generation) =>
+      `session-generation-${generation}-${++nextEntitySubscriptionId}`
+  });
+  const receivedEntityFrames = [];
+  const entitySubscription = entityClient.subscribeEntityFrames("session", (frame) => {
+    receivedEntityFrames.push(frame);
+  });
+  await waitForTestCondition(() => entityChannels[0].sent.length === 1);
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, entityChannels[0].sent[0]),
+    {
+      type: "subscribe_entities",
+      entity_type: "session",
+      subscription_id: "session-generation-1-1"
+    }
+  );
+  await emitChunkedTestResponse(
+    entityChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_snapshot",
+      subscription_id: "session-generation-1-1",
+      entity_type: "session",
+      snapshot_seq: 0,
+      items: []
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "entity-initial-snapshot" }
+  );
+  await emitChunkedTestResponse(
+    entityChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_subscribed", events: [], diagnostics: [] },
+    { messageId: "entity-subscribe-response" }
+  );
+  await entitySubscription.ready;
+  assert.deepEqual(receivedEntityFrames.map((frame) => frame.type), ["entity_snapshot"]);
+
+  const statusWhileSubscribed = entityClient.request({ type: "status" });
+  await waitForTestCondition(() => entityChannels[0].sent.length === 2);
+  await emitChunkedTestResponse(
+    entityChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_upsert",
+      subscription_id: "session-generation-1-1",
+      entity_type: "session",
+      snapshot_seq: 1,
+      id: "external-session",
+      entity: {
+        session_uuid: "external-session",
+        registry_state: "active",
+        lifecycle: "running",
+        rows: 24,
+        cols: 80,
+        updated_at: 1
+      }
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "entity-upsert" }
+  );
+  await emitChunkedTestResponse(
+    entityChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "status",
+      status: null,
+      sessions: [],
+      packages: [],
+      package_decision: null,
+      lifecycle: [],
+      plugin_tools: [],
+      plugin_tool_result: null,
+      events: [],
+      cleanup: null,
+      coordination: null,
+      error: null
+    },
+    { messageId: "status-while-entity-streaming" }
+  );
+  assert.equal((await statusWhileSubscribed).kind, "status");
+  assert.deepEqual(receivedEntityFrames.map((frame) => frame.type), ["entity_snapshot", "entity_upsert"]);
+
+  await emitChunkedTestResponse(
+    entityChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_patch",
+      subscription_id: "stale-subscription",
+      entity_type: "session",
+      snapshot_seq: 2,
+      id: "external-session",
+      patch: { rows: 99 }
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "stale-entity-patch" }
+  );
+  assert.equal(receivedEntityFrames.length, 2);
+
+  entityChannels[0].close();
+  await waitForTestCondition(() => entityChannels[1].sent.length === 1);
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, entityChannels[1].sent[0]),
+    {
+      type: "subscribe_entities",
+      entity_type: "session",
+      subscription_id: "session-generation-2-2"
+    }
+  );
+  await emitChunkedTestResponse(
+    entityChannels[1],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_subscribed", events: [], diagnostics: [] },
+    { messageId: "entity-reconnect-subscribe-response" }
+  );
+  await emitChunkedTestResponse(
+    entityChannels[1],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_patch",
+      subscription_id: "session-generation-1-1",
+      entity_type: "session",
+      snapshot_seq: 2,
+      id: "external-session",
+      patch: { rows: 120 }
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "prior-generation-frame" }
+  );
+  assert.equal(receivedEntityFrames.length, 2);
+  await emitChunkedTestResponse(
+    entityChannels[1],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_snapshot",
+      subscription_id: "session-generation-2-2",
+      entity_type: "session",
+      snapshot_seq: 4,
+      items: []
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "entity-reconnect-snapshot" }
+  );
+  await waitForTestCondition(() => receivedEntityFrames.length === 3);
+  assert.equal(receivedEntityFrames[2].subscription_id, "session-generation-2-2");
+  entitySubscription.unsubscribe();
+  await waitForTestCondition(() => entityChannels[1].sent.length === 2);
+  await emitChunkedTestResponse(
+    entityChannels[1],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_unsubscribed", events: [], diagnostics: [] },
+    { messageId: "entity-unsubscribe-response" }
+  );
+  entityClient.disconnect();
+
+  const deltaBeforeSnapshotChannel = createFakeDataChannel();
+  let nextResyncSubscriptionId = 0;
+  const deltaBeforeSnapshotClient = createWebrtcTestClient(
+    [deltaBeforeSnapshotChannel],
+    localWebrtcBootstrapFixture,
+    {
+      entitySubscriptionIdGenerator: () => `resync-subscription-${++nextResyncSubscriptionId}`
+    }
+  );
+  const resyncedFrames = [];
+  const resyncSubscription = deltaBeforeSnapshotClient.subscribeEntityFrames(
+    "session",
+    (frame) => resyncedFrames.push(frame)
+  );
+  await waitForTestCondition(() => deltaBeforeSnapshotChannel.sent.length === 1);
+  await emitChunkedTestResponse(
+    deltaBeforeSnapshotChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_subscribed", events: [], diagnostics: [] },
+    { messageId: "resync-initial-subscribe-response" }
+  );
+  await emitChunkedTestResponse(
+    deltaBeforeSnapshotChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_upsert",
+      subscription_id: "resync-subscription-1",
+      entity_type: "session",
+      snapshot_seq: 1,
+      id: "too-early",
+      entity: {
+        session_uuid: "too-early",
+        registry_state: "active",
+        lifecycle: "running",
+        rows: 24,
+        cols: 80,
+        updated_at: 1
+      }
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "delta-before-snapshot" }
+  );
+  await waitForTestCondition(() => deltaBeforeSnapshotChannel.sent.length === 2);
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, deltaBeforeSnapshotChannel.sent[1]),
+    { type: "unsubscribe_entities", subscription_id: "resync-subscription-1" }
+  );
+  await emitChunkedTestResponse(
+    deltaBeforeSnapshotChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_unsubscribed", events: [], diagnostics: [] },
+    { messageId: "resync-unsubscribe-response" }
+  );
+  await waitForTestCondition(() => deltaBeforeSnapshotChannel.sent.length === 3);
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, deltaBeforeSnapshotChannel.sent[2]),
+    {
+      type: "subscribe_entities",
+      entity_type: "session",
+      subscription_id: "resync-subscription-2"
+    }
+  );
+  await emitChunkedTestResponse(
+    deltaBeforeSnapshotChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_subscribed", events: [], diagnostics: [] },
+    { messageId: "resync-second-subscribe-response" }
+  );
+  await emitChunkedTestResponse(
+    deltaBeforeSnapshotChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_snapshot",
+      subscription_id: "resync-subscription-2",
+      entity_type: "session",
+      snapshot_seq: 5,
+      items: [],
+      resync_reason: "subscriber_overflow"
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "resync-authoritative-snapshot" }
+  );
+  await resyncSubscription.ready;
+  assert.deepEqual(resyncedFrames.map((frame) => frame.type), ["entity_snapshot"]);
+  resyncSubscription.unsubscribe();
+  await waitForTestCondition(() => deltaBeforeSnapshotChannel.sent.length === 4);
+  await emitChunkedTestResponse(
+    deltaBeforeSnapshotChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_unsubscribed", events: [], diagnostics: [] },
+    { messageId: "resync-final-unsubscribe-response" }
+  );
+  deltaBeforeSnapshotClient.disconnect();
+
   assert.deepEqual(localWebrtcResponseChunkLimits, {
     maximumFrameBytesExclusive: 65_536,
     maximumResponseBytes: 16_777_216,
@@ -2433,7 +2723,7 @@ try {
   const legacyFramePromise = legacyFrameClient.request({ type: "status" });
   const legacyFrameRejection = assert.rejects(
     legacyFramePromise,
-    (error) => error instanceof WebrtcDaemonClientError && /message id is invalid/.test(error.message)
+    (error) => error instanceof WebrtcDaemonClientError && /delivery chunk version is unsupported/.test(error.message)
   );
   await waitForTestCondition(() => legacyFrameChannel.sent.length === 1);
   legacyFrameChannel.emitMessage(await encryptTestEnvelope(
@@ -2455,15 +2745,16 @@ try {
 
   const malformedCases = [
     {},
-    { version: 2, message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
-    { version: 1, message_id: "", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
-    { version: 1, message_id: "x", chunk_index: -1, chunk_count: 1, total_bytes: 1, payload: "x" },
-    { version: 1, message_id: "x", chunk_index: 0, chunk_count: 2, total_bytes: 1, payload: "x" },
-    { version: 1, message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 16_777_217, payload: "x" },
-    { version: 1, message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "" },
-    { version: 1, message_id: 1, chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
-    { version: 1, message_id: "x", chunk_index: 0, chunk_count: "1", total_bytes: 1, payload: "x" },
-    { version: 1, message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: 1 }
+    { version: 1, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "unknown", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "daemon_response", message_id: "", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: -1, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: 2, total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 16_777_217, payload: "x" },
+    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "" },
+    { version: 2, delivery_kind: "daemon_response", message_id: 1, chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: "1", total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: 1 }
   ];
   for (const [index, malformedChunk] of malformedCases.entries()) {
     const malformedChannel = createFakeDataChannel();
@@ -2482,7 +2773,8 @@ try {
   await waitForTestCondition(() => concurrentChannel.sent.length === 17);
   for (let index = 0; index < 17; index += 1) {
     concurrentChannel.emitMessage(JSON.stringify({
-      version: 1,
+      version: 2,
+      delivery_kind: "daemon_response",
       message_id: `concurrent-response-${index}`,
       chunk_index: 0,
       chunk_count: 2,
@@ -2501,7 +2793,8 @@ try {
   );
   await waitForTestCondition(() => mismatchChannel.sent.length === 1);
   mismatchChannel.emitMessage(JSON.stringify({
-    version: 1,
+    version: 2,
+    delivery_kind: "daemon_response",
     message_id: "total-mismatch",
     chunk_index: 0,
     chunk_count: 1,
@@ -2519,7 +2812,8 @@ try {
   );
   await waitForTestCondition(() => metadataChannel.sent.length === 1);
   metadataChannel.emitMessage(JSON.stringify({
-    version: 1,
+    version: 2,
+    delivery_kind: "daemon_response",
     message_id: "metadata-conflict",
     chunk_index: 0,
     chunk_count: 2,
@@ -2527,7 +2821,8 @@ try {
     payload: "x"
   }));
   metadataChannel.emitMessage(JSON.stringify({
-    version: 1,
+    version: 2,
+    delivery_kind: "daemon_response",
     message_id: "metadata-conflict",
     chunk_index: 1,
     chunk_count: 3,
@@ -2549,7 +2844,8 @@ try {
   while (aggregateChannel.readyState === "open") {
     for (let assemblyIndex = 0; assemblyIndex < 3; assemblyIndex += 1) {
       aggregateChannel.emitMessage(JSON.stringify({
-        version: 1,
+        version: 2,
+        delivery_kind: "daemon_response",
         message_id: `aggregate-response-${assemblyIndex}`,
         chunk_index: aggregateChunkIndex,
         chunk_count: 1_000,
@@ -2583,7 +2879,8 @@ try {
     );
     await waitForTestCondition(() => timeoutChannels[0].sent.length === 1);
     timeoutChannels[0].emitMessage(JSON.stringify({
-      version: 1,
+      version: 2,
+      delivery_kind: "daemon_response",
       message_id: "incomplete-timeout-response",
       chunk_index: 0,
       chunk_count: 2,
@@ -2599,7 +2896,8 @@ try {
     const afterTimeoutPromise = timeoutClient.request({ type: "list_apps" });
     await waitForTestCondition(() => timeoutChannels[1].sent.length === 1);
     timeoutChannels[0].emitMessage(JSON.stringify({
-      version: 1,
+      version: 2,
+      delivery_kind: "daemon_response",
       message_id: "incomplete-timeout-response",
       chunk_index: 1,
       chunk_count: 2,
@@ -2895,6 +3193,38 @@ const realTransport = createRealHubDogfoodTransport({ bridge });
 const realFrames = [];
 await realTransport.connect({ client: "botster-web", capabilities: [] }, (frame) => realFrames.push(frame));
 await flushMicrotasks();
+await realTransport.send({ kind: "subscribe", payload: {} });
+await realTransport.send({ kind: "entity_pull", payload: { family: "botster-web.session" } });
+bridgeEntitySubscriptions[0].onFrame({
+  type: "entity_upsert",
+  subscription_id: "bridge-session-generation-1",
+  entity_type: "session",
+  snapshot_seq: 1,
+  id: "external-session",
+  entity: {
+    session_uuid: "external-session",
+    registry_state: "active",
+    lifecycle: "running",
+    rows: 24,
+    cols: 80,
+    updated_at: 1
+  }
+});
+bridgeEntitySubscriptions[0].onFrame({
+  type: "entity_patch",
+  subscription_id: "bridge-session-generation-1",
+  entity_type: "session",
+  snapshot_seq: 2,
+  id: "external-session",
+  patch: { rows: 31, cols: 101, updated_at: 2 }
+});
+bridgeEntitySubscriptions[0].onFrame({
+  type: "entity_remove",
+  subscription_id: "bridge-session-generation-1",
+  entity_type: "session",
+  snapshot_seq: 3,
+  id: "external-session"
+});
 await realTransport.send({ kind: "surface_subscribe", payload: { surface: "botster-web.dogfood.session" } });
 await flushMicrotasks();
 await realTransport.send({ kind: "entity_pull", payload: { family: "botster-web.app" } });
@@ -3065,7 +3395,17 @@ for (const action of [
   await flushMicrotasks();
 }
 assert.equal(bridgeRequests.some((request) => request.type === "status"), true);
-assert.equal(bridgeRequests.some((request) => request.type === "list_sessions"), true);
+assert.equal(bridgeRequests.some((request) => request.type === "list_sessions"), false);
+assert.equal(bridgeEntitySubscriptions.length, 1);
+assert.equal(
+  realFrames.some(
+    (frame) =>
+      frame.kind === "entity_snapshot" &&
+      frame.payload.family === "botster-web.session" &&
+      frame.payload.records.length === 0
+  ),
+  true
+);
 assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "spawn" && request.session_id === realHubDogfoodSessionId), true);
 const configSaveRequests = bridgeRequests.filter((request) => request.type === "set_package_configuration");
@@ -3330,6 +3670,20 @@ assert.equal(
 assert.equal(
   daemonResponseFrames({ kind: "sessions", sessions: [], packages: [], events: [] }, 21)
     .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session"),
+  false
+);
+assert.equal(
+  daemonResponseFrames({
+    kind: "spawned",
+    sessions: [{ session_id: "spawned-target", lifecycle: "running" }],
+    packages: [],
+    events: []
+  }, 22).some(
+    (frame) =>
+      frame.kind === "entity_upsert" &&
+      frame.payload.key.family === "botster-web.session" &&
+      frame.payload.key.id === "spawned-target"
+  ),
   true
 );
 
@@ -3357,6 +3711,16 @@ for (const frame of daemonResponseFrames({
     realRuntime.entities.apply(frame.payload);
   }
 }
+assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).status, "running");
+const authoritativeExitFrame = daemonEntityFrame({
+  type: "entity_patch",
+  subscription_id: "bridge-session-generation-2",
+  entity_type: "session",
+  snapshot_seq: 2,
+  id: realHubDogfoodSessionId,
+  patch: { registry_state: "exited", exit_code: 0, updated_at: 2 }
+});
+realRuntime.entities.apply(authoritativeExitFrame.payload);
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).status, "exited");
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attachable, false);
 assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.disabled, true);
@@ -4146,8 +4510,8 @@ assert.equal(
   2
 );
 assert.equal(
-  bridgeRequests.filter((request) => request.type === "list_sessions").length >= 2,
-  true
+  bridgeRequests.filter((request) => request.type === "list_sessions").length,
+  0
 );
 
 const byteOnlyTerminalStatuses = [];
@@ -4216,19 +4580,10 @@ assert.equal(byteOnlyTerminalStatuses.some((status) => status.state === "live_on
 
 const delayedBridgeRequests = [];
 const delayedBridgeTerminalStreams = [];
-let delayedListSessions = 0;
 const delayedTerminalDataPlane = createRealHubTerminalDataPlane({
   bridge: {
     async request(request) {
       delayedBridgeRequests.push(request);
-      if (request.type === "list_sessions") {
-        delayedListSessions += 1;
-        return {
-          kind: "sessions",
-          sessions: delayedListSessions >= 3 ? [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }] : [],
-          events: []
-        };
-      }
       return { kind: "events", events: [] };
     },
     streamTerminal(sessionId, subscriptionId, onEvent) {
@@ -4258,7 +4613,7 @@ assert.equal(delayedStatuses.some((status) => status.state === "live_only"), tru
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize").length, 1);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].rows, 9);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].cols, 34);
-assert.equal(delayedBridgeRequests.filter((request) => request.type === "list_sessions").length, 3);
+assert.equal(delayedBridgeRequests.filter((request) => request.type === "list_sessions").length, 0);
 assert.equal(delayedBridgeTerminalStreams.length, 1);
 
 const terminalWithoutStream = createRealHubTerminalDataPlane({
@@ -6203,14 +6558,20 @@ try {
       realHubStore.apply(frame.payload);
     }
   }
-  for (const frame of daemonResponseFrames({
-    kind: "sessions",
-    sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }]
-  }, 14)) {
-    if (frame.kind === "entity_snapshot") {
-      realHubStore.apply(frame.payload);
-    }
-  }
+  realHubStore.apply(daemonEntityFrame({
+    type: "entity_snapshot",
+    subscription_id: "render-session-generation",
+    entity_type: "session",
+    snapshot_seq: 14,
+    items: [{
+      session_uuid: realHubDogfoodSessionId,
+      registry_state: "active",
+      lifecycle: "running",
+      rows: 24,
+      cols: 80,
+      updated_at: 1
+    }]
+  }).payload);
   for (const frame of daemonResponseFrames(generatedAppResponseFixture, 15)) {
     if (frame.kind === "entity_snapshot") {
       realHubStore.apply(frame.payload);
@@ -6845,9 +7206,10 @@ function createFakePeerConnection(dataChannel) {
   };
 }
 
-function createWebrtcTestClient(dataChannels, bootstrap) {
+function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
   let nextDataChannel = 0;
   return createWebrtcDaemonClient({
+    ...options,
     bootstrap,
     peerConnectionFactory: () => createFakePeerConnection(dataChannels[nextDataChannel++]),
     fetchImpl: async () => ({
@@ -6903,7 +7265,8 @@ async function chunkedTestResponse(secret, response, options = {}) {
   const chunkPayloadBytes = options.chunkPayloadBytes ?? envelope.length;
   const payloads = chunkUtf8Payload(envelope, chunkPayloadBytes);
   return payloads.map((payload, chunkIndex) => ({
-    version: 1,
+    version: 2,
+    delivery_kind: options.deliveryKind ?? "daemon_response",
     message_id: options.messageId ?? `response-test-${++nextTestResponseMessageId}`,
     chunk_index: chunkIndex,
     chunk_count: payloads.length,
