@@ -7,6 +7,7 @@ import type {
   DaemonBridgeResponseEnvelope,
   DaemonApp,
   DaemonDiagnostic,
+  DaemonEntityFrame,
   DaemonEvent,
   DaemonOperatorError,
   DaemonAvailablePackage,
@@ -21,6 +22,7 @@ import type {
   DaemonRequest,
   DaemonResponse,
   DaemonSession,
+  DaemonSessionEntity,
   JsonValue
 } from "./realHubDaemonDto";
 import type { UiTreeSnapshot } from "./uiNodes";
@@ -53,6 +55,10 @@ export interface DaemonBridgeClient {
   request(request: DaemonRequest): Promise<DaemonResponse>;
   disconnect?(): void;
   subscribeEvents?(onEvent: (event: DaemonEvent) => void): { unsubscribe(): void };
+  subscribeEntityFrames?(
+    entityType: string,
+    onFrame: (frame: DaemonEntityFrame) => void
+  ): { ready: Promise<void>; unsubscribe(): void };
   streamTerminal?(
     sessionId: string,
     subscriptionId: string,
@@ -154,12 +160,25 @@ export function createRealHubDogfoodTransport({
     }
   };
   let daemonEventSubscription: { unsubscribe(): void } | undefined;
+  let sessionEntitySubscription: { ready: Promise<void>; unsubscribe(): void } | undefined;
+  const ensureSessionEntitySubscription = () => {
+    if (!sessionEntitySubscription) {
+      if (!bridge.subscribeEntityFrames) {
+        throw new Error("session entity subscription requires the WebRTC entity-frame delivery path");
+      }
+      sessionEntitySubscription = bridge.subscribeEntityFrames("session", (frame) => {
+        const projected = daemonEntityFrame(frame);
+        if (projected) emit(projected);
+      });
+    }
+    return sessionEntitySubscription.ready;
+  };
 
   return {
     async connect(_capabilities, nextIngress) {
       ingress = nextIngress;
       daemonEventSubscription = bridge.subscribeEvents?.((event) => {
-        const frame = daemonEventFrame(event, sequence++);
+        const frame = daemonEventFrame(event);
         if (frame) {
           emit(frame);
         }
@@ -170,19 +189,20 @@ export function createRealHubDogfoodTransport({
     async disconnect() {
       daemonEventSubscription?.unsubscribe();
       daemonEventSubscription = undefined;
+      sessionEntitySubscription?.unsubscribe();
+      sessionEntitySubscription = undefined;
       ingress = undefined;
       bridge.disconnect?.();
     },
     async send(frame) {
       if (frame.kind === "subscribe") {
-        emitResponse(await bridge.request({ type: "list_sessions" }));
+        await ensureSessionEntitySubscription();
         return;
       }
 
       if (frame.kind === "surface_subscribe") {
         emit({ kind: "ui_tree_snapshot", payload: realHubDogfoodUiTreeSnapshot });
         emitResponse(await bridge.request({ type: "status" }));
-        emitResponse(await bridge.request({ type: "list_sessions" }));
         return;
       }
 
@@ -191,7 +211,7 @@ export function createRealHubDogfoodTransport({
         if (request.family === statusFamily) {
           emitResponse(await bridge.request({ type: "status" }));
         } else if (request.family === sessionFamily) {
-          emitResponse(await bridge.request({ type: "list_sessions" }));
+          await ensureSessionEntitySubscription();
         } else if (request.family === appFamily) {
           emitResponse(await bridge.request({ type: "list_apps" }));
         } else if (request.family === packageNavigationFamily) {
@@ -247,16 +267,17 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
     });
   }
 
-  if (responseOwnsSessions(response) && Array.isArray(response.sessions)) {
-    frames.push({
-      kind: "entity_snapshot",
-      payload: {
-        operation: "entity_snapshot",
-        family: sessionFamily,
-        sequence,
-        records: response.sessions.map(sessionRecord)
-      } satisfies EntityFrame
-    });
+  if (response.kind === "spawned" && Array.isArray(response.sessions)) {
+    for (const session of response.sessions) {
+      frames.push({
+        kind: "entity_upsert",
+        payload: {
+          operation: "entity_upsert",
+          key: { family: sessionFamily, id: session.session_id },
+          record: sessionRecord(session)
+        } satisfies EntityFrame
+      });
+    }
   }
 
   if (responseOwnsApps(response)) {
@@ -322,10 +343,8 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
 
   if (Array.isArray(response.events)) {
     for (const event of response.events) {
-      const frame = daemonEventFrame(event, sequence);
-      if (frame) {
-        frames.push(frame);
-      }
+      const frame = daemonEventFrame(event);
+      if (frame) frames.push(frame);
     }
   }
 
@@ -338,10 +357,6 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
   }
 
   return frames;
-}
-
-function responseOwnsSessions(response: DaemonResponse): boolean {
-  return response.kind === "sessions" || response.kind === "spawned";
 }
 
 function responseOwnsApps(response: DaemonResponse): boolean {
@@ -384,37 +399,7 @@ function isDaemonSpawnTarget(value: unknown): value is DaemonSpawnTarget {
   );
 }
 
-export function daemonEventFrame(event: DaemonEvent, sequence: number): HubControlFrame | undefined {
-  if (event.type === "session_lifecycle") {
-    return {
-      kind: "entity_patch",
-      payload: {
-        operation: "entity_patch",
-        key: { family: sessionFamily, id: event.session_id },
-        sequence,
-        record: {
-          ...sessionAttachFields(event.session_id, event.state),
-          last_result: `session ${event.state}`
-        }
-      } satisfies EntityFrame
-    };
-  }
-
-  if (event.type === "process_exit") {
-    return {
-      kind: "entity_patch",
-      payload: {
-        operation: "entity_patch",
-        key: { family: sessionFamily, id: event.session_id },
-        sequence,
-        record: {
-          ...sessionAttachFields(event.session_id, "exited"),
-          last_result: `process exited${typeof event.code === "number" ? ` with ${event.code}` : ""}`
-        }
-      } satisfies EntityFrame
-    };
-  }
-
+export function daemonEventFrame(event: DaemonEvent): HubControlFrame | undefined {
   if (event.type === "runtime_observation") {
     return connectionDiagnosticFrame({
       kind: event.kind,
@@ -423,6 +408,65 @@ export function daemonEventFrame(event: DaemonEvent, sequence: number): HubContr
   }
 
   return undefined;
+}
+
+export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | undefined {
+  if (frame.entity_type !== "session") return undefined;
+
+  if (frame.type === "entity_snapshot") {
+    return {
+      kind: "entity_snapshot",
+      payload: {
+        operation: "entity_snapshot",
+        family: sessionFamily,
+        sequence: frame.snapshot_seq,
+        records: frame.items.map(sessionEntityRecord)
+      } satisfies EntityFrame
+    };
+  }
+
+  if (frame.type === "entity_remove") {
+    return {
+      kind: "entity_remove",
+      payload: {
+        operation: "entity_remove",
+        key: { family: sessionFamily, id: frame.id },
+        sequence: frame.snapshot_seq
+      } satisfies EntityFrame
+    };
+  }
+
+  if (frame.type === "entity_upsert") {
+    return {
+      kind: "entity_upsert",
+      payload: {
+        operation: "entity_upsert",
+        key: { family: sessionFamily, id: frame.id },
+        sequence: frame.snapshot_seq,
+        record: sessionEntityRecord(frame.entity)
+      } satisfies EntityFrame
+    };
+  }
+
+  const patch = isRecord(frame.patch) ? frame.patch : {};
+  const lifecycle = typeof patch.lifecycle === "string"
+    ? patch.lifecycle
+    : typeof patch.registry_state === "string"
+      ? patch.registry_state
+      : undefined;
+  return {
+    kind: "entity_patch",
+    payload: {
+      operation: "entity_patch",
+      key: { family: sessionFamily, id: frame.id },
+      sequence: frame.snapshot_seq,
+      record: {
+        ...patch,
+        id: frame.id,
+        ...(lifecycle ? sessionAttachFields(frame.id, lifecycle) : {})
+      }
+    } satisfies EntityFrame
+  };
 }
 
 function statusRecord(
@@ -449,6 +493,23 @@ function sessionRecord(session: DaemonSession) {
     target: "isolated-local-hub",
     last_result: `daemon session ${session.lifecycle}`,
     ...sessionAttachFields(session.session_id, session.lifecycle)
+  };
+}
+
+function sessionEntityRecord(session: DaemonSessionEntity) {
+  const lifecycle = session.lifecycle ?? session.registry_state;
+  return {
+    session_uuid: session.session_uuid,
+    registry_state: session.registry_state,
+    rows: session.rows,
+    cols: session.cols,
+    updated_at: session.updated_at,
+    exit_code: session.exit_code,
+    failure_reason: session.failure_reason,
+    title: session.session_uuid,
+    target: "isolated-local-hub",
+    last_result: `daemon session ${lifecycle}`,
+    ...sessionAttachFields(session.session_uuid, lifecycle)
   };
 }
 

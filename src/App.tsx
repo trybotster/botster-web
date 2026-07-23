@@ -817,6 +817,7 @@ export default function App() {
   const [selectedPluginSurface, setSelectedPluginSurface] = useState<SelectedPluginSurface | undefined>();
   const lastPluginRouteRenderKey = useRef<string | undefined>(undefined);
   const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
+  const [pendingSessionId, setPendingSessionId] = useState<string | undefined>();
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
     setLocalState((current) => ({ ...current, ...patch }));
@@ -974,8 +975,10 @@ export default function App() {
     (action: ActionBinding) => {
       const isSpawnAction = action.id === "botster.session.select" && action.target === realHubDogfoodSessionId;
       const statusKey = isSpawnAction ? "dogfood.action_status" : "dogfood.diagnostic_action_status";
+      if (isSpawnAction) setPendingSessionId(realHubDogfoodSessionId);
       updateLocalState({ [statusKey]: `Dispatching ${action.id}` });
       void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
+        if (isSpawnAction) setPendingSessionId(undefined);
         const isAttachAction = action.id === "botster.session.attach";
         if (result.accepted && isAttachAction && action.target) {
           setSelectedRealHubTerminalSessionId(action.target);
@@ -1020,6 +1023,11 @@ export default function App() {
           ...(renderedSurface?.status ? { "dogfood.plugin_surface_status": visibleStatusText(renderedSurface.status) } : {})
         });
         recordDiagnostic(actionFailureDiagnostic(action, result));
+      }).catch((error: unknown) => {
+        if (isSpawnAction) setPendingSessionId(undefined);
+        updateLocalState({
+          [statusKey]: error instanceof Error ? error.message : `Rejected ${action.id}`
+        });
       });
     },
     [recordDiagnostic, runtimeClient, updateLocalState]
@@ -1405,6 +1413,19 @@ export default function App() {
   }, [navigateToHubRoutePath, navigateToPluginSurface]);
   const packageNavigationShortcuts = packageNavigation;
   const sessions = runtimeClient.entities.list("botster-web.session");
+  const sessionsWithPending = pendingSessionId && !sessions.some((session) => session.id === pendingSessionId)
+    ? [
+        ...sessions,
+        {
+          id: pendingSessionId,
+          title: pendingSessionId,
+          status: "pending",
+          attachable: false,
+          attach_status: "Waiting for authoritative hub session state",
+          client_local: true
+        }
+      ]
+    : sessions;
   const attachableDogfoodSession = sessions.find((session) => session.id === realHubDogfoodSessionId && isAttachableSession(session));
   const selectedRealHubSession = selectedRealHubTerminalSessionId
     ? sessions.find((session) => session.id === selectedRealHubTerminalSessionId)
@@ -1679,7 +1700,7 @@ export default function App() {
                     diagnostics={diagnostics}
                     packages={packages}
                     packageLoadStatus={entityLoadStatus.package}
-                    sessions={sessions}
+                    sessions={sessionsWithPending}
                     sessionLoadStatus={entityLoadStatus.session}
                     actionStatus={actionStatus}
                   />

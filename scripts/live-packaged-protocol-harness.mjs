@@ -131,7 +131,17 @@ try {
   if (transportMode === "webrtc") {
     await waitForRemoteAccessPackageConfiguration(page);
   }
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, "list_sessions request");
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "subscribe_entities", entity_type: "session" },
+    "session entity subscription request"
+  );
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "botster-web.session" },
+    "authoritative session snapshot"
+  );
+  await assertNoLegacySessionHydration(page);
   await openAppsView(page);
   if (transportMode === "webrtc") {
     await assertRemoteAccessSettingsDispatch(page);
@@ -162,18 +172,30 @@ try {
   await openDiagnosticsView(page);
 
   await page.getByRole("button", { name: "Spawn botster-web-dogfood-session to terminal" }).click();
+  await page.getByText("Pending").first().waitFor();
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "spawn" }, "spawn request");
   await waitForSessionStatus(page, "running");
   await waitForSessionAttachable(page, true);
   await page.getByText("Attachable").waitFor();
+  if (transportMode === "webrtc") {
+    await proveExternalSessionLifecycle(page);
+  }
   await waitForTerminalSession(page, "botster-web-dogfood-session");
   responseAssemblyTelemetry.push({ cycle: 0, ...await waitForAutomaticTerminalRestore(page) });
   await proveLiveTerminalAfterAttach(page, `${attachProbe}-0`);
   attachChronology.push({ cycle: 0, ...await assertTerminalAttachChronology(page, "botster-web-dogfood-session") });
 
   let previousGrantId = await latestLocalWebrtcGrantId(page);
+  let previousEntitySubscriptionId = await latestSessionEntitySubscriptionId(page);
   for (const cycle of [1, 2]) {
-    previousGrantId = await reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId);
+    const reconnect = await reloadSamePackageUrlAndAssertWebrtc(
+      page,
+      cycle,
+      previousGrantId,
+      previousEntitySubscriptionId
+    );
+    previousGrantId = reconnect.grantId;
+    previousEntitySubscriptionId = reconnect.subscriptionId;
     await openDiagnosticsView(page);
     await waitForSessionStatus(page, "running");
     await waitForSessionAttachable(page, true);
@@ -242,9 +264,7 @@ try {
 
   await callTerminalControl(page, "writeInput", "botster-web-dogfood-exit\n");
   await waitForTerminalOutput(page, "botster-web-dogfood-exiting");
-  await waitForProcessExitProof(page);
-  await waitForSessionStatus(page, "exited");
-  await page.getByText("Exited sessions cannot attach").waitFor();
+  await shutdownDogfoodSession();
   await waitForTerminalDetached(page);
 
   await assertNoUnknownSession(page);
@@ -561,7 +581,7 @@ async function revisitPackageRuntime(page) {
   await page.goto(withDogfoodMode(appUrl), { waitUntil: "domcontentloaded" });
 }
 
-async function reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId) {
+async function reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId, previousEntitySubscriptionId) {
   const expectedUrl = withDogfoodMode(appUrl);
   const beforeUrl = page.url();
   if (new URL(beforeUrl).origin !== new URL(expectedUrl).origin) {
@@ -599,8 +619,25 @@ async function reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId)
   await page.getByText("Encrypted client stream ready").waitFor({ timeout: 15_000 });
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, `reload ${cycle} status request`);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, `reload ${cycle} list_packages request`);
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_sessions" }, `reload ${cycle} list_sessions request`);
-  return grantId;
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "subscribe_entities", entity_type: "session" },
+    `reload ${cycle} session entity subscription`
+  );
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "botster-web.session" },
+    `reload ${cycle} authoritative session snapshot`
+  );
+  const subscriptionId = await latestSessionEntitySubscriptionId(page);
+  if (!subscriptionId) {
+    throw new Error(`same-URL reload cycle ${cycle} did not create a session entity subscription`);
+  }
+  if (previousEntitySubscriptionId && subscriptionId === previousEntitySubscriptionId) {
+    throw new Error(`same-URL reload cycle ${cycle} reused session subscription_id ${subscriptionId}`);
+  }
+  await assertNoLegacySessionHydration(page);
+  return { grantId, subscriptionId };
 }
 
 async function callTerminalControl(page, method, ...args) {
@@ -1572,7 +1609,13 @@ async function waitForHarnessEvent(page, criteria, label) {
           framePayload.record?.status !== expectedCriteria.status &&
           !framePayload.records?.some((record) => record.status === expectedCriteria.status)
         ) return false;
+        if (
+          typeof expectedCriteria.attachable === "boolean" &&
+          framePayload.record?.attachable !== expectedCriteria.attachable &&
+          !framePayload.records?.some((record) => record.attachable === expectedCriteria.attachable)
+        ) return false;
         if (expectedCriteria.type && payload.type !== expectedCriteria.type) return false;
+        if (expectedCriteria.entity_type && payload.entity_type !== expectedCriteria.entity_type) return false;
         if (expectedCriteria.package_name && payload.package_name !== expectedCriteria.package_name) return false;
         if (expectedCriteria.package_name_pattern && !new RegExp(expectedCriteria.package_name_pattern).test(payload.package_name)) return false;
         if (expectedCriteria.surface_id && payload.surface_id !== expectedCriteria.surface_id) return false;
@@ -1598,6 +1641,88 @@ async function latestLocalWebrtcGrantId(page) {
       .filter((grantId) => typeof grantId === "string");
     return requests.at(-1) ?? null;
   });
+}
+
+async function latestSessionEntitySubscriptionId(page) {
+  return page.evaluate(() => {
+    const requests = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter(
+        (entry) =>
+          entry.kind === "daemon_request" &&
+          entry.payload?.type === "subscribe_entities" &&
+          entry.payload?.entity_type === "session"
+      )
+      .map((entry) => entry.payload?.subscription_id)
+      .filter((subscriptionId) => typeof subscriptionId === "string");
+    return requests.at(-1) ?? null;
+  });
+}
+
+async function assertNoLegacySessionHydration(page) {
+  const legacyRequests = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "list_sessions")
+      .map((entry) => entry.payload)
+  );
+  if (legacyRequests.length > 0) {
+    throw new Error(`session lifecycle used legacy list_sessions hydration: ${JSON.stringify(legacyRequests)}`);
+  }
+}
+
+async function proveExternalSessionLifecycle(page) {
+  if (!webrtcDataDir) throw new Error("external session proof requires a WebRTC hub data directory");
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  const sessionId = "botster-web-external-session";
+  const spawnResponse = await sendDaemonRequest(socketPath, {
+    type: "spawn",
+    session_id: sessionId,
+    command: "sleep 30"
+  });
+  if (spawnResponse.error) {
+    throw new Error(`external session spawn failed: ${JSON.stringify(spawnResponse.error)}`);
+  }
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "botster-web.session", id: sessionId, status: "running" },
+    "externally spawned session upsert"
+  );
+  await page.getByText(sessionId, { exact: true }).first().waitFor();
+  const shutdownResponse = await sendDaemonRequest(socketPath, {
+    type: "shutdown_session",
+    session_id: sessionId
+  });
+  if (shutdownResponse.error) {
+    throw new Error(`external session shutdown failed: ${JSON.stringify(shutdownResponse.error)}`);
+  }
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "botster-web.session", id: sessionId, status: "exited" },
+    "external session exit patch"
+  );
+  const removeResponse = await sendDaemonRequest(socketPath, {
+    type: "remove_session",
+    session_id: sessionId
+  });
+  if (removeResponse.error) {
+    throw new Error(`external session removal failed: ${JSON.stringify(removeResponse.error)}`);
+  }
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", frameKind: "entity_remove", family: "botster-web.session", id: sessionId },
+    "external session removal"
+  );
+  await page.getByText(sessionId, { exact: true }).first().waitFor({ state: "detached" });
+}
+
+async function shutdownDogfoodSession() {
+  if (!webrtcDataDir) throw new Error("session shutdown proof requires a WebRTC hub data directory");
+  const response = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
+    type: "shutdown_session",
+    session_id: "botster-web-dogfood-session"
+  });
+  if (response.error) {
+    throw new Error(`dogfood session shutdown failed: ${JSON.stringify(response.error)}`);
+  }
 }
 
 async function assertNoGrantSecretLeak(page, cycle) {
@@ -1989,31 +2114,6 @@ async function waitForResizeProof(page, requestedResize) {
   );
 }
 
-async function waitForProcessExitProof(page) {
-  await page.waitForFunction(
-    () => {
-      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      return events.some((entry) => {
-        if (entry.kind === "daemon_event" && entry.payload?.type === "process_exit") {
-          return true;
-        }
-        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "entity_snapshot") {
-          return false;
-        }
-        const payload = entry.payload.payload;
-        return (
-          payload?.family === "botster-web.session" &&
-          payload.records?.some((record) => record.id === "botster-web-dogfood-session" && record.status === "exited")
-        );
-      });
-    },
-    undefined,
-    { timeout: 45_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for process exit proof: ${error.message}`);
-  });
-}
-
 async function waitForSessionStatus(page, status) {
   await waitForHarnessEvent(
     page,
@@ -2028,28 +2128,17 @@ async function waitForSessionStatus(page, status) {
 }
 
 async function waitForSessionAttachable(page, attachable) {
-  await page.waitForFunction(
-    ({ expectedAttachable }) => {
-      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      return events.some((entry) => {
-        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "entity_snapshot") return false;
-        const payload = entry.payload.payload;
-        return (
-          payload?.family === "botster-web.session" &&
-          payload.records?.some(
-            (record) =>
-              record.id === "botster-web-dogfood-session" &&
-              record.status === "running" &&
-              record.attachable === expectedAttachable
-          )
-        );
-      });
+  await waitForHarnessEvent(
+    page,
+    {
+      kind: "hub_frame",
+      family: "botster-web.session",
+      id: "botster-web-dogfood-session",
+      status: "running",
+      attachable
     },
-    { expectedAttachable: attachable },
-    { timeout: 15_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for restored session attachable=${attachable}: ${error.message}`);
-  });
+    `restored session attachable=${attachable}`
+  );
 }
 
 async function waitForTerminalAttachState(page, states) {
