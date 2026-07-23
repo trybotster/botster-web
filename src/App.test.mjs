@@ -1081,6 +1081,7 @@ await Promise.all([
 
 const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
 const { createBotsterWebClient } = requireRuntime("./botster/client.js");
+const { createInMemoryEntityFrameStore } = requireRuntime("./botster/entities.js");
 const { createLocalDogfoodTransport } = requireRuntime("./botster/localDogfoodTransport.js");
 const { createDogfoodRuntimeConfig, terminalDataPlaneLabel } = requireRuntime("./botster/dogfoodMode.js");
 const {
@@ -3672,20 +3673,36 @@ assert.equal(
     .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session"),
   false
 );
-assert.equal(
-  daemonResponseFrames({
+const optimisticSpawnFrame = daemonResponseFrames({
     kind: "spawned",
     sessions: [{ session_id: "spawned-target", lifecycle: "running" }],
     packages: [],
     events: []
-  }, 22).some(
-    (frame) =>
-      frame.kind === "entity_upsert" &&
-      frame.payload.key.family === "botster-web.session" &&
-      frame.payload.key.id === "spawned-target"
-  ),
-  true
+  }, 22).find(
+  (frame) =>
+    frame.kind === "entity_upsert" &&
+    frame.payload.key.family === "botster-web.session" &&
+    frame.payload.key.id === "spawned-target"
 );
+assert.ok(optimisticSpawnFrame);
+assert.equal(optimisticSpawnFrame.payload.sequence, undefined);
+const optimisticSpawnStore = createInMemoryEntityFrameStore();
+optimisticSpawnStore.apply({
+  operation: "entity_snapshot",
+  family: "botster-web.session",
+  sequence: 0,
+  records: []
+});
+optimisticSpawnStore.apply(optimisticSpawnFrame.payload);
+optimisticSpawnStore.apply(daemonEntityFrame({
+  type: "entity_patch",
+  subscription_id: "spawn-regression-subscription",
+  entity_type: "session",
+  snapshot_seq: 1,
+  id: "spawned-target",
+  patch: { registry_state: "exited", exit_code: 0, updated_at: 2 }
+}).payload);
+assert.equal(optimisticSpawnStore.get("botster-web.session", "spawned-target").status, "exited");
 
 const attachSuccess = realRuntime.actions.dispatch({
   origin: "ui_node",

@@ -142,9 +142,6 @@ try {
     "authoritative session snapshot"
   );
   await assertNoLegacySessionHydration(page);
-  if (transportMode === "webrtc") {
-    await proveExternalSessionLifecycle(page);
-  }
   await openAppsView(page);
   if (transportMode === "webrtc") {
     await assertRemoteAccessSettingsDispatch(page);
@@ -180,6 +177,9 @@ try {
   await waitForSessionStatus(page, "running");
   await waitForSessionAttachable(page, true);
   await page.getByText("Attachable").waitFor();
+  if (transportMode === "webrtc") {
+    await proveExternalSessionLifecycle(page);
+  }
   await waitForTerminalSession(page, "botster-web-dogfood-session");
   responseAssemblyTelemetry.push({ cycle: 0, ...await waitForAutomaticTerminalRestore(page) });
   await proveLiveTerminalAfterAttach(page, `${attachProbe}-0`);
@@ -1686,6 +1686,7 @@ async function proveExternalSessionLifecycle(page) {
     { kind: "hub_frame", family: "botster-web.session", id: sessionId, status: "running" },
     "externally spawned session upsert"
   );
+  await page.getByText(sessionId, { exact: true }).first().waitFor();
   const shutdownResponse = await sendDaemonRequest(socketPath, {
     type: "shutdown_session",
     session_id: sessionId
@@ -1710,6 +1711,7 @@ async function proveExternalSessionLifecycle(page) {
     { kind: "hub_frame", frameKind: "entity_remove", family: "botster-web.session", id: sessionId },
     "external session removal"
   );
+  await page.getByText(sessionId, { exact: true }).first().waitFor({ state: "detached" });
 }
 
 async function shutdownDogfoodSession() {

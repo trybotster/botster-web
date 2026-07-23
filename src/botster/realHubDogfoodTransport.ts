@@ -274,7 +274,6 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
         payload: {
           operation: "entity_upsert",
           key: { family: sessionFamily, id: session.session_id },
-          sequence,
           record: sessionRecord(session)
         } satisfies EntityFrame
       });
