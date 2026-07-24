@@ -20,13 +20,32 @@ const outputListeners = new Set<(data: TerminalOutput) => void>();
 const statusListeners = new Set<(status: TerminalAttachmentStatus) => void>();
 
 type MountedKeyboardHarness = {
+  callbackOrder: string[];
+  emitOutput(data: string): void;
+  emitStatus(status: TerminalAttachmentStatus): void;
+  exitSessions: string[];
   inputs: string[];
+  statuses: Array<{ sessionId: string; state: TerminalAttachmentStatus["state"] }>;
   terminal: Array<{ kind: string; payload: unknown }>;
   outputSubscribers: number;
 };
 
 const harness: MountedKeyboardHarness = {
+  callbackOrder: [],
+  emitOutput(data) {
+    for (const listener of outputListeners) {
+      listener(data);
+    }
+    harness.callbackOrder.push(`output:${data}`);
+  },
+  emitStatus(status) {
+    for (const listener of statusListeners) {
+      listener(status);
+    }
+  },
+  exitSessions: [],
   inputs: [],
+  statuses: [],
   terminal: [],
   outputSubscribers: 0
 };
@@ -100,5 +119,15 @@ if (!rootElement) {
 }
 
 createRoot(rootElement).render(
-  <TerminalViewHost descriptor={descriptor} dataPlane={dataPlane} />
+  <TerminalViewHost
+    descriptor={descriptor}
+    dataPlane={dataPlane}
+    onAttachmentStatus={(sessionId, status) => {
+      harness.statuses.push({ sessionId, state: status.state });
+    }}
+    onExit={(sessionId) => {
+      harness.exitSessions.push(sessionId);
+      harness.callbackOrder.push(`exit:${sessionId}`);
+    }}
+  />
 );

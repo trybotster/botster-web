@@ -11,9 +11,16 @@ export function isAttachableSession(
 
 export function resolveTerminalSessionId(
   sessions: Record<string, unknown>[],
-  retainedSessionId?: string
+  retainedSessionId?: string,
+  attachedSessionId?: string
 ): string | undefined {
-  if (retainedSessionId && sessions.some((session) => session.id === retainedSessionId)) {
+  const retainedSession = retainedSessionId
+    ? sessions.find((session) => session.id === retainedSessionId)
+    : undefined;
+  if (
+    retainedSession &&
+    (retainedSessionId === attachedSessionId || isAttachableSession(retainedSession))
+  ) {
     return retainedSessionId;
   }
 

@@ -242,7 +242,8 @@ assert.match(app, /isAttachableSession/);
 assert.match(app, /hubRuntime\.createTerminalDataPlane\(terminalDescriptor\.sessionId\)/);
 assert.match(app, /descriptor=\{terminalDescriptor\}/);
 assert.match(app, /dataPlane=\{terminalDataPlane\}/);
-assert.match(app, /onExit=\{releaseExitedTerminalSession\}/);
+assert.match(app, /onAttachmentStatus=\{recordTerminalAttachmentStatus\}/);
+assert.match(app, /onExit=\{releaseTerminalSession\}/);
 assert.match(app, /Select a running session to attach the terminal panel/);
 assert.match(app, /onDiagnostic=\{recordTerminalDiagnostic\}/);
 assert.doesNotMatch(app, /terminal-placeholder/);
@@ -510,6 +511,7 @@ assert.match(terminalHost, /data-terminal-attach-state/);
 assert.match(terminalHost, /subscribeStatus/);
 assert.match(terminalHost, /status\.state === "exited"/);
 assert.match(terminalHost, /onExitRef\.current\?\.\(descriptor\.sessionId\)/);
+assert.match(terminalHost, /onAttachmentStatusRef\.current\?\.\(descriptor\.sessionId, status\)/);
 assert.match(terminalHost, /bridge\.attach/);
 assert.match(terminalHost, /focus: \(\) => bridge\.focus\(descriptor\)/);
 assert.match(terminalHost, /bridge\.unmount/);
@@ -4416,11 +4418,19 @@ try {
   assert.equal(resolveTerminalSessionId([exitedTerminalSession]), undefined);
   assert.equal(
     resolveTerminalSessionId([exitedTerminalSession], activeHubSessionId),
-    activeHubSessionId
+    undefined
   );
   assert.equal(
     resolveTerminalSessionId(
       [exitedTerminalSession, { id: "next-running-session", status: "running", attachable: true }],
+      activeHubSessionId
+    ),
+    "next-running-session"
+  );
+  assert.equal(
+    resolveTerminalSessionId(
+      [exitedTerminalSession, { id: "next-running-session", status: "running", attachable: true }],
+      activeHubSessionId,
       activeHubSessionId
     ),
     activeHubSessionId

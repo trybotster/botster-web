@@ -72,7 +72,7 @@ import { createHubRuntimeConfig } from "./botster/hubRuntime";
 import { webRtcDaemonLifecycleEventName, type LocalWebrtcBootstrap, type WebrtcDaemonLifecycleEvent } from "./botster/webrtcDaemonClient";
 import type { ActionBinding } from "./botster/actions";
 import type { EntityFrameStore } from "./botster/entities";
-import type { TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
+import type { TerminalAttachmentStatus, TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import { isAttachableSession, resolveTerminalSessionId } from "./botster/terminalSession";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
 import { configurationFieldType, configurationSaveAction } from "./packageConfigurationForm";
@@ -820,6 +820,7 @@ export default function App() {
   const [selectedPluginSurface, setSelectedPluginSurface] = useState<SelectedPluginSurface | undefined>();
   const lastPluginRouteRenderKey = useRef<string | undefined>(undefined);
   const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
+  const attachedRealHubTerminalSessionId = useRef<string | undefined>(undefined);
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
     setLocalState((current) => ({ ...current, ...patch }));
@@ -913,7 +914,8 @@ export default function App() {
         setSelectedRealHubTerminalSessionId((currentSessionId) =>
           resolveTerminalSessionId(
             runtimeClient.entities.list("botster-web.session"),
-            currentSessionId
+            currentSessionId,
+            attachedRealHubTerminalSessionId.current
           )
         );
         setFrameVersion((version) => version + 1);
@@ -1422,11 +1424,26 @@ export default function App() {
       label: "Open session"
     });
   }, [dispatchAction]);
-  const releaseExitedTerminalSession = useCallback((sessionId: string) => {
+  const releaseTerminalSession = useCallback((sessionId: string) => {
+    if (attachedRealHubTerminalSessionId.current === sessionId) {
+      attachedRealHubTerminalSessionId.current = undefined;
+    }
     setSelectedRealHubTerminalSessionId((currentSessionId) =>
-      currentSessionId === sessionId ? undefined : currentSessionId
+      currentSessionId === sessionId
+        ? resolveTerminalSessionId(runtimeClient.entities.list("botster-web.session"))
+        : currentSessionId
     );
-  }, []);
+  }, [runtimeClient]);
+  const recordTerminalAttachmentStatus = useCallback((
+    sessionId: string,
+    status: TerminalAttachmentStatus
+  ) => {
+    if (status.state === "attached" || status.state === "live_only") {
+      attachedRealHubTerminalSessionId.current = sessionId;
+    } else if (status.state === "failed") {
+      releaseTerminalSession(sessionId);
+    }
+  }, [releaseTerminalSession]);
   const terminalDescriptor: TerminalViewDescriptor | undefined = useMemo(
     () => selectedRealHubTerminalSessionId
       ? { sessionId: selectedRealHubTerminalSessionId, renderer: terminalRenderer }
@@ -1463,8 +1480,9 @@ export default function App() {
     <TerminalViewHost
       dataPlane={terminalDataPlane}
       descriptor={terminalDescriptor}
+      onAttachmentStatus={recordTerminalAttachmentStatus}
       onDiagnostic={recordTerminalDiagnostic}
-      onExit={releaseExitedTerminalSession}
+      onExit={releaseTerminalSession}
     />
   ) : (
     <aside className="terminal-panel" aria-labelledby="terminal-heading">

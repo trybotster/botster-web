@@ -80,6 +80,7 @@
 - `src/App.tsx`: retain the current terminal session across its lifecycle entity exit, then clear it after the terminal data plane reports `process_exit`, without allowing a fresh attachment to an exited-only session.
 - `src/botster/TerminalViewHost.tsx`: report the structured terminal exit status to the owning App after final output has been delivered.
 - `src/botster/terminalSession.ts`: centralize the small tested rule that selects a running attachable session but retains the current attachment across lifecycle updates.
+- `src/botster/mountedKeyboardSmoke.tsx` and `scripts/mounted-terminal-keyboard-smoke.mjs`: render the real terminal component and deterministically prove final-output-before-exit callback ordering, single exit notification, and non-exit status behavior.
 - `src/App.test.mjs`: exact coordinate, protocol/conformance metadata, committed Hub-source hash, generated request shape, package-backed drift assertions, all three fixture-level revision pins, and both unchanged compatibility floors.
 - `scripts/check-daemon-protocol-drift.mjs`: expected unchanged; verify that the production `npm test` entrypoint consumes the installed package by default.
 - `scripts/live-packaged-protocol-harness.mjs`: expected unchanged; execute it with the reviewed, independently hashed Hub/worker binaries from the authorized tree-identical preparation commit and retain its runtime-path and binary-provenance evidence.
@@ -122,12 +123,14 @@
    - `npm run build`
    - `npm run typecheck`
    - `npm run lint`
+   - `npm run smoke:mounted-terminal-keyboard`
 4. Exact downstream runtime proof:
    - Verify the reviewed preparation commit and Hub merge resolve to the same Git tree `9881511790eca8addd552ebc76efe23a48a243ec`, and verify their scoped source/Cargo diff is empty.
    - Independently verify Cargo.lock SHA-256 `005043ffe6401c5431059f4444d9c6f5a34ec9bc91b9f0b50554dc9555a196b7`, Hub binary SHA-256 `639d71016f0516b2542385178ec272daece4fbea285f1a4ca6005e643581fbef`, and session-worker SHA-256 `e15913445469d6f0012b0a97fd98d5db4539cff06661a3df4c262e8af408c273`.
    - Run `BOTSTER_HUB_BIN=<reviewed exact binary> BOTSTER_SESSION_WORKER_BIN=<reviewed exact binary> npm run smoke:live-packaged-protocol`.
    - Capture the source/preparation commits, shared tree, Cargo.lock and binary hashes, harness binary provenance, attach chronology, response-assembly telemetry, and successful packaged runtime/session/terminal path.
    - Require the fixture's final `botster-web-production-exiting` marker and clean shutdown after the session entity transitions to `exited`.
+   - Treat this terminal-finalization path as repeated-run evidence: before commit `7683471` the harness failed about half the time (including a reproduced reverted-code failure), while Review accepted the fix after eight consecutive clean runs. A single future green invocation is not sufficient regression evidence for this path.
 5. Negative audit:
    - Lockfile contains no `file:`, local tarball, or sibling checkout resolution for hub-test-support.
    - Acceptance command environment does not set `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL`.
