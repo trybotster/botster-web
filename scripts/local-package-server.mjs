@@ -244,11 +244,12 @@ async function serveStaticUi(request, response) {
     return;
   }
 
+  const body = await injectPackageRuntimeMarker(await readFile(indexPath, "utf8"));
   response.writeHead(200, {
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store"
   });
-  response.end(await injectPackageRuntimeMarker(await readFile(indexPath, "utf8")));
+  response.end(body);
 }
 
 async function readExistingFile(filePath) {

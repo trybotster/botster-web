@@ -851,6 +851,28 @@ try {
   await packageServerRuntime.stop();
 }
 
+const invalidFallbackBootstrapRuntime = await startPackageServerRuntime({
+  launchResult: true,
+  invalidBootstrapAt: 2
+});
+try {
+  const rootResponse = await fetch(`${invalidFallbackBootstrapRuntime.origin}/`);
+  assert.equal(rootResponse.status, 200);
+
+  const fallbackResponse = await fetch(`${invalidFallbackBootstrapRuntime.origin}/apps/direct-load`);
+  assert.equal(fallbackResponse.status, 503);
+  assert.deepEqual(await fallbackResponse.json(), {
+    error: "local_webrtc_bootstrap_unavailable",
+    message: "Hub returned an invalid local WebRTC bootstrap grant."
+  });
+
+  const healthResponse = await fetch(`${invalidFallbackBootstrapRuntime.origin}/health`);
+  assert.equal(healthResponse.status, 200);
+  assert.equal((await healthResponse.json()).ok, true);
+} finally {
+  await invalidFallbackBootstrapRuntime.stop();
+}
+
 const dynamicPackageServerRuntime = await startPackageServerRuntime({
   launchResult: true,
   dynamicPort: true
@@ -6511,7 +6533,12 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
 
 console.log("Renderer seam, runtime behavior, and registry fixture assertions passed.");
 
-async function startPackageServerRuntime({ launchResult = false, dynamicPort = false, occupiedPort = false } = {}) {
+async function startPackageServerRuntime({
+  launchResult = false,
+  dynamicPort = false,
+  occupiedPort = false,
+  invalidBootstrapAt
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), "botster-web-package-runtime-"));
   const socketPath = join(root, "botster-hub.sock");
   const launchResultPath = join(root, "launch-result.json");
@@ -6547,10 +6574,9 @@ async function startPackageServerRuntime({ launchResult = false, dynamicPort = f
             daemonRequests.push(frame);
             if (frame.type === "issue_local_webrtc_bootstrap") {
               bootstrapSequence += 1;
-              socket.write(
-                `${JSON.stringify({
-                  kind: "local_webrtc_bootstrap",
-                  local_webrtc_bootstrap: {
+              const localWebrtcBootstrap = bootstrapSequence === invalidBootstrapAt
+                ? null
+                : {
                     grant_id: `package-server-grant-${bootstrapSequence}`,
                     grant_secret: String(bootstrapSequence).padStart(64, "0"),
                     package_name: frame.package_name,
@@ -6560,7 +6586,11 @@ async function startPackageServerRuntime({ launchResult = false, dynamicPort = f
                     signaling_transport: "daemon_request",
                     data_plane: "webrtc_data_channel",
                     ordered: true
-                  }
+                  };
+              socket.write(
+                `${JSON.stringify({
+                  kind: "local_webrtc_bootstrap",
+                  local_webrtc_bootstrap: localWebrtcBootstrap
                 })}\n`
               );
             } else if (frame.type === "status") {
