@@ -72,7 +72,8 @@ import { createHubRuntimeConfig } from "./botster/hubRuntime";
 import { webRtcDaemonLifecycleEventName, type LocalWebrtcBootstrap, type WebrtcDaemonLifecycleEvent } from "./botster/webrtcDaemonClient";
 import type { ActionBinding } from "./botster/actions";
 import type { EntityFrameStore } from "./botster/entities";
-import type { TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
+import type { TerminalAttachmentStatus, TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
+import { isAttachableSession, resolveTerminalSessionId } from "./botster/terminalSession";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
 import { configurationFieldType, configurationSaveAction } from "./packageConfigurationForm";
 
@@ -320,10 +321,6 @@ type BotsterPackageWindow = typeof window & {
   __BOTSTER_PACKAGE_RUNTIME__?: boolean;
   __BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__?: LocalWebrtcBootstrap;
 };
-
-function isAttachableSession(record: Record<string, unknown> | undefined): record is Record<string, unknown> & { id: string } {
-  return Boolean(record && typeof record.id === "string" && record.status === "running" && record.attachable === true);
-}
 
 function readRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -823,6 +820,7 @@ export default function App() {
   const [selectedPluginSurface, setSelectedPluginSurface] = useState<SelectedPluginSurface | undefined>();
   const lastPluginRouteRenderKey = useRef<string | undefined>(undefined);
   const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
+  const attachedRealHubTerminalSessionId = useRef<string | undefined>(undefined);
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
     setLocalState((current) => ({ ...current, ...patch }));
@@ -913,6 +911,13 @@ export default function App() {
     });
     const unsubscribeFrames = runtimeClient.hub.onFrame(() => {
       if (!cancelled) {
+        setSelectedRealHubTerminalSessionId((currentSessionId) =>
+          resolveTerminalSessionId(
+            runtimeClient.entities.list("botster-web.session"),
+            currentSessionId,
+            attachedRealHubTerminalSessionId.current
+          )
+        );
         setFrameVersion((version) => version + 1);
       }
     });
@@ -1412,7 +1417,6 @@ export default function App() {
   }, [navigateToHubRoutePath, navigateToPluginSurface]);
   const packageNavigationShortcuts = packageNavigation;
   const sessions = runtimeClient.entities.list("botster-web.session");
-  const activeHubSessionId = String(sessions.find(isAttachableSession)?.id ?? "");
   const attachSession = useCallback((sessionId: string) => {
     dispatchAction({
       id: "botster.session.attach",
@@ -1420,20 +1424,32 @@ export default function App() {
       label: "Open session"
     });
   }, [dispatchAction]);
-  const attachableProductionSession = sessions.find((session) => session.id === activeHubSessionId && isAttachableSession(session));
-  const selectedRealHubSession = selectedRealHubTerminalSessionId
-    ? sessions.find((session) => session.id === selectedRealHubTerminalSessionId)
-    : undefined;
-  const selectedRealHubSessionAttachable = isAttachableSession(selectedRealHubSession);
-  const selectedTerminalSessionId = selectedRealHubSessionAttachable ? selectedRealHubTerminalSessionId : undefined;
-  const defaultTerminalSessionId = attachableProductionSession ? String(attachableProductionSession.id) : undefined;
-  const activeRealHubTerminalSessionId = selectedTerminalSessionId ?? defaultTerminalSessionId;
+  const releaseTerminalSession = useCallback((sessionId: string) => {
+    if (attachedRealHubTerminalSessionId.current === sessionId) {
+      attachedRealHubTerminalSessionId.current = undefined;
+    }
+    setSelectedRealHubTerminalSessionId((currentSessionId) =>
+      currentSessionId === sessionId
+        ? resolveTerminalSessionId(runtimeClient.entities.list("botster-web.session"))
+        : currentSessionId
+    );
+  }, [runtimeClient]);
+  const recordTerminalAttachmentStatus = useCallback((
+    sessionId: string,
+    status: TerminalAttachmentStatus
+  ) => {
+    if (status.state === "attached" || status.state === "live_only") {
+      attachedRealHubTerminalSessionId.current = sessionId;
+    } else if (status.state === "failed") {
+      releaseTerminalSession(sessionId);
+    }
+  }, [releaseTerminalSession]);
   const terminalDescriptor: TerminalViewDescriptor | undefined = useMemo(
-    () => activeRealHubTerminalSessionId
-      ? { sessionId: activeRealHubTerminalSessionId, renderer: terminalRenderer }
+    () => selectedRealHubTerminalSessionId
+      ? { sessionId: selectedRealHubTerminalSessionId, renderer: terminalRenderer }
       : undefined,
     [
-      activeRealHubTerminalSessionId
+      selectedRealHubTerminalSessionId
     ]
   );
   const terminalDataPlane: TerminalDataPlaneAttachment | undefined = useMemo(
@@ -1464,7 +1480,9 @@ export default function App() {
     <TerminalViewHost
       dataPlane={terminalDataPlane}
       descriptor={terminalDescriptor}
+      onAttachmentStatus={recordTerminalAttachmentStatus}
       onDiagnostic={recordTerminalDiagnostic}
+      onExit={releaseTerminalSession}
     />
   ) : (
     <aside className="terminal-panel" aria-labelledby="terminal-heading">
@@ -1607,7 +1625,7 @@ export default function App() {
                       <span><strong>Workspaces</strong><small>Choose where sessions can run</small></span>
                     </button>
                   </div>
-                  {activeRealHubTerminalSessionId ? terminalPanel : null}
+                  {terminalDescriptor ? terminalPanel : null}
                 </section>
               ) : null}
 

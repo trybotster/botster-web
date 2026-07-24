@@ -20,17 +20,23 @@ export interface TerminalViewHostProps {
   bridge?: TerminalViewBridge;
   dataPlane?: TerminalDataPlaneAttachment;
   descriptor?: TerminalViewDescriptor;
+  onAttachmentStatus?: (sessionId: string, status: TerminalAttachmentStatus) => void;
   onDiagnostic?: (error: unknown) => void;
+  onExit?: (sessionId: string) => void;
 }
 
 export function TerminalViewHost({
   bridge = defaultBridge,
   dataPlane,
   descriptor = defaultDescriptor,
-  onDiagnostic
+  onAttachmentStatus,
+  onDiagnostic,
+  onExit
 }: TerminalViewHostProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
+  const onAttachmentStatusRef = useRef(onAttachmentStatus);
   const onDiagnosticRef = useRef(onDiagnostic);
+  const onExitRef = useRef(onExit);
   const [mountDiagnostic, setMountDiagnostic] = useState<string | undefined>();
   const [attachmentStatus, setAttachmentStatus] = useState<TerminalAttachmentStatus | undefined>();
   const terminalDataPlane = useMemo(
@@ -44,8 +50,16 @@ export function TerminalViewHost({
   );
 
   useEffect(() => {
+    onAttachmentStatusRef.current = onAttachmentStatus;
+  }, [onAttachmentStatus]);
+
+  useEffect(() => {
     onDiagnosticRef.current = onDiagnostic;
   }, [onDiagnostic]);
+
+  useEffect(() => {
+    onExitRef.current = onExit;
+  }, [onExit]);
 
   useEffect(() => {
     const container = terminalRef.current;
@@ -55,6 +69,7 @@ export function TerminalViewHost({
     let mount: TerminalViewMount | undefined;
     let statusSubscription: { unsubscribe(): void } | undefined;
     let uninstallLiveHarnessTerminalControls: (() => void) | undefined;
+    let exitReported = false;
 
     void bridge
       .mount(container, descriptor)
@@ -65,7 +80,14 @@ export function TerminalViewHost({
           return;
         }
 
-        statusSubscription = terminalDataPlane.subscribeStatus?.(setAttachmentStatus);
+        statusSubscription = terminalDataPlane.subscribeStatus?.((status) => {
+          setAttachmentStatus(status);
+          onAttachmentStatusRef.current?.(descriptor.sessionId, status);
+          if (status.state === "exited" && !exitReported) {
+            exitReported = true;
+            onExitRef.current?.(descriptor.sessionId);
+          }
+        });
         await bridge.attach(descriptor, terminalDataPlane);
         uninstallLiveHarnessTerminalControls = installLiveHarnessTerminalControls(bridge, descriptor, terminalDataPlane);
         setMountDiagnostic(undefined);

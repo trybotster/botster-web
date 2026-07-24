@@ -5,6 +5,7 @@ const host = "127.0.0.1";
 const probe = "botster-web-mounted-keyboard-input";
 const echo = `botster-web-mounted-keyboard-echo:${probe}`;
 const fullLine = `${probe}\n`;
+const finalOutput = "botster-web-mounted-final-output\r\n";
 
 let vite;
 let browser;
@@ -109,7 +110,39 @@ try {
     throw new Error(`${error.message}\nmounted keyboard smoke state:\n${JSON.stringify(state, null, 2)}`);
   });
 
-  console.log("mounted terminal keyboard smoke passed");
+  await page.evaluate(() => {
+    const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
+    harness.emitStatus({ state: "attaching", message: "Still attaching" });
+    harness.emitStatus({ state: "failed", message: "Synthetic attach failure" });
+  });
+  const exitsBeforeTerminalStatus = await page.evaluate(
+    () => globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__.exitSessions
+  );
+  if (exitsBeforeTerminalStatus.length !== 0) {
+    throw new Error(`non-exited terminal status invoked onExit: ${JSON.stringify(exitsBeforeTerminalStatus)}`);
+  }
+
+  await page.evaluate((output) => {
+    const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
+    harness.emitOutput(output);
+    harness.emitStatus({ state: "exited", message: "Synthetic process exit" });
+    harness.emitStatus({ state: "exited", message: "Duplicate synthetic process exit" });
+  }, finalOutput);
+  await page.waitForFunction(
+    ({ output, sessionId }) => {
+      const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
+      return (
+        harness.exitSessions.length === 1 &&
+        harness.exitSessions[0] === sessionId &&
+        harness.callbackOrder.indexOf(`output:${output}`) <
+          harness.callbackOrder.indexOf(`exit:${sessionId}`)
+      );
+    },
+    { output: finalOutput, sessionId: "mounted_keyboard_smoke_session" },
+    { timeout: 15_000 }
+  );
+
+  console.log("mounted terminal keyboard and exit-order smoke passed");
 } finally {
   await browser?.close();
   await vite?.close();
