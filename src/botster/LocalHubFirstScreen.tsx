@@ -1,6 +1,5 @@
-import { IonBadge, IonButton } from "@ionic/react";
+import { IonBadge } from "@ionic/react";
 
-import { realHubDogfoodSessionId } from "./realHubDogfoodTransport";
 import type { ConnectionDiagnostic } from "./connectionDiagnostics";
 import type { EntityRecord } from "./entities";
 
@@ -15,9 +14,6 @@ export interface LocalHubFirstScreenProps {
   sessions: EntityRecord[];
   sessionLoadStatus: HubEntityLoadStatus;
   actionStatus: string;
-  onStartSession: () => void;
-  startDisabled?: boolean;
-  startPending?: boolean;
 }
 
 interface StatusSummary {
@@ -36,10 +32,7 @@ export function LocalHubFirstScreen({
   packageLoadStatus,
   sessions,
   sessionLoadStatus,
-  actionStatus,
-  onStartSession,
-  startDisabled = false,
-  startPending = false
+  actionStatus
 }: LocalHubFirstScreenProps) {
   const summaries = hubStatusSummaries({
     mode,
@@ -60,19 +53,6 @@ export function LocalHubFirstScreen({
         <p>
           Connection, extensions, sessions, and terminal availability for this device.
         </p>
-      </div>
-      <div className="local-hub-primary-action" aria-label="Primary local hub action">
-        <div>
-          <p className="eyebrow">Session</p>
-          <h2>Start a local session</h2>
-          <p>
-            Starts a session in your local Botster workspace.
-          </p>
-          <p className="local-hub-action-state">{visibleStatusText(actionStatus)}</p>
-        </div>
-        <IonButton onClick={onStartSession} disabled={startDisabled}>
-          {startPending ? "Starting…" : "Start session"}
-        </IonButton>
       </div>
       <div className="local-hub-status-grid" aria-label="Local hub health summary">
         {summaries.map((summary) => (
@@ -98,7 +78,7 @@ function hubStatusSummaries({
   sessions,
   sessionLoadStatus,
   actionStatus
-}: Omit<LocalHubFirstScreenProps, "onStartSession">): StatusSummary[] {
+}: LocalHubFirstScreenProps): StatusSummary[] {
   const transportDiagnostic = diagnostics.find(
     (diagnostic) =>
       (diagnostic.source === "server" || diagnostic.source === "signaling" || diagnostic.source === "webrtc") &&
@@ -112,8 +92,8 @@ function hubStatusSummaries({
   const actionDiagnostic =
     actionDiagnostics.find((diagnostic) => diagnostic.title === "Hub action failed") ??
     highestSeverityDiagnostic(actionDiagnostics);
-  const runningSession = sessions.find((session) => session.id === realHubDogfoodSessionId && session.status === "running");
-  const pendingSession = sessions.find((session) => session.id === realHubDogfoodSessionId && session.status === "pending");
+  const runningSession = sessions.find((session) => session.status === "running");
+  const pendingSession = sessions.find((session) => session.status === "pending");
   const localHubMode = mode === "webrtc";
 
   return [
@@ -268,15 +248,8 @@ function spawnRequested(actionStatus: string) {
   return actionStatus.toLowerCase().includes("spawn requested");
 }
 
-function visibleStatusText(value: string): string {
-  return value
-    .replaceAll(realHubDogfoodSessionId, "local hub session")
-    .replace(/dogfood/gi, "local");
-}
-
 function isSpawnDiagnostic(diagnostic: ConnectionDiagnostic) {
-  return diagnostic.operation === "spawn" ||
-    (diagnostic.actionId === "botster.session.select" && diagnostic.actionTarget === realHubDogfoodSessionId);
+  return diagnostic.operation === "spawn" || diagnostic.actionId === "botster.session.select";
 }
 
 function badgeColor(severity: ConnectionDiagnostic["severity"]) {

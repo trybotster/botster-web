@@ -4,8 +4,8 @@ import type {
   TerminalOutput,
   TerminalSubscription
 } from "./terminal";
-import type { DaemonBridgeClient } from "./realHubDogfoodTransport";
-import { realHubDogfoodSessionId, realHubDogfoodSubscriptionId } from "./realHubDogfoodTransport";
+import type { DaemonBridgeClient } from "./hubTransport";
+import { hubTerminalSubscriptionId } from "./hubTransport";
 import type { DaemonCaptureSnapshot, DaemonEvent, DaemonReadScreen } from "./realHubDaemonDto";
 
 const maxHydrationBufferBytes = 16_777_216;
@@ -18,13 +18,13 @@ interface ScreenHydration {
   pendingExit?: number | null;
 }
 
-export interface RealHubTerminalDataPlaneOptions {
+export interface HubTerminalDataPlaneOptions {
   bridge: DaemonBridgeClient;
   sessionId?: string;
   subscriptionId?: string;
 }
 
-export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
+export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   readonly sessionId: string;
 
   private readonly subscriptionId: string;
@@ -43,8 +43,9 @@ export class RealHubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private hydratedGeneration: number | undefined;
   private restoredVisibleScreenGeneration: number | undefined;
 
-  constructor(private readonly options: RealHubTerminalDataPlaneOptions) {
-    this.sessionId = options.sessionId ?? realHubDogfoodSessionId;
+  constructor(private readonly options: HubTerminalDataPlaneOptions) {
+    if (!options.sessionId) throw new Error("Hub terminal data plane requires a session id.");
+    this.sessionId = options.sessionId;
     this.subscriptionId = options.subscriptionId ?? createTerminalSubscriptionId();
   }
 
@@ -394,17 +395,17 @@ function attachStateStatus(state: string): TerminalAttachmentStatus {
   };
 }
 
-export function createRealHubTerminalDataPlane(options: RealHubTerminalDataPlaneOptions): TerminalDataPlaneAttachment {
-  return new RealHubTerminalDataPlane(options);
+export function createHubTerminalDataPlane(options: HubTerminalDataPlaneOptions): TerminalDataPlaneAttachment {
+  return new HubTerminalDataPlane(options);
 }
 
 function createTerminalSubscriptionId(): string {
   const randomId = globalThis.crypto?.randomUUID?.();
   if (randomId) {
-    return `${realHubDogfoodSubscriptionId}-${randomId}`;
+    return `${hubTerminalSubscriptionId}-${randomId}`;
   }
 
-  return `${realHubDogfoodSubscriptionId}-${Date.now()}-${nextSubscriptionSequence++}`;
+  return `${hubTerminalSubscriptionId}-${Date.now()}-${nextSubscriptionSequence++}`;
 }
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {

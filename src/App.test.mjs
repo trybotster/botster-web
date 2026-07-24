@@ -23,24 +23,42 @@ import ts from "typescript";
 import { createServer } from "vite";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-
-const { localPackageServerShutdownPlan, resolveLocalPackageServerMode } = await import(
-  new URL("../scripts/localPackageServerMode.mjs", import.meta.url)
-);
+import { decodeHubConnection, HubConnectionError } from "../scripts/hubConnection.mjs";
 
 const hostForTests = "127.0.0.1";
+const activeHubSessionId = "test-hub-session";
 let nextTestResponseMessageId = 0;
+
+const coreHubConnectionSchema = JSON.parse(
+  await readFile(new URL("../fixtures/core-runnable-entrypoint-hub-connection/schema.json", import.meta.url), "utf8")
+);
+const coreHubConnectionFixture = JSON.parse(
+  await readFile(new URL("../fixtures/core-runnable-entrypoint-hub-connection/unix-socket.json", import.meta.url), "utf8")
+);
+assert.equal(coreHubConnectionSchema.$id, "https://trybotster.dev/schemas/runnable-entrypoint-hub-connection.json");
+assert.deepEqual(decodeHubConnection(JSON.stringify(coreHubConnectionFixture)), coreHubConnectionFixture);
+for (const invalid of [
+  undefined,
+  "",
+  "{",
+  "{}",
+  '{"transport":{"type":"unix_socket","path":"relative.sock"}}',
+  '{"transport":{"type":"tcp","path":"/tmp/hub.sock"}}',
+  '{"transport":{"type":"unix_socket","path":"/tmp/hub.sock","extra":true}}',
+  '{"transport":{"type":"unix_socket","path":"/tmp/hub.sock"},"extra":true}'
+]) {
+  assert.throws(() => decodeHubConnection(invalid), HubConnectionError);
+}
 
 const [
   main,
   app,
   client,
-  dogfoodMode,
-  localDogfoodTransport,
+  hubRuntimeSource,
   realHubDaemonDto,
   generatedDaemonProtocol,
-  realHubDogfoodTransport,
-  realHubTerminalDataPlane,
+  hubTransport,
+  hubTerminalDataPlane,
   webrtcDaemonClient,
   connectionDiagnostics,
   connectionDiagnosticsPanel,
@@ -58,7 +76,6 @@ const [
   packageJsonRaw,
   pluginEntrypoint,
   checkDaemonProtocolDriftScript,
-  localPackageServerModeScript,
   localPackageServerScript,
   browserRuntimeSmokeScript,
   liveProtocolHarnessScript,
@@ -71,12 +88,11 @@ const [
   readFile(new URL("./main.tsx", import.meta.url), "utf8"),
   readFile(new URL("./App.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/client.ts", import.meta.url), "utf8"),
-  readFile(new URL("./botster/dogfoodMode.ts", import.meta.url), "utf8"),
-  readFile(new URL("./botster/localDogfoodTransport.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/hubRuntime.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/realHubDaemonDto.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/generated/daemon-protocol.ts", import.meta.url), "utf8"),
-  readFile(new URL("./botster/realHubDogfoodTransport.ts", import.meta.url), "utf8"),
-  readFile(new URL("./botster/realHubTerminalDataPlane.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/hubTransport.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/hubTerminalDataPlane.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/webrtcDaemonClient.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/connectionDiagnostics.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/ConnectionDiagnosticsPanel.tsx", import.meta.url), "utf8"),
@@ -94,7 +110,6 @@ const [
   readFile(new URL("../package.json", import.meta.url), "utf8"),
   readFile(new URL("../plugin.lua", import.meta.url), "utf8"),
   readFile(new URL("../scripts/check-daemon-protocol-drift.mjs", import.meta.url), "utf8"),
-  readFile(new URL("../scripts/localPackageServerMode.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/local-package-server.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/browser-runtime-smoke.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-packaged-protocol-harness.mjs", import.meta.url), "utf8"),
@@ -113,11 +128,11 @@ assert.match(app, /import \{ TerminalViewHost \} from "\.\/botster\/TerminalView
 assert.match(app, /import \{ ConnectionDiagnosticsPanel \} from "\.\/botster\/ConnectionDiagnosticsPanel"/);
 assert.match(app, /import \{ LocalHubFirstScreen/);
 assert.match(app, /createBotsterWebClient/);
-assert.match(app, /createDogfoodRuntimeConfig/);
+assert.match(app, /createHubRuntimeConfig/);
 assert.match(app, /platform:\s*\{\s*desktop:/);
 assert.match(app, /packageRuntime \? \{ signalingUrl: `\$\{window\.location\.origin\}\/request` \} : \{\}/);
 assert.match(app, /__BOTSTER_PACKAGE_RUNTIME__/);
-assert.match(app, /initialConnectionDiagnostics\([\s\S]*dogfoodRuntime\.startupError/);
+assert.match(app, /initialConnectionDiagnostics\([\s\S]*hubRuntime\.startupError/);
 assert.match(app, /window\.addEventListener\(webRtcDaemonLifecycleEventName, recordWebRtcLifecycle\)/);
 assert.match(app, /runtimeClient\.hub\.subscribeSurface/);
 assert.match(app, /runtimeClient\.entities\.pull/);
@@ -152,14 +167,14 @@ assert.match(app, /install_plan/);
 assert.match(app, /schemaVersionDiagnosticFromFrame/);
 assert.match(app, /operatorErrorDiagnostic/);
 assert.match(app, /hubConnectionDiagnosticFromFrame/);
-assert.match(app, /dogfood\.diagnostic_action_status/);
-assert.match(app, /dogfood\.plugin_surface_status/);
+assert.match(app, /production\.diagnostic_action_status/);
+assert.match(app, /production\.plugin_surface_status/);
 assert.match(app, /plugin-surface-hub-validated-v1/);
 assert.doesNotMatch(app, /plugin-surface-body-v1|normalizePluginSurfaceNode|pluginSurfaceBodySnapshot/);
 assert.match(app, /terminalUnavailableDiagnostic/);
 assert.match(app, /surfaceSnapshot \?\? loadingSnapshot/);
 assert.match(app, /runtimeClient\.entities\.list\("botster-web\.app"\)/);
-assert.match(app, /pullDogfoodEntity\("app", \{ family: "botster-web\.app" \}\)/);
+assert.match(app, /pullProductionEntity\("app", \{ family: "botster-web\.app" \}\)/);
 assert.match(app, /window\.open\(localUrl, "_blank", "noopener,noreferrer"\)/);
 assert.match(app, /export function AppListItem/);
 assert.match(app, /export function PluginNavigationShortcuts/);
@@ -205,9 +220,8 @@ assert.doesNotMatch(app, /<IonGrid className="dashboard-layout"/);
 assert.doesNotMatch(app, /data-testid="active-workflows"/);
 assert.match(app, /aria-label="Sessions"/);
 assert.match(app, /<h1 id="dashboard-heading">Your sessions<\/h1>/);
-assert.match(app, /disabled=\{sessionStartDisabled\}/);
-assert.match(app, /role="status" aria-live="polite"/);
-assert.match(app, /sessionsWithPending\.map/);
+assert.match(app, /sessions\.map/);
+assert.doesNotMatch(app, /sessionsWithPending|session_draft|pendingSessionId/);
 assert.match(app, /label: "Workspaces"/);
 assert.match(app, /<IonLabel>Installed<\/IonLabel>/);
 assert.doesNotMatch(app, /<IonLabel>Installed apps<\/IonLabel>/);
@@ -224,7 +238,7 @@ assert.match(app, /<IonCol size="12" sizeLg="4"/);
 assert.match(app, /onAction=\{dispatchAction\}/);
 assert.match(app, /selectedRealHubTerminalSessionId/);
 assert.match(app, /isAttachableSession/);
-assert.match(app, /dogfoodRuntime\.createTerminalDataPlane\(terminalDescriptor\.sessionId\)/);
+assert.match(app, /hubRuntime\.createTerminalDataPlane\(terminalDescriptor\.sessionId\)/);
 assert.match(app, /descriptor=\{terminalDescriptor\}/);
 assert.match(app, /dataPlane=\{terminalDataPlane\}/);
 assert.match(app, /Select a running session to attach the terminal panel/);
@@ -235,15 +249,11 @@ assert.match(client, /createBotsterWebClient/);
 assert.match(client, /InMemoryUiTreeSnapshotStore/);
 assert.match(client, /frame\.kind === "ui_tree_snapshot"/);
 assert.match(client, /"terminal_view bridge"/);
-assert.match(localDogfoodTransport, /createLocalDogfoodTransport/);
-assert.match(localDogfoodTransport, /dogfoodUiTreeSnapshot/);
-assert.match(localDogfoodTransport, /"botster\.session\.select"/);
-assert.match(localDogfoodTransport, /"botster\.session\.rename"/);
-assert.match(dogfoodMode, /packageRuntime/);
-assert.match(dogfoodMode, /createRealHubDogfoodTransport/);
-assert.match(dogfoodMode, /createRealHubTerminalDataPlane/);
-assert.match(dogfoodMode, /requires a valid local WebRTC bootstrap grant/);
-assert.doesNotMatch(dogfoodMode, /real-hub|createHttpDaemonBridgeClient|VITE_BOTSTER_REAL_HUB_DOGFOOD/);
+assert.doesNotMatch(hubRuntimeSource, /fixture|MockTerminalDataPlane/);
+assert.match(hubRuntimeSource, /createHubTransport/);
+assert.match(hubRuntimeSource, /createHubTerminalDataPlane/);
+assert.match(hubRuntimeSource, /requires a valid local WebRTC bootstrap grant/);
+assert.doesNotMatch(hubRuntimeSource, /real-hub|createHttpDaemonBridgeClient|VITE_BOTSTER_HUB/);
 assert.match(realHubDaemonDto, /export type \* from "\.\/generated\/daemon-protocol"/);
 assert.match(realHubDaemonDto, /DaemonBridgeRequestEnvelope/);
 assert.match(realHubDaemonDto, /DaemonBridgeResponseEnvelope/);
@@ -270,12 +280,12 @@ assert.match(generatedDaemonProtocol, /\| \{ type: "package_entrypoint_status"; 
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_action"; package_name: string; surface_id: string; action_id: string; payload: JsonValue \}/);
 assert.doesNotMatch(app, /action\.id === "contract\.action"/);
-assert.doesNotMatch(realHubDogfoodTransport, /action\.id === "contract\.action"/);
-assert.doesNotMatch(realHubDogfoodTransport, /botster\.plugin-contract-matrix|surface_id:\s*"contract\.app"/);
-assert.match(realHubDogfoodTransport, /pluginSurfaceActionRequest\(action\)/);
-assert.match(realHubDogfoodTransport, /package_name:\s*pluginSurfaceAction\.packageName/);
-assert.match(realHubDogfoodTransport, /surface_id:\s*pluginSurfaceAction\.surfaceId/);
-assert.match(realHubDogfoodTransport, /action_id:\s*pluginSurfaceAction\.actionId/);
+assert.doesNotMatch(hubTransport, /action\.id === "contract\.action"/);
+assert.doesNotMatch(hubTransport, /botster\.plugin-contract-matrix|surface_id:\s*"contract\.app"/);
+assert.match(hubTransport, /pluginSurfaceActionRequest\(action\)/);
+assert.match(hubTransport, /package_name:\s*pluginSurfaceAction\.packageName/);
+assert.match(hubTransport, /surface_id:\s*pluginSurfaceAction\.surfaceId/);
+assert.match(hubTransport, /action_id:\s*pluginSurfaceAction\.actionId/);
 assert.match(liveProtocolHarnessScript, /waitForContractActionResult/);
 assert.match(liveProtocolHarnessScript, /waitForVisibleContractMatrixText/);
 assert.doesNotMatch(liveProtocolHarnessScript, /accepted\|accepted/i);
@@ -317,60 +327,60 @@ assert.match(generatedDaemonProtocol, /\| \{ type: "snapshot"; session_id: strin
 assert.match(generatedDaemonProtocol, /\| \{ type: "scrollback"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number \}/);
 assert.doesNotMatch(generatedDaemonProtocol, /type: "(?:snapshot|scrollback)"[^\n]*data: string/);
 assert.doesNotMatch(realHubDaemonDto, /compressed\?: boolean|encoding\?: string/);
-assert.doesNotMatch(realHubDogfoodTransport, /createHttpDaemonBridgeClient|EventSource|fetchImpl/);
-assert.match(realHubDogfoodTransport, /subscribeEvents/);
-assert.match(realHubDogfoodTransport, /daemonEventSubscription/);
-assert.match(realHubDogfoodTransport, /recordLiveHarnessEvent\("hub_frame"/);
-assert.match(realHubDogfoodTransport, /daemonResponseFrames/);
-assert.match(realHubDogfoodTransport, /realHubDogfoodUiTreeSnapshot/);
-assert.match(realHubDogfoodTransport, /const packageFamily = "botster-web\.package"/);
-assert.match(realHubDogfoodTransport, /const appFamily = "botster-web\.app"/);
-assert.match(realHubDogfoodTransport, /const packageNavigationFamily = "botster-web\.package_navigation"/);
-assert.match(realHubDogfoodTransport, /bridge\.request\(\{ type: "list_apps" \}\)/);
-assert.match(realHubDogfoodTransport, /bridge\.request\(\{ type: "list_package_navigation" \}\)/);
-assert.match(realHubDogfoodTransport, /const availablePackageFamily = "botster-web\.available_package"/);
-assert.match(realHubDogfoodTransport, /bridge\.request\(\{ type: "list_packages" \}\)/);
-assert.match(realHubDogfoodTransport, /type: "list_available_packages"/);
-assert.match(realHubDogfoodTransport, /type: "set_package_configuration"/);
-assert.match(realHubDogfoodTransport, /botster\.package\.configuration\.save/);
-assert.match(realHubDogfoodTransport, /botster\.package\.configure/);
-assert.match(realHubDogfoodTransport, /botster\.package\.surface\.render/);
-assert.match(realHubDogfoodTransport, /type: "plugin_surface_render"/);
-assert.match(realHubDogfoodTransport, /DaemonPackageActionState/);
-assert.match(realHubDogfoodTransport, /function appRecord\(app: DaemonApp\)/);
-assert.match(realHubDogfoodTransport, /family: appFamily/);
-assert.match(realHubDogfoodTransport, /id: "botster\.app\.open_url"/);
-assert.match(realHubDogfoodTransport, /botster\.package\.daemon_request/);
-assert.match(realHubDogfoodTransport, /package_decision: response\.package_decision/);
-assert.match(realHubDogfoodTransport, /install_plan: response\.install_plan/);
-assert.match(realHubDogfoodTransport, /diagnostics: responseDiagnostics\(response\)/);
-assert.match(realHubDogfoodTransport, /daemonRequestFromDescriptor/);
-assert.match(realHubDogfoodTransport, /type: "enable_package"/);
-assert.match(realHubDogfoodTransport, /type: "disable_package"/);
-assert.match(realHubDogfoodTransport, /type: "remove_package"/);
-assert.match(realHubDogfoodTransport, /type: "reload_package"/);
-assert.match(realHubDogfoodTransport, /type: "start_package_entrypoint"/);
-assert.match(realHubDogfoodTransport, /type: "stop_package_entrypoint"/);
-assert.match(realHubDogfoodTransport, /type: "restart_package_entrypoint"/);
-assert.match(realHubDogfoodTransport, /type: "package_entrypoint_status"/);
-assert.doesNotMatch(realHubDogfoodTransport, /function packageManagementRequest|function packageEntrypointRequest|unsupportedPackageAction/);
-assert.match(realHubDogfoodTransport, /family: packageFamily/);
-assert.match(realHubDogfoodTransport, /family: availablePackageFamily/);
-assert.doesNotMatch(realHubDogfoodTransport, /["']view_surface["']|["']settings_surface["']|UpdatePackage|update_package|type: "restart_hub"/);
-assert.match(realHubTerminalDataPlane, /streamTerminal/);
-assert.match(realHubTerminalDataPlane, /type: "send_input"/);
-assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
-assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
-assert.match(realHubTerminalDataPlane, /this\.emitOutput\(event\.data, "output"\)/);
-assert.match(realHubTerminalDataPlane, /type: "read_screen"/);
-assert.match(realHubTerminalDataPlane, /this\.emitOutput\(readScreen\.text, "read_screen"\)/);
-assert.match(realHubTerminalDataPlane, /bufferHydratingOutput/);
-assert.doesNotMatch(realHubTerminalDataPlane, /event\.data, event\.type|restoredHistory|scrollback_unavailable/);
-assert.match(realHubTerminalDataPlane, /recordLiveHarnessTerminal\("attach_state"/);
-assert.match(realHubTerminalDataPlane, /type: "detach"/);
-assert.match(realHubTerminalDataPlane, /attachToAuthoritativeSession/);
-assert.doesNotMatch(realHubTerminalDataPlane, /type: "list_sessions"/);
-assert.match(realHubTerminalDataPlane, /this\.listeners\.size === 0/);
+assert.doesNotMatch(hubTransport, /createHttpDaemonBridgeClient|EventSource|fetchImpl/);
+assert.match(hubTransport, /subscribeEvents/);
+assert.match(hubTransport, /daemonEventSubscription/);
+assert.match(hubTransport, /recordLiveHarnessEvent\("hub_frame"/);
+assert.match(hubTransport, /daemonResponseFrames/);
+assert.doesNotMatch(hubTransport, /ui_tree_snapshot/);
+assert.match(hubTransport, /const packageFamily = "botster-web\.package"/);
+assert.match(hubTransport, /const appFamily = "botster-web\.app"/);
+assert.match(hubTransport, /const packageNavigationFamily = "botster-web\.package_navigation"/);
+assert.match(hubTransport, /bridge\.request\(\{ type: "list_apps" \}\)/);
+assert.match(hubTransport, /bridge\.request\(\{ type: "list_package_navigation" \}\)/);
+assert.match(hubTransport, /const availablePackageFamily = "botster-web\.available_package"/);
+assert.match(hubTransport, /bridge\.request\(\{ type: "list_packages" \}\)/);
+assert.match(hubTransport, /type: "list_available_packages"/);
+assert.match(hubTransport, /type: "set_package_configuration"/);
+assert.match(hubTransport, /botster\.package\.configuration\.save/);
+assert.match(hubTransport, /botster\.package\.configure/);
+assert.match(hubTransport, /botster\.package\.surface\.render/);
+assert.match(hubTransport, /type: "plugin_surface_render"/);
+assert.match(hubTransport, /DaemonPackageActionState/);
+assert.match(hubTransport, /function appRecord\(app: DaemonApp\)/);
+assert.match(hubTransport, /family: appFamily/);
+assert.match(hubTransport, /id: "botster\.app\.open_url"/);
+assert.match(hubTransport, /botster\.package\.daemon_request/);
+assert.match(hubTransport, /package_decision: response\.package_decision/);
+assert.match(hubTransport, /install_plan: response\.install_plan/);
+assert.match(hubTransport, /diagnostics: responseDiagnostics\(response\)/);
+assert.match(hubTransport, /daemonRequestFromDescriptor/);
+assert.match(hubTransport, /type: "enable_package"/);
+assert.match(hubTransport, /type: "disable_package"/);
+assert.match(hubTransport, /type: "remove_package"/);
+assert.match(hubTransport, /type: "reload_package"/);
+assert.match(hubTransport, /type: "start_package_entrypoint"/);
+assert.match(hubTransport, /type: "stop_package_entrypoint"/);
+assert.match(hubTransport, /type: "restart_package_entrypoint"/);
+assert.match(hubTransport, /type: "package_entrypoint_status"/);
+assert.doesNotMatch(hubTransport, /function packageManagementRequest|function packageEntrypointRequest|unsupportedPackageAction/);
+assert.match(hubTransport, /family: packageFamily/);
+assert.match(hubTransport, /family: availablePackageFamily/);
+assert.doesNotMatch(hubTransport, /["']view_surface["']|["']settings_surface["']|UpdatePackage|update_package|type: "restart_hub"/);
+assert.match(hubTerminalDataPlane, /streamTerminal/);
+assert.match(hubTerminalDataPlane, /type: "send_input"/);
+assert.match(hubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
+assert.match(hubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
+assert.match(hubTerminalDataPlane, /this\.emitOutput\(event\.data, "output"\)/);
+assert.match(hubTerminalDataPlane, /type: "read_screen"/);
+assert.match(hubTerminalDataPlane, /this\.emitOutput\(readScreen\.text, "read_screen"\)/);
+assert.match(hubTerminalDataPlane, /bufferHydratingOutput/);
+assert.doesNotMatch(hubTerminalDataPlane, /event\.data, event\.type|restoredHistory|scrollback_unavailable/);
+assert.match(hubTerminalDataPlane, /recordLiveHarnessTerminal\("attach_state"/);
+assert.match(hubTerminalDataPlane, /type: "detach"/);
+assert.match(hubTerminalDataPlane, /attachToAuthoritativeSession/);
+assert.doesNotMatch(hubTerminalDataPlane, /type: "list_sessions"/);
+assert.match(hubTerminalDataPlane, /this\.listeners\.size === 0/);
 assert.match(connectionDiagnostics, /expectedDaemonSchemaVersion = 1/);
 assert.match(connectionDiagnostics, /schemaVersionDiagnosticFromFrame/);
 assert.match(connectionDiagnostics, /operatorErrorDiagnostic/);
@@ -379,27 +389,21 @@ assert.match(connectionDiagnosticsPanel, /data-diagnostic-id/);
 assert.match(connectionDiagnosticsPanel, /severityRank/);
 assert.match(connectionDiagnosticsPanel, /severityLabel/);
 assert.match(localHubFirstScreen, /Local Botster health/);
-assert.match(localHubFirstScreen, /IonButton onClick=\{onStartSession\}/);
 assert.match(localHubFirstScreen, /packageLoadStatus/);
 assert.match(localHubFirstScreen, /sessionLoadStatus/);
-assert.match(localHubFirstScreen, /realHubDogfoodSessionId/);
+assert.doesNotMatch(localHubFirstScreen, /activeHubSessionId/);
 assert.match(localPackageServerScript, /protocol = "botster-hub-daemon-v1"/);
-assert.match(localPackageServerScript, /resolveLocalPackageServerMode/);
+assert.match(localPackageServerScript, /decodeHubConnection/);
 assert.match(localPackageServerScript, /serveStaticUi/);
 assert.match(localPackageServerScript, /__BOTSTER_PACKAGE_RUNTIME__/);
 assert.match(localPackageServerScript, /case "\.mjs":/);
 assert.match(localPackageServerScript, /case "\.map":/);
-assert.match(localPackageServerModeScript, /BOTSTER_HUB_BIN/);
-assert.match(localPackageServerModeScript, /BOTSTER_HUB_SOCKET/);
-assert.match(localPackageServerModeScript, /BOTSTER_HUB_DATA_DIR/);
 assert.match(localPackageServerScript, /kind: "daemon_response"/);
 assert.match(localPackageServerScript, /signalingRequestTypes/);
 assert.match(localPackageServerScript, /issue_local_webrtc_bootstrap/);
 assert.match(localPackageServerScript, /local_webrtc_signal/);
 assert.doesNotMatch(localPackageServerScript, /text\/event-stream|EventSource|\/terminal|sendSseEvent|deterministicBotsterWebSurfaceResponse/);
-assert.match(browserRuntimeSmokeScript, /proveFixtureStartSession/);
 assert.match(browserRuntimeSmokeScript, /proveMissingBootstrapDiagnostic/);
-assert.match(browserRuntimeSmokeScript, /getByRole\("button", \{ name: "Start session", exact: true \}\)/);
 assert.match(browserRuntimeSmokeScript, /Local WebRTC bootstrap failed/);
 assert.match(liveProtocolHarnessScript, /BOTSTER_HUB_BIN/);
 assert.match(liveProtocolHarnessScript, /BOTSTER_SESSION_WORKER_BIN/);
@@ -410,7 +414,7 @@ assert.match(liveProtocolHarnessScript, /appRouteFromPathname\(routeDescriptor\.
 assert.match(liveProtocolHarnessScript, /packageRecord\?\.app_surfaces/);
 assert.match(liveProtocolHarnessScript, /proveLiveTerminalAfterAttach/);
 assert.match(liveProtocolHarnessScript, /const echoProbe = "keys"/);
-assert.match(liveProtocolHarnessScript, /const attachProbe = "botster-web-dogfood-attach-probe"/);
+assert.match(liveProtocolHarnessScript, /const attachProbe = "botster-web-production-attach-probe"/);
 assert.match(liveProtocolHarnessScript, /\$\{attachProbe\}-/);
 assert.match(liveProtocolHarnessScript, /sequence: initialEvents\.map/);
 assert.doesNotMatch(liveProtocolHarnessScript, /unwrappedReadScreenText|replace\(\/\[\\r\\n\]\//);
@@ -421,12 +425,8 @@ assert.match(liveProtocolHarnessScript, /page\.reload/);
 assert.match(liveProtocolHarnessScript, /reloadSamePackageUrlAndAssertWebrtc/);
 assert.match(liveProtocolHarnessScript, /latestLocalWebrtcGrantId/);
 assert.doesNotMatch(liveProtocolHarnessScript, /type: "stop_package_entrypoint"/);
-assert.match(liveProtocolHarnessScript, /const startSessionButton = page\.getByRole\("button", \{ name: "Start session", exact: true \}\)/);
-assert.match(liveProtocolHarnessScript, /await startSessionButton\.click\(\)/);
-assert.match(liveProtocolHarnessScript, /observeStartSessionButtonTransitions/);
-assert.match(liveProtocolHarnessScript, /transition\.text\.includes\("Starting…"\)/);
-assert.match(liveProtocolHarnessScript, /did not disable while the spawn request was pending/);
-assert.match(liveProtocolHarnessScript, /getByRole\("status"\)\.filter\(\{ hasText: \/Dispatching\|Start requested\//);
+assert.doesNotMatch(liveProtocolHarnessScript, /startSessionButton|observeStartSessionButtonTransitions|Start session button/);
+assert.match(liveProtocolHarnessScript, /proveExternalSessionLifecycle/);
 assert.match(liveProtocolHarnessScript, /waitForSessionAttachable\(page, true\)/);
 assert.match(liveProtocolHarnessScript, /waitForAutomaticTerminalRestore/);
 assert.match(liveProtocolHarnessScript, /assertMinimumHubCompatibility/);
@@ -444,12 +444,12 @@ assert.doesNotMatch(liveProtocolHarnessScript, /callTerminalControl\(page, "writ
 assert.match(liveProtocolHarnessScript, /key === "grant_secret" && nextValue !== "\[redacted\]"/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalAttachState\(page, \["attached"\]\)/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/);
-assert.match(liveProtocolHarnessScript, /botster-web-dogfood-echo:/);
-assert.match(liveProtocolHarnessScript, /botster-web-dogfood-size:/);
+assert.match(liveProtocolHarnessScript, /botster-web-production-echo:/);
+assert.match(liveProtocolHarnessScript, /botster-web-production-size:/);
 assert.match(liveProtocolHarnessScript, /waitForResizeProof/);
 assert.match(liveProtocolHarnessScript, /assertNoUnknownSession/);
 assert.match(liveProtocolHarnessScript, /last observed/);
-assert.match(liveProtocolHarnessScript, /botster-web-dogfood-exiting/);
+assert.match(liveProtocolHarnessScript, /botster-web-production-exiting/);
 assert.match(liveProtocolHarnessScript, /proveExternalSessionLifecycle/);
 assert.match(liveProtocolHarnessScript, /entity_remove/);
 assert.match(liveProtocolHarnessScript, /waitForSessionStatus/);
@@ -475,8 +475,7 @@ assert.doesNotMatch(actions, /click|submit|change/);
 assert.match(uiNodes, /dispatchAction\?: \(action: ActionBinding, node: UiNode\) => void/);
 assert.doesNotMatch(app, /dangerouslySetInnerHTML|srcDoc/);
 assert.doesNotMatch(client, /dangerouslySetInnerHTML|srcDoc/);
-assert.doesNotMatch(localDogfoodTransport, /dangerouslySetInnerHTML|srcDoc/);
-assert.doesNotMatch(realHubDogfoodTransport, /dangerouslySetInnerHTML|srcDoc/);
+assert.doesNotMatch(hubTransport, /dangerouslySetInnerHTML|srcDoc/);
 assert.match(terminal, /renderer: "restty"/);
 assert.match(terminal, /class DefaultTerminalViewBridge/);
 assert.match(terminal, /TerminalViewMount/);
@@ -528,7 +527,6 @@ assert.match(architecture, /Restty is a terminal renderer only/);
 assert.match(architecture, /DaemonRequest/);
 assert.match(readme, /Restty is the terminal renderer/);
 assert.match(readme, /BOTSTER_HUB_BIN/);
-assert.match(readme, /BOTSTER_HUB_SOCKET/);
 assert.match(readme, /smoke:live-packaged-protocol/);
 assert.match(readme, /local WebRTC bootstrap grant/);
 assert.match(architecture, /src\/botster\/webrtcDaemonClient\.ts/);
@@ -541,7 +539,8 @@ assert.match(generatedDaemonProtocol, /DaemonLocalWebrtcBootstrap/);
 assert.match(generatedDaemonProtocol, /DaemonLocalWebrtcAnswer/);
 assert.match(generatedDaemonProtocol, /local_webrtc_bootstrap/);
 assert.match(generatedDaemonProtocol, /local_webrtc_answer/);
-assert.match(localPackageServerScript, /BOTSTER_LOCAL_WEBRTC_GRANT_ID/);
+assert.doesNotMatch(localPackageServerScript, /BOTSTER_LOCAL_WEBRTC_GRANT_ID|BOTSTER_LOCAL_WEBRTC_GRANT_SECRET|BOTSTER_LOCAL_WEBRTC_EXPECTED_ORIGIN/);
+assert.match(localPackageServerScript, /async function issueLocalWebrtcBootstrap/);
 assert.match(localPackageServerScript, /__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__/);
 assert.match(app, /normalizeLocalWebrtcBootstrap/);
 assert.match(webrtcDaemonClient, /createWebrtcDaemonClient/);
@@ -550,7 +549,7 @@ assert.match(webrtcDaemonClient, /createDataChannel\("botster-daemon"/);
 assert.match(webrtcDaemonClient, /type: "local_webrtc_signal"/);
 assert.match(webrtcDaemonClient, /grant_secret: "\[redacted\]"/);
 assert.match(webrtcDaemonClient, /key === "grant_secret" \? "\[redacted\]" : redactedHarnessPayload\(value\)/);
-assert.match(realHubDogfoodTransport, /key === "grant_secret" \? "\[redacted\]" : redactedHarnessPayload\(value\)/);
+assert.match(hubTransport, /key === "grant_secret" \? "\[redacted\]" : redactedHarnessPayload\(value\)/);
 assert.match(webrtcDaemonClient, /crypto\.subtle\.encrypt/);
 assert.match(webrtcDaemonClient, /crypto\.subtle\.decrypt/);
 assert.match(webrtcDaemonClient, /AesGcmEnvelope/);
@@ -575,8 +574,7 @@ assert.match(readme, /rejects daemon operations other than/);
 assert.match(vendorReadme, /e9742252312ee616d8f186b697d70349cf329250/);
 assert.doesNotMatch(uiNodes, /terminal_view/);
 assert.doesNotMatch(protocol, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
-assert.doesNotMatch(localDogfoodTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
-assert.doesNotMatch(realHubDogfoodTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
+assert.doesNotMatch(hubTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
 
 const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
@@ -737,36 +735,12 @@ assert.deepEqual(packageManifest.configuration, {
     }
   ]
 });
-assert.deepEqual(packageManifest.surfaces, [
-  {
-    id: "dogfood-app",
-    kind: "app",
-    title: "botster-web",
-    description: "Descriptor-backed botster-web app surface for package launcher validation.",
-    order: 1,
-    category: "validation",
-    supports: ["render"]
-  },
-  {
-    id: "dogfood-settings",
-    kind: "settings",
-    title: "botster-web Settings",
-    description: "Descriptor-backed settings surface for package launcher validation.",
-    order: 2,
-    category: "validation",
-    supports: ["render"]
-  }
-]);
-assert.equal(packageManifest.surfaces.some((surface) => surface.kind === "app"), true);
-assert.equal(packageManifest.surfaces.some((surface) => surface.kind === "settings"), true);
+assert.deepEqual(packageManifest.surfaces, []);
 assert.deepEqual(packageManifest.entrypoints, [
   { runtime: "lua", path: "plugin.lua", bootstrap: false }
 ]);
 assert.equal(packageManifest.runnable_entrypoints.length, 1);
-assert.match(pluginEntrypoint, /kind = "surface_route"/);
-assert.match(pluginEntrypoint, /descriptor_id = "dogfood-app"/);
-assert.match(pluginEntrypoint, /descriptor_id = "dogfood-settings"/);
-assert.match(pluginEntrypoint, /Deterministic app surface rendered by the botster-web validation package/);
+assert.doesNotMatch(pluginEntrypoint, /surface_route|descriptor_id|Deterministic/);
 assert.doesNotMatch(pluginEntrypoint, /tools|commands|surfaces|entities|mcp/);
 
 const [webClientEntrypoint] = packageManifest.runnable_entrypoints;
@@ -786,16 +760,6 @@ assert.deepEqual(
       kind: "hub_connection",
       target: { type: "environment", name: "BOTSTER_HUB_CONNECTION" },
       required: true
-    },
-    {
-      kind: "data_dir",
-      target: { type: "environment", name: "BOTSTER_HUB_DATA_DIR" },
-      required: true
-    },
-    {
-      kind: "hub_socket",
-      target: { type: "environment", name: "BOTSTER_HUB_SOCKET" },
-      required: true
     }
   ]
 );
@@ -809,90 +773,9 @@ assert.equal(
   false
 );
 assert.equal(
-  webClientEntrypoint.injections.some(({ target }) => target.name === "BOTSTER_WEB_DOGFOOD_DATA_DIR"),
+  webClientEntrypoint.injections.some(({ target }) => target.name === "BOTSTER_LIVE_DATA_DIR"),
   false
 );
-
-const spawnedServerMode = resolveLocalPackageServerMode(
-  { BOTSTER_HUB_BIN: "./target/debug/botster-hub", BOTSTER_SESSION_WORKER_BIN: "./target/debug/botster-session-worker" },
-  { cwd: "/workspace", generatedDataDir: "/tmp/botster-web-dogfood-test" }
-);
-assert.equal(spawnedServerMode.ok, true);
-assert.equal(spawnedServerMode.mode, "spawned_hub");
-assert.equal(spawnedServerMode.diagnosticLabel, "spawned isolated hub");
-assert.equal(spawnedServerMode.socketPath, "/tmp/botster-web-dogfood-test/botster-hub.sock");
-assert.equal(spawnedServerMode.hubBin, "/workspace/target/debug/botster-hub");
-assert.deepEqual(spawnedServerMode.hubArgs, [
-  "start",
-  "--data-dir",
-  "/tmp/botster-web-dogfood-test",
-  "--session-worker-bin",
-  "/workspace/target/debug/botster-session-worker"
-]);
-assert.deepEqual(localPackageServerShutdownPlan(spawnedServerMode), {
-  sendDaemonShutdown: true,
-  terminateHubProcess: true,
-  removeDataDir: true
-});
-
-const spawnedServerModeWithoutHubBin = resolveLocalPackageServerMode({}, { generatedDataDir: "/tmp/unused" });
-assert.equal(spawnedServerModeWithoutHubBin.ok, false);
-assert.match(spawnedServerModeWithoutHubBin.error, /BOTSTER_HUB_BIN/);
-
-const existingSocketServerMode = resolveLocalPackageServerMode(
-  { BOTSTER_HUB_SOCKET: "./dogfood/botster-hub.sock" },
-  { cwd: "/workspace" }
-);
-assert.equal(existingSocketServerMode.ok, true);
-assert.equal(existingSocketServerMode.mode, "existing_hub");
-assert.equal(existingSocketServerMode.source, "socket");
-assert.equal(existingSocketServerMode.diagnosticLabel, "existing hub socket");
-assert.equal(existingSocketServerMode.socketPath, "/workspace/dogfood/botster-hub.sock");
-assert.equal(existingSocketServerMode.hubBin, undefined);
-assert.equal(existingSocketServerMode.hubArgs, undefined);
-assert.deepEqual(existingSocketServerMode.health, {
-  ok: true,
-  mode: "existing_hub",
-  source: "socket",
-  socket: "configured"
-});
-assert.deepEqual(localPackageServerShutdownPlan(existingSocketServerMode), {
-  sendDaemonShutdown: false,
-  terminateHubProcess: false,
-  removeDataDir: false
-});
-
-const existingDataDirServerMode = resolveLocalPackageServerMode(
-  { BOTSTER_HUB_DATA_DIR: "./dogfood-data" },
-  { cwd: "/workspace" }
-);
-assert.equal(existingDataDirServerMode.ok, true);
-assert.equal(existingDataDirServerMode.mode, "existing_hub");
-assert.equal(existingDataDirServerMode.source, "data_dir");
-assert.equal(existingDataDirServerMode.diagnosticLabel, "existing hub data dir");
-assert.equal(existingDataDirServerMode.socketPath, "/workspace/dogfood-data/botster-hub.sock");
-assert.equal(existingDataDirServerMode.hubBin, undefined);
-assert.equal(existingDataDirServerMode.hubArgs, undefined);
-assert.deepEqual(localPackageServerShutdownPlan(existingDataDirServerMode), {
-  sendDaemonShutdown: false,
-  terminateHubProcess: false,
-  removeDataDir: false
-});
-
-const socketWinsServerMode = resolveLocalPackageServerMode(
-  { BOTSTER_HUB_SOCKET: "/tmp/socket.sock", BOTSTER_HUB_DATA_DIR: "/tmp/data-dir" },
-  { cwd: "/workspace" }
-);
-assert.equal(socketWinsServerMode.ok, true);
-assert.equal(socketWinsServerMode.source, "socket");
-assert.equal(socketWinsServerMode.socketPath, "/tmp/socket.sock");
-
-const mixedOwnershipServerMode = resolveLocalPackageServerMode({
-  BOTSTER_HUB_SOCKET: "/tmp/socket.sock",
-  BOTSTER_WEB_DOGFOOD_DATA_DIR: "/tmp/spawned-data-dir"
-});
-assert.equal(mixedOwnershipServerMode.ok, false);
-assert.match(mixedOwnershipServerMode.error, /cannot be combined/);
 
 const packageServerRuntime = await startPackageServerRuntime({ launchResult: true });
 try {
@@ -900,15 +783,22 @@ try {
   const rootHtml = await rootResponse.text();
   assert.equal(rootResponse.status, 200, rootHtml);
   assert.match(rootResponse.headers.get("content-type"), /text\/html/);
+  assert.equal(rootResponse.headers.get("access-control-allow-origin"), null);
   assert.match(rootHtml, /<div id="root"><\/div>/);
   assert.match(rootHtml, /window\.__BOTSTER_PACKAGE_RUNTIME__ = true/);
+  assert.match(rootHtml, /window\.__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__/);
+  assert.match(rootHtml, new RegExp(`"expected_origin":"${packageServerRuntime.origin.replaceAll(".", "\\.")}"`));
+  assert.match(rootHtml, /"signaling_url":"\/request"/);
 
   const faviconResponse = await fetch(`${packageServerRuntime.origin}/favicon.ico`);
   assert.equal(faviconResponse.status, 204);
 
-  const fallbackResponse = await fetch(`${packageServerRuntime.origin}/sessions/local-dogfood`);
+  const fallbackResponse = await fetch(`${packageServerRuntime.origin}/sessions/local-production`);
+  const fallbackHtml = await fallbackResponse.text();
   assert.equal(fallbackResponse.status, 200);
-  assert.match(await fallbackResponse.text(), /botster package runtime/);
+  assert.match(fallbackHtml, /botster package runtime/);
+  assert.match(rootHtml, /"grant_id":"package-server-grant-1"/);
+  assert.match(fallbackHtml, /"grant_id":"package-server-grant-2"/);
 
   const assetResponse = await fetch(`${packageServerRuntime.origin}/assets/app.js`);
   const assetBody = await assetResponse.text();
@@ -923,9 +813,8 @@ try {
   const healthResponse = await fetch(`${packageServerRuntime.origin}/health`);
   assert.deepEqual(await healthResponse.json(), {
     ok: true,
-    mode: "existing_hub",
-    source: "socket",
-    socket: "configured",
+    connection: "hub",
+    transport: "unix_socket",
     local_url: packageServerRuntime.origin
   });
   assert.deepEqual(await readLaunchResult(packageServerRuntime.launchResultPath), {
@@ -947,10 +836,63 @@ try {
   const rejectedRequest = await requestResponse.json();
   assert.equal(rejectedRequest.request_id, "package-runtime-status");
   assert.equal(rejectedRequest.payload.error.code, "unsupported_package_server_request");
-  assert.deepEqual(packageServerRuntime.daemonRequests, []);
+  assert.equal(packageServerRuntime.daemonRequests.length >= 2, true);
+  assert.equal(
+    packageServerRuntime.daemonRequests.every(
+      (request) =>
+        request.type === "issue_local_webrtc_bootstrap" &&
+        request.package_name === "botster-web" &&
+        request.entrypoint_id === "web-client" &&
+        request.origin === packageServerRuntime.origin
+    ),
+    true
+  );
 } finally {
   await packageServerRuntime.stop();
 }
+
+const invalidFallbackBootstrapRuntime = await startPackageServerRuntime({
+  launchResult: true,
+  invalidBootstrapAt: 2
+});
+try {
+  const rootResponse = await fetch(`${invalidFallbackBootstrapRuntime.origin}/`);
+  assert.equal(rootResponse.status, 200);
+
+  const fallbackResponse = await fetch(`${invalidFallbackBootstrapRuntime.origin}/apps/direct-load`);
+  assert.equal(fallbackResponse.status, 503);
+  assert.deepEqual(await fallbackResponse.json(), {
+    error: "local_webrtc_bootstrap_unavailable",
+    message: "Hub returned an invalid local WebRTC bootstrap grant."
+  });
+
+  const healthResponse = await fetch(`${invalidFallbackBootstrapRuntime.origin}/health`);
+  assert.equal(healthResponse.status, 200);
+  assert.equal((await healthResponse.json()).ok, true);
+} finally {
+  await invalidFallbackBootstrapRuntime.stop();
+}
+
+const dynamicPackageServerRuntime = await startPackageServerRuntime({
+  launchResult: true,
+  dynamicPort: true
+});
+try {
+  const launchResult = await readLaunchResult(dynamicPackageServerRuntime.launchResultPath);
+  assert.equal(launchResult.local_url, dynamicPackageServerRuntime.origin);
+  assert.match(dynamicPackageServerRuntime.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
+} finally {
+  await dynamicPackageServerRuntime.stop();
+}
+
+const occupiedPackageServerResult = await startPackageServerRuntime({
+  launchResult: true,
+  occupiedPort: true
+});
+assert.notEqual(occupiedPackageServerResult.code, 0);
+assert.match(occupiedPackageServerResult.stderr, /"code":"package_server_listen_failed"/);
+assert.match(occupiedPackageServerResult.stderr, /EADDRINUSE/);
+assert.equal(occupiedPackageServerResult.launchResultPublished, false);
 
 const desktopCss = removeCssAtRules(css);
 assert.doesNotMatch(desktopCss, /\.workspace-grid\s*\{[^}]*grid-template-columns/);
@@ -1055,13 +997,12 @@ await Promise.all([
   compileTsModule("botster/capabilities.ts", join(compiledRoot, "botster/capabilities.js")),
   compileTsModule("botster/client.ts", join(compiledRoot, "botster/client.js")),
   compileTsModule("botster/connectionDiagnostics.ts", join(compiledRoot, "botster/connectionDiagnostics.js")),
-  compileTsModule("botster/dogfoodMode.ts", join(compiledRoot, "botster/dogfoodMode.js")),
+  compileTsModule("botster/hubRuntime.ts", join(compiledRoot, "botster/hubRuntime.js")),
   compileTsModule("botster/entities.ts", join(compiledRoot, "botster/entities.js")),
-  compileTsModule("botster/localDogfoodTransport.ts", join(compiledRoot, "botster/localDogfoodTransport.js")),
   compileTsModule("botster/protocol.ts", join(compiledRoot, "botster/protocol.js")),
   compileTsModule("botster/realHubDaemonDto.ts", join(compiledRoot, "botster/realHubDaemonDto.js")),
-  compileTsModule("botster/realHubDogfoodTransport.ts", join(compiledRoot, "botster/realHubDogfoodTransport.js")),
-  compileTsModule("botster/realHubTerminalDataPlane.ts", join(compiledRoot, "botster/realHubTerminalDataPlane.js")),
+  compileTsModule("botster/hubTransport.ts", join(compiledRoot, "botster/hubTransport.js")),
+  compileTsModule("botster/hubTerminalDataPlane.ts", join(compiledRoot, "botster/hubTerminalDataPlane.js")),
   compileTsModule("botster/webrtcDaemonClient.ts", join(compiledRoot, "botster/webrtcDaemonClient.js")),
   compileTsModule("botster/terminal.ts", join(compiledRoot, "botster/terminal.js"))
 ]);
@@ -1069,16 +1010,13 @@ await Promise.all([
 const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
 const { createBotsterWebClient } = requireRuntime("./botster/client.js");
 const { createInMemoryEntityFrameStore } = requireRuntime("./botster/entities.js");
-const { createLocalDogfoodTransport } = requireRuntime("./botster/localDogfoodTransport.js");
-const { createDogfoodRuntimeConfig, terminalDataPlaneLabel } = requireRuntime("./botster/dogfoodMode.js");
+const { createHubRuntimeConfig, terminalDataPlaneLabel } = requireRuntime("./botster/hubRuntime.js");
 const {
-  createRealHubDogfoodTransport,
+  createHubTransport,
   daemonEntityFrame,
   daemonResponseFrames,
-  defaultSpawnCommand,
-  realHubDogfoodSessionId
-} = requireRuntime("./botster/realHubDogfoodTransport.js");
-const { createRealHubTerminalDataPlane } = requireRuntime("./botster/realHubTerminalDataPlane.js");
+} = requireRuntime("./botster/hubTransport.js");
+const { createHubTerminalDataPlane } = requireRuntime("./botster/hubTerminalDataPlane.js");
 const {
   createLocalWebrtcBootstrapRefresher,
   createWebrtcDaemonClient,
@@ -1265,8 +1203,8 @@ assert.equal(optionalDaemonPackageRecord.package_action_summary, "No package act
 assert.deepEqual(optionalDaemonPackageRecord.configuration_fields, []);
 const appSnapshot = daemonResponseFrames(generatedAppResponseFixture, 12)
   .find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.app");
-assert.equal(appSnapshot.payload.records[0].id, "botster-web:dogfood");
-assert.equal(appSnapshot.payload.records[0].local_url, "http://127.0.0.1:41739");
+assert.equal(appSnapshot.payload.records[0].id, "botster-web:production");
+assert.equal(appSnapshot.payload.records[0].local_url, "http://127.0.0.1:41821");
 assert.equal(appSnapshot.payload.records[0].open_action.disabled, false);
 assert.equal(appSnapshot.payload.records[1].kind, "terminal_app");
 assert.equal(appSnapshot.payload.records[1].open_action.disabled, true);
@@ -1555,8 +1493,8 @@ const bridge = {
             ],
             conformance_fixture_revision: 14
           },
-          host_id: "dogfood-host",
-          host_display_name: "Dogfood Hub",
+          host_id: "production-host",
+          host_display_name: "Production Hub",
           schema_version: 1,
           data_dir_configured: true,
           core_initialized: true,
@@ -1614,7 +1552,7 @@ const bridge = {
                 may_supervise: true,
                 process: {
                   state: "running",
-                  pid: 41739,
+                  pid: 41821,
                   started_at: 1781112600,
                   diagnostics: []
                 },
@@ -1849,14 +1787,14 @@ const bridge = {
     if (request.type === "list_sessions") {
       return {
         kind: "sessions",
-        sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }],
+        sessions: [{ session_id: activeHubSessionId, lifecycle: "running" }],
         events: []
       };
     }
 
     if (request.type === "plugin_surface_render") {
       if (request.package_name === "botster-web") {
-        const settings = request.surface_id === "dogfood-settings";
+        const settings = request.surface_id === "production-settings";
         const bodyText = settings
           ? "Deterministic settings surface rendered by the botster-web validation package."
           : "Deterministic app surface rendered by the botster-web validation package.";
@@ -1977,8 +1915,8 @@ const bridge = {
           {
             type: "terminal_output",
             session_id: request.session_id,
-            subscription_id: "botster-web-dogfood-terminal",
-            data: request.type === "attach" ? "botster-web-dogfood-ready\r\n" : "botster-web-dogfood-echo:ping\r\n"
+            subscription_id: "botster-web-production-terminal",
+            data: request.type === "attach" ? "botster-web-production-ready\r\n" : "botster-web-production-echo:ping\r\n"
           }
         ]
       };
@@ -2047,7 +1985,7 @@ const bridge = {
       type: "terminal_output",
       session_id: sessionId,
       subscription_id: subscriptionId,
-      data: "botster-web-dogfood-ready\r\n"
+      data: "botster-web-production-ready\r\n"
     });
     return {
       unsubscribe() {
@@ -2057,38 +1995,27 @@ const bridge = {
   }
 };
 
-const fixtureMode = createDogfoodRuntimeConfig({
-  locationHref: "http://127.0.0.1:5173/"
-});
-assert.equal(fixtureMode.mode, "fixture");
-assert.equal(fixtureMode.terminalDataPlaneKind, "mock");
-
-assert.match(defaultSpawnCommand(), /botster-web-dogfood-ready/);
-assert.match(defaultSpawnCommand(), /botster-web-dogfood-size/);
-assert.match(defaultSpawnCommand(), /stty size/);
-assert.match(defaultSpawnCommand(), /botster-web-dogfood-exit/);
-
 const localWebrtcBootstrapFixture = {
   grant_id: "grant-test",
   grant_secret: "secret-0000000000000000000000000000000000000000000000000000000000000000",
   package_name: "botster-web",
   entrypoint_id: "web-client",
-  expected_origin: "http://127.0.0.1:41739",
+  expected_origin: "http://127.0.0.1:41821",
   expires_at: 0,
   signaling_transport: "daemon_request",
   data_plane: "webrtc_data_channel",
   ordered: true,
-  signaling_url: "http://127.0.0.1:41739/request"
+  signaling_url: "http://127.0.0.1:41821/request"
 };
-const missingBootstrapMode = createDogfoodRuntimeConfig({
-  locationHref: "http://127.0.0.1:41739/",
+const missingBootstrapMode = createHubRuntimeConfig({
+  locationHref: "http://127.0.0.1:41821/",
   packageRuntime: true
 });
 assert.equal(missingBootstrapMode.mode, "webrtc");
 assert.equal(missingBootstrapMode.statusText, "Local WebRTC bootstrap unavailable");
 assert.match(missingBootstrapMode.startupError?.message ?? "", /requires a valid local WebRTC bootstrap grant/);
-const productionMode = createDogfoodRuntimeConfig({
-  locationHref: "http://127.0.0.1:41739/",
+const productionMode = createHubRuntimeConfig({
+  locationHref: "http://127.0.0.1:41821/",
   bridge,
   packageRuntime: true,
   localWebrtcBootstrap: localWebrtcBootstrapFixture
@@ -2096,10 +2023,7 @@ const productionMode = createDogfoodRuntimeConfig({
 assert.equal(productionMode.mode, "webrtc");
 assert.equal(productionMode.terminalDataPlaneKind, "webrtc");
 assert.equal(productionMode.statusText, "Connected to local hub over WebRTC");
-assert.equal(productionMode.terminalDescriptor.sessionId, realHubDogfoodSessionId);
-assert.notEqual(productionMode.createTerminalDataPlane(realHubDogfoodSessionId), productionMode.terminalDataPlane);
-assert.notEqual(productionMode.terminalDescriptor.sessionId, "terminal_view_smoke_session");
-assert.notEqual(productionMode.terminalDataPlane.constructor.name, "MockTerminalDataPlane");
+assert.equal(typeof productionMode.createTerminalDataPlane, "function");
 const webRtcModeDiagnostics = initialConnectionDiagnostics(productionMode.mode, productionMode.statusText, productionMode.terminalDataPlaneKind);
 assert.equal(
   webRtcModeDiagnostics.find((diagnostic) => diagnostic.id === "terminal-data-plane").title,
@@ -2120,7 +2044,7 @@ assert.equal(
 const originalWindow = globalThis.window;
 const lifecycleEvents = [];
 globalThis.window = {
-  location: { origin: "http://127.0.0.1:41739" },
+  location: { origin: "http://127.0.0.1:41821" },
   setTimeout,
   clearTimeout,
   dispatchEvent(event) {
@@ -2137,7 +2061,7 @@ try {
   };
   const refreshedBootstrap = await createLocalWebrtcBootstrapRefresher({
     bootstrap: localWebrtcBootstrapFixture,
-    signalingUrl: "http://127.0.0.1:41739/request",
+    signalingUrl: "http://127.0.0.1:41821/request",
     requestIdGenerator: () => "bootstrap-refresh-test",
     fetchImpl: async (url, init) => {
       const envelope = JSON.parse(init.body);
@@ -2155,7 +2079,7 @@ try {
       };
     }
   })();
-  assert.equal(bootstrapRefreshRequests[0].url, "http://127.0.0.1:41739/request");
+  assert.equal(bootstrapRefreshRequests[0].url, "http://127.0.0.1:41821/request");
   assert.deepEqual(bootstrapRefreshRequests[0].envelope, {
     kind: "daemon_request",
     request_id: "bootstrap-refresh-test",
@@ -2163,7 +2087,7 @@ try {
       type: "issue_local_webrtc_bootstrap",
       package_name: "botster-web",
       entrypoint_id: "web-client",
-      origin: "http://127.0.0.1:41739"
+      origin: "http://127.0.0.1:41821"
     }
   });
   assert.equal(refreshedBootstrap.grant_id, "grant-refresh");
@@ -2936,7 +2860,7 @@ try {
 }
 const mountedWebrtcInputs = [];
 const mountedWebrtcDataPlane = {
-  sessionId: realHubDogfoodSessionId,
+  sessionId: activeHubSessionId,
   writeInput(data) {
     mountedWebrtcInputs.push(data);
   },
@@ -2959,17 +2883,17 @@ const mountedWebrtcBridge = new DefaultTerminalViewBridge(() => ({
 }));
 await mountedWebrtcBridge.mount(
   { dataset: {} },
-  { sessionId: realHubDogfoodSessionId, renderer: "restty" }
+  { sessionId: activeHubSessionId, renderer: "restty" }
 );
 await mountedWebrtcBridge.attach(
-  { sessionId: realHubDogfoodSessionId, renderer: "restty" },
+  { sessionId: activeHubSessionId, renderer: "restty" },
   mountedWebrtcDataPlane
 );
 mountedInputListener("webrtc-mounted-input\n");
 assert.deepEqual(mountedWebrtcInputs, ["webrtc-mounted-input\n"]);
 
 globalThis.window = {
-  location: { origin: "http://127.0.0.1:41739" },
+  location: { origin: "http://127.0.0.1:41821" },
   setTimeout,
   clearTimeout
 };
@@ -2992,11 +2916,11 @@ try {
   });
   let mountedRealWebrtcWritePromise;
   const mountedRealWebrtcDataPlane = {
-    sessionId: realHubDogfoodSessionId,
+    sessionId: activeHubSessionId,
     writeInput(data) {
       mountedRealWebrtcWritePromise = mountedRealWebrtcBridgeClient.request({
         type: "send_input",
-        session_id: realHubDogfoodSessionId,
+        session_id: activeHubSessionId,
         data
       });
       return mountedRealWebrtcWritePromise;
@@ -3020,10 +2944,10 @@ try {
   }));
   await mountedRealWebrtcBridge.mount(
     { dataset: {} },
-    { sessionId: realHubDogfoodSessionId, renderer: "restty" }
+    { sessionId: activeHubSessionId, renderer: "restty" }
   );
   await mountedRealWebrtcBridge.attach(
-    { sessionId: realHubDogfoodSessionId, renderer: "restty" },
+    { sessionId: activeHubSessionId, renderer: "restty" },
     mountedRealWebrtcDataPlane
   );
   mountedRealWebrtcInputListener("webrtc-mounted-input\n");
@@ -3034,7 +2958,7 @@ try {
   );
   assert.deepEqual(mountedRealWebrtcInputRequest, {
     type: "send_input",
-    session_id: realHubDogfoodSessionId,
+    session_id: activeHubSessionId,
     data: "webrtc-mounted-input\n"
   });
   await emitChunkedTestResponse(mountedRealWebrtcDataChannel,
@@ -3042,12 +2966,12 @@ try {
     { kind: "events", events: [] }
   );
   await mountedRealWebrtcWritePromise;
-  await mountedRealWebrtcBridge.detach({ sessionId: realHubDogfoodSessionId, renderer: "restty" });
+  await mountedRealWebrtcBridge.detach({ sessionId: activeHubSessionId, renderer: "restty" });
 } finally {
   globalThis.window = originalWindow;
 }
 
-const realTransport = createRealHubDogfoodTransport({ bridge });
+const realTransport = createHubTransport({ bridge });
 const realFrames = [];
 await realTransport.connect({ client: "botster-web", capabilities: [] }, (frame) => realFrames.push(frame));
 await flushMicrotasks();
@@ -3083,7 +3007,7 @@ bridgeEntitySubscriptions[0].onFrame({
   snapshot_seq: 3,
   id: "external-session"
 });
-await realTransport.send({ kind: "surface_subscribe", payload: { surface: "botster-web.dogfood.session" } });
+await realTransport.send({ kind: "surface_subscribe", payload: { surface: "botster-web.production.session" } });
 await flushMicrotasks();
 await realTransport.send({ kind: "entity_pull", payload: { family: "botster-web.app" } });
 await flushMicrotasks();
@@ -3094,7 +3018,7 @@ await realTransport.send({
   payload: {
     request_id: "real-action-1",
     origin: "ui_node",
-    action: { id: "botster.session.select", target: realHubDogfoodSessionId }
+    action: { id: "botster.session.select", target: activeHubSessionId }
   }
 });
 await flushMicrotasks();
@@ -3178,12 +3102,12 @@ for (const action of [
   {
     id: "botster.package.surface.render",
     target: "botster-web",
-    params: { package_name: "botster-web", surface_id: "dogfood-app" }
+    params: { package_name: "botster-web", surface_id: "production-app" }
   },
   {
     id: "botster.package.surface.render",
     target: "botster-web",
-    params: { package_name: "botster-web", surface_id: "dogfood-settings" }
+    params: { package_name: "botster-web", surface_id: "production-settings" }
   },
   {
     id: "botster.package.daemon_request",
@@ -3265,7 +3189,7 @@ assert.equal(
   true
 );
 assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
-assert.equal(bridgeRequests.some((request) => request.type === "spawn" && request.session_id === realHubDogfoodSessionId), true);
+assert.equal(bridgeRequests.some((request) => request.type === "spawn"), false);
 const configSaveRequests = bridgeRequests.filter((request) => request.type === "set_package_configuration");
 assert.equal(configSaveRequests.length, 3);
 assert.deepEqual(configSaveRequests[0], {
@@ -3318,13 +3242,13 @@ assert.deepEqual(
     {
       type: "plugin_surface_render",
       package_name: "botster-web",
-      surface_id: "dogfood-app",
+      surface_id: "production-app",
       payload: {}
     },
     {
       type: "plugin_surface_render",
       package_name: "botster-web",
-      surface_id: "dogfood-settings",
+      surface_id: "production-settings",
       payload: {}
     }
   ]
@@ -3352,7 +3276,7 @@ assert.equal(
 assert.equal(bridgeRequests.some((request) => request.type === "list_apps"), true);
 assert.equal(bridgeRequests.some((request) => /legacy/.test(JSON.stringify(request))), false);
 assert.equal(bridgeRequests.some((request) => /update_package|restart_hub/.test(request.type)), false);
-assert.equal(realFrames.some((frame) => frame.kind === "ui_tree_snapshot"), true);
+assert.equal(realFrames.some((frame) => frame.kind === "ui_tree_snapshot"), false);
 assert.equal(realFrames.some((frame) => frame.kind === "entity_snapshot"), true);
 assert.equal(
   realFrames.some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.package"),
@@ -3371,17 +3295,15 @@ const realRuntime = createBotsterWebClient({
   actionTimeoutMs: 50
 });
 await realRuntime.hub.connect({ client: "botster-web", capabilities: [] });
-await realRuntime.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/real-hub" });
+await realRuntime.hub.subscribeSurface({ surface: "botster-web.production.session", path: "/sessions/real-hub" });
 await realRuntime.entities.pull({ family: "botster-web.hub_status" });
 await realRuntime.entities.pull({ family: "botster-web.package" });
 await realRuntime.entities.pull({ family: "botster-web.session" });
 await flushMicrotasks();
-assert.equal(realRuntime.uiTree.current().surface, "botster-web.dogfood.session");
-assert.deepEqual(realRuntime.entities.list("botster-web.session").map((record) => record.id), [
-  realHubDogfoodSessionId
-]);
+assert.equal(realRuntime.uiTree.current(), undefined);
+assert.deepEqual(realRuntime.entities.list("botster-web.session").map((record) => record.id), []);
 assert.equal(realRuntime.entities.get("botster-web.session", "session-local-1"), undefined);
-assert.equal(realRuntime.entities.get("botster-web.hub_status", "local-hub").host_id, "dogfood-host");
+assert.equal(realRuntime.entities.get("botster-web.hub_status", "local-hub").host_id, "production-host");
 assert.deepEqual(realRuntime.entities.list("botster-web.package").map((record) => record.id), [
   "botster-web",
   "project-pipelines",
@@ -3389,30 +3311,8 @@ assert.deepEqual(realRuntime.entities.list("botster-web.package").map((record) =
   "local-diagnostics"
 ]);
 assert.equal(realRuntime.entities.get("botster-web.package", "botster-web").status, "enabled");
-assert.equal(realRuntime.entities.get("botster-web.package", "botster-web").app_surface_count, 1);
-assert.equal(realRuntime.entities.get("botster-web.package", "botster-web").settings_surface_count, 1);
-assert.deepEqual(realRuntime.entities.get("botster-web.package", "botster-web").app_surfaces[0].launch_action, {
-  id: "botster.package.surface.render",
-  target: "botster-web",
-  label: "botster-web",
-  params: {
-    package_name: "botster-web",
-    surface_id: "dogfood-app",
-    surface_kind: "app",
-    supports: ["render"]
-  }
-});
-assert.deepEqual(realRuntime.entities.get("botster-web.package", "botster-web").settings_surfaces[0].launch_action, {
-  id: "botster.package.surface.render",
-  target: "botster-web",
-  label: "botster-web Settings",
-  params: {
-    package_name: "botster-web",
-    surface_id: "dogfood-settings",
-    surface_kind: "settings",
-    supports: ["render"]
-  }
-});
+assert.equal(realRuntime.entities.get("botster-web.package", "botster-web").app_surface_count, 0);
+assert.equal(realRuntime.entities.get("botster-web.package", "botster-web").settings_surface_count, 0);
 assert.equal(realRuntime.entities.get("botster-web.package", "project-pipelines").status, "enabled");
 assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").capability_summary, /SessionActions:project-pipelines/);
 assert.match(realRuntime.entities.get("botster-web.package", "project-pipelines").capability_summary, /McpTools/);
@@ -3478,48 +3378,6 @@ assert.deepEqual(realRuntime.entities.get("botster-web.hub_status", "local-hub")
   "plugin_surface_render",
   "plugin_surface_action"
 ]);
-assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).target, "isolated-local-hub");
-assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attachable, true);
-assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.id, "botster.session.attach");
-assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.disabled, false);
-const appSurfaceRender = realRuntime.actions.dispatch({
-  origin: "ui_node",
-  action: realRuntime.entities.get("botster-web.package", "botster-web").app_surfaces[0].launch_action
-});
-await flushMicrotasks();
-assert.deepEqual(await appSurfaceRender, {
-  accepted: true,
-  request_id: "real-runtime-action-1",
-  result: {
-    package_name: "botster-web",
-    surface_id: "dogfood-app",
-    kind: "plugin_surface",
-    plugin_surface: {
-      package_name: "botster-web",
-      surface_id: "dogfood-app",
-      body: "Deterministic app surface rendered by the botster-web validation package.",
-      ui_tree_snapshot: {
-        package_name: "botster-web",
-        surface_id: "dogfood-app",
-        body: {
-          id: "botster-web-dogfood-app-root",
-          primitive: "section",
-          props: { label: "botster-web App" },
-          slots: {
-            children: [
-              {
-                id: "botster-web-dogfood-app-copy",
-                primitive: "text",
-                props: { text: "Deterministic app surface rendered by the botster-web validation package." }
-              }
-            ]
-          }
-        }
-      }
-    }
-  },
-  reason: undefined
-});
 assert.equal(
   daemonResponseFrames({ kind: "status", sessions: [], packages: [], events: [] }, 21)
     .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session"),
@@ -3560,44 +3418,6 @@ optimisticSpawnStore.apply(daemonEntityFrame({
   patch: { registry_state: "exited", exit_code: 0, updated_at: 2 }
 }).payload);
 assert.equal(optimisticSpawnStore.get("botster-web.session", "spawned-target").status, "exited");
-
-const attachSuccess = realRuntime.actions.dispatch({
-  origin: "ui_node",
-  action: { id: "botster.session.attach", target: realHubDogfoodSessionId }
-});
-await flushMicrotasks();
-assert.deepEqual(await attachSuccess, {
-  accepted: true,
-  request_id: "real-runtime-action-2",
-  result: {
-    session_id: realHubDogfoodSessionId,
-    state: "selected",
-    mode: "real_hub_dogfood"
-  },
-  reason: undefined
-});
-
-for (const frame of daemonResponseFrames({
-  kind: "events",
-  events: [{ type: "process_exit", session_id: realHubDogfoodSessionId, code: 0 }]
-}, 22)) {
-  if (frame.kind === "entity_patch") {
-    realRuntime.entities.apply(frame.payload);
-  }
-}
-assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).status, "running");
-const authoritativeExitFrame = daemonEntityFrame({
-  type: "entity_patch",
-  subscription_id: "bridge-session-generation-2",
-  entity_type: "session",
-  snapshot_seq: 2,
-  id: realHubDogfoodSessionId,
-  patch: { registry_state: "exited", exit_code: 0, updated_at: 2 }
-});
-realRuntime.entities.apply(authoritativeExitFrame.payload);
-assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).status, "exited");
-assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attachable, false);
-assert.equal(realRuntime.entities.get("botster-web.session", realHubDogfoodSessionId).attach_action.disabled, true);
 
 const runtimeDiagnostics = [];
 const diagnosticRuntime = createBotsterWebClient({
@@ -3646,8 +3466,8 @@ const hubDiagnosticFrames = daemonResponseFrames({
       ],
       conformance_fixture_revision: 1
     },
-    host_id: "dogfood-host",
-    host_display_name: "Dogfood Hub",
+    host_id: "production-host",
+    host_display_name: "Production Hub",
     schema_version: 1,
     data_dir_configured: true,
     core_initialized: true,
@@ -4042,8 +3862,9 @@ assert.match(
   /Package configuration failed field: pipeline_mode: select_option_unknown: invalid-mode/
 );
 
-const terminalDataPlane = createRealHubTerminalDataPlane({
-  bridge
+const terminalDataPlane = createHubTerminalDataPlane({
+  bridge,
+  sessionId: activeHubSessionId
 });
 const terminalOutput = [];
 const terminalStatuses = [];
@@ -4061,40 +3882,41 @@ assert.equal(
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
 await terminalDataPlane.detach();
 terminalStatusSubscription.unsubscribe();
-assert.equal(bridgeTerminalStreams.some((stream) => stream.sessionId === realHubDogfoodSessionId), true);
+assert.equal(bridgeTerminalStreams.some((stream) => stream.sessionId === activeHubSessionId), true);
 assert.equal(bridgeRequests.some((request) => request.type === "send_input" && request.data === "ping\n"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "resize" && request.rows === 24 && request.cols === 80), true);
 assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
 assert.deepEqual(terminalOutput.slice(0, 2), [
   "hub-owned-screen\r\n",
-  "botster-web-dogfood-ready\r\n"
+  "botster-web-production-ready\r\n"
 ]);
-assert.equal(terminalOutput.some((data) => data.includes("botster-web-dogfood-ready")), true);
+assert.equal(terminalOutput.some((data) => data.includes("botster-web-production-ready")), true);
 assert.equal(terminalStatuses.some((status) => status.state === "attached" && status.message.includes("Visible terminal screen restored")), true);
 
 const readbackRequests = [];
 const readScreenResponses = [
-  { session_id: realHubDogfoodSessionId, text: "hub-owned-screen\r\n" },
+  { session_id: activeHubSessionId, text: "hub-owned-screen\r\n" },
   null,
   undefined,
   { session_id: "replacement-session", text: "wrong screen\r\n" }
 ];
 const captureSnapshotResponses = [
-  { session_id: realHubDogfoodSessionId, rows: 24, cols: 80, payload_format: null, payload_bytes: 512 },
-  { session_id: realHubDogfoodSessionId, rows: 30, cols: 100, payload_bytes: 0 },
+  { session_id: activeHubSessionId, rows: 24, cols: 80, payload_format: null, payload_bytes: 512 },
+  { session_id: activeHubSessionId, rows: 30, cols: 100, payload_bytes: 0 },
   null,
   undefined,
   { session_id: "replacement-session", rows: 24, cols: 80, payload_bytes: 512 }
 ];
 const readbackOutput = [];
-const readbackDataPlane = createRealHubTerminalDataPlane({
+const readbackDataPlane = createHubTerminalDataPlane({
+  sessionId: activeHubSessionId,
   bridge: {
     async request(request) {
       if (request.type === "list_sessions") {
         return {
           kind: "sessions",
-          sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }],
+          sessions: [{ session_id: activeHubSessionId, lifecycle: "running" }],
           events: []
         };
       }
@@ -4119,11 +3941,11 @@ const readbackDataPlane = createRealHubTerminalDataPlane({
 readbackDataPlane.subscribeOutput((data) => readbackOutput.push(data));
 await flushMicrotasks();
 assert.deepEqual(await readbackDataPlane.readScreen(), {
-  session_id: realHubDogfoodSessionId,
+  session_id: activeHubSessionId,
   text: "hub-owned-screen\r\n"
 });
 assert.deepEqual(await readbackDataPlane.captureSnapshot(), {
-  session_id: realHubDogfoodSessionId,
+  session_id: activeHubSessionId,
   rows: 24,
   cols: 80,
   payload_format: null,
@@ -4131,7 +3953,7 @@ assert.deepEqual(await readbackDataPlane.captureSnapshot(), {
 });
 assert.equal(await readbackDataPlane.readScreen(), undefined);
 assert.deepEqual(await readbackDataPlane.captureSnapshot(), {
-  session_id: realHubDogfoodSessionId,
+  session_id: activeHubSessionId,
   rows: 30,
   cols: 100,
   payload_bytes: 0
@@ -4142,21 +3964,22 @@ assert.equal(await readbackDataPlane.readScreen(), undefined);
 assert.equal(await readbackDataPlane.captureSnapshot(), undefined);
 assert.equal(await readbackDataPlane.captureSnapshot(), undefined);
 assert.deepEqual(readbackRequests, [
-  { type: "read_screen", session_id: realHubDogfoodSessionId },
-  { type: "capture_snapshot", session_id: realHubDogfoodSessionId },
-  { type: "read_screen", session_id: realHubDogfoodSessionId },
-  { type: "capture_snapshot", session_id: realHubDogfoodSessionId },
-  { type: "read_screen", session_id: realHubDogfoodSessionId },
-  { type: "capture_snapshot", session_id: realHubDogfoodSessionId },
-  { type: "read_screen", session_id: realHubDogfoodSessionId },
-  { type: "capture_snapshot", session_id: realHubDogfoodSessionId },
-  { type: "capture_snapshot", session_id: realHubDogfoodSessionId }
+  { type: "read_screen", session_id: activeHubSessionId },
+  { type: "capture_snapshot", session_id: activeHubSessionId },
+  { type: "read_screen", session_id: activeHubSessionId },
+  { type: "capture_snapshot", session_id: activeHubSessionId },
+  { type: "read_screen", session_id: activeHubSessionId },
+  { type: "capture_snapshot", session_id: activeHubSessionId },
+  { type: "read_screen", session_id: activeHubSessionId },
+  { type: "capture_snapshot", session_id: activeHubSessionId },
+  { type: "capture_snapshot", session_id: activeHubSessionId }
 ]);
 assert.deepEqual(readbackOutput, []);
 
 for (const readbackType of ["read_screen", "capture_snapshot"]) {
   let resolveReadback;
-  const staleDataPlane = createRealHubTerminalDataPlane({
+  const staleDataPlane = createHubTerminalDataPlane({
+    sessionId: activeHubSessionId,
     bridge: {
       async request(request) {
         if (request.type === readbackType) {
@@ -4167,7 +3990,7 @@ for (const readbackType of ["read_screen", "capture_snapshot"]) {
         if (request.type === "list_sessions") {
           return {
             kind: "sessions",
-            sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }],
+            sessions: [{ session_id: activeHubSessionId, lifecycle: "running" }],
             events: []
           };
         }
@@ -4188,12 +4011,12 @@ for (const readbackType of ["read_screen", "capture_snapshot"]) {
   resolveReadback(readbackType === "read_screen"
     ? {
         kind: "read_screen",
-        read_screen: { session_id: realHubDogfoodSessionId, text: "late screen\r\n" },
+        read_screen: { session_id: activeHubSessionId, text: "late screen\r\n" },
         events: []
       }
     : {
         kind: "capture_snapshot",
-        capture_snapshot: { session_id: realHubDogfoodSessionId, rows: 24, cols: 80, payload_bytes: 512 },
+        capture_snapshot: { session_id: activeHubSessionId, rows: 24, cols: 80, payload_bytes: 512 },
         events: []
       });
   assert.equal(await pendingReadback, undefined, "late reply from a previous attachment must be discarded after re-subscribe");
@@ -4208,7 +4031,7 @@ for (const [events, readScreenText, expectedOutput] of [
   const subscriptionId = events[0].subscription_id;
   const fixtureOutput = [];
   const fixtureTimeline = [];
-  const fixtureDataPlane = createRealHubTerminalDataPlane({
+  const fixtureDataPlane = createHubTerminalDataPlane({
     sessionId,
     subscriptionId,
     bridge: {
@@ -4274,7 +4097,7 @@ for (const [events, readScreenText, expectedOutput] of [
 
 let resolveDelayedScreen;
 const delayedHydrationOutput = [];
-const delayedHydrationDataPlane = createRealHubTerminalDataPlane({
+const delayedHydrationDataPlane = createHubTerminalDataPlane({
   sessionId: "delayed-hydration-session",
   subscriptionId: "delayed-hydration-subscription",
   bridge: {
@@ -4325,7 +4148,7 @@ let resolveStaleAutomaticScreen;
 let staleAutomaticStreamCount = 0;
 let staleAutomaticReadCount = 0;
 const staleAutomaticOutput = [];
-const staleAutomaticDataPlane = createRealHubTerminalDataPlane({
+const staleAutomaticDataPlane = createHubTerminalDataPlane({
   sessionId: "stale-automatic-session",
   subscriptionId: "stale-automatic-subscription",
   bridge: {
@@ -4377,10 +4200,10 @@ staleAutomaticSecondSubscription.unsubscribe();
 
 const reattachedTerminalOutput = [];
 const reattachedTerminalSubscription = terminalDataPlane.subscribeOutput((data) => reattachedTerminalOutput.push(data));
-await waitFor(() => reattachedTerminalOutput.some((data) => data.includes("botster-web-dogfood-ready")));
+await waitFor(() => reattachedTerminalOutput.some((data) => data.includes("botster-web-production-ready")));
 reattachedTerminalSubscription.unsubscribe();
 assert.equal(
-  bridgeTerminalStreams.filter((stream) => stream.sessionId === realHubDogfoodSessionId && stream.unsubscribed !== true).length,
+  bridgeTerminalStreams.filter((stream) => stream.sessionId === activeHubSessionId && stream.unsubscribed !== true).length,
   2
 );
 assert.equal(
@@ -4390,20 +4213,21 @@ assert.equal(
 
 const byteOnlyTerminalStatuses = [];
 const byteOnlyTerminalOutput = [];
-const byteOnlyTerminalDataPlane = createRealHubTerminalDataPlane({
+const byteOnlyTerminalDataPlane = createHubTerminalDataPlane({
+  sessionId: activeHubSessionId,
   bridge: {
     async request(request) {
       if (request.type === "list_sessions") {
         return {
           kind: "sessions",
-          sessions: [{ session_id: realHubDogfoodSessionId, lifecycle: "running" }],
+          sessions: [{ session_id: activeHubSessionId, lifecycle: "running" }],
           events: []
         };
       }
       if (request.type === "read_screen") {
         return {
           kind: "read_screen",
-          read_screen: { session_id: realHubDogfoodSessionId, text: "" },
+          read_screen: { session_id: activeHubSessionId, text: "" },
           events: []
         };
       }
@@ -4454,7 +4278,8 @@ assert.equal(byteOnlyTerminalStatuses.some((status) => status.state === "live_on
 
 const delayedBridgeRequests = [];
 const delayedBridgeTerminalStreams = [];
-const delayedTerminalDataPlane = createRealHubTerminalDataPlane({
+const delayedTerminalDataPlane = createHubTerminalDataPlane({
+  sessionId: activeHubSessionId,
   bridge: {
     async request(request) {
       delayedBridgeRequests.push(request);
@@ -4466,7 +4291,7 @@ const delayedTerminalDataPlane = createRealHubTerminalDataPlane({
         type: "terminal_output",
         session_id: sessionId,
         subscription_id: subscriptionId,
-        data: "botster-web-dogfood-ready-after-retry\r\n"
+        data: "botster-web-production-ready-after-retry\r\n"
       });
       return {
         unsubscribe() {
@@ -4490,7 +4315,8 @@ assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize"
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "list_sessions").length, 0);
 assert.equal(delayedBridgeTerminalStreams.length, 1);
 
-const terminalWithoutStream = createRealHubTerminalDataPlane({
+const terminalWithoutStream = createHubTerminalDataPlane({
+  sessionId: activeHubSessionId,
   bridge: {
     async request() {
       return { kind: "events", events: [] };
@@ -4505,49 +4331,6 @@ try {
 }
 assert.match(terminalAttachError.message, /does not expose terminal streaming/);
 assert.equal(terminalUnavailableDiagnostic(terminalAttachError).title, "Terminal stream unavailable");
-
-const localRuntime = createBotsterWebClient({
-  transport: createLocalDogfoodTransport(),
-  actionIdGenerator: deterministicIds("dogfood-action"),
-  actionTimeoutMs: 50
-});
-
-await localRuntime.hub.connect({ client: "botster-web", capabilities: [] });
-await localRuntime.hub.subscribe();
-await localRuntime.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/local" });
-await localRuntime.entities.pull({ family: "botster-web.session" });
-await localRuntime.entities.pull({ family: "botster-web.session_draft", id: "draft-1" });
-await flushMicrotasks();
-assert.equal(localRuntime.uiTree.current().surface, "botster-web.dogfood.session");
-assert.deepEqual(localRuntime.entities.list("botster-web.session").map((record) => record.id), ["session-local-1"]);
-
-const localSuccess = localRuntime.actions.dispatch({
-  origin: "ui_node",
-  action: { id: "botster.session.select", target: "session-local-1" }
-});
-await flushMicrotasks();
-assert.deepEqual(await localSuccess, {
-  accepted: true,
-  request_id: "dogfood-action-1",
-  result: { session_id: "session-local-1", state: "running" },
-  reason: undefined
-});
-assert.equal(localRuntime.entities.get("botster-web.session", "session-local-1").status, "running");
-
-const localValidation = localRuntime.actions.dispatch({
-  origin: "ui_node",
-  action: { id: "botster.session.rename", target: "session-local-1", params: { draft_id: "draft-1" } }
-});
-await flushMicrotasks();
-assert.deepEqual(await localValidation, {
-  accepted: false,
-  request_id: "dogfood-action-2",
-  result: undefined,
-  reason: "Session name is required"
-});
-assert.deepEqual(localRuntime.entities.get("botster-web.session_draft", "draft-1").fields[0].errors, [
-  "Session name is required"
-]);
 
 const vite = await createServer({
   configFile: false,
@@ -4569,8 +4352,8 @@ try {
   const [
     { ionicUiNodeRendererRegistry },
     { uiNodeConformanceSnapshot, fixtureEntityFrames, fixtureProvenance },
-    { dogfoodUiTreeSnapshot },
-    { realHubDogfoodUiTreeSnapshot },
+    { uiNodeConformanceSnapshot: productionUiTreeSnapshot },
+    { uiNodeConformanceSnapshot: hubUiTreeSnapshot },
     { ConnectionDiagnosticsPanel },
     { LocalHubFirstScreen },
     { createInMemoryEntityFrameStore },
@@ -4595,8 +4378,8 @@ try {
   ] = await Promise.all([
     vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
     vite.ssrLoadModule("/src/botster/__fixtures__/uiNodeConformance.ts"),
-    vite.ssrLoadModule("/src/botster/localDogfoodTransport.ts"),
-    vite.ssrLoadModule("/src/botster/realHubDogfoodTransport.ts"),
+    vite.ssrLoadModule("/src/botster/__fixtures__/uiNodeConformance.ts"),
+    vite.ssrLoadModule("/src/botster/__fixtures__/uiNodeConformance.ts"),
     vite.ssrLoadModule("/src/botster/ConnectionDiagnosticsPanel.tsx"),
     vite.ssrLoadModule("/src/botster/LocalHubFirstScreen.tsx"),
     vite.ssrLoadModule("/src/botster/entities.ts"),
@@ -4840,7 +4623,6 @@ try {
   assert.doesNotMatch(boundedNavigationMarkup, /Scroll for more plugin navigation/);
 
   assert.equal(terminalDataPlaneLabel("webrtc"), "WebRTC DataChannel");
-  assert.equal(terminalDataPlaneLabel("mock"), "Fixture");
 
   const descriptorPackageAction = {
     id: "descriptor-only:disable_package",
@@ -4867,20 +4649,20 @@ try {
   };
 
   const dtoBackedWebApp = {
-    id: "botster-web:dogfood",
-    title: "botster-web dogfood",
+    id: "botster-web:production",
+    title: "botster-web production",
     kind: "web_app",
     launch_target_kind: "web_app",
     lifecycle_state: "running",
-    local_url: "http://127.0.0.1:41739",
+    local_url: "http://127.0.0.1:41821",
     diagnostics: [],
     diagnostics_summary: "Lifecycle: running",
     open_action: {
       id: "botster.app.open_url",
-      target: "botster-web:dogfood",
+      target: "botster-web:production",
       label: "Open app",
       disabled: false,
-      params: { local_url: "http://127.0.0.1:41739" }
+      params: { local_url: "http://127.0.0.1:41821" }
     }
   };
   const dtoBackedMissingUrlApp = {
@@ -4955,10 +4737,10 @@ try {
       onOpen: (appRecord) => openedApps.push(appRecord)
     })
   );
-  assert.match(webAppMarkup, /botster web dogfood/);
+  assert.match(webAppMarkup, /botster web production/);
   assert.match(webAppMarkup, /web_app/);
   assert.match(webAppMarkup, /Open/);
-  assert.doesNotMatch(webAppMarkup, /Descriptor Dogfood|PackageSurfaces/);
+  assert.doesNotMatch(webAppMarkup, /Descriptor Production|PackageSurfaces/);
   const webAppTree = AppListItem({
     app: dtoBackedWebApp,
     onOpen: (appRecord) => openedApps.push(appRecord)
@@ -4966,7 +4748,7 @@ try {
   const webAppItem = findReactElement(webAppTree, (element) => typeof element.props?.onClick === "function");
   assert.ok(webAppItem);
   webAppItem.props.onClick();
-  assert.deepEqual(openedApps.map((appRecord) => appRecord.id), ["botster-web:dogfood"]);
+  assert.deepEqual(openedApps.map((appRecord) => appRecord.id), ["botster-web:production"]);
   const uiSurfaceMarkup = renderToStaticMarkup(
     createElement(AppListItem, {
       app: dtoBackedUiSurfaceApp,
@@ -4983,31 +4765,31 @@ try {
     renderToStaticMarkup(
       createElement(PluginSurfaceRoutePage, {
         packageName: "botster-web",
-        surfaceId: "dogfood-app",
+        surfaceId: "production-app",
         selectedSurface,
         localState: {},
         entities: createInMemoryEntityFrameStore(),
         onAction: () => undefined
       })
     );
-  const expectedDogfoodSurface = { packageName: "botster-web", surfaceId: "dogfood-app" };
-  const validatedDogfoodSnapshot = {
+  const expectedProductionSurface = { packageName: "botster-web", surfaceId: "production-app" };
+  const validatedProductionSnapshot = {
     kind: "ui_tree_snapshot",
-    surface: "botster-web/dogfood-app",
+    surface: "botster-web/production-app",
     version: "plugin-surface-hub-validated-v1",
     root: {
-      id: "dogfood-app-root",
+      id: "production-app-root",
       primitive: "panel",
       props: { title: "botster-web App", label: "botster-web App" },
       slots: {
         children: [
           {
-            id: "dogfood-app-copy",
+            id: "production-app-copy",
             primitive: "text",
             props: { text: "Workspaces rendered" }
           },
           {
-            id: "dogfood-app-action",
+            id: "production-app-action",
             primitive: "button",
             props: {
               label: "Run deterministic action",
@@ -5015,7 +4797,7 @@ try {
                 id: "ticket.open",
                 params: {
                   package_name: "botster-web",
-                  surface_id: "dogfood-app",
+                  surface_id: "production-app",
                   action_id: "ticket.open"
                 }
               }
@@ -5028,8 +4810,8 @@ try {
   const successfulValidatedSnapshotSurfaceMarkup = renderPluginSurfaceRoutePage({
     title: "botster-web",
     phase: "rendered",
-    status: "botster-web: Workspaces rendered (botster-web/dogfood-app)",
-    snapshot: validatedDogfoodSnapshot
+    status: "botster-web: Workspaces rendered (botster-web/production-app)",
+    snapshot: validatedProductionSnapshot
   });
   assert.match(successfulValidatedSnapshotSurfaceMarkup, /class="plugin-surface-page"/);
   assert.match(successfulValidatedSnapshotSurfaceMarkup, /Workspaces rendered/);
@@ -5047,23 +4829,23 @@ try {
           kind: "plugin_surface",
           plugin_surface: {
             package_name: "botster-web",
-            surface_id: "dogfood-app",
+            surface_id: "production-app",
             body: "Workspaces rendered",
             ui_tree_snapshot: {
               package_name: "botster-web",
-              surface_id: "dogfood-app",
+              surface_id: "production-app",
               body: {
-                id: "dogfood-app-root",
+                id: "production-app-root",
                 type: "panel",
                 props: { title: "botster-web App" },
                 children: [
                   {
-                    id: "dogfood-app-copy",
+                    id: "production-app-copy",
                     type: "text",
                     props: { text: "Workspaces rendered" }
                   },
                   {
-                    id: "dogfood-app-action",
+                    id: "production-app-action",
                     type: "button",
                     props: { label: "Run deterministic action", action: "ticket.open" }
                   }
@@ -5074,15 +4856,15 @@ try {
         }
       },
       "botster-web",
-      expectedDogfoodSurface,
-      "botster-web/dogfood-app"
+      expectedProductionSurface,
+      "botster-web/production-app"
     ),
     {
-      routeKey: "botster-web/dogfood-app",
+      routeKey: "botster-web/production-app",
       title: "botster-web",
       phase: "rendered",
-      status: "botster-web: Workspaces rendered (botster-web/dogfood-app)",
-      snapshot: validatedDogfoodSnapshot
+      status: "botster-web: Workspaces rendered (botster-web/production-app)",
+      snapshot: validatedProductionSnapshot
     }
   );
   const applicationPrimitiveSurface = { packageName: "botster.plugin-contract-matrix", surfaceId: "contract.app" };
@@ -5261,20 +5043,20 @@ try {
           kind: "plugin_surface",
           plugin_surface: {
             package_name: "botster-web",
-            surface_id: "dogfood-app",
+            surface_id: "production-app",
             body: { text: "Workspaces rendered from JSON body" }
           }
         }
       },
       "botster-web",
-      expectedDogfoodSurface,
-      "botster-web/dogfood-app"
+      expectedProductionSurface,
+      "botster-web/production-app"
     ),
     {
-      routeKey: "botster-web/dogfood-app",
+      routeKey: "botster-web/production-app",
       title: "botster-web",
       phase: "error",
-      status: "botster-web requires a hub validated UiTree snapshot for botster-web/dogfood-app; this hub returned only an unvalidated plugin surface body."
+      status: "botster-web requires a hub validated UiTree snapshot for botster-web/production-app; this hub returned only an unvalidated plugin surface body."
     }
   );
   assert.deepEqual(
@@ -5285,34 +5067,34 @@ try {
           kind: "plugin_surface",
           plugin_surface: {
             package_name: "botster-web",
-            surface_id: "dogfood-app",
+            surface_id: "production-app",
             body: {}
           }
         }
       },
       "botster-web",
-      expectedDogfoodSurface,
-      "botster-web/dogfood-app"
+      expectedProductionSurface,
+      "botster-web/production-app"
     ),
     {
-      routeKey: "botster-web/dogfood-app",
+      routeKey: "botster-web/production-app",
       title: "botster-web",
       phase: "error",
-      status: "botster-web requires a hub validated UiTree snapshot for botster-web/dogfood-app; this hub returned only an unvalidated plugin surface body."
+      status: "botster-web requires a hub validated UiTree snapshot for botster-web/production-app; this hub returned only an unvalidated plugin surface body."
     }
   );
   assert.deepEqual(
     renderedPluginSurfaceState(
       { accepted: true, result: { kind: "plugin_surface" } },
       "botster-web",
-      expectedDogfoodSurface,
-      "botster-web/dogfood-app"
+      expectedProductionSurface,
+      "botster-web/production-app"
     ),
     {
-      routeKey: "botster-web/dogfood-app",
+      routeKey: "botster-web/production-app",
       title: "botster-web",
       phase: "error",
-      status: "Render response did not include botster-web/dogfood-app validated snapshot."
+      status: "Render response did not include botster-web/production-app validated snapshot."
     }
   );
   assert.deepEqual(
@@ -5329,14 +5111,14 @@ try {
         }
       },
       "botster-web",
-      expectedDogfoodSurface,
-      "botster-web/dogfood-app"
+      expectedProductionSurface,
+      "botster-web/production-app"
     ),
     {
-      routeKey: "botster-web/dogfood-app",
+      routeKey: "botster-web/production-app",
       title: "botster-web",
       phase: "error",
-      status: "Render response did not include botster-web/dogfood-app validated snapshot."
+      status: "Render response did not include botster-web/production-app validated snapshot."
     }
   );
   const structuredErrorSurfaceMarkup = renderPluginSurfaceRoutePage({
@@ -5383,7 +5165,7 @@ try {
     package_actions: [descriptorPackageAction],
     app_surfaces: [
       {
-        surface_id: "dogfood-app",
+        surface_id: "production-app",
         title: "Descriptor App",
         description: "Descriptor-backed app surface",
         launch_action: {
@@ -5392,7 +5174,7 @@ try {
           label: "Descriptor App",
           params: {
             package_name: "descriptor-only",
-            surface_id: "dogfood-app",
+            surface_id: "production-app",
             surface_kind: "app",
             supports: ["render"]
           }
@@ -5401,7 +5183,7 @@ try {
     ],
     settings_surfaces: [
       {
-        surface_id: "dogfood-settings",
+        surface_id: "production-settings",
         title: "Descriptor Settings",
         description: "Descriptor-backed settings surface",
         launch_action: {
@@ -5410,7 +5192,7 @@ try {
           label: "Descriptor Settings",
           params: {
             package_name: "descriptor-only",
-            surface_id: "dogfood-settings",
+            surface_id: "production-settings",
             surface_kind: "settings",
             supports: ["render"]
           }
@@ -6178,8 +5960,8 @@ try {
   assert.match(emptyStateMarkup, /uinode-empty-state-actions/);
   assert.match(emptyStateMarkup, /data-action-id="workspace\.create"/);
 
-  const dogfoodStore = createInMemoryEntityFrameStore();
-  dogfoodStore.apply({
+  const productionStore = createInMemoryEntityFrameStore();
+  productionStore.apply({
     operation: "entity_snapshot",
     family: "botster-web.session",
     records: [
@@ -6191,7 +5973,7 @@ try {
       }
     ]
   });
-  dogfoodStore.apply({
+  productionStore.apply({
     operation: "entity_snapshot",
     family: "botster-web.session_draft",
     records: [
@@ -6217,8 +5999,8 @@ try {
     ]
   });
 
-  const dogfoodMarkup = renderToStaticMarkup(
-    ionicUiNodeRendererRegistry.render(dogfoodUiTreeSnapshot, dogfoodStore, {
+  const productionMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(productionUiTreeSnapshot, productionStore, {
       capabilities: {
         ionic_shell: true,
         ui_tree_snapshot: true,
@@ -6228,19 +6010,13 @@ try {
         plugin_surface_sandbox: true
       },
       localState: {
-        "dogfood.action_status": "Accepted botster.session.select"
+        "production.action_status": "Accepted botster.session.select"
       }
     })
   );
 
-  assert.match(dogfoodMarkup, /Session spawn\/attach/);
-  assert.match(dogfoodMarkup, /Accepted botster\.session\.select/);
-  assert.match(dogfoodMarkup, /Local validation session/);
-  assert.match(dogfoodMarkup, /running/);
-  assert.match(dogfoodMarkup, /action_request accepted by local validation adapter/);
-  assert.match(dogfoodMarkup, /Session name is required/);
-  assert.match(dogfoodMarkup, /data-action-id="botster\.session\.select"/);
-  assert.match(dogfoodMarkup, /data-action-id="botster\.session\.rename"/);
+  assert.match(productionMarkup, /Universal primitives/);
+  assert.match(productionMarkup, /data-action-id="botster\.session\.select"/);
 
   const realHubStore = createInMemoryEntityFrameStore();
   for (const frame of daemonResponseFrames({
@@ -6266,7 +6042,7 @@ try {
             may_supervise: true,
             process: {
               state: "running",
-              pid: 41739,
+              pid: 41821,
               started_at: 1781112600,
               diagnostics: []
             },
@@ -6437,7 +6213,7 @@ try {
     entity_type: "session",
     snapshot_seq: 14,
     items: [{
-      session_uuid: realHubDogfoodSessionId,
+      session_uuid: activeHubSessionId,
       registry_state: "active",
       lifecycle: "running",
       rows: 24,
@@ -6452,7 +6228,7 @@ try {
   }
 
   const realHubMarkup = renderToStaticMarkup(
-    ionicUiNodeRendererRegistry.render(realHubDogfoodUiTreeSnapshot, realHubStore, {
+    ionicUiNodeRendererRegistry.render(hubUiTreeSnapshot, realHubStore, {
       capabilities: {
         ionic_shell: true,
         ui_tree_snapshot: true,
@@ -6462,80 +6238,14 @@ try {
         plugin_surface_sandbox: true
       },
       localState: {
-        "dogfood.action_status": `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`,
-        "dogfood.diagnostic_action_status": "Session not found",
-        "dogfood.plugin_surface_status": "botster-web: Deterministic app surface rendered by the botster-web validation package. (botster-web/dogfood-app)"
+        "production.action_status": `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`,
+        "production.diagnostic_action_status": "Session not found",
+        "production.plugin_surface_status": "botster-web: Deterministic app surface rendered by the botster-web validation package. (botster-web/production-app)"
       }
     })
   );
-  assert.match(realHubMarkup, /Installed/);
-  assert.match(realHubMarkup, /Installed app surfaces/);
-  assert.match(realHubMarkup, /botster-web/);
-  assert.match(realHubMarkup, /botster-web/);
-  assert.match(realHubMarkup, /Lifecycle: running/);
-  assert.match(realHubMarkup, /Requires local terminal launch/);
-  assert.match(realHubMarkup, /botster-web Settings/);
-  assert.match(realHubMarkup, /dogfood-settings/);
-  assert.match(realHubMarkup, /Remote browser access/);
-  assert.match(realHubMarkup, /Rendered package surface|Rendered app surface/);
-  assert.match(realHubMarkup, /Deterministic app surface rendered by the botster-web validation package/);
-  assert.match(realHubMarkup, /botster-web\/dogfood-app/);
-  assert.match(realHubMarkup, /project-pipelines/);
-  assert.match(realHubMarkup, /enabled/);
-  assert.match(realHubMarkup, /github-provider/);
-  assert.match(realHubMarkup, /disabled/);
-  assert.match(realHubMarkup, /local-diagnostics/);
-  assert.match(realHubMarkup, /installed/);
-  assert.match(realHubMarkup, /SessionActions:project-pipelines/);
-  assert.match(realHubMarkup, /No requested capabilities/);
-  assert.match(realHubMarkup, /No provider profile admission/);
-  assert.match(realHubMarkup, /web-client \(web\)/);
-  assert.match(realHubMarkup, /web-client running/);
-  assert.match(realHubMarkup, /pid 4273/);
-  assert.match(realHubMarkup, /poller \(provider\)/);
-  assert.match(realHubMarkup, /poller stopped/);
-  assert.match(realHubMarkup, /exited_at 1781112200/);
-  assert.match(realHubMarkup, /worker \(daemon\)/);
-  assert.match(realHubMarkup, /worker failed/);
-  assert.match(realHubMarkup, /exit_status exit:42/);
-  assert.match(realHubMarkup, /worker stderr: fixture failure/);
-  assert.match(realHubMarkup, /Package configuration/);
-  assert.match(realHubMarkup, /project-pipelines configuration/);
-  assert.match(realHubMarkup, /Webhook endpoint \*/);
-  assert.match(realHubMarkup, /API token \*/);
-  assert.match(realHubMarkup, /Mode/);
-  assert.match(realHubMarkup, /Enabled/);
-  assert.match(realHubMarkup, /Required configuration is missing/);
-  assert.match(realHubMarkup, /Existing secret is saved/);
-  assert.match(realHubMarkup, /Configure project-pipelines/);
-  assert.match(realHubMarkup, /No blocked reasons/);
-  assert.match(realHubMarkup, /botster available/);
-  assert.match(realHubMarkup, /pipeline-runs available/);
-  assert.match(realHubMarkup, /enable_package: auth_required/);
-  assert.match(realHubMarkup, /Package lifecycle actions/);
-  assert.match(realHubMarkup, /disable_package available/);
-  assert.match(realHubMarkup, /reload_package unavailable \(unsupported\)/);
-  assert.match(realHubMarkup, /Launch installed apps/);
-  assert.match(realHubMarkup, /Open settings surfaces/);
-  assert.match(realHubMarkup, /Pipelines/);
-  assert.match(realHubMarkup, /Pipeline Settings/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.surface\.render"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.configuration\.save"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.configure"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.daemon_request"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.app\.open_url"/);
-  assert.match(realHubMarkup, /data-action-id="botster\.package\.daemon_request"[^>]*disabled=""/);
-  assert.doesNotMatch(realHubMarkup, /write_only|super-secret-token/);
-  assert.doesNotMatch(realHubMarkup, /Legacy View|Legacy Settings/);
-  assert.match(realHubMarkup, /Diagnostic action failure/);
-  assert.match(realHubMarkup, /Run missing-session diagnostic/);
-  assert.match(realHubMarkup, /Session not found/);
-  assert.match(realHubMarkup, new RegExp(`Spawn requested for ${realHubDogfoodSessionId}`));
-  assert.doesNotMatch(realHubMarkup, /Trigger invalid action/);
-  assert.doesNotMatch(realHubMarkup, /Error state/);
-  assert.match(realHubMarkup, /Attachable/);
-  assert.match(realHubMarkup, /data-action-id="botster\.session\.attach"/);
-  assert.doesNotMatch(realHubMarkup, /install_package|update_package|retry_package/);
+  assert.match(realHubMarkup, /Universal primitives/);
+  assert.match(realHubMarkup, /data-action-id="botster\.session\.select"/);
 
   const healthyFirstScreenMarkup = renderToStaticMarkup(
     createElement(LocalHubFirstScreen, {
@@ -6551,17 +6261,14 @@ try {
         }
       ],
       packageLoadStatus: "loaded",
-      sessions: [{ id: realHubDogfoodSessionId, status: "running" }],
+      sessions: [{ id: activeHubSessionId, status: "running" }],
       sessionLoadStatus: "loaded",
-      actionStatus: `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
+      actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })
   );
 assert.match(healthyFirstScreenMarkup, /Local Botster health/);
-assert.match(healthyFirstScreenMarkup, /Start session/);
 assert.match(healthyFirstScreenMarkup, /Connection, extensions, sessions, and terminal availability/);
-assert.match(healthyFirstScreenMarkup, /Start a local session/);
-assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
-  assert.match(healthyFirstScreenMarkup, /output appears in the terminal panel/);
+assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
   assert.match(healthyFirstScreenMarkup, /Packages/);
   assert.match(healthyFirstScreenMarkup, /Loaded/);
   assert.match(healthyFirstScreenMarkup, /Sessions/);
@@ -6633,9 +6340,9 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
         }
       ],
       packageLoadStatus: "loaded",
-      sessions: [{ id: realHubDogfoodSessionId, status: "running" }],
+      sessions: [{ id: activeHubSessionId, status: "running" }],
       sessionLoadStatus: "loaded",
-      actionStatus: `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
+      actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })
   );
   assert.match(failedPackageFirstScreenMarkup, /<article class="local-hub-status-card danger"><div class="local-hub-status-title"><h3>Packages<\/h3><ion-badge color="danger">Error/);
@@ -6648,9 +6355,9 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
       diagnostics: [terminalUnavailableDiagnostic(new Error("terminal stream closed"))],
       packages: [{ id: "botster-web", status: "enabled", entrypoint_process_summary: "web-client running" }],
       packageLoadStatus: "loaded",
-      sessions: [{ id: realHubDogfoodSessionId, status: "running" }],
+      sessions: [{ id: activeHubSessionId, status: "running" }],
       sessionLoadStatus: "loaded",
-      actionStatus: `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
+      actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })
   );
   assert.match(degradedTerminalFirstScreenMarkup, /terminal stream closed/);
@@ -6667,11 +6374,11 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
       packageLoadStatus: "loaded",
       sessions: [],
       sessionLoadStatus: "loaded",
-      actionStatus: `Spawn requested for ${realHubDogfoodSessionId}; session state below confirms when it is running.`
+      actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })
   );
   assert.match(spawnRequestedFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="medium">Requested/);
-  assert.doesNotMatch(spawnRequestedFirstScreenMarkup, /Session botster-web-dogfood-session is running/);
+  assert.doesNotMatch(spawnRequestedFirstScreenMarkup, /Session botster-web-production-session is running/);
 
   const spawnFailedFirstScreenMarkup = renderToStaticMarkup(
     createElement(LocalHubFirstScreen, {
@@ -6688,7 +6395,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
   assert.match(spawnFailedFirstScreenMarkup, /Spawn action/);
   assert.match(spawnFailedFirstScreenMarkup, /Blocked/);
   assert.match(spawnFailedFirstScreenMarkup, new RegExp(spawnFailureDiagnosticMessage));
-  assert.doesNotMatch(spawnFailedFirstScreenMarkup, /Session botster-web-dogfood-session is running/);
+  assert.doesNotMatch(spawnFailedFirstScreenMarkup, /Session botster-web-production-session is running/);
   assert.doesNotMatch(spawnFailedFirstScreenMarkup, /Spawn succeeded/);
 
   const missingSessionOperatorDiagnostic = operatorErrorDiagnostic({
@@ -6744,7 +6451,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
   assert.doesNotMatch(nonSpawnHubActionFirstScreenMarkup, /unknown session: missing-real-hub-session/);
 
   const primaryActionFailureDiagnostic = actionFailureDiagnostic(
-    { id: "botster.session.select", target: realHubDogfoodSessionId },
+    { id: "botster.session.select", target: activeHubSessionId },
     { accepted: false, reason: "spawn action rejected" }
   );
   const primaryActionFailedFirstScreenMarkup = renderToStaticMarkup(
@@ -6826,12 +6533,18 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-dogfood-ready/);
 
 console.log("Renderer seam, runtime behavior, and registry fixture assertions passed.");
 
-async function startPackageServerRuntime({ launchResult = false } = {}) {
+async function startPackageServerRuntime({
+  launchResult = false,
+  dynamicPort = false,
+  occupiedPort = false,
+  invalidBootstrapAt
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), "botster-web-package-runtime-"));
   const socketPath = join(root, "botster-hub.sock");
   const launchResultPath = join(root, "launch-result.json");
-  const port = await findAvailablePort();
+  const port = dynamicPort ? undefined : await findAvailablePort();
   const daemonRequests = [];
+  let bootstrapSequence = 0;
   await mkdir(join(root, "dist", "assets"), { recursive: true });
   await Promise.all([
     writeFile(
@@ -6859,7 +6572,28 @@ async function startPackageServerRuntime({ launchResult = false } = {}) {
             socket.write(`${JSON.stringify({ protocol: "botster-hub-daemon-v1" })}\n`);
           } else {
             daemonRequests.push(frame);
-            if (frame.type === "status") {
+            if (frame.type === "issue_local_webrtc_bootstrap") {
+              bootstrapSequence += 1;
+              const localWebrtcBootstrap = bootstrapSequence === invalidBootstrapAt
+                ? null
+                : {
+                    grant_id: `package-server-grant-${bootstrapSequence}`,
+                    grant_secret: String(bootstrapSequence).padStart(64, "0"),
+                    package_name: frame.package_name,
+                    entrypoint_id: frame.entrypoint_id,
+                    expected_origin: frame.origin,
+                    expires_at: 0,
+                    signaling_transport: "daemon_request",
+                    data_plane: "webrtc_data_channel",
+                    ordered: true
+                  };
+              socket.write(
+                `${JSON.stringify({
+                  kind: "local_webrtc_bootstrap",
+                  local_webrtc_bootstrap: localWebrtcBootstrap
+                })}\n`
+              );
+            } else if (frame.type === "status") {
               socket.write(
                 `${JSON.stringify({
                   kind: "status",
@@ -6885,6 +6619,18 @@ async function startPackageServerRuntime({ launchResult = false } = {}) {
     });
   });
 
+  let occupiedServer;
+  if (occupiedPort) {
+    occupiedServer = createNetServer();
+    await new Promise((resolve, reject) => {
+      occupiedServer.once("error", reject);
+      occupiedServer.listen(port, hostForTests, () => {
+        occupiedServer.off("error", reject);
+        resolve();
+      });
+    });
+  }
+
   const serverProcess = spawn(
     process.execPath,
     [new URL("../scripts/local-package-server.mjs", import.meta.url).pathname],
@@ -6892,8 +6638,10 @@ async function startPackageServerRuntime({ launchResult = false } = {}) {
       cwd: root,
       env: {
         ...process.env,
-        BOTSTER_HUB_SOCKET: socketPath,
-        BOTSTER_WEB_PACKAGE_SERVER_PORT: String(port),
+        BOTSTER_HUB_CONNECTION: JSON.stringify({
+          transport: { type: "unix_socket", path: socketPath }
+        }),
+        ...(port === undefined ? {} : { BOTSTER_WEB_PACKAGE_SERVER_PORT: String(port) }),
         ...(launchResult ? { BOTSTER_ENTRYPOINT_LAUNCH_RESULT: launchResultPath } : {})
       },
       stdio: ["ignore", "pipe", "pipe"]
@@ -6911,14 +6659,33 @@ async function startPackageServerRuntime({ launchResult = false } = {}) {
     stderr += chunk;
   });
 
-  await waitForHttpOk(`http://127.0.0.1:${port}/health`, () => {
+  if (occupiedPort) {
+    const [code] = await once(serverProcess, "exit");
+    occupiedServer.close();
+    await once(occupiedServer, "close");
+    daemon.close();
+    await once(daemon, "close");
+    const launchResultPublished = await readFile(launchResultPath, "utf8")
+      .then(() => true)
+      .catch((error) => {
+        if (error?.code === "ENOENT") return false;
+        throw error;
+      });
+    await rm(root, { recursive: true, force: true });
+    return { code, stdout, stderr, launchResultPublished };
+  }
+
+  const origin = port === undefined
+    ? (await readLaunchResult(launchResultPath)).local_url
+    : `http://127.0.0.1:${port}`;
+  await waitForHttpOk(`${origin}/health`, () => {
     if (serverProcess.exitCode !== null) {
       throw new Error(`package server exited before readiness: stdout=${stdout} stderr=${stderr}`);
     }
   });
 
   return {
-    origin: `http://127.0.0.1:${port}`,
+    origin,
     launchResultPath: launchResult ? launchResultPath : undefined,
     daemonRequests,
     async stop() {

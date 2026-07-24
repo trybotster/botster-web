@@ -23,14 +23,10 @@ import type {
   DaemonSessionEntity,
   JsonValue
 } from "./realHubDaemonDto";
-import type { UiTreeSnapshot } from "./uiNodes";
 
-export const realHubDogfoodSessionId = "botster-web-dogfood-session";
-export const realHubDogfoodSubscriptionId = "botster-web-dogfood-terminal";
+export const hubTerminalSubscriptionId = "botster-web-terminal";
 
-const dogfoodSurface = "botster-web.dogfood.session";
 const sessionFamily = "botster-web.session";
-const draftFamily = "botster-web.session_draft";
 const appFamily = "botster-web.app";
 const packageNavigationFamily = "botster-web.package_navigation";
 const packageFamily = "botster-web.package";
@@ -64,17 +60,11 @@ export interface DaemonBridgeClient {
   ): { unsubscribe(): void };
 }
 
-export interface RealHubDogfoodTransportOptions {
+export interface HubTransportOptions {
   bridge: DaemonBridgeClient;
-  sessionId?: string;
-  spawnCommand?: string;
 }
 
-export function createRealHubDogfoodTransport({
-  bridge,
-  sessionId = realHubDogfoodSessionId,
-  spawnCommand = defaultSpawnCommand()
-}: RealHubDogfoodTransportOptions): HubControlTransport {
+export function createHubTransport({ bridge }: HubTransportOptions): HubControlTransport {
   let ingress: HubControlFrameHandler | undefined;
   let sequence = 1;
 
@@ -111,7 +101,7 @@ export function createRealHubDogfoodTransport({
           emit(frame);
         }
       });
-      emit({ kind: "hello_ack", payload: { mode: "real_hub_dogfood" } });
+      emit({ kind: "hello_ack", payload: { mode: "hub" } });
       emitResponse(await bridge.request({ type: "status" }));
     },
     async disconnect() {
@@ -125,12 +115,6 @@ export function createRealHubDogfoodTransport({
     async send(frame) {
       if (frame.kind === "subscribe") {
         await ensureSessionEntitySubscription();
-        return;
-      }
-
-      if (frame.kind === "surface_subscribe") {
-        emit({ kind: "ui_tree_snapshot", payload: realHubDogfoodUiTreeSnapshot });
-        emitResponse(await bridge.request({ type: "status" }));
         return;
       }
 
@@ -163,18 +147,13 @@ export function createRealHubDogfoodTransport({
               } satisfies EntityFrame
             });
           }
-        } else if (request.family === draftFamily) {
-          emit({
-            kind: "entity_snapshot",
-            payload: draftSnapshot(sequence++)
-          });
         }
         return;
       }
 
       if (frame.kind === "action_request") {
         const request = frame.payload as UiActionRequest;
-        await dispatchDaemonAction(bridge, request, sessionId, spawnCommand, emitResponse, emit);
+        await dispatchDaemonAction(bridge, request, emitResponse, emit);
       }
     }
   };
@@ -454,7 +433,7 @@ function sessionAttachFields(sessionId: string, lifecycle: string) {
       target: sessionId,
       label: isRunning ? `Attach ${sessionId}` : "Not attachable",
       disabled: !isRunning,
-      params: { mode: "real_hub_dogfood" }
+      params: {}
     } satisfies ActionBinding
   };
 }
@@ -1007,55 +986,13 @@ function entrypointDiagnosticsListSummary(entrypoints: DaemonPackage["runnable_e
   return diagnostics.length === 0 ? "No entrypoint diagnostics" : diagnostics.join("; ");
 }
 
-function draftSnapshot(sequence: number): EntityFrame {
-  return {
-    operation: "entity_snapshot",
-    family: draftFamily,
-    sequence,
-    records: [
-      {
-        id: "draft-1",
-        fields: [
-          {
-            id: "session_name",
-            label: "Session name",
-            kind: "text_input",
-            value: realHubDogfoodSessionId,
-            errors: []
-          },
-          {
-            id: "target",
-            label: "Target",
-            kind: "text_input",
-            value: "isolated-local-hub",
-            errors: []
-          }
-        ]
-      }
-    ]
-  };
-}
-
 async function dispatchDaemonAction(
   bridge: DaemonBridgeClient,
   request: UiActionRequest,
-  sessionId: string,
-  spawnCommand: string,
   emitResponse: (response: DaemonResponse) => void,
   emit: (frame: HubControlFrame) => void
 ) {
   const action = request.action;
-
-  if (action.id === "botster.session.select") {
-    const response = await bridge.request({
-      type: "spawn",
-      session_id: sessionId,
-      command: spawnCommand
-    });
-    emitResponse(response);
-    emit(actionResultFrame(request, !response.error, response.error?.message, { session_id: sessionId, kind: response.kind }));
-    return;
-  }
 
   if (action.id === "botster.session.attach") {
     const targetSessionId = action.target ?? "";
@@ -1068,19 +1005,9 @@ async function dispatchDaemonAction(
       actionResultFrame(request, true, undefined, {
         session_id: targetSessionId,
         state: "selected",
-        mode: "real_hub_dogfood"
+        mode: "hub"
       })
     );
-    return;
-  }
-
-  if (action.id === "botster.session.rename") {
-    const response = await bridge.request({
-      type: "shutdown_session",
-      session_id: action.target ?? "missing-real-hub-session"
-    });
-    emitResponse(response);
-    emit(actionResultFrame(request, false, response.error?.message ?? "Real hub rejected the validation action", response.error));
     return;
   }
 
@@ -1198,7 +1125,7 @@ async function dispatchDaemonAction(
     return;
   }
 
-  emit(actionResultFrame(request, false, `Unsupported real hub action: ${action.id}`));
+  emit(actionResultFrame(request, false, `Unsupported hub action: ${action.id}`));
 }
 
 function packageConfigurationRequest(packageName: string, action: ActionBinding): DaemonRequest {
@@ -1369,10 +1296,6 @@ function responseDiagnostics(response: DaemonResponse): DaemonDiagnostic[] {
   return diagnostics;
 }
 
-export function defaultSpawnCommand(): string {
-  return "printf 'botster-web-dogfood-ready\\n'; while IFS= read -r line; do if [ \"$line\" = 'botster-web-dogfood-size' ]; then set -- $(stty size 2>/dev/null || printf '0 0'); printf 'botster-web-dogfood-size:%sx%s\\n' \"$1\" \"$2\"; elif [ \"$line\" = 'botster-web-dogfood-exit' ]; then printf 'botster-web-dogfood-exiting\\n'; exit 0; else printf 'botster-web-dogfood-echo:%s\\n' \"$line\"; fi; done";
-}
-
 function recordLiveHarnessEvent(kind: string, payload: unknown): void {
   if (typeof window === "undefined") return;
 
@@ -1399,441 +1322,3 @@ function redactedHarnessPayload(payload: unknown): unknown {
     ])
   );
 }
-
-export const realHubDogfoodUiTreeSnapshot: UiTreeSnapshot = {
-  kind: "ui_tree_snapshot",
-  surface: dogfoodSurface,
-  version: "real-hub-dogfood-v1",
-  root: {
-    id: "real-hub-dogfood-root",
-    primitive: "stack",
-    props: { label: "Real isolated hub surface" },
-    slots: {
-      children: [
-        {
-          id: "real-hub-summary",
-          primitive: "section",
-          slots: {
-            children: [
-              {
-                id: "real-hub-heading",
-                primitive: "heading",
-                props: { level: 2, text: "Isolated local hub" }
-              },
-              {
-                id: "real-hub-copy",
-                primitive: "text",
-                props: {
-                  text: `Spawn creates ${realHubDogfoodSessionId}, runs the readiness command, and sends output to the terminal panel.`
-                }
-              },
-              {
-                id: "real-hub-action-status",
-                primitive: "text",
-                bindings: [{ source: "local_state", path: "dogfood.action_status", prop: "text" }]
-              },
-              {
-                id: "real-hub-spawn-action",
-                primitive: "action",
-                props: {
-                  action: {
-                    id: "botster.session.select",
-                    target: realHubDogfoodSessionId,
-                    label: `Spawn ${realHubDogfoodSessionId} to terminal`,
-                    params: { mode: "real_hub_dogfood" }
-                  } satisfies ActionBinding
-                }
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-status-list",
-          primitive: "list",
-          props: { label: "Hub status" },
-          bindings: [{ source: "entity", path: `/${statusFamily}`, prop: "items" }],
-          slots: {
-            item: [
-              {
-                id: "real-hub-status-row",
-                primitive: "row",
-                slots: {
-                  children: [
-                    { id: "hub-title", primitive: "text", bindings: [{ source: "entity", path: "@/title", prop: "text" }] },
-                    { id: "hub-status", primitive: "badge", bindings: [{ source: "entity", path: "@/status", prop: "text" }] },
-                    { id: "hub-source", primitive: "text", bindings: [{ source: "entity", path: "@/state_source", prop: "text" }] }
-                  ]
-                }
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-package-list",
-          primitive: "list",
-          props: { label: "Installed" },
-          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items" }],
-          slots: {
-            item: [
-              {
-                id: "real-hub-package-row",
-                primitive: "row",
-                slots: {
-                  children: [
-                    { id: "real-hub-package-title", primitive: "text", bindings: [{ source: "entity", path: "@/title", prop: "text" }] },
-                    { id: "real-hub-package-state", primitive: "badge", bindings: [{ source: "entity", path: "@/status", prop: "text" }] },
-                    { id: "real-hub-package-version", primitive: "text", bindings: [{ source: "entity", path: "@/version", prop: "text" }] },
-                    { id: "real-hub-package-classification", primitive: "text", bindings: [{ source: "entity", path: "@/classification", prop: "text" }] },
-                    { id: "real-hub-package-capabilities", primitive: "text", bindings: [{ source: "entity", path: "@/capability_summary", prop: "text" }] },
-                    { id: "real-hub-package-compatibility", primitive: "text", bindings: [{ source: "entity", path: "@/compatibility_summary", prop: "text" }] },
-                    { id: "real-hub-package-entrypoints", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_summary", prop: "text" }] },
-                    { id: "real-hub-package-entrypoint-processes", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_process_summary", prop: "text" }] },
-                    { id: "real-hub-package-entrypoint-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/entrypoint_diagnostics_summary", prop: "text" }] },
-                    { id: "real-hub-package-availability", primitive: "text", bindings: [{ source: "entity", path: "@/availability_summary", prop: "text" }] },
-                    { id: "real-hub-package-dependency-gates", primitive: "text", bindings: [{ source: "entity", path: "@/dependency_availability_summary", prop: "text" }] },
-                    { id: "real-hub-package-feature-gates", primitive: "text", bindings: [{ source: "entity", path: "@/feature_availability_summary", prop: "text" }] },
-                    { id: "real-hub-package-app-surfaces", primitive: "text", bindings: [{ source: "entity", path: "@/app_surface_summary", prop: "text" }] },
-                    { id: "real-hub-package-settings-surfaces", primitive: "text", bindings: [{ source: "entity", path: "@/settings_surface_summary", prop: "text" }] },
-                    { id: "real-hub-package-configure-action", primitive: "action", bindings: [{ source: "entity", path: "@/configure_action", prop: "action" }] },
-                    { id: "real-hub-package-action-summary", primitive: "text", bindings: [{ source: "entity", path: "@/package_action_summary", prop: "text" }] },
-                    { id: "real-hub-package-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/diagnostics_summary", prop: "text" }] }
-                  ]
-                }
-              }
-            ],
-            empty: [
-              {
-                id: "real-hub-packages-empty",
-                primitive: "empty_state",
-                props: { title: "No installed packages", body: "This daemon returned an empty package registry." }
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-available-package-list",
-          primitive: "list",
-          props: { label: "Marketplace" },
-          bindings: [{ source: "entity", path: `/${availablePackageFamily}`, prop: "items" }],
-          slots: {
-            item: [
-              {
-                id: "real-hub-available-package-row",
-                primitive: "row",
-                slots: {
-                  children: [
-                    { id: "real-hub-available-package-title", primitive: "text", bindings: [{ source: "entity", path: "@/title", prop: "text" }] },
-                    { id: "real-hub-available-package-state", primitive: "badge", bindings: [{ source: "entity", path: "@/status", prop: "text" }] },
-                    { id: "real-hub-available-package-source", primitive: "text", bindings: [{ source: "entity", path: "@/source_label", prop: "text" }] },
-                    { id: "real-hub-available-package-compatibility", primitive: "text", bindings: [{ source: "entity", path: "@/compatibility_summary", prop: "text" }] },
-                    { id: "real-hub-available-package-actions-summary", primitive: "text", bindings: [{ source: "entity", path: "@/package_action_summary", prop: "text" }] }
-                  ]
-                }
-              }
-            ],
-            empty: [
-              {
-                id: "real-hub-available-packages-empty",
-                primitive: "empty_state",
-                props: { title: "No available packages", body: "No marketplace catalog rows have been returned by the daemon." }
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-package-action-list",
-          primitive: "list",
-          props: { label: "Package lifecycle actions" },
-          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items" }],
-          slots: {
-            item: [
-              {
-                id: "real-hub-package-action-buttons",
-                primitive: "list",
-                bindings: [{ source: "entity", path: "@/package_actions", prop: "items" }],
-                slots: {
-                  item: [
-                    { id: "real-hub-package-action", primitive: "action", bindings: [{ source: "entity", path: "@/action", prop: "action" }] }
-                  ]
-                }
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-app-list",
-          primitive: "list",
-          props: { label: "Installed app surfaces" },
-          bindings: [{ source: "entity", path: `/${appFamily}`, prop: "items" }],
-          slots: {
-            item: [
-              {
-                id: "real-hub-app-row",
-                primitive: "row",
-                slots: {
-                  children: [
-                    { id: "real-hub-app-title", primitive: "text", bindings: [{ source: "entity", path: "@/title", prop: "text" }] },
-                    { id: "real-hub-app-kind", primitive: "badge", bindings: [{ source: "entity", path: "@/kind", prop: "text" }] },
-                    { id: "real-hub-app-lifecycle", primitive: "text", bindings: [{ source: "entity", path: "@/lifecycle_state", prop: "text" }] },
-                    { id: "real-hub-app-diagnostics", primitive: "text", bindings: [{ source: "entity", path: "@/diagnostics_summary", prop: "text" }] }
-                  ]
-                }
-              }
-            ],
-            empty: [
-              {
-                id: "real-hub-apps-empty",
-                primitive: "empty_state",
-                props: { title: "No app surfaces", body: "The daemon returned an empty app surface registry." }
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-app-actions",
-          primitive: "list",
-          props: { label: "Launch installed apps" },
-          bindings: [{ source: "entity", path: `/${appFamily}`, prop: "items" }],
-          slots: {
-            item: [
-              { id: "real-hub-app-launch", primitive: "action", bindings: [{ source: "entity", path: "@/open_action", prop: "action" }] }
-            ]
-          }
-        },
-        {
-          id: "real-hub-package-settings-surface-actions",
-          primitive: "list",
-          props: { label: "Open settings surfaces" },
-          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items", where: { has_settings_surfaces: true } }],
-          slots: {
-            item: [
-              {
-                id: "real-hub-package-settings-surface-launches",
-                primitive: "list",
-                bindings: [{ source: "entity", path: "@/settings_surfaces", prop: "items" }],
-                slots: {
-                  item: [
-                    { id: "real-hub-package-settings-surface-launch", primitive: "action", bindings: [{ source: "entity", path: "@/launch_action", prop: "action" }] }
-                  ]
-                }
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-plugin-surface-render-result",
-          primitive: "section",
-          props: { label: "Rendered package surface" },
-          slots: {
-            children: [
-              {
-                id: "real-hub-plugin-surface-render-result-heading",
-                primitive: "heading",
-                props: { level: 3, text: "Rendered package surface" }
-              },
-              {
-                id: "real-hub-plugin-surface-render-result-text",
-                primitive: "text",
-                bindings: [{ source: "local_state", path: "dogfood.plugin_surface_status", prop: "text" }]
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-package-configuration-list",
-          primitive: "list",
-          props: { label: "Package configuration" },
-          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items", where: { configurable: true } }],
-          slots: {
-            item: [
-              {
-                id: "real-hub-package-configuration-form",
-                primitive: "form",
-                bindings: [
-                  { source: "entity", path: "@/configuration_submit", prop: "action" }
-                ],
-                slots: {
-                  children: [
-                    {
-                      id: "real-hub-package-configuration-section",
-                      primitive: "form_section",
-                      bindings: [{ source: "entity", path: "@/configuration_title", prop: "title" }],
-                      slots: {
-                        children: [
-                          {
-                            id: "real-hub-remote-browser-rendezvous-enabled",
-                            primitive: "checkbox",
-                            props: {
-                              name: "remote_browser_rendezvous_enabled",
-                              label: "Remote browser access",
-                              description:
-                                "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
-                              checked: false
-                            }
-                          },
-                          {
-                            id: "real-hub-package-webhook-endpoint",
-                            primitive: "text_input",
-                            props: {
-                              name: "endpoint",
-                              label: "Webhook endpoint",
-                              required: true,
-                              value: "",
-                              error: "Required configuration is missing."
-                            }
-                          },
-                          {
-                            id: "real-hub-package-api-token",
-                            primitive: "text_input",
-                            props: {
-                              name: "api_token",
-                              label: "API token",
-                              required: true,
-                              value: "",
-                              placeholder: "Existing secret is saved",
-                              description: "Existing secret is saved"
-                            }
-                          },
-                          {
-                            id: "real-hub-package-mode",
-                            primitive: "select",
-                            props: {
-                              name: "mode",
-                              label: "Mode",
-                              value: "read"
-                            },
-                            slots: {
-                              options: [
-                                { id: "real-hub-package-mode-read", primitive: "select_option", props: { value: "read", label: "Read" } },
-                                { id: "real-hub-package-mode-write", primitive: "select_option", props: { value: "write", label: "Write" } }
-                              ]
-                            }
-                          },
-                          {
-                            id: "real-hub-package-enabled",
-                            primitive: "checkbox",
-                            props: {
-                              name: "enabled",
-                              label: "Enabled",
-                              checked: true
-                            }
-                          }
-                        ]
-                      }
-                    }
-                  ]
-                }
-              }
-            ],
-            empty: [
-              {
-                id: "real-hub-package-configuration-empty",
-                primitive: "empty_state",
-                props: { title: "No package configuration", body: "Installed packages did not expose configuration schema." }
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-package-entrypoint-actions",
-          primitive: "list",
-          props: { label: "Entrypoint controls" },
-          bindings: [{ source: "entity", path: `/${packageFamily}`, prop: "items" }],
-          slots: {
-            item: [
-              {
-                id: "real-hub-package-entrypoint-action-list",
-                primitive: "list",
-                bindings: [{ source: "entity", path: "@/entrypoint_actions", prop: "items" }],
-                slots: {
-                  item: [
-                    { id: "real-hub-package-entrypoint-action", primitive: "action", bindings: [{ source: "entity", path: "@/action", prop: "action" }] }
-                  ]
-                }
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-session-list",
-          primitive: "list",
-          props: { label: "Runtime sessions" },
-          bindings: [{ source: "entity", path: `/${sessionFamily}`, prop: "items" }],
-          slots: {
-            item: [
-              {
-                id: "real-hub-session-row",
-                primitive: "row",
-                slots: {
-                  children: [
-                    { id: "real-hub-session-title", primitive: "text", bindings: [{ source: "entity", path: "@/title", prop: "text" }] },
-                    { id: "real-hub-session-status", primitive: "badge", bindings: [{ source: "entity", path: "@/status", prop: "text" }] },
-                    { id: "real-hub-session-result", primitive: "text", bindings: [{ source: "entity", path: "@/last_result", prop: "text" }] },
-                    { id: "real-hub-session-attach-status", primitive: "text", bindings: [{ source: "entity", path: "@/attach_status", prop: "text" }] },
-                    { id: "real-hub-session-attach-action", primitive: "action", bindings: [{ source: "entity", path: "@/attach_action", prop: "action" }] }
-                  ]
-                }
-              }
-            ],
-            empty: [
-              {
-                id: "real-hub-sessions-empty",
-                primitive: "empty_state",
-                props: { title: "No daemon sessions", body: "Spawn an isolated session to populate this entity family." }
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-validation-form",
-          primitive: "form",
-          props: {
-            action: {
-              id: "botster.session.rename",
-              target: "missing-real-hub-session",
-              label: "Run missing-session diagnostic",
-              params: { mode: "real_hub_dogfood_error" }
-            }
-          },
-          slots: {
-            children: [
-              {
-                id: "real-hub-diagnostic-action-failure",
-                primitive: "form_section",
-                props: { title: "Diagnostic action failure" },
-                slots: {
-                  children: [
-                    {
-                      id: "real-hub-diagnostic-session-name",
-                      primitive: "text_input",
-                      props: {
-                        name: "session_name",
-                        label: "Session name",
-                        value: "",
-                        error: "Session name is required"
-                      }
-                    },
-                    {
-                      id: "real-hub-diagnostic-target",
-                      primitive: "text_input",
-                      props: {
-                        name: "target",
-                        label: "Target",
-                        value: "botster-web"
-                      }
-                    }
-                  ]
-                }
-              }
-            ]
-          }
-        },
-        {
-          id: "real-hub-diagnostic-action-status",
-          primitive: "text",
-          bindings: [{ source: "local_state", path: "dogfood.diagnostic_action_status", prop: "text" }]
-        }
-      ]
-    }
-  }
-};

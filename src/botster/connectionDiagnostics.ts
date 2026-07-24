@@ -1,5 +1,5 @@
 import type { ActionBinding, ActionDispatchResult } from "./actions";
-import type { TerminalDataPlaneKind } from "./dogfoodMode";
+import type { TerminalDataPlaneKind } from "./hubRuntime";
 import type { HubControlFrame } from "./protocol";
 import type { WebrtcDaemonLifecycleEvent } from "./webrtcDaemonClient";
 
@@ -70,10 +70,9 @@ export function hubConnectionDiagnosticFromFrame(frame: HubControlFrame): Connec
 export function initialConnectionDiagnostics(
   mode: string,
   statusText: string,
-  terminalDataPlaneKind: TerminalDataPlaneKind = mode === "webrtc" ? "webrtc" : "mock",
+  terminalDataPlaneKind: TerminalDataPlaneKind = "webrtc",
   startupError?: unknown
 ): ConnectionDiagnostic[] {
-  const localHubMode = terminalDataPlaneKind === "webrtc";
   const diagnostics: ConnectionDiagnostic[] = [
     dataPlaneDiagnostic(terminalDataPlaneKind),
     {
@@ -122,10 +121,10 @@ export function initialConnectionDiagnostics(
     ...diagnostics,
     {
       id: "transport-mode",
-      title: mode === "webrtc" ? "Local hub WebRTC selected" : "Fixture transport selected",
+      title: "Local hub WebRTC selected",
       detail: statusText,
-      severity: localHubMode ? "info" : "success",
-      source: mode === "webrtc" ? "stream" : "server"
+      severity: "info",
+      source: "stream"
     }
   ];
 }
@@ -137,14 +136,6 @@ export function dataPlaneDiagnostic(kind: TerminalDataPlaneKind): ConnectionDiag
         id: "terminal-data-plane",
         title: "Terminal data plane: WebRTC DataChannel",
         detail: "Terminal requests and terminal stream polling use the encrypted local WebRTC DataChannel after bootstrap/signaling.",
-        severity: "success",
-        source: "data-plane"
-      };
-    case "mock":
-      return {
-        id: "terminal-data-plane",
-        title: "Terminal data plane: fixture",
-        detail: "Terminal traffic is served by the local fixture data plane.",
         severity: "success",
         source: "data-plane"
       };
@@ -481,7 +472,7 @@ export function upsertDiagnostic(
     return diagnostics;
   }
 
-  // This panel is a running diagnostic log for the current dogfood session.
+  // This panel is a running diagnostic log for the current production session.
   // Retry/recovery flows should add explicit recovery rows instead of silently
   // deleting the failure evidence that explains the current session history.
   const existing = diagnostics.findIndex((entry) => entry.id === diagnostic.id);

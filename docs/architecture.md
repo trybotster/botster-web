@@ -5,11 +5,10 @@
 ## Client layers
 
 - `src/botster/client.ts` composes UI-tree, entity-store, action, and injected transport seams.
-- `src/botster/dogfoodMode.ts` selects deterministic fixture mode for Vite and WebRTC mode for installed package runtime. Package runtime requires an injected bootstrap grant and fails closed into a rendered danger diagnostic with hub actions disabled when the grant is absent or malformed.
-- `src/botster/localDogfoodTransport.ts` is the development fixture adapter.
+- `src/botster/hubRuntime.ts` composes the single production WebRTC runtime. A missing bootstrap grant fails closed into a rendered danger diagnostic.
 - `src/botster/webrtcDaemonClient.ts` owns bootstrap refresh, signaling, encrypted ordered data-channel delivery, reconnect generations, and session entity subscriptions.
-- `src/botster/realHubDogfoodTransport.ts` projects daemon DTO responses and pushed entity frames into the web client’s UI/action/entity seams.
-- `src/botster/realHubTerminalDataPlane.ts` adapts WebRTC daemon requests and drained terminal events into `TerminalDataPlaneAttachment`.
+- `src/botster/hubTransport.ts` projects daemon DTO responses and pushed entity frames into the web client’s UI/action/entity seams.
+- `src/botster/hubTerminalDataPlane.ts` adapts WebRTC daemon requests and drained terminal events into `TerminalDataPlaneAttachment`.
 - `src/botster/entities.ts`, `uiNodes.ts`, and `actions.ts` implement the canonical read, render, and semantic-dispatch seams.
 - `src/botster/TerminalViewHost.tsx` mounts Restty and forwards measured input, resize, attach, detach, and readback operations.
 
@@ -27,11 +26,11 @@ Session state uses a held entity subscription:
 
 There is no HTTP daemon client, SSE terminal stream, polling, `list_sessions` hydration, or lifecycle-event projection fallback.
 
-Terminal data stays outside `HubControlFrame`. The WebRTC client attaches and drains terminal events, while `RealHubTerminalDataPlane` restores visible `read_screen` text before buffered live output. Snapshot/scrollback payloads remain opaque metadata and are never rendered as terminal text.
+Terminal data stays outside `HubControlFrame`. The WebRTC client attaches and drains terminal events, while the Hub terminal data plane restores visible `read_screen` text before buffered live output. Snapshot/scrollback payloads remain opaque metadata and are never rendered as terminal text.
 
 ## Local package server
 
-`scripts/local-package-server.mjs` serves the compiled SPA, injects package-runtime/bootstrap metadata, reports readiness, and forwards only:
+`scripts/local-package-server.mjs` reports readiness only after binding. For each HTML load it requests a fresh initial WebRTC grant from Hub using the actual bound origin, validates the returned transport contract, and injects package-runtime/bootstrap metadata. The browser uses the same server to forward only:
 
 - `issue_local_webrtc_bootstrap`
 - `local_webrtc_signal`

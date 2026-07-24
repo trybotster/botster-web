@@ -28,7 +28,9 @@ export const generatedDaemonRequestFixtures = [
     type: "start_package_entrypoint",
     package_name: "project-pipelines",
     entrypoint_id: "web-client",
-    environment_overrides: { BOTSTER_HUB_SOCKET: "/tmp/botster-hub.sock" }
+    environment_overrides: {
+      BOTSTER_HUB_CONNECTION: "{\"transport\":{\"type\":\"unix_socket\",\"path\":\"/tmp/botster-hub.sock\"}}"
+    }
   },
   { type: "stop_package_entrypoint", package_name: "project-pipelines", entrypoint_id: "web-client" },
   { type: "restart_package_entrypoint", package_name: "project-pipelines", entrypoint_id: "web-client" },
@@ -186,7 +188,7 @@ export const generatedPackageResponseFixture = {
       requested_capabilities: [],
       surfaces: [
         {
-          id: "dogfood-settings",
+          id: "production-settings",
           kind: "settings",
           title: "botster-web Settings",
           description: "Descriptor-backed settings surface for package launcher validation.",
@@ -325,7 +327,7 @@ export const generatedAppResponseFixture = {
   apps: [
     {
       package_name: "botster-web",
-      app_id: "dogfood",
+      app_id: "production",
       entrypoint_id: "web-client",
       kind: "web_app",
       launch_mode: "browser",
@@ -347,7 +349,7 @@ export const generatedAppResponseFixture = {
       blocked_reasons: [],
       launch_target: {
         kind: "web_app",
-        local_url: "http://127.0.0.1:41739"
+        local_url: "http://127.0.0.1:41821"
       }
     },
     {
