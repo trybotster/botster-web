@@ -13,6 +13,7 @@ import {
   materializePluginContractMatrixFixture,
   metadata as hubTestSupportMetadata,
   pluginContractMatrixFixturePath,
+  readDaemonProtocolTypescript,
   readLateAttachHistoryConformanceFixture,
   readLocalWebrtcDeliveryChunkConformanceFixture,
   readModeFlagsConformanceFixture,
@@ -581,10 +582,17 @@ const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 const hubTestSupportVersion = packageJson.devDependencies["@trybotster/hub-test-support"];
-assert.equal(hubTestSupportVersion, "0.1.10");
+const expectedHubDaemonProtocolSha256 = "39e9202bd333584be077e1d1ef5c3fa31a9409996607cb4c01471c103e263980";
+const installedDaemonProtocol = readDaemonProtocolTypescript();
+assert.equal(hubTestSupportVersion, "0.1.11");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.10");
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 17);
+assert.equal(hubTestSupportMetadata.package_version, "0.1.11");
+assert.equal(hubTestSupportMetadata.protocol_version, 3);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 18);
+assert.equal(hubTestSupportMetadata.daemon_protocol.sha256, expectedHubDaemonProtocolSha256);
+assert.equal(createHash("sha256").update(installedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
+assert.equal(createHash("sha256").update(generatedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
+assert.match(generatedDaemonProtocol, /\{ type: "refresh_local_packages" \}/);
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(hubTestSupportMetadata.application_primitives.surface_id, "contract.app");
 assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, [
@@ -603,7 +611,7 @@ assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, 
 assert.equal(applicationPrimitivesFixturePath(), pluginContractMatrixFixturePath());
 assert.equal(verifyPackageAssets().ok, true);
 const modeFlagsConformanceFixture = readModeFlagsConformanceFixture();
-assert.equal(modeFlagsConformanceFixture.conformance_fixture_revision, 17);
+assert.equal(modeFlagsConformanceFixture.conformance_fixture_revision, 18);
 assert.deepEqual(modeFlagsConformanceFixture.request, {
   type: "read_mode_flags",
   session_id: "mode-flags-fixture-session"
@@ -624,7 +632,7 @@ for (const failure of [modeFlagsConformanceFixture.unknown_session, modeFlagsCon
 assert.equal(modeFlagsConformanceFixture.unknown_session.error_code, "unknown_session");
 assert.equal(modeFlagsConformanceFixture.backend_failure.error_code, "runtime_error");
 const lateAttachHistoryConformanceFixture = readLateAttachHistoryConformanceFixture();
-assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 17);
+assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 18);
 assert.deepEqual(
   lateAttachHistoryConformanceFixture.history_then_live.map((event) =>
     event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
@@ -680,7 +688,7 @@ assert.equal(
   "encrypted-operator-error"
 );
 const sessionLifecycleFixture = readSessionLifecycleSubscriptionConformanceFixture();
-assert.equal(sessionLifecycleFixture.conformance_fixture_revision, 17);
+assert.equal(sessionLifecycleFixture.conformance_fixture_revision, 18);
 assert.equal(sessionLifecycleFixture.fresh_subscription.requires_authoritative_snapshot_before_deltas, true);
 assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
 assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping daemon protocol drift check|check out \.\.\/botster-hub/);
@@ -1042,6 +1050,7 @@ const {
   hubStatusFamily,
   initialConnectionDiagnostics,
   minimumConformanceFixtureRevision,
+  minimumDaemonProtocolVersion,
   operatorErrorDiagnostic,
   requiredDaemonFeatures,
   schemaVersionDiagnosticFromFrame,
@@ -3714,6 +3723,7 @@ assert.deepEqual(requiredDaemonFeatures, [
   "plugin_surface_action"
 ]);
 assert.equal(minimumConformanceFixtureRevision, 14);
+assert.equal(minimumDaemonProtocolVersion, 1);
 assert.equal(compatibleDescriptorDiagnostics.length, 1);
 assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
 assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
