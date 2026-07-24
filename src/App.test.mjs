@@ -242,6 +242,7 @@ assert.match(app, /isAttachableSession/);
 assert.match(app, /hubRuntime\.createTerminalDataPlane\(terminalDescriptor\.sessionId\)/);
 assert.match(app, /descriptor=\{terminalDescriptor\}/);
 assert.match(app, /dataPlane=\{terminalDataPlane\}/);
+assert.match(app, /onExit=\{releaseExitedTerminalSession\}/);
 assert.match(app, /Select a running session to attach the terminal panel/);
 assert.match(app, /onDiagnostic=\{recordTerminalDiagnostic\}/);
 assert.doesNotMatch(app, /terminal-placeholder/);
@@ -507,6 +508,8 @@ assert.doesNotMatch(terminalHost, /requestAnimationFrame/);
 assert.doesNotMatch(terminalHost, /cancelAnimationFrame/);
 assert.match(terminalHost, /data-terminal-attach-state/);
 assert.match(terminalHost, /subscribeStatus/);
+assert.match(terminalHost, /status\.state === "exited"/);
+assert.match(terminalHost, /onExitRef\.current\?\.\(descriptor\.sessionId\)/);
 assert.match(terminalHost, /bridge\.attach/);
 assert.match(terminalHost, /focus: \(\) => bridge\.focus\(descriptor\)/);
 assert.match(terminalHost, /bridge\.unmount/);
@@ -4368,6 +4371,7 @@ try {
     { LocalHubFirstScreen },
     { createInMemoryEntityFrameStore },
     { configurationFieldType, configurationSaveAction, configurationSubmitValues },
+    { resolveTerminalSessionId },
     {
       AppListItem,
       PackageNavigationShortcutButton,
@@ -4394,8 +4398,40 @@ try {
     vite.ssrLoadModule("/src/botster/LocalHubFirstScreen.tsx"),
     vite.ssrLoadModule("/src/botster/entities.ts"),
     vite.ssrLoadModule("/src/packageConfigurationForm.ts"),
+    vite.ssrLoadModule("/src/botster/terminalSession.ts"),
     vite.ssrLoadModule("/src/App.tsx")
   ]);
+
+  const runningTerminalSession = {
+    id: activeHubSessionId,
+    status: "running",
+    attachable: true
+  };
+  const exitedTerminalSession = {
+    id: activeHubSessionId,
+    status: "exited",
+    attachable: false
+  };
+  assert.equal(resolveTerminalSessionId([runningTerminalSession]), activeHubSessionId);
+  assert.equal(resolveTerminalSessionId([exitedTerminalSession]), undefined);
+  assert.equal(
+    resolveTerminalSessionId([exitedTerminalSession], activeHubSessionId),
+    activeHubSessionId
+  );
+  assert.equal(
+    resolveTerminalSessionId(
+      [exitedTerminalSession, { id: "next-running-session", status: "running", attachable: true }],
+      activeHubSessionId
+    ),
+    activeHubSessionId
+  );
+  assert.equal(
+    resolveTerminalSessionId(
+      [{ id: "next-running-session", status: "running", attachable: true }],
+      activeHubSessionId
+    ),
+    "next-running-session"
+  );
 
   const descriptorAppRoute = appRouteFromPathname("/packages/acme%20tools/surfaces/home%2Fmain");
   const fallbackAppRoute = appRouteFromPathname("/apps/acme%20tools/home%2Fmain");

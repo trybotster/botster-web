@@ -44,11 +44,12 @@
 5. Preserve the package-backed default in `scripts/check-daemon-protocol-drift.mjs`; acceptance must exercise that default with no `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL` override.
 6. Run the existing repository unit, build, lint, typecheck, and live packaged-protocol entrypoints. For the live run, use the human-authorized reviewed Hub preparation binaries from commit `423eaf4b29ebc9fb211d4b6c0ac08e19107a4950`, whose Git tree `9881511790eca8addd552ebc76efe23a48a243ec` is identical to Hub `main` merge `42a2f1df02f69719d5a7a47216fb22515c1c0762`; independently verify the Cargo.lock and binary hashes before execution.
 7. Record the release coordinate and source/artifact hashes in implementation and gate evidence. Update `README.md` and `docs/architecture.md` only if they contain or gain exact package/revision claims; current main has no such claims to synchronize.
+8. Preserve an already-attached terminal through its session entity's transition to `exited`, so the Web-owned polling subscription can drain final PTY output and `process_exit`; release it on the structured terminal exit status, and do not make an exited session newly attachable.
 
 ## Non-scope
 
 - No changes to Hub, core, session-worker, hub-client Rust source, protocol generation, protocol versioning, conformance fixtures, or npm publication.
-- No browser runtime behavior, compatibility-floor, route, transport, terminal, UI, or application-state changes.
+- No compatibility-floor, route, transport protocol, terminal renderer, or UI changes beyond retaining an already-attached terminal data plane long enough to drain its final events.
 - No sibling checkout, unpublished tarball, local folder dependency, `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL`, or other override may satisfy artifact acceptance.
 - No new artifact resolver, compatibility layer, optional configuration, service abstraction, broad dependency upgrade, or adjacent cleanup.
 - No hand-authored DTO field or duplicate `refresh_local_packages` browser contract.
@@ -76,6 +77,9 @@
 - `package.json`: exact `0.1.11` devDependency.
 - `package-lock.json`: `0.1.11` tarball and published integrity.
 - `src/botster/generated/daemon-protocol.ts`: byte-for-byte package artifact; expected one-line `refresh_local_packages` addition.
+- `src/App.tsx`: retain the current terminal session across its lifecycle entity exit, then clear it after the terminal data plane reports `process_exit`, without allowing a fresh attachment to an exited-only session.
+- `src/botster/TerminalViewHost.tsx`: report the structured terminal exit status to the owning App after final output has been delivered.
+- `src/botster/terminalSession.ts`: centralize the small tested rule that selects a running attachable session but retains the current attachment across lifecycle updates.
 - `src/App.test.mjs`: exact coordinate, protocol/conformance metadata, committed Hub-source hash, generated request shape, package-backed drift assertions, all three fixture-level revision pins, and both unchanged compatibility floors.
 - `scripts/check-daemon-protocol-drift.mjs`: expected unchanged; verify that the production `npm test` entrypoint consumes the installed package by default.
 - `scripts/live-packaged-protocol-harness.mjs`: expected unchanged; execute it with the reviewed, independently hashed Hub/worker binaries from the authorized tree-identical preparation commit and retain its runtime-path and binary-provenance evidence.
@@ -90,6 +94,7 @@
 5. Run deterministic checks with `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL` absent. Review the diff and lockfile to ensure no folder/tarball/sibling source was recorded.
 6. Re-derive that `423eaf4b29ebc9fb211d4b6c0ac08e19107a4950^{tree}` and `42a2f1df02f69719d5a7a47216fb22515c1c0762^{tree}` both equal `9881511790eca8addd552ebc76efe23a48a243ec`, confirm their scoped source/Cargo diff is empty, and independently verify the approved Cargo.lock and Hub/worker binary hashes.
 7. Run the live packaged-protocol harness with those reviewed exact binaries, capture its packaged WebRTC/runtime proof, and attach all release/hash evidence plus the authorization from `question_1784923021_264572` to the Implement and Verify gates.
+8. If the live harness exposes a terminal-finalization race, fix only the Web-owned attachment lifetime, add a focused selection/retention regression test, and rerun the exact live command without weakening its final-output oracle.
 
 ## Risks
 
@@ -100,6 +105,7 @@
 - Protocol version 3 or conformance revision 18 could be mistaken for new minimum compatibility policy. Mitigation: keep `minimumDaemonProtocolVersion === 1` and `minimumConformanceFixtureRevision === 14` unchanged and test that separation.
 - A registry release after `0.1.11` could make “latest” diverge from this ticket’s published prerequisite. Mitigation: stop for a human decision instead of silently broadening the release under test.
 - Updating unrelated documentation or runtime code would expand a one-line protocol-consumer change. Mitigation: require every changed line to map to dependency provenance, generated bytes, focused assertions, or stale exact-version documentation.
+- Session lifecycle entity patches can arrive before the polling terminal stream drains its final PTY bytes. Mitigation: retain only the session that Web already attached until the data plane reports `process_exit`, then release it; prove an exited-only session is never selected for a new attachment.
 
 ## Acceptance checks and downstream proof
 
@@ -121,6 +127,7 @@
    - Independently verify Cargo.lock SHA-256 `005043ffe6401c5431059f4444d9c6f5a34ec9bc91b9f0b50554dc9555a196b7`, Hub binary SHA-256 `639d71016f0516b2542385178ec272daece4fbea285f1a4ca6005e643581fbef`, and session-worker SHA-256 `e15913445469d6f0012b0a97fd98d5db4539cff06661a3df4c262e8af408c273`.
    - Run `BOTSTER_HUB_BIN=<reviewed exact binary> BOTSTER_SESSION_WORKER_BIN=<reviewed exact binary> npm run smoke:live-packaged-protocol`.
    - Capture the source/preparation commits, shared tree, Cargo.lock and binary hashes, harness binary provenance, attach chronology, response-assembly telemetry, and successful packaged runtime/session/terminal path.
+   - Require the fixture's final `botster-web-production-exiting` marker and clean shutdown after the session entity transitions to `exited`.
 5. Negative audit:
    - Lockfile contains no `file:`, local tarball, or sibling checkout resolution for hub-test-support.
    - Acceptance command environment does not set `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL`.

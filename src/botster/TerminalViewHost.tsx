@@ -21,16 +21,19 @@ export interface TerminalViewHostProps {
   dataPlane?: TerminalDataPlaneAttachment;
   descriptor?: TerminalViewDescriptor;
   onDiagnostic?: (error: unknown) => void;
+  onExit?: (sessionId: string) => void;
 }
 
 export function TerminalViewHost({
   bridge = defaultBridge,
   dataPlane,
   descriptor = defaultDescriptor,
-  onDiagnostic
+  onDiagnostic,
+  onExit
 }: TerminalViewHostProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const onDiagnosticRef = useRef(onDiagnostic);
+  const onExitRef = useRef(onExit);
   const [mountDiagnostic, setMountDiagnostic] = useState<string | undefined>();
   const [attachmentStatus, setAttachmentStatus] = useState<TerminalAttachmentStatus | undefined>();
   const terminalDataPlane = useMemo(
@@ -46,6 +49,10 @@ export function TerminalViewHost({
   useEffect(() => {
     onDiagnosticRef.current = onDiagnostic;
   }, [onDiagnostic]);
+
+  useEffect(() => {
+    onExitRef.current = onExit;
+  }, [onExit]);
 
   useEffect(() => {
     const container = terminalRef.current;
@@ -65,7 +72,12 @@ export function TerminalViewHost({
           return;
         }
 
-        statusSubscription = terminalDataPlane.subscribeStatus?.(setAttachmentStatus);
+        statusSubscription = terminalDataPlane.subscribeStatus?.((status) => {
+          setAttachmentStatus(status);
+          if (status.state === "exited") {
+            onExitRef.current?.(descriptor.sessionId);
+          }
+        });
         await bridge.attach(descriptor, terminalDataPlane);
         uninstallLiveHarnessTerminalControls = installLiveHarnessTerminalControls(bridge, descriptor, terminalDataPlane);
         setMountDiagnostic(undefined);
