@@ -539,7 +539,8 @@ assert.match(generatedDaemonProtocol, /DaemonLocalWebrtcBootstrap/);
 assert.match(generatedDaemonProtocol, /DaemonLocalWebrtcAnswer/);
 assert.match(generatedDaemonProtocol, /local_webrtc_bootstrap/);
 assert.match(generatedDaemonProtocol, /local_webrtc_answer/);
-assert.match(localPackageServerScript, /BOTSTER_LOCAL_WEBRTC_GRANT_ID/);
+assert.doesNotMatch(localPackageServerScript, /BOTSTER_LOCAL_WEBRTC_GRANT_ID|BOTSTER_LOCAL_WEBRTC_GRANT_SECRET|BOTSTER_LOCAL_WEBRTC_EXPECTED_ORIGIN/);
+assert.match(localPackageServerScript, /async function issueLocalWebrtcBootstrap/);
 assert.match(localPackageServerScript, /__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__/);
 assert.match(app, /normalizeLocalWebrtcBootstrap/);
 assert.match(webrtcDaemonClient, /createWebrtcDaemonClient/);
@@ -785,13 +786,19 @@ try {
   assert.equal(rootResponse.headers.get("access-control-allow-origin"), null);
   assert.match(rootHtml, /<div id="root"><\/div>/);
   assert.match(rootHtml, /window\.__BOTSTER_PACKAGE_RUNTIME__ = true/);
+  assert.match(rootHtml, /window\.__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__/);
+  assert.match(rootHtml, new RegExp(`"expected_origin":"${packageServerRuntime.origin.replaceAll(".", "\\.")}"`));
+  assert.match(rootHtml, /"signaling_url":"\/request"/);
 
   const faviconResponse = await fetch(`${packageServerRuntime.origin}/favicon.ico`);
   assert.equal(faviconResponse.status, 204);
 
   const fallbackResponse = await fetch(`${packageServerRuntime.origin}/sessions/local-production`);
+  const fallbackHtml = await fallbackResponse.text();
   assert.equal(fallbackResponse.status, 200);
-  assert.match(await fallbackResponse.text(), /botster package runtime/);
+  assert.match(fallbackHtml, /botster package runtime/);
+  assert.match(rootHtml, /"grant_id":"package-server-grant-1"/);
+  assert.match(fallbackHtml, /"grant_id":"package-server-grant-2"/);
 
   const assetResponse = await fetch(`${packageServerRuntime.origin}/assets/app.js`);
   const assetBody = await assetResponse.text();
@@ -829,7 +836,17 @@ try {
   const rejectedRequest = await requestResponse.json();
   assert.equal(rejectedRequest.request_id, "package-runtime-status");
   assert.equal(rejectedRequest.payload.error.code, "unsupported_package_server_request");
-  assert.deepEqual(packageServerRuntime.daemonRequests, []);
+  assert.equal(packageServerRuntime.daemonRequests.length >= 2, true);
+  assert.equal(
+    packageServerRuntime.daemonRequests.every(
+      (request) =>
+        request.type === "issue_local_webrtc_bootstrap" &&
+        request.package_name === "botster-web" &&
+        request.entrypoint_id === "web-client" &&
+        request.origin === packageServerRuntime.origin
+    ),
+    true
+  );
 } finally {
   await packageServerRuntime.stop();
 }
@@ -6500,6 +6517,7 @@ async function startPackageServerRuntime({ launchResult = false, dynamicPort = f
   const launchResultPath = join(root, "launch-result.json");
   const port = dynamicPort ? undefined : await findAvailablePort();
   const daemonRequests = [];
+  let bootstrapSequence = 0;
   await mkdir(join(root, "dist", "assets"), { recursive: true });
   await Promise.all([
     writeFile(
@@ -6527,7 +6545,25 @@ async function startPackageServerRuntime({ launchResult = false, dynamicPort = f
             socket.write(`${JSON.stringify({ protocol: "botster-hub-daemon-v1" })}\n`);
           } else {
             daemonRequests.push(frame);
-            if (frame.type === "status") {
+            if (frame.type === "issue_local_webrtc_bootstrap") {
+              bootstrapSequence += 1;
+              socket.write(
+                `${JSON.stringify({
+                  kind: "local_webrtc_bootstrap",
+                  local_webrtc_bootstrap: {
+                    grant_id: `package-server-grant-${bootstrapSequence}`,
+                    grant_secret: String(bootstrapSequence).padStart(64, "0"),
+                    package_name: frame.package_name,
+                    entrypoint_id: frame.entrypoint_id,
+                    expected_origin: frame.origin,
+                    expires_at: 0,
+                    signaling_transport: "daemon_request",
+                    data_plane: "webrtc_data_channel",
+                    ordered: true
+                  }
+                })}\n`
+              );
+            } else if (frame.type === "status") {
               socket.write(
                 `${JSON.stringify({
                   kind: "status",

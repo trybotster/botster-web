@@ -77,7 +77,14 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === "GET") {
-    await serveStaticUi(request, response);
+    try {
+      await serveStaticUi(request, response);
+    } catch (error) {
+      writeJson(response, 503, {
+        error: "local_webrtc_bootstrap_unavailable",
+        message: error instanceof Error ? error.message : "Local WebRTC bootstrap unavailable"
+      });
+    }
     return;
   }
 
@@ -212,7 +219,9 @@ async function serveStaticUi(request, response) {
   const file = await readExistingFile(filePath);
   if (file.ok && file.stats.isFile()) {
     const isHtml = filePath === indexPath || extname(filePath) === ".html";
-    const body = isHtml ? injectPackageRuntimeMarker(await readFile(filePath, "utf8")) : await readFile(filePath);
+    const body = isHtml
+      ? await injectPackageRuntimeMarker(await readFile(filePath, "utf8"))
+      : await readFile(filePath);
     response.writeHead(200, {
       "content-type": contentTypeFor(filePath),
       "cache-control": isHtml ? "no-store" : "public, max-age=31536000, immutable"
@@ -239,7 +248,7 @@ async function serveStaticUi(request, response) {
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store"
   });
-  response.end(injectPackageRuntimeMarker(await readFile(indexPath, "utf8")));
+  response.end(await injectPackageRuntimeMarker(await readFile(indexPath, "utf8")));
 }
 
 async function readExistingFile(filePath) {
@@ -285,38 +294,55 @@ function isSpaRoutePath(pathname) {
   return pathname.startsWith("/apps/") || pathname.startsWith("/packages/");
 }
 
-function injectPackageRuntimeMarker(html) {
-  const marker = `<script>window.__BOTSTER_PACKAGE_RUNTIME__ = true;${localWebrtcBootstrapScript()}</script>`;
+async function injectPackageRuntimeMarker(html) {
   if (html.includes("__BOTSTER_PACKAGE_RUNTIME__")) {
     return html;
   }
+  const bootstrap = await issueLocalWebrtcBootstrap();
+  const marker = `<script>window.__BOTSTER_PACKAGE_RUNTIME__ = true;${localWebrtcBootstrapScript(bootstrap)}</script>`;
   if (html.includes("</head>")) {
     return html.replace("</head>", `${marker}</head>`);
   }
   return `${marker}${html}`;
 }
 
-function localWebrtcBootstrapScript() {
-  const grantId = process.env.BOTSTER_LOCAL_WEBRTC_GRANT_ID;
-  const grantSecret = process.env.BOTSTER_LOCAL_WEBRTC_GRANT_SECRET;
-  const signalingTransport = process.env.BOTSTER_LOCAL_WEBRTC_SIGNALING_TRANSPORT;
-  const expectedOrigin = process.env.BOTSTER_LOCAL_WEBRTC_EXPECTED_ORIGIN;
-  if (!grantId || !grantSecret || signalingTransport !== "daemon_request" || !expectedOrigin) {
-    return "";
+async function issueLocalWebrtcBootstrap() {
+  if (!localUrl) {
+    throw new Error("Package server origin is unavailable before listen readiness.");
   }
 
-  return `window.__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__ = ${JSON.stringify({
-    grant_id: grantId,
-    grant_secret: grantSecret,
+  const response = await sendDaemonRequest(socketPath, {
+    type: "issue_local_webrtc_bootstrap",
     package_name: "botster-web",
     entrypoint_id: "web-client",
-    expected_origin: expectedOrigin,
-    expires_at: 0,
-    signaling_transport: signalingTransport,
-    data_plane: "webrtc_data_channel",
-    ordered: true,
+    origin: localUrl
+  });
+  const bootstrap = response?.local_webrtc_bootstrap;
+  if (
+    !bootstrap ||
+    typeof bootstrap.grant_id !== "string" ||
+    bootstrap.grant_id.length === 0 ||
+    typeof bootstrap.grant_secret !== "string" ||
+    bootstrap.grant_secret.length === 0 ||
+    bootstrap.package_name !== "botster-web" ||
+    bootstrap.entrypoint_id !== "web-client" ||
+    bootstrap.expected_origin !== localUrl ||
+    !Number.isFinite(bootstrap.expires_at) ||
+    bootstrap.signaling_transport !== "daemon_request" ||
+    bootstrap.data_plane !== "webrtc_data_channel" ||
+    bootstrap.ordered !== true
+  ) {
+    throw new Error("Hub returned an invalid local WebRTC bootstrap grant.");
+  }
+  return bootstrap;
+}
+
+function localWebrtcBootstrapScript(bootstrap) {
+  const serialized = JSON.stringify({
+    ...bootstrap,
     signaling_url: "/request"
-  })};`;
+  }).replaceAll("<", "\\u003c");
+  return `window.__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__ = ${serialized};`;
 }
 
 function contentTypeFor(filePath) {

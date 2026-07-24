@@ -30,7 +30,7 @@ Terminal data stays outside `HubControlFrame`. The WebRTC client attaches and dr
 
 ## Local package server
 
-`scripts/local-package-server.mjs` serves the compiled SPA, injects package-runtime/bootstrap metadata, reports readiness, and forwards only:
+`scripts/local-package-server.mjs` reports readiness only after binding. For each HTML load it requests a fresh initial WebRTC grant from Hub using the actual bound origin, validates the returned transport contract, and injects package-runtime/bootstrap metadata. The browser uses the same server to forward only:
 
 - `issue_local_webrtc_bootstrap`
 - `local_webrtc_signal`

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -29,6 +29,7 @@ const payloadContractPackagePath = payloadContractMode
   : undefined;
 const echoProbe = "keys";
 const attachProbe = "botster-web-production-attach-probe";
+const productionSessionId = "web-prod";
 
 if (!process.env.BOTSTER_HUB_BIN) {
   throw new Error(
@@ -48,7 +49,9 @@ let hubProcess;
 let hubStdout = "";
 let hubStderr = "";
 const ownsWebrtcDataDir = !process.env.BOTSTER_LIVE_DATA_DIR;
-const webrtcDataDir = process.env.BOTSTER_LIVE_DATA_DIR ?? await mkdtemp(join(tmpdir(), "botster-web-webrtc-production-"));
+const webrtcDataDir =
+  process.env.BOTSTER_LIVE_DATA_DIR ??
+  await mkdtemp(join(process.platform === "win32" ? tmpdir() : "/tmp", "botster-web-webrtc-"));
 let appUrl;
 
 let browser;
@@ -128,7 +131,9 @@ try {
       : "plugin contract matrix smoke passed (webrtc)");
     process.exit(0);
   }
-  await openFirstPartyUiAppSurface(page, "webrtc");
+  if (workspacesPackagePath) {
+    await openFirstPartyUiAppSurface(page, "webrtc");
+  }
   if (process.env.BOTSTER_LIVE_SURFACE_ONLY === "1") {
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
     await requestDaemonShutdown();
@@ -136,15 +141,15 @@ try {
     process.exit(0);
   }
   await openHomeView(page);
+  await startProductionSession();
   await waitForSessionStatus(page, "running");
   await openDiagnosticsView(page);
   await waitForSessionAttachable(page, true);
-  await page.getByText("Attachable").waitFor();
-  await proveExternalSessionLifecycle(page);
-  await waitForTerminalSession(page, "botster-web-production-session");
+  await waitForTerminalSession(page, productionSessionId);
   responseAssemblyTelemetry.push({ cycle: 0, ...await waitForAutomaticTerminalRestore(page) });
   await proveLiveTerminalAfterAttach(page, `${attachProbe}-0`);
-  attachChronology.push({ cycle: 0, ...await assertTerminalAttachChronology(page, "botster-web-production-session") });
+  attachChronology.push({ cycle: 0, ...await assertTerminalAttachChronology(page, productionSessionId) });
+  await proveExternalSessionLifecycle(page);
 
   let previousGrantId = await latestLocalWebrtcGrantId(page);
   let previousEntitySubscriptionId = await latestSessionEntitySubscriptionId(page);
@@ -160,11 +165,10 @@ try {
     await openDiagnosticsView(page);
     await waitForSessionStatus(page, "running");
     await waitForSessionAttachable(page, true);
-    await page.getByRole("button", { name: "Attach botster-web-production-session" }).click();
-    await waitForTerminalSession(page, "botster-web-production-session");
+    await waitForTerminalSession(page, productionSessionId);
     responseAssemblyTelemetry.push({ cycle, ...await waitForAutomaticTerminalRestore(page) });
     await proveLiveTerminalAfterAttach(page, `${attachProbe}-${cycle}`);
-    attachChronology.push({ cycle, ...await assertTerminalAttachChronology(page, "botster-web-production-session") });
+    attachChronology.push({ cycle, ...await assertTerminalAttachChronology(page, productionSessionId) });
   }
 
   const sendInputRequestsBeforeEcho = await daemonRequestCount(page, {
@@ -193,7 +197,7 @@ try {
   const readScreen = await callTerminalControl(page, "readScreen");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_screen" }, "read_screen request");
   if (
-    readScreen?.session_id !== "botster-web-production-session" ||
+    readScreen?.session_id !== productionSessionId ||
     !readScreen.text?.includes(`botster-web-production-echo:${echoProbe}`)
   ) {
     throw new Error(`unexpected read_screen response: ${JSON.stringify(readScreen)}`);
@@ -202,7 +206,7 @@ try {
   const captureSnapshot = await callTerminalControl(page, "captureSnapshot");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "capture_snapshot" }, "capture_snapshot request");
   if (
-    captureSnapshot?.session_id !== "botster-web-production-session" ||
+    captureSnapshot?.session_id !== productionSessionId ||
     !Number.isInteger(captureSnapshot.rows) ||
     captureSnapshot.rows <= 0 ||
     !Number.isInteger(captureSnapshot.cols) ||
@@ -1382,11 +1386,37 @@ async function proveExternalSessionLifecycle(page) {
   await page.getByText(sessionId, { exact: true }).first().waitFor({ state: "detached" });
 }
 
+async function startProductionSession() {
+  if (!webrtcDataDir) throw new Error("production session proof requires a WebRTC hub data directory");
+  const scriptPath = join(webrtcDataDir, "botster-web-production-session.sh");
+  await writeFile(
+    scriptPath,
+    [
+      "echo botster-web-production-ready",
+      "while IFS= read -r line; do",
+      "  case \"$line\" in",
+      "    botster-web-production-size) set -- $(stty size); echo botster-web-production-size:${1}x${2} ;;",
+      "    botster-web-production-exit) echo botster-web-production-exiting; exit 0 ;;",
+      "    *) echo botster-web-production-echo:$line ;;",
+      "  esac",
+      "done"
+    ].join("\n")
+  );
+  const response = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
+    type: "spawn",
+    session_id: productionSessionId,
+    command: `sh ${scriptPath}`
+  });
+  if (response.error) {
+    throw new Error(`production session spawn failed: ${JSON.stringify(response.error)}`);
+  }
+}
+
 async function shutdownProductionSession() {
   if (!webrtcDataDir) throw new Error("session shutdown proof requires a WebRTC hub data directory");
   const response = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
     type: "shutdown_session",
-    session_id: "botster-web-production-session"
+    session_id: productionSessionId
   });
   if (response.error) {
     throw new Error(`production session shutdown failed: ${JSON.stringify(response.error)}`);
@@ -1787,7 +1817,7 @@ async function waitForSessionStatus(page, status) {
     {
       kind: "hub_frame",
       family: "botster-web.session",
-      id: "botster-web-production-session",
+      id: productionSessionId,
       status
     },
     `session entity status ${status}`
@@ -1800,7 +1830,7 @@ async function waitForSessionAttachable(page, attachable) {
     {
       kind: "hub_frame",
       family: "botster-web.session",
-      id: "botster-web-production-session",
+      id: productionSessionId,
       status: "running",
       attachable
     },

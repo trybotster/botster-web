@@ -8,7 +8,7 @@
 - Installed package runtime requires a hub-issued local WebRTC bootstrap grant.
 - Encrypted daemon requests, responses, terminal traffic, and pushed session entity frames travel over the ordered WebRTC data channel.
 - Session state begins with an authoritative subscription snapshot and continues through ordered pushed deltas. The client does not poll or call `list_sessions`.
-- The loopback package server serves compiled assets and handles only WebRTC bootstrap refresh and signaling at `/request`. It is not a daemon control or terminal-data fallback.
+- After binding, the loopback package server requests an origin-bound initial WebRTC grant from Hub and injects it into each HTML load. It handles later bootstrap refresh and signaling at `/request`; it is not a daemon control or terminal-data fallback.
 - Restty is the terminal renderer. It receives terminal data through `TerminalViewHost` and the WebRTC-backed data-plane adapter.
 
 See [docs/architecture.md](docs/architecture.md) for module boundaries.
@@ -48,7 +48,7 @@ npm run smoke:live-packaged-protocol
 
 `smoke:browser-runtime` exercises the real compiled React UI in fixture mode and in package mode without a bootstrap grant. It verifies Start Session feedback, fixture session rendering, a visible bootstrap diagnostic, and blocked actions during connection failure.
 
-The live acceptance builds and installs the package into an isolated Hub, launches Chromium, starts a session through the production Home control, verifies immediate UI feedback, receives authoritative session snapshots and deltas, attaches Restty, exercises input/resize/readback/exit, and proves two fresh WebRTC subscription generations across reloads. It fails if any legacy `list_sessions` hydration occurs.
+The live acceptance builds and installs the package into an isolated Hub, launches Chromium, starts a test-owned session through Hub's generic API, receives authoritative session snapshots and deltas, attaches Restty, exercises input/resize/readback/exit, and proves two fresh WebRTC subscription generations across reloads. It fails if any legacy `list_sessions` hydration occurs.
 
 The plugin contract checks use the same production WebRTC harness:
 
@@ -86,7 +86,7 @@ signaling: `${local_url}/request`
 health:    `${local_url}/health`
 ```
 
-The package server binds an ephemeral loopback port by default. Set `BOTSTER_WEB_PACKAGE_SERVER_PORT` for an explicit generic override. It fails closed when the structured Hub descriptor is missing or malformed, and `/request` rejects daemon operations other than `issue_local_webrtc_bootstrap` and `local_webrtc_signal`.
+The package server binds an ephemeral loopback port by default. Set `BOTSTER_WEB_PACKAGE_SERVER_PORT` for an explicit generic override. Once the actual `local_url` is known, it requests an initial grant from the injected Hub connection and requires Hub to bind that grant to the exact origin before serving HTML. It fails closed when the descriptor or grant is missing or malformed, and `/request` rejects daemon operations other than `issue_local_webrtc_bootstrap` and `local_webrtc_signal`.
 
 ## License
 
