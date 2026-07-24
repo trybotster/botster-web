@@ -42,7 +42,7 @@
 3. Replace `src/botster/generated/daemon-protocol.ts` byte-for-byte with `readDaemonProtocolTypescript()` from the installed `0.1.11` package. Do not hand-edit the generated union.
 4. Update focused assertions in `src/App.test.mjs` so the package version, protocol version, conformance revision, metadata hash, computed artifact/vendored hash, and `refresh_local_packages` request shape are pinned to the published Hub source.
 5. Preserve the package-backed default in `scripts/check-daemon-protocol-drift.mjs`; acceptance must exercise that default with no `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL` override.
-6. Run the existing repository unit, build, lint, typecheck, and live packaged-protocol entrypoints. Build Hub and session-worker binaries from exact Hub `main` merge `42a2f1d` in a fresh target directory before the live run, then record the source commit and binary paths/hashes with the harness result.
+6. Run the existing repository unit, build, lint, typecheck, and live packaged-protocol entrypoints. For the live run, use the human-authorized reviewed Hub preparation binaries from commit `423eaf4b29ebc9fb211d4b6c0ac08e19107a4950`, whose Git tree `9881511790eca8addd552ebc76efe23a48a243ec` is identical to Hub `main` merge `42a2f1df02f69719d5a7a47216fb22515c1c0762`; independently verify the Cargo.lock and binary hashes before execution.
 7. Record the release coordinate and source/artifact hashes in implementation and gate evidence. Update `README.md` and `docs/architecture.md` only if they contain or gain exact package/revision claims; current main has no such claims to synchronize.
 
 ## Non-scope
@@ -68,7 +68,7 @@
 - Assumption: conformance revision 18 is artifact provenance for this update. The ticket does not authorize changing Web’s separately owned minimum compatible Hub revision 14.
 - Assumption: the one-line generated request-union addition requires no production caller change; the runtime already sends only explicitly selected daemon requests.
 - Assumption: `npm ci` or the repository’s normal lock install must start from the committed lockfile and resolve the public registry coordinate without local npm overrides.
-- Unknown: the existing Hub `target/debug` binaries predate merge `42a2f1d`; they are not acceptable. Implementation must produce fresh binaries from that exact tree and isolate their target directory from stale same-version artifacts.
+- Authorized proof substitution: question `question_1784923021_264572` approved the reviewed Hub preparation binaries after a fresh locked build could not execute Zig’s pinned generated helper in this environment. The preparation commit `423eaf4b29ebc9fb211d4b6c0ac08e19107a4950` and merge `42a2f1df02f69719d5a7a47216fb22515c1c0762` share Git tree `9881511790eca8addd552ebc76efe23a48a243ec`; Cargo.lock SHA-256 is `005043ffe6401c5431059f4444d9c6f5a34ec9bc91b9f0b50554dc9555a196b7`, Hub binary SHA-256 is `639d71016f0516b2542385178ec272daece4fbea285f1a4ca6005e643581fbef`, and session-worker SHA-256 is `e15913445469d6f0012b0a97fd98d5db4539cff06661a3df4c262e8af408c273`.
 - Unknown: a post-plan Hub commit would make “current” ambiguous. The implementation should pin verification to the release-producing merge `42a2f1d` and `0.1.11`; if the public latest coordinate changes before implementation, ask the human rather than silently adopting another release.
 
 ## Affected surfaces and files
@@ -78,7 +78,7 @@
 - `src/botster/generated/daemon-protocol.ts`: byte-for-byte package artifact; expected one-line `refresh_local_packages` addition.
 - `src/App.test.mjs`: exact coordinate, protocol/conformance metadata, committed Hub-source hash, generated request shape, package-backed drift assertions, all three fixture-level revision pins, and both unchanged compatibility floors.
 - `scripts/check-daemon-protocol-drift.mjs`: expected unchanged; verify that the production `npm test` entrypoint consumes the installed package by default.
-- `scripts/live-packaged-protocol-harness.mjs`: expected unchanged; execute it with freshly built exact Hub/worker binaries and retain its runtime-path and binary-provenance evidence.
+- `scripts/live-packaged-protocol-harness.mjs`: expected unchanged; execute it with the reviewed, independently hashed Hub/worker binaries from the authorized tree-identical preparation commit and retain its runtime-path and binary-provenance evidence.
 - `README.md` and `docs/architecture.md`: inspect for exact package/revision claims; do not add speculative release documentation when no claim exists.
 
 ## Implementation sequence
@@ -88,15 +88,15 @@
 3. Import the installed package, require `verifyPackageAssets().ok`, and verify exact metadata before copying `readDaemonProtocolTypescript()` into the vendored path.
 4. Commit the Hub-source SHA `39e9202bd333584be077e1d1ef5c3fa31a9409996607cb4c01471c103e263980` as a literal in `src/App.test.mjs`; assert metadata SHA plus computed installed-artifact and vendored hashes against that independent literal, and assert the `refresh_local_packages` token.
 5. Run deterministic checks with `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL` absent. Review the diff and lockfile to ensure no folder/tarball/sibling source was recorded.
-6. In the authoritative Hub checkout at `42a2f1d`, use a fresh target directory to build `botster-hub` and `botster-session-worker`; record commit and binary hashes.
-7. Run the live packaged-protocol harness with those exact binaries, capture its packaged WebRTC/runtime proof, and attach all release/hash evidence to the Implement and Verify gates.
+6. Re-derive that `423eaf4b29ebc9fb211d4b6c0ac08e19107a4950^{tree}` and `42a2f1df02f69719d5a7a47216fb22515c1c0762^{tree}` both equal `9881511790eca8addd552ebc76efe23a48a243ec`, confirm their scoped source/Cargo diff is empty, and independently verify the approved Cargo.lock and Hub/worker binary hashes.
+7. Run the live packaged-protocol harness with those reviewed exact binaries, capture its packaged WebRTC/runtime proof, and attach all release/hash evidence plus the authorization from `question_1784923021_264572` to the Implement and Verify gates.
 
 ## Risks
 
 - A stale `node_modules` tree can keep tests on `0.1.10` after editing only `package.json`. Mitigation: clean lock-based install plus imported metadata/version assertions.
 - A hand-edited generated file can include the new token while differing from Hub bytes. Mitigation: package-backed byte equality and exact SHA assertions.
 - An override can make drift tests pass against a sibling checkout instead of the installed public artifact. Mitigation: acceptance explicitly removes `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL` and inspects the lock resolution.
-- Hub binaries under the normal target directory can predate or cache the release source. Mitigation: fresh target directory, exact `42a2f1d` commit, binary hashes, and harness provenance.
+- Pre-existing Hub binaries can be stale even when their paths look current. Mitigation: require the reviewed preparation commit to have the same Git tree as `42a2f1d`, require an empty scoped source/Cargo diff, independently verify the recorded Cargo.lock and binary hashes, and retain harness provenance.
 - Protocol version 3 or conformance revision 18 could be mistaken for new minimum compatibility policy. Mitigation: keep `minimumDaemonProtocolVersion === 1` and `minimumConformanceFixtureRevision === 14` unchanged and test that separation.
 - A registry release after `0.1.11` could make “latest” diverge from this ticket’s published prerequisite. Mitigation: stop for a human decision instead of silently broadening the release under test.
 - Updating unrelated documentation or runtime code would expand a one-line protocol-consumer change. Mitigation: require every changed line to map to dependency provenance, generated bytes, focused assertions, or stale exact-version documentation.
@@ -117,9 +117,10 @@
    - `npm run typecheck`
    - `npm run lint`
 4. Exact downstream runtime proof:
-   - Build `botster-hub` and `botster-session-worker` from clean Hub merge `42a2f1d` artifacts in a fresh target directory.
-   - Run `BOTSTER_HUB_BIN=<fresh exact binary> BOTSTER_SESSION_WORKER_BIN=<fresh exact binary> npm run smoke:live-packaged-protocol`.
-   - Capture Hub source commit, Hub/worker binary paths and SHA-256 values, harness binary provenance, attach chronology, response-assembly telemetry, and successful packaged runtime/session/terminal path.
+   - Verify the reviewed preparation commit and Hub merge resolve to the same Git tree `9881511790eca8addd552ebc76efe23a48a243ec`, and verify their scoped source/Cargo diff is empty.
+   - Independently verify Cargo.lock SHA-256 `005043ffe6401c5431059f4444d9c6f5a34ec9bc91b9f0b50554dc9555a196b7`, Hub binary SHA-256 `639d71016f0516b2542385178ec272daece4fbea285f1a4ca6005e643581fbef`, and session-worker SHA-256 `e15913445469d6f0012b0a97fd98d5db4539cff06661a3df4c262e8af408c273`.
+   - Run `BOTSTER_HUB_BIN=<reviewed exact binary> BOTSTER_SESSION_WORKER_BIN=<reviewed exact binary> npm run smoke:live-packaged-protocol`.
+   - Capture the source/preparation commits, shared tree, Cargo.lock and binary hashes, harness binary provenance, attach chronology, response-assembly telemetry, and successful packaged runtime/session/terminal path.
 5. Negative audit:
    - Lockfile contains no `file:`, local tarball, or sibling checkout resolution for hub-test-support.
    - Acceptance command environment does not set `BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL`.
@@ -136,7 +137,7 @@
 
 - Plan artifact: this document.
 - Plan gate evidence: all required repository-routing fields, checklists `checklist_1784922011_674803` and `checklist_1784922020_612020`, registry/package inspection, baseline false-green proof, and exact hash comparison.
-- Implement evidence: exact dependency/lock diff, package metadata/assets, generated byte/hash proof, focused test changes, all deterministic commands, fresh Hub/worker build provenance, and live packaged harness output.
+- Implement evidence: exact dependency/lock diff, package metadata/assets, generated byte/hash proof, focused test changes, all deterministic commands, authorized reviewed Hub/worker tree-and-hash provenance, and live packaged harness output.
 - Review and Verify must reject stale `node_modules`, a skipped/overridden drift check, local dependency resolution, hand-edited generated DTOs, old Hub binaries, revision-floor drift, unrelated changes, or code-existence-only proof.
 
 ## Vault gaps worth capturing
