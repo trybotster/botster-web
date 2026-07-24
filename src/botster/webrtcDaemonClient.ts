@@ -11,7 +11,7 @@ import type {
   DaemonResponse,
   JsonValue
 } from "./realHubDaemonDto";
-import type { DaemonBridgeClient } from "./realHubDogfoodTransport";
+import type { DaemonBridgeClient } from "./hubTransport";
 
 export interface LocalWebrtcBootstrap extends DaemonLocalWebrtcBootstrap {
   signaling_url: string;

@@ -67,7 +67,7 @@ kind: web_app
 launch_mode: background
 command: node
 args: scripts/local-package-server.mjs
-injections: hub_connection, data_dir, hub_socket
+injections: hub_connection
 readiness: local_url
 ```
 
@@ -75,18 +75,18 @@ Build before starting it:
 
 ```bash
 npm run build
-BOTSTER_HUB_SOCKET=/path/to/botster-hub.sock npm run serve:package
+BOTSTER_HUB_CONNECTION='{"transport":{"type":"unix_socket","path":"/path/to/botster-hub.sock"}}' npm run serve:package
 ```
 
 The server exposes:
 
 ```text
-web:       http://127.0.0.1:41739/
-signaling: http://127.0.0.1:41739/request
-health:    http://127.0.0.1:41739/health
+web:       the `local_url` written to `BOTSTER_ENTRYPOINT_LAUNCH_RESULT`
+signaling: `${local_url}/request`
+health:    `${local_url}/health`
 ```
 
-Package runtime fails closed when no WebRTC bootstrap grant is injected: the app remains rendered, exposes a danger diagnostic, and disables session start. `/request` rejects daemon operations other than `issue_local_webrtc_bootstrap` and `local_webrtc_signal`.
+The package server binds an ephemeral loopback port by default. Set `BOTSTER_WEB_PACKAGE_SERVER_PORT` for an explicit generic override. It fails closed when the structured Hub descriptor is missing or malformed, and `/request` rejects daemon operations other than `issue_local_webrtc_bootstrap` and `local_webrtc_signal`.
 
 ## License
 

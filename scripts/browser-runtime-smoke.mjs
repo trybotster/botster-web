@@ -43,31 +43,11 @@ const origin = `http://${host}:${address.port}`;
 const browser = await chromium.launch({ headless: true });
 
 try {
-  await proveFixtureStartSession();
   await proveMissingBootstrapDiagnostic();
   console.log("browser runtime interaction smoke passed");
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));
-}
-
-async function proveFixtureStartSession() {
-  const page = await browser.newPage();
-  const pageErrors = [];
-  page.on("pageerror", (error) => pageErrors.push(error.message));
-
-  await page.goto(`${origin}/dashboard`, { waitUntil: "networkidle" });
-  const startButton = page.getByRole("button", { name: "Start session", exact: true });
-  await startButton.waitFor();
-  if (await startButton.isDisabled()) {
-    throw new Error("fixture Start session button remained disabled after entity loading");
-  }
-
-  await startButton.click();
-  await page.getByRole("status").filter({ hasText: "Start requested for local hub session" }).waitFor();
-  await page.getByRole("list", { name: "Sessions" }).getByText("running", { exact: true }).waitFor();
-  assertNoPageErrors("fixture Start session interaction", pageErrors);
-  await page.close();
 }
 
 async function proveMissingBootstrapDiagnostic() {
@@ -77,10 +57,6 @@ async function proveMissingBootstrapDiagnostic() {
 
   await page.goto(`${origin}/missing-bootstrap`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "Your sessions" }).waitFor();
-  const startButton = page.getByRole("button", { name: "Start session", exact: true });
-  if (!await startButton.isDisabled()) {
-    throw new Error("Start session button stayed enabled without a valid WebRTC bootstrap grant");
-  }
 
   await page.getByRole("button", { name: "Needs attention" }).click();
   const diagnosticsView = page.getByTestId("diagnostics-view");

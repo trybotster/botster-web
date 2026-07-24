@@ -28,18 +28,18 @@ const payloadContractPackagePath = payloadContractMode
   ? resolvePayloadContractPackagePath()
   : undefined;
 const echoProbe = "keys";
-const attachProbe = "botster-web-dogfood-attach-probe";
+const attachProbe = "botster-web-production-attach-probe";
 
-if (!process.env.BOTSTER_HUB_BIN && !process.env.BOTSTER_HUB_SOCKET && !process.env.BOTSTER_HUB_DATA_DIR) {
+if (!process.env.BOTSTER_HUB_BIN) {
   throw new Error(
-    "Live packaged protocol harness requires BOTSTER_HUB_BIN, BOTSTER_HUB_SOCKET, or BOTSTER_HUB_DATA_DIR. " +
+    "Live packaged protocol harness requires BOTSTER_HUB_BIN. " +
       "Use BOTSTER_HUB_BIN with BOTSTER_SESSION_WORKER_BIN for an isolated spawned hub."
   );
 }
 
 if (!workspacesPackagePath) {
   console.log(
-    "Workspaces package path not provided; live packaged protocol harness will fall back to generic first-party/dogfood surface coverage. " +
+    "Workspaces package path not provided; live packaged protocol harness will fall back to generic first-party/production surface coverage. " +
       "Set BOTSTER_WORKSPACES_PACKAGE_PATH or BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH for named botster-workspaces/workspaces acceptance."
   );
 }
@@ -47,8 +47,8 @@ if (!workspacesPackagePath) {
 let hubProcess;
 let hubStdout = "";
 let hubStderr = "";
-const ownsWebrtcDataDir = !process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR;
-const webrtcDataDir = process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR ?? await mkdtemp(join(tmpdir(), "botster-web-webrtc-dogfood-"));
+const ownsWebrtcDataDir = !process.env.BOTSTER_LIVE_DATA_DIR;
+const webrtcDataDir = process.env.BOTSTER_LIVE_DATA_DIR ?? await mkdtemp(join(tmpdir(), "botster-web-webrtc-production-"));
 let appUrl;
 
 let browser;
@@ -136,33 +136,15 @@ try {
     process.exit(0);
   }
   await openHomeView(page);
-  const startSessionButton = page.getByRole("button", { name: "Start session", exact: true });
-  await observeStartSessionButtonTransitions(page);
-  await startSessionButton.click();
-  await page.waitForFunction(() =>
-    globalThis.__BOTSTER_START_SESSION_TRANSITIONS__?.some(
-      (transition) => transition.text.includes("Starting…") && transition.disabled
-    )
-  );
-  const pendingTransition = await page.evaluate(() =>
-    globalThis.__BOTSTER_START_SESSION_TRANSITIONS__?.find(
-      (transition) => transition.text.includes("Starting…") && transition.disabled
-    )
-  );
-  if (!pendingTransition?.disabled) {
-    throw new Error("Start session button did not disable while the spawn request was pending");
-  }
-  await page.getByRole("status").filter({ hasText: /Dispatching|Start requested/ }).waitFor();
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "spawn" }, "spawn request");
   await waitForSessionStatus(page, "running");
   await openDiagnosticsView(page);
   await waitForSessionAttachable(page, true);
   await page.getByText("Attachable").waitFor();
   await proveExternalSessionLifecycle(page);
-  await waitForTerminalSession(page, "botster-web-dogfood-session");
+  await waitForTerminalSession(page, "botster-web-production-session");
   responseAssemblyTelemetry.push({ cycle: 0, ...await waitForAutomaticTerminalRestore(page) });
   await proveLiveTerminalAfterAttach(page, `${attachProbe}-0`);
-  attachChronology.push({ cycle: 0, ...await assertTerminalAttachChronology(page, "botster-web-dogfood-session") });
+  attachChronology.push({ cycle: 0, ...await assertTerminalAttachChronology(page, "botster-web-production-session") });
 
   let previousGrantId = await latestLocalWebrtcGrantId(page);
   let previousEntitySubscriptionId = await latestSessionEntitySubscriptionId(page);
@@ -178,11 +160,11 @@ try {
     await openDiagnosticsView(page);
     await waitForSessionStatus(page, "running");
     await waitForSessionAttachable(page, true);
-    await page.getByRole("button", { name: "Attach botster-web-dogfood-session" }).click();
-    await waitForTerminalSession(page, "botster-web-dogfood-session");
+    await page.getByRole("button", { name: "Attach botster-web-production-session" }).click();
+    await waitForTerminalSession(page, "botster-web-production-session");
     responseAssemblyTelemetry.push({ cycle, ...await waitForAutomaticTerminalRestore(page) });
     await proveLiveTerminalAfterAttach(page, `${attachProbe}-${cycle}`);
-    attachChronology.push({ cycle, ...await assertTerminalAttachChronology(page, "botster-web-dogfood-session") });
+    attachChronology.push({ cycle, ...await assertTerminalAttachChronology(page, "botster-web-production-session") });
   }
 
   const sendInputRequestsBeforeEcho = await daemonRequestCount(page, {
@@ -196,8 +178,8 @@ try {
     sendInputRequestsBeforeEcho + 1,
     "single echo send_input request"
   );
-  await waitForTerminalOutput(page, `botster-web-dogfood-echo:${echoProbe}`);
-  await waitForTerminalRendererWrite(page, `botster-web-dogfood-echo:${echoProbe}`);
+  await waitForTerminalOutput(page, `botster-web-production-echo:${echoProbe}`);
+  await waitForTerminalRendererWrite(page, `botster-web-production-echo:${echoProbe}`);
   const sendInputRequestsAfterEcho = await daemonRequestCount(page, {
     type: "send_input",
     data: `${echoProbe}\n`
@@ -211,8 +193,8 @@ try {
   const readScreen = await callTerminalControl(page, "readScreen");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_screen" }, "read_screen request");
   if (
-    readScreen?.session_id !== "botster-web-dogfood-session" ||
-    !readScreen.text?.includes(`botster-web-dogfood-echo:${echoProbe}`)
+    readScreen?.session_id !== "botster-web-production-session" ||
+    !readScreen.text?.includes(`botster-web-production-echo:${echoProbe}`)
   ) {
     throw new Error(`unexpected read_screen response: ${JSON.stringify(readScreen)}`);
   }
@@ -220,7 +202,7 @@ try {
   const captureSnapshot = await callTerminalControl(page, "captureSnapshot");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "capture_snapshot" }, "capture_snapshot request");
   if (
-    captureSnapshot?.session_id !== "botster-web-dogfood-session" ||
+    captureSnapshot?.session_id !== "botster-web-production-session" ||
     !Number.isInteger(captureSnapshot.rows) ||
     captureSnapshot.rows <= 0 ||
     !Number.isInteger(captureSnapshot.cols) ||
@@ -241,9 +223,9 @@ try {
   );
   await waitForResizeProof(page, requestedResize);
 
-  await callTerminalControl(page, "writeInput", "botster-web-dogfood-exit\n");
-  await waitForTerminalOutput(page, "botster-web-dogfood-exiting");
-  await shutdownDogfoodSession();
+  await callTerminalControl(page, "writeInput", "botster-web-production-exit\n");
+  await waitForTerminalOutput(page, "botster-web-production-exiting");
+  await shutdownProductionSession();
   await waitForTerminalDetached(page);
 
   await assertNoUnknownSession(page);
@@ -315,35 +297,6 @@ try {
   if (contractMatrixFixtureTempDir) {
     await rm(contractMatrixFixtureTempDir, { recursive: true, force: true });
   }
-}
-
-async function observeStartSessionButtonTransitions(page) {
-  await page.evaluate(() => {
-    const button = [...globalThis.document.querySelectorAll("ion-button")]
-      .find((candidate) => candidate.textContent?.trim() === "Start session");
-    if (!button) {
-      throw new Error("Start session IonButton was not present");
-    }
-
-    globalThis.__BOTSTER_START_SESSION_TRANSITIONS__ = [];
-    const record = () => {
-      const nativeButton = button.shadowRoot?.querySelector("button");
-      globalThis.__BOTSTER_START_SESSION_TRANSITIONS__.push({
-        text: button.textContent?.trim() ?? "",
-        disabled:
-          button.hasAttribute("disabled") ||
-          button.getAttribute("aria-disabled") === "true" ||
-          nativeButton?.disabled === true
-      });
-    };
-    new globalThis.MutationObserver(record).observe(button, {
-      attributes: true,
-      childList: true,
-      characterData: true,
-      subtree: true
-    });
-    record();
-  });
 }
 
 async function requestDaemonShutdown() {
@@ -556,8 +509,8 @@ async function openFirstPartyUiAppSurface(page, mode) {
       }
     : {
         packageName: mode === "webrtc" ? "botster-web" : undefined,
-        surfaceId: mode === "webrtc" ? "dogfood-app" : undefined,
-        visiblePattern: mode === "webrtc" ? /botster[- ]web|Dogfood/i : /project[- ]pipelines|botster[- ]workspaces|workspaces/i,
+        surfaceId: mode === "webrtc" ? "production-app" : undefined,
+        visiblePattern: mode === "webrtc" ? /botster[- ]web|Production/i : /project[- ]pipelines|botster[- ]workspaces|workspaces/i,
         packageNamePattern: mode === "webrtc" ? "^botster-web$" : "^(project-pipelines|botster-workspaces)$"
       };
   const candidate = installed.getByText(target.visiblePattern).first();
@@ -1114,7 +1067,7 @@ async function assertSelectedAppSurfaceRendered(page, target) {
     ({ packageName, surfaceId }) => {
       const text = globalThis.document.querySelector("[data-testid='selected-app-surface']")?.textContent ?? "";
       const expectedRoute = packageName && surfaceId ? `${packageName}/${surfaceId}` : "";
-      return /project-pipelines|botster-workspaces|Pipelines|Workspaces|botster-web|Dogfood/i.test(text) &&
+      return /project-pipelines|botster-workspaces|Pipelines|Workspaces|botster-web|Production/i.test(text) &&
         /rendered|\//i.test(text) &&
         !/Render response did not include/i.test(text) &&
         (!expectedRoute || text.includes(expectedRoute));
@@ -1429,14 +1382,14 @@ async function proveExternalSessionLifecycle(page) {
   await page.getByText(sessionId, { exact: true }).first().waitFor({ state: "detached" });
 }
 
-async function shutdownDogfoodSession() {
+async function shutdownProductionSession() {
   if (!webrtcDataDir) throw new Error("session shutdown proof requires a WebRTC hub data directory");
   const response = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
     type: "shutdown_session",
-    session_id: "botster-web-dogfood-session"
+    session_id: "botster-web-production-session"
   });
   if (response.error) {
-    throw new Error(`dogfood session shutdown failed: ${JSON.stringify(response.error)}`);
+    throw new Error(`production session shutdown failed: ${JSON.stringify(response.error)}`);
   }
 }
 
@@ -1641,8 +1594,8 @@ async function proveLiveTerminalAfterAttach(page, probe) {
     { kind: "daemon_request", type: "send_input", data: `${probe}\n` },
     `post-attach live input ${probe}`
   );
-  await waitForTerminalOutput(page, `botster-web-dogfood-echo:${probe}`);
-  await waitForTerminalRendererWrite(page, `botster-web-dogfood-echo:${probe}`);
+  await waitForTerminalOutput(page, `botster-web-production-echo:${probe}`);
+  await waitForTerminalRendererWrite(page, `botster-web-production-echo:${probe}`);
 }
 
 async function waitForTerminalCanvas(page) {
@@ -1812,7 +1765,7 @@ async function waitForResizeProof(page, requestedResize) {
 
   while (Date.now() < deadline) {
     const outputCount = await terminalOutputCount(page);
-    await callTerminalControl(page, "writeInput", "botster-web-dogfood-size\n");
+    await callTerminalControl(page, "writeInput", "botster-web-production-size\n");
     const observedSize = await waitForNextSizeProbe(page, outputCount).catch(() => undefined);
     lastObservedSize = observedSize ?? lastObservedSize;
 
@@ -1834,7 +1787,7 @@ async function waitForSessionStatus(page, status) {
     {
       kind: "hub_frame",
       family: "botster-web.session",
-      id: "botster-web-dogfood-session",
+      id: "botster-web-production-session",
       status
     },
     `session entity status ${status}`
@@ -1847,7 +1800,7 @@ async function waitForSessionAttachable(page, attachable) {
     {
       kind: "hub_frame",
       family: "botster-web.session",
-      id: "botster-web-dogfood-session",
+      id: "botster-web-production-session",
       status: "running",
       attachable
     },
@@ -1936,7 +1889,7 @@ async function waitForNextSizeProbe(page, outputCount) {
         .filter((entry) => entry.kind === "output")
         .slice(previousOutputCount);
       return outputs
-        .map((entry) => String(entry.payload?.data ?? "").match(/botster-web-dogfood-size:(\d+x\d+)/)?.[1])
+        .map((entry) => String(entry.payload?.data ?? "").match(/botster-web-production-size:(\d+x\d+)/)?.[1])
         .find((size) => typeof size === "string") ?? null;
     },
     { previousOutputCount: outputCount },
@@ -2016,10 +1969,7 @@ async function startWebrtcPackageRuntime() {
   await sendDaemonRequest(socketPath, {
     type: "start_package_entrypoint",
     package_name: "botster-web",
-    entrypoint_id: "web-client",
-    environment_overrides: {
-      BOTSTER_WEB_PACKAGE_SERVER_PORT: "0"
-    }
+    entrypoint_id: "web-client"
   });
   const url = await waitForPackageAppUrl(socketPath);
 

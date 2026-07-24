@@ -1,56 +1,55 @@
 import { createServer } from "node:http";
 import { connect } from "node:net";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { extname, join, normalize, relative, sep } from "node:path";
-import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { localPackageServerShutdownPlan, resolveLocalPackageServerMode } from "./localPackageServerMode.mjs";
+import { decodeHubConnection, HubConnectionError } from "./hubConnection.mjs";
 
 const protocol = "botster-hub-daemon-v1";
 const signalingRequestTypes = new Set(["issue_local_webrtc_bootstrap", "local_webrtc_signal"]);
-const port = Number.parseInt(process.env.BOTSTER_WEB_PACKAGE_SERVER_PORT ?? "41739", 10);
 const host = "127.0.0.1";
 const packageRoot = process.cwd();
 const distRoot = join(packageRoot, "dist");
 const indexPath = join(distRoot, "index.html");
 const launchResultPath = process.env.BOTSTER_ENTRYPOINT_LAUNCH_RESULT;
-const existingHubConfigured = Boolean(process.env.BOTSTER_HUB_SOCKET || process.env.BOTSTER_HUB_DATA_DIR);
-const generatedDataDir = existingHubConfigured || process.env.BOTSTER_WEB_DOGFOOD_DATA_DIR
-  ? undefined
-  : await mkdtemp(join(tmpdir(), "botster-web-dogfood-"));
-const serverMode = resolveLocalPackageServerMode(process.env, { generatedDataDir });
-
-if (!serverMode.ok) {
-  if (generatedDataDir) {
-    await rm(generatedDataDir, { recursive: true, force: true });
-  }
-  console.error(serverMode.error);
+let port;
+try {
+  port = configuredPort(process.env.BOTSTER_WEB_PACKAGE_SERVER_PORT);
+} catch (error) {
+  console.error(JSON.stringify({
+    kind: "operator_error",
+    error: {
+      code: "invalid_package_server_port",
+      operation: "configure_listener",
+      message: error instanceof Error ? error.message : String(error)
+    }
+  }));
   process.exit(1);
 }
-
-let hubExit;
-let hub;
-
-if (serverMode.ownsHub) {
-  hub = spawn(serverMode.hubBin, serverMode.hubArgs, {
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-
-  hub.stdout.setEncoding("utf8");
-  hub.stderr.setEncoding("utf8");
-  hub.stdout.on("data", (chunk) => process.stdout.write(`[botster-hub] ${chunk}`));
-  hub.stderr.on("data", (chunk) => process.stderr.write(`[botster-hub] ${chunk}`));
-  hub.on("error", (error) => {
-    console.error(`botster-hub spawn failed: ${error.message}`);
-    process.exit(1);
-  });
-  hub.on("exit", (code, signal) => {
-    hubExit = { code, signal };
-  });
+let hubConnection;
+try {
+  hubConnection = decodeHubConnection(process.env.BOTSTER_HUB_CONNECTION);
+} catch (error) {
+  const diagnostic = error instanceof HubConnectionError
+    ? { code: error.code, operation: "decode_hub_connection", message: error.message }
+    : { code: "invalid_hub_connection", operation: "decode_hub_connection", message: String(error) };
+  console.error(JSON.stringify({ kind: "operator_error", error: diagnostic }));
+  process.exit(1);
 }
-
-await waitForSocket(serverMode.socketPath, () => hubExit, serverMode.diagnosticLabel);
+const socketPath = hubConnection.transport.path;
+try {
+  await waitForSocket(socketPath);
+} catch (error) {
+  console.error(JSON.stringify({
+    kind: "operator_error",
+    error: {
+      code: "hub_connection_unavailable",
+      operation: "connect_hub",
+      message: error instanceof Error ? error.message : String(error)
+    }
+  }));
+  process.exit(1);
+}
 
 let localUrl;
 
@@ -66,7 +65,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && request.url === "/health") {
-    writeJson(response, 200, { ...serverMode.health, local_url: localUrl });
+    writeJson(response, 200, { ok: true, connection: "hub", transport: "unix_socket", local_url: localUrl });
     return;
   }
 
@@ -112,7 +111,7 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    const payload = await sendDaemonRequest(serverMode.socketPath, envelope.payload);
+    const payload = await sendDaemonRequest(socketPath, envelope.payload);
     writeJson(response, 200, {
       kind: "daemon_response",
       request_id: envelope.request_id,
@@ -131,18 +130,25 @@ const server = createServer(async (request, response) => {
   }
 });
 
+server.once("error", (error) => {
+  console.error(JSON.stringify({
+    kind: "operator_error",
+    error: {
+      code: "package_server_listen_failed",
+      operation: "listen",
+      message: error instanceof Error ? error.message : String(error)
+    }
+  }));
+  process.exitCode = 1;
+});
+
 server.listen(port, host, () => {
   localUrl = boundServerOrigin(server);
   void publishReadyLaunchResult(localUrl)
     .then(() => {
       console.log(`botster-web local package server listening at ${localUrl}/request`);
       console.log(`botster-web package UI available at ${localUrl}/`);
-      console.log(`mode: ${serverMode.diagnosticLabel}`);
-      if (serverMode.mode === "spawned_hub") {
-        console.log(`isolated data dir: ${serverMode.dataDir}`);
-      } else {
-        console.log(`attached socket: configured ${serverMode.source}`);
-      }
+      console.log("hub connection: injected unix_socket descriptor");
     })
     .catch(() => {
       console.error("botster-web launch result write failed");
@@ -176,20 +182,6 @@ async function publishReadyLaunchResult(url) {
 
 const shutdown = async () => {
   server.close();
-  const shutdownPlan = localPackageServerShutdownPlan(serverMode);
-  if (shutdownPlan.sendDaemonShutdown) {
-    try {
-      await sendDaemonRequest(serverMode.socketPath, { type: "daemon_shutdown" });
-    } catch {
-      if (shutdownPlan.terminateHubProcess) {
-        hub?.kill("SIGTERM");
-      }
-    }
-  }
-
-  if (shutdownPlan.removeDataDir) {
-    await rm(serverMode.dataDir, { recursive: true, force: true });
-  }
 };
 
 process.once("SIGINT", () => {
@@ -412,15 +404,10 @@ async function readSocketLine(socket) {
   });
 }
 
-async function waitForSocket(path, exitStatus, label = "botster-hub") {
+async function waitForSocket(path) {
   const deadline = Date.now() + 10_000;
   let lastError;
   while (Date.now() < deadline) {
-    const exited = exitStatus();
-    if (exited) {
-      throw new Error(`botster-hub exited before socket startup (code=${exited.code ?? "null"}, signal=${exited.signal ?? "null"})`);
-    }
-
     try {
       const socket = connect(path);
       await once(socket, "connect");
@@ -431,7 +418,17 @@ async function waitForSocket(path, exitStatus, label = "botster-hub") {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-  throw lastError ?? new Error(`timed out waiting for ${label} socket`);
+  throw lastError ?? new Error("timed out waiting for injected hub socket");
+}
+
+function configuredPort(value) {
+  if (value === undefined) return 0;
+  if (!/^\d+$/.test(value)) throw new Error("BOTSTER_WEB_PACKAGE_SERVER_PORT must be an integer from 0 through 65535.");
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65_535) {
+    throw new Error("BOTSTER_WEB_PACKAGE_SERVER_PORT must be an integer from 0 through 65535.");
+  }
+  return parsed;
 }
 
 function writeJson(response, status, payload) {

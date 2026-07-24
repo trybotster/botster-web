@@ -16,26 +16,7 @@
       }
     ]
   },
-  "surfaces": [
-    {
-      "id": "dogfood-app",
-      "kind": "app",
-      "title": "botster-web",
-      "description": "Descriptor-backed botster-web app surface for package launcher validation.",
-      "order": 1,
-      "category": "validation",
-      "supports": ["render"]
-    },
-    {
-      "id": "dogfood-settings",
-      "kind": "settings",
-      "title": "botster-web Settings",
-      "description": "Descriptor-backed settings surface for package launcher validation.",
-      "order": 2,
-      "category": "validation",
-      "supports": ["render"]
-    }
-  ],
+  "surfaces": [],
   "entrypoints": [
     { "runtime": "lua", "path": "plugin.lua", "bootstrap": false }
   ],
@@ -53,18 +34,6 @@
           "target": { "type": "environment", "name": "BOTSTER_HUB_CONNECTION" },
           "required": true,
           "description": "Structured hub connection descriptor supplied by hub-supervised package launch."
-        },
-        {
-          "kind": "data_dir",
-          "target": { "type": "environment", "name": "BOTSTER_HUB_DATA_DIR" },
-          "required": true,
-          "description": "Hub data directory supplied by hub-supervised package launch."
-        },
-        {
-          "kind": "hub_socket",
-          "target": { "type": "environment", "name": "BOTSTER_HUB_SOCKET" },
-          "required": true,
-          "description": "Existing hub daemon socket. Preferred when hub supervises botster-web."
         }
       ],
       "environment": [],
@@ -72,7 +41,7 @@
       "capabilities": [
         { "surface": "network", "scope": "localhost" }
       ],
-      "may_supervise": true
+      "may_supervise": false
     }
   ]
 }

@@ -44,7 +44,6 @@ import {
   layersOutline,
   listCircleOutline,
   openOutline,
-  playOutline,
   powerOutline,
   refreshOutline,
   serverOutline
@@ -69,8 +68,7 @@ import {
   webRtcLifecycleDiagnostic,
   type ConnectionDiagnostic
 } from "./botster/connectionDiagnostics";
-import { createDogfoodRuntimeConfig } from "./botster/dogfoodMode";
-import { realHubDogfoodSessionId } from "./botster/realHubDogfoodTransport";
+import { createHubRuntimeConfig } from "./botster/hubRuntime";
 import { webRtcDaemonLifecycleEventName, type LocalWebrtcBootstrap, type WebrtcDaemonLifecycleEvent } from "./botster/webrtcDaemonClient";
 import type { ActionBinding } from "./botster/actions";
 import type { EntityFrameStore } from "./botster/entities";
@@ -294,20 +292,20 @@ export function PluginNavigationShortcuts({
 
 const loadingSnapshot: UiTreeSnapshot = {
   kind: "ui_tree_snapshot",
-  surface: "botster-web.dogfood.loading",
+  surface: "botster-web.production.loading",
   version: "local-loading-v1",
   root: {
-    id: "dogfood-loading-root",
+    id: "production-loading-root",
     primitive: "section",
     slots: {
       children: [
         {
-          id: "dogfood-loading-heading",
+          id: "production-loading-heading",
           primitive: "heading",
           props: { level: 2, text: "Waiting for local surface" }
         },
         {
-          id: "dogfood-loading-copy",
+          id: "production-loading-copy",
           primitive: "text",
           props: { text: "The local session surface is loading." }
         }
@@ -772,7 +770,7 @@ export function SpawnTargetListItem({
 }
 
 export default function App() {
-  const dogfoodRuntime = useMemo(
+  const hubRuntime = useMemo(
     () => {
       const packageRuntime = Boolean(
         (window as BotsterPackageWindow).__BOTSTER_PACKAGE_RUNTIME__
@@ -780,10 +778,9 @@ export default function App() {
       const localWebrtcBootstrap = packageRuntime
         ? normalizeLocalWebrtcBootstrap((window as BotsterPackageWindow).__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__)
         : undefined;
-      return createDogfoodRuntimeConfig({
+      return createHubRuntimeConfig({
         locationHref: window.location.href,
         ...(packageRuntime ? { signalingUrl: `${window.location.origin}/request` } : {}),
-        packageRuntime,
         localWebrtcBootstrap
       });
     },
@@ -792,30 +789,29 @@ export default function App() {
   const runtimeClient = useMemo(
     () =>
       createBotsterWebClient({
-        transport: dogfoodRuntime.transport
+        transport: hubRuntime.transport
       }),
-    [dogfoodRuntime]
+    [hubRuntime]
   );
   const [surfaceSnapshot, setSurfaceSnapshot] = useState<UiTreeSnapshot | undefined>(() => runtimeClient.uiTree.current());
   const [localState, setLocalState] = useState<Record<string, unknown>>({
-    "dogfood.action_status": dogfoodRuntime.statusText
+    "production.action_status": hubRuntime.statusText
   });
   const [diagnostics, setDiagnostics] = useState<ConnectionDiagnostic[]>(() =>
     initialConnectionDiagnostics(
-      dogfoodRuntime.mode,
-      dogfoodRuntime.statusText,
-      dogfoodRuntime.terminalDataPlaneKind,
-      dogfoodRuntime.startupError
+      hubRuntime.mode,
+      hubRuntime.statusText,
+      hubRuntime.terminalDataPlaneKind,
+      hubRuntime.startupError
     )
   );
-  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "session" | "draft", HubEntityLoadStatus>>({
+  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "session", HubEntityLoadStatus>>({
     app: "not_loaded",
     packageNavigation: "not_loaded",
     package: "not_loaded",
     availablePackage: "not_loaded",
     spawnTarget: "not_loaded",
-    session: "not_loaded",
-    draft: "not_loaded"
+    session: "not_loaded"
   });
   const [activeRoute, setActiveRoute] = useState<AppRoute>(() => appRouteFromLocation());
   const [marketplaceRegistryPath, setMarketplaceRegistryPath] = useState("");
@@ -827,8 +823,6 @@ export default function App() {
   const [selectedPluginSurface, setSelectedPluginSurface] = useState<SelectedPluginSurface | undefined>();
   const lastPluginRouteRenderKey = useRef<string | undefined>(undefined);
   const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
-  const [pendingSessionId, setPendingSessionId] = useState<string | undefined>();
-  const pendingSessionIdRef = useRef<string | undefined>(undefined);
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
     setLocalState((current) => ({ ...current, ...patch }));
@@ -920,11 +914,6 @@ export default function App() {
     const unsubscribeFrames = runtimeClient.hub.onFrame(() => {
       if (!cancelled) {
         setFrameVersion((version) => version + 1);
-        const pendingId = pendingSessionIdRef.current;
-        if (pendingId && runtimeClient.entities.get("botster-web.session", pendingId)) {
-          pendingSessionIdRef.current = undefined;
-          setPendingSessionId(undefined);
-        }
       }
     });
     const unsubscribeDiagnostics = runtimeClient.hub.onFrame((frame) => {
@@ -936,8 +925,8 @@ export default function App() {
       }
     });
 
-    const pullDogfoodEntity = async (
-      key: "app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "session" | "draft",
+    const pullProductionEntity = async (
+      key: "app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "session",
       request: { family: string; id?: string }
     ) => {
       setEntityLoadStatus((current) => ({ ...current, [key]: "loading" }));
@@ -960,18 +949,17 @@ export default function App() {
         controlStreamEstablished = true;
       })
       .then(() => runtimeClient.hub.subscribe())
-      .then(() => runtimeClient.hub.subscribeSurface({ surface: "botster-web.dogfood.session", path: "/sessions/local" }))
-      .then(() => pullDogfoodEntity("app", { family: "botster-web.app" }))
-      .then(() => pullDogfoodEntity("packageNavigation", { family: "botster-web.package_navigation" }))
-      .then(() => pullDogfoodEntity("package", { family: "botster-web.package" }))
-      .then(() => pullDogfoodEntity("availablePackage", { family: "botster-web.available_package" }))
-      .then(() => pullDogfoodEntity("spawnTarget", { family: "botster-web.spawn_target" }))
-      .then(() => pullDogfoodEntity("session", { family: "botster-web.session" }))
-      .then(() => pullDogfoodEntity("draft", { family: "botster-web.session_draft", id: "draft-1" }))
+      .then(() => runtimeClient.hub.subscribeSurface({ surface: "botster-web.production.session", path: "/sessions/local" }))
+      .then(() => pullProductionEntity("app", { family: "botster-web.app" }))
+      .then(() => pullProductionEntity("packageNavigation", { family: "botster-web.package_navigation" }))
+      .then(() => pullProductionEntity("package", { family: "botster-web.package" }))
+      .then(() => pullProductionEntity("availablePackage", { family: "botster-web.available_package" }))
+      .then(() => pullProductionEntity("spawnTarget", { family: "botster-web.spawn_target" }))
+      .then(() => pullProductionEntity("session", { family: "botster-web.session" }))
       .catch((error: unknown) => {
         if (!cancelled) {
           updateLocalState({
-            "dogfood.action_status": error instanceof Error ? visibleStatusText(error.message) : "Local hub connection failed"
+            "production.action_status": error instanceof Error ? visibleStatusText(error.message) : "Local hub connection failed"
           });
           recordDiagnostic(connectionFailureDiagnostic(controlStreamEstablished, error));
         }
@@ -989,19 +977,9 @@ export default function App() {
 
   const dispatchAction = useCallback(
     (action: ActionBinding) => {
-      const isSpawnAction = action.id === "botster.session.select";
-      const statusKey = isSpawnAction ? "dogfood.action_status" : "dogfood.diagnostic_action_status";
-      if (isSpawnAction) {
-        const pendingId = action.target ?? realHubDogfoodSessionId;
-        pendingSessionIdRef.current = pendingId;
-        setPendingSessionId(pendingId);
-      }
+      const statusKey = "production.diagnostic_action_status";
       updateLocalState({ [statusKey]: `Dispatching ${action.id}` });
       void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
-        if (isSpawnAction && !result.accepted) {
-          pendingSessionIdRef.current = undefined;
-          setPendingSessionId(undefined);
-        }
         const isAttachAction = action.id === "botster.session.attach";
         if (result.accepted && isAttachAction && action.target) {
           setSelectedRealHubTerminalSessionId(action.target);
@@ -1036,21 +1014,15 @@ export default function App() {
           void runtimeClient.entities.pull({ family: "botster-web.spawn_target" });
         }
         updateLocalState({
-          [statusKey]: result.accepted && isSpawnAction
-            ? "Start requested for local hub session; session state below confirms when it is running."
-            : result.accepted && isAttachAction && action.target
+          [statusKey]: result.accepted && isAttachAction && action.target
               ? `Attached terminal panel to ${visibleStatusText(action.target)}.`
             : result.accepted
               ? `Accepted ${action.id}`
               : result.reason ?? `Rejected ${action.id}`,
-          ...(renderedSurface?.status ? { "dogfood.plugin_surface_status": visibleStatusText(renderedSurface.status) } : {})
+          ...(renderedSurface?.status ? { "production.plugin_surface_status": visibleStatusText(renderedSurface.status) } : {})
         });
         recordDiagnostic(actionFailureDiagnostic(action, result));
       }).catch((error: unknown) => {
-        if (isSpawnAction) {
-          pendingSessionIdRef.current = undefined;
-          setPendingSessionId(undefined);
-        }
         updateLocalState({
           [statusKey]: error instanceof Error ? error.message : `Rejected ${action.id}`
         });
@@ -1082,12 +1054,12 @@ export default function App() {
       .pull({ family: "botster-web.available_package", registry_path: registryPath })
       .then(() => {
         setEntityLoadStatus((current) => ({ ...current, availablePackage: "loaded" }));
-        updateLocalState({ "dogfood.diagnostic_action_status": `Loaded marketplace registry ${registryPath}` });
+        updateLocalState({ "production.diagnostic_action_status": `Loaded marketplace registry ${registryPath}` });
       })
       .catch((error: unknown) => {
         setEntityLoadStatus((current) => ({ ...current, availablePackage: "error" }));
         updateLocalState({
-          "dogfood.diagnostic_action_status": error instanceof Error ? error.message : "Marketplace registry load failed"
+          "production.diagnostic_action_status": error instanceof Error ? error.message : "Marketplace registry load failed"
         });
       });
   }, [marketplaceRegistryPath, runtimeClient, updateLocalState]);
@@ -1296,7 +1268,7 @@ export default function App() {
       );
       setSelectedPluginSurface(renderedSurface);
       updateLocalState({
-        "dogfood.plugin_surface_status": renderedSurface.status ? visibleStatusText(renderedSurface.status) : undefined
+        "production.plugin_surface_status": renderedSurface.status ? visibleStatusText(renderedSurface.status) : undefined
       });
       recordDiagnostic(actionFailureDiagnostic(routePluginLaunchAction, result));
     });
@@ -1338,7 +1310,7 @@ export default function App() {
       );
       setSelectedPluginSurface(renderedSurface);
       updateLocalState({
-        "dogfood.plugin_surface_status": renderedSurface.status ? visibleStatusText(renderedSurface.status) : undefined
+        "production.plugin_surface_status": renderedSurface.status ? visibleStatusText(renderedSurface.status) : undefined
       });
       recordDiagnostic(actionFailureDiagnostic(routeSettingsLaunchAction, result));
     });
@@ -1440,29 +1412,7 @@ export default function App() {
   }, [navigateToHubRoutePath, navigateToPluginSurface]);
   const packageNavigationShortcuts = packageNavigation;
   const sessions = runtimeClient.entities.list("botster-web.session");
-  const sessionStartPending = pendingSessionId !== undefined && !sessions.some((session) => session.id === pendingSessionId);
-  const sessionsWithPending = sessionStartPending
-    ? [
-        ...sessions,
-        {
-          id: pendingSessionId!,
-          title: pendingSessionId!,
-          status: "pending",
-          attachable: false,
-          attach_status: "Waiting for authoritative hub session state",
-          client_local: true
-        }
-      ]
-    : sessions;
-  const startPrimarySession = useCallback(() => {
-    const fixtureTarget = sessions.find((session) => session.status !== "running")?.id;
-    dispatchAction({
-      id: "botster.session.select",
-      target: dogfoodRuntime.mode === "fixture" ? String(fixtureTarget ?? "session-local-1") : realHubDogfoodSessionId,
-      label: "Start session",
-      params: { mode: "local" }
-    });
-  }, [dispatchAction, dogfoodRuntime.mode, sessions]);
+  const activeHubSessionId = String(sessions.find(isAttachableSession)?.id ?? "");
   const attachSession = useCallback((sessionId: string) => {
     dispatchAction({
       id: "botster.session.attach",
@@ -1470,53 +1420,45 @@ export default function App() {
       label: "Open session"
     });
   }, [dispatchAction]);
-  const attachableDogfoodSession = sessions.find((session) => session.id === realHubDogfoodSessionId && isAttachableSession(session));
+  const attachableProductionSession = sessions.find((session) => session.id === activeHubSessionId && isAttachableSession(session));
   const selectedRealHubSession = selectedRealHubTerminalSessionId
     ? sessions.find((session) => session.id === selectedRealHubTerminalSessionId)
     : undefined;
   const selectedRealHubSessionAttachable = isAttachableSession(selectedRealHubSession);
   const selectedTerminalSessionId = selectedRealHubSessionAttachable ? selectedRealHubTerminalSessionId : undefined;
-  const defaultTerminalSessionId = attachableDogfoodSession ? String(attachableDogfoodSession.id) : undefined;
+  const defaultTerminalSessionId = attachableProductionSession ? String(attachableProductionSession.id) : undefined;
   const activeRealHubTerminalSessionId = selectedTerminalSessionId ?? defaultTerminalSessionId;
   const terminalDescriptor: TerminalViewDescriptor | undefined = useMemo(
-    () =>
-      dogfoodRuntime.mode === "webrtc"
-        ? activeRealHubTerminalSessionId
-          ? { sessionId: activeRealHubTerminalSessionId, renderer: terminalRenderer }
-          : undefined
-        : dogfoodRuntime.terminalDescriptor,
+    () => activeRealHubTerminalSessionId
+      ? { sessionId: activeRealHubTerminalSessionId, renderer: terminalRenderer }
+      : undefined,
     [
-      activeRealHubTerminalSessionId,
-      dogfoodRuntime
+      activeRealHubTerminalSessionId
     ]
   );
   const terminalDataPlane: TerminalDataPlaneAttachment | undefined = useMemo(
-    () => (terminalDescriptor ? dogfoodRuntime.createTerminalDataPlane(terminalDescriptor.sessionId) : undefined),
-    [dogfoodRuntime, terminalDescriptor]
+    () => (terminalDescriptor ? hubRuntime.createTerminalDataPlane(terminalDescriptor.sessionId) : undefined),
+    [hubRuntime, terminalDescriptor]
   );
   const actionStatus =
-    typeof localState["dogfood.action_status"] === "string"
-      ? localState["dogfood.action_status"]
-      : dogfoodRuntime.statusText;
-  const showSessionStartFeedback = sessionStartPending || actionStatus !== dogfoodRuntime.statusText;
+    typeof localState["production.action_status"] === "string"
+      ? localState["production.action_status"]
+      : hubRuntime.statusText;
   const diagnosticActionStatus =
-    typeof localState["dogfood.diagnostic_action_status"] === "string"
-      ? localState["dogfood.diagnostic_action_status"]
+    typeof localState["production.diagnostic_action_status"] === "string"
+      ? localState["production.diagnostic_action_status"]
       : "No diagnostic action has been dispatched.";
   const blockingDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "danger");
   const warningDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "warning");
   const hubStateLoading = [entityLoadStatus.package, entityLoadStatus.session].some((status) => status === "not_loaded" || status === "loading");
-  const sessionStartDisabled = hubStateLoading || sessionStartPending || blockingDiagnostics.length > 0;
   const healthLabel = blockingDiagnostics.length > 0
     ? "Needs attention"
     : hubStateLoading
       ? "Connecting"
-      : dogfoodRuntime.mode === "fixture"
-        ? "Preview"
-        : warningDiagnostics.length > 0
+      : warningDiagnostics.length > 0
           ? "Connected with warnings"
           : "Connected";
-  const healthColor = blockingDiagnostics.length > 0 ? "danger" : hubStateLoading || dogfoodRuntime.mode === "fixture" ? "medium" : warningDiagnostics.length > 0 ? "warning" : "success";
+  const healthColor = blockingDiagnostics.length > 0 ? "danger" : hubStateLoading ? "medium" : warningDiagnostics.length > 0 ? "warning" : "success";
   const pluginAppRouteActive = activeView === "apps" && Boolean(routePluginSurface);
   const terminalPanel = terminalDescriptor && terminalDataPlane ? (
     <TerminalViewHost
@@ -1616,29 +1558,22 @@ export default function App() {
                     <div>
                       <p className="eyebrow">Local Botster</p>
                       <h1 id="dashboard-heading">Your sessions</h1>
-                      <p>Start something new or return to work already running on this device.</p>
+                      <p>Return to work already running on this device.</p>
                     </div>
-                    <IonButton onClick={startPrimarySession} disabled={sessionStartDisabled}>
-                      <IonIcon icon={playOutline} slot="start" aria-hidden="true" />
-                      {sessionStartPending ? "Starting…" : "Start session"}
-                    </IonButton>
                   </section>
-                  {showSessionStartFeedback ? (
-                    <p className="home-session-status" role="status" aria-live="polite">{actionStatus}</p>
-                  ) : null}
                   <section className="workflow-section home-sessions" aria-labelledby="recent-sessions-heading">
                     <div className="section-heading">
                       <div>
                         <p className="eyebrow">Recent work</p>
                         <h2 id="recent-sessions-heading">Sessions</h2>
                       </div>
-                      <IonBadge color="medium">{sessionsWithPending.length}</IonBadge>
+                      <IonBadge color="medium">{sessions.length}</IonBadge>
                     </div>
                     {entityLoadStatus.session === "error" ? (
                       <p className="entity-empty">Sessions could not be loaded. Check Diagnostics for connection details.</p>
-                    ) : sessionsWithPending.length > 0 ? (
+                    ) : sessions.length > 0 ? (
                       <IonList lines="full" aria-label="Sessions">
-                        {sessionsWithPending.map((session) => {
+                        {sessions.map((session) => {
                           const sessionId = String(session.id);
                           const attachable = isAttachableSession(session);
                           return (
@@ -1672,7 +1607,7 @@ export default function App() {
                       <span><strong>Workspaces</strong><small>Choose where sessions can run</small></span>
                     </button>
                   </div>
-                  {dogfoodRuntime.mode !== "fixture" && activeRealHubTerminalSessionId ? terminalPanel : null}
+                  {activeRealHubTerminalSessionId ? terminalPanel : null}
                 </section>
               ) : null}
 
@@ -1809,17 +1744,14 @@ export default function App() {
                     </IonBadge>
                   </div>
                   <LocalHubFirstScreen
-                    mode={dogfoodRuntime.mode}
-                    statusText={dogfoodRuntime.statusText}
+                    mode={hubRuntime.mode}
+                    statusText={hubRuntime.statusText}
                     diagnostics={diagnostics}
                     packages={packages}
                     packageLoadStatus={entityLoadStatus.package}
-                    sessions={sessionsWithPending}
+                    sessions={sessions}
                     sessionLoadStatus={entityLoadStatus.session}
                     actionStatus={actionStatus}
-                    onStartSession={startPrimarySession}
-                    startDisabled={sessionStartDisabled}
-                    startPending={sessionStartPending}
                   />
                   <details className="developer-diagnostics">
                     <summary>Developer details</summary>
@@ -2810,7 +2742,5 @@ function firstString(...values: unknown[]): string | undefined {
 }
 
 function visibleStatusText(value: string): string {
-  return value
-    .replaceAll(realHubDogfoodSessionId, "local hub session")
-    .replace(/dogfood/gi, "local");
+  return value;
 }
