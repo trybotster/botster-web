@@ -750,7 +750,7 @@ assert.equal(webClientEntrypoint.command, "node");
 assert.deepEqual(webClientEntrypoint.args, ["scripts/local-package-server.mjs"]);
 assert.deepEqual(webClientEntrypoint.working_directory, { policy: "package_root" });
 assert.equal(Object.hasOwn(webClientEntrypoint, "mode"), false);
-assert.equal(webClientEntrypoint.may_supervise, false);
+assert.equal(webClientEntrypoint.may_supervise, true);
 assert.deepEqual(webClientEntrypoint.capabilities, [{ surface: "network", scope: "localhost" }]);
 assert.deepEqual(
   webClientEntrypoint.injections.map(({ kind, target, required }) => ({ kind, target, required })),
@@ -782,6 +782,7 @@ try {
   const rootHtml = await rootResponse.text();
   assert.equal(rootResponse.status, 200, rootHtml);
   assert.match(rootResponse.headers.get("content-type"), /text\/html/);
+  assert.equal(rootResponse.headers.get("access-control-allow-origin"), null);
   assert.match(rootHtml, /<div id="root"><\/div>/);
   assert.match(rootHtml, /window\.__BOTSTER_PACKAGE_RUNTIME__ = true/);
 

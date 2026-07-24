@@ -41,7 +41,7 @@
       "capabilities": [
         { "surface": "network", "scope": "localhost" }
       ],
-      "may_supervise": false
+      "may_supervise": true
     }
   ]
 }

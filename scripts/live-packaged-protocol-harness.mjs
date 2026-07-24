@@ -2064,9 +2064,11 @@ async function runHubCommand(args) {
 async function waitForPackageAppUrl(socketPath) {
   const deadline = Date.now() + 15_000;
   let lastState = "missing";
+  let lastApp;
   while (Date.now() < deadline) {
     const response = await sendDaemonRequest(socketPath, { type: "list_apps" });
     const app = response.apps?.find((candidate) => candidate.package_name === "botster-web" && candidate.entrypoint_id === "web-client");
+    lastApp = app;
     if (app?.lifecycle_state) {
       lastState = app.lifecycle_state;
     }
@@ -2075,7 +2077,9 @@ async function waitForPackageAppUrl(socketPath) {
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`timed out waiting for botster-web/web-client local_url; lifecycle_state=${lastState}`);
+  throw new Error(
+    `timed out waiting for botster-web/web-client local_url; lifecycle_state=${lastState}; app=${JSON.stringify(lastApp)}`
+  );
 }
 
 async function sendDaemonRequest(socketPath, request) {

@@ -54,7 +54,6 @@ try {
 let localUrl;
 
 const server = createServer(async (request, response) => {
-  response.setHeader("access-control-allow-origin", "http://127.0.0.1:5173");
   response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
   response.setHeader("access-control-allow-headers", "content-type");
 
