@@ -1524,17 +1524,23 @@ async function waitForRemoteAccessPackageConfiguration(page) {
       for (const entry of events) {
         const packageRecords = [];
         if (entry.kind === "daemon_response" && entry.payload?.kind === "packages") {
-          packageRecords.push(...(entry.payload.packages ?? []));
+          packageRecords.push(...(entry.payload.packages ?? []).map((record) => ({
+            identity: record.package_name,
+            record
+          })));
         }
         if (entry.kind === "hub_frame" && entry.payload?.kind === "entity_snapshot") {
           const payload = entry.payload.payload;
           if (payload?.family === "botster-web.package") {
-            packageRecords.push(...(payload.records ?? []));
+            packageRecords.push(...(payload.records ?? []).map((record) => ({
+              identity: record.id,
+              record
+            })));
           }
         }
 
-        for (const packageRecord of packageRecords) {
-          if (packageRecord?.package_name !== "botster-web") continue;
+        for (const { identity, record: packageRecord } of packageRecords) {
+          if (identity !== "botster-web") continue;
           const effectiveValue = remoteAccessConfigurationValue(packageRecord);
           if (effectiveValue !== undefined) return { effectiveValue };
         }
@@ -1576,6 +1582,8 @@ async function waitForRemoteAccessPackageConfiguration(page) {
 
 async function assertRemoteAccessSettingsDispatch(page, originalValue) {
   const nextValue = !originalValue;
+  let dispatchError;
+  let restorationError;
   try {
     await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
     await page.getByText("Package configuration").waitFor();
@@ -1595,11 +1603,23 @@ async function assertRemoteAccessSettingsDispatch(page, originalValue) {
     await page.getByText("Package action accepted").waitFor();
     await closePackageSettingsRoute(page);
     await page.getByText("Package configuration").waitFor({ state: "detached" });
+  } catch (error) {
+    dispatchError = error;
   } finally {
     if (!ownsWebrtcDataDir) {
-      await restoreRemoteAccessConfiguration(originalValue);
+      try {
+        await restoreRemoteAccessConfiguration(originalValue);
+      } catch (error) {
+        console.error(`live caller-owned remote access configuration restoration failed ${JSON.stringify({
+          attempted_value: originalValue,
+          error: error instanceof Error ? error.message : String(error)
+        })}`);
+        restorationError = error;
+      }
     }
   }
+  if (dispatchError) throw dispatchError;
+  if (restorationError) throw restorationError;
 }
 
 async function restoreRemoteAccessConfiguration(value) {

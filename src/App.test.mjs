@@ -5538,38 +5538,54 @@ try {
       }
     }
   );
+  const remoteAccessSettingsApp = {
+    id: "botster-web",
+    title: "botster-web",
+    configuration_fields: [
+      {
+        id: "remote_browser_rendezvous_enabled",
+        label: "Remote browser access",
+        kind: "checkbox",
+        config_type: "boolean",
+        value: false,
+        helper: "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
+        errors: ["Remote access configuration failed"]
+      }
+    ],
+    configuration_submit: {
+      id: "botster.package.configuration.save",
+      target: "botster-web",
+      label: "Configure",
+      disabled: false,
+      params: {
+        package_name: "botster-web",
+        daemon_request: { request_type: "set_package_configuration", package_name: "botster-web" }
+      }
+    },
+    settings_surfaces: [],
+    package_actions: []
+  };
   const remoteAccessSettingsMarkup = renderToStaticMarkup(
     createElement(PluginSettingsPanel, {
+      app: remoteAccessSettingsApp,
+      onAction: () => undefined
+    })
+  );
+  const enabledRemoteAccessSettingsMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsPanel, {
       app: {
-        id: "botster-web",
-        title: "botster-web",
-        configuration_fields: [
-          {
-            id: "remote_browser_rendezvous_enabled",
-            label: "Remote browser access",
-            kind: "checkbox",
-            config_type: "boolean",
-            value: false,
-            helper: "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
-            errors: ["Remote access configuration failed"]
-          }
-        ],
-        configuration_submit: {
-          id: "botster.package.configuration.save",
-          target: "botster-web",
-          label: "Configure",
-          disabled: false,
-          params: {
-            package_name: "botster-web",
-            daemon_request: { request_type: "set_package_configuration", package_name: "botster-web" }
-          }
-        },
-        settings_surfaces: [],
-        package_actions: []
+        ...remoteAccessSettingsApp,
+        configuration_fields: remoteAccessSettingsApp.configuration_fields.map((field) => ({
+          ...field,
+          value: true,
+          errors: []
+        }))
       },
       onAction: () => undefined
     })
   );
+  assert.match(enabledRemoteAccessSettingsMarkup, /Remote browser rendezvous is opted in/);
+  assert.match(enabledRemoteAccessSettingsMarkup, />Opt out</);
   assert.equal((remoteAccessSettingsMarkup.match(/Remote browser access/g) ?? []).length, 1);
   assert.match(remoteAccessSettingsMarkup, /Remote browser rendezvous is off/);
   assert.match(remoteAccessSettingsMarkup, /Remote access configuration failed/);
