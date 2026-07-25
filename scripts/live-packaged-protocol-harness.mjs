@@ -7,6 +7,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { createServer as createViteServer } from "vite";
+import {
+  harnessEventMatches,
+  packageEnsureDecision
+} from "./live-packaged-protocol-helpers.mjs";
 
 const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
@@ -30,6 +34,11 @@ const payloadContractPackagePath = payloadContractMode
 const echoProbe = "keys";
 const attachProbe = "botster-web-production-attach-probe";
 const productionSessionId = "web-prod";
+const durableStateMode = process.env.BOTSTER_LIVE_DURABLE_STATE === "1";
+const durableSeedSessionIds = Array.from(
+  { length: 5 },
+  (_, index) => `botster-web-durable-exited-${index + 1}`
+);
 
 if (!process.env.BOTSTER_HUB_BIN) {
   throw new Error(
@@ -141,6 +150,9 @@ try {
     process.exit(0);
   }
   await openHomeView(page);
+  if (durableStateMode) {
+    await assertDurableSeededSessionsVisible(page);
+  }
   await startProductionSession();
   await waitForSessionStatus(page, "running");
   await openDiagnosticsView(page);
@@ -1258,51 +1270,15 @@ async function waitForPackageConfigurationActionResultCount(page, packageName, a
 }
 
 async function waitForHarnessEvent(page, criteria, label) {
-  await page.waitForFunction(
-    ({ criteria: expectedCriteria }) => {
-      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      return events.some((entry) => {
-        if (entry.kind !== expectedCriteria.kind) return false;
-        const payload = entry.payload ?? {};
-        if (expectedCriteria.frameKind && payload.kind !== expectedCriteria.frameKind) return false;
-        const framePayload = payload.payload ?? {};
-        if (
-          expectedCriteria.family &&
-          framePayload.key?.family !== expectedCriteria.family &&
-          framePayload.family !== expectedCriteria.family
-        ) return false;
-        if (
-          expectedCriteria.id &&
-          framePayload.key?.id !== expectedCriteria.id &&
-          !framePayload.records?.some((record) => record.id === expectedCriteria.id)
-        ) return false;
-        if (
-          expectedCriteria.status &&
-          framePayload.record?.status !== expectedCriteria.status &&
-          !framePayload.records?.some((record) => record.status === expectedCriteria.status)
-        ) return false;
-        if (
-          typeof expectedCriteria.attachable === "boolean" &&
-          framePayload.record?.attachable !== expectedCriteria.attachable &&
-          !framePayload.records?.some((record) => record.attachable === expectedCriteria.attachable)
-        ) return false;
-        if (expectedCriteria.type && payload.type !== expectedCriteria.type) return false;
-        if (expectedCriteria.entity_type && payload.entity_type !== expectedCriteria.entity_type) return false;
-        if (expectedCriteria.package_name && payload.package_name !== expectedCriteria.package_name) return false;
-        if (expectedCriteria.package_name_pattern && !new RegExp(expectedCriteria.package_name_pattern).test(payload.package_name)) return false;
-        if (expectedCriteria.surface_id && payload.surface_id !== expectedCriteria.surface_id) return false;
-        if (typeof expectedCriteria.rows === "number" && payload.rows !== expectedCriteria.rows) return false;
-        if (typeof expectedCriteria.cols === "number" && payload.cols !== expectedCriteria.cols) return false;
-        if (expectedCriteria.state && payload.state !== expectedCriteria.state) return false;
-        if (expectedCriteria.requestType && payload.requestType !== expectedCriteria.requestType) return false;
-        return true;
-      });
-    },
-    { criteria },
-    { timeout: 45_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for ${label}: ${error.message}`);
-  });
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    const events = await page.evaluate(
+      () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []
+    );
+    if (events.some((entry) => harnessEventMatches(entry, criteria))) return;
+    await page.waitForTimeout(100);
+  }
+  throw new Error(`timed out waiting for ${label}`);
 }
 
 async function latestLocalWebrtcGrantId(page) {
@@ -1355,10 +1331,25 @@ async function proveExternalSessionLifecycle(page) {
   }
   await waitForHarnessEvent(
     page,
-    { kind: "hub_frame", family: "botster-web.session", id: sessionId, status: "running" },
+    {
+      kind: "hub_frame",
+      family: "botster-web.session",
+      id: sessionId,
+      status: "running",
+      attachable: true
+    },
     "externally spawned session upsert"
   );
-  await page.getByText(sessionId, { exact: true }).first().waitFor();
+  if (durableStateMode) {
+    await page.getByTestId("diagnostics-view").waitFor();
+    await page.getByText(/\d+ more records loaded\./).waitFor();
+    if (await page.getByTestId("diagnostics-view").getByText(sessionId, { exact: true }).count() !== 0) {
+      throw new Error("durable external session unexpectedly appeared inside the capped Diagnostics summary");
+    }
+  }
+  await openHomeView(page);
+  const sessionRow = page.getByTestId("dashboard-view").getByText(sessionId, { exact: true });
+  await sessionRow.waitFor({ state: "visible" });
   const shutdownResponse = await sendDaemonRequest(socketPath, {
     type: "shutdown_session",
     session_id: sessionId
@@ -1383,7 +1374,14 @@ async function proveExternalSessionLifecycle(page) {
     { kind: "hub_frame", frameKind: "entity_remove", family: "botster-web.session", id: sessionId },
     "external session removal"
   );
-  await page.getByText(sessionId, { exact: true }).first().waitFor({ state: "detached" });
+  await sessionRow.waitFor({ state: "detached" });
+}
+
+async function assertDurableSeededSessionsVisible(page) {
+  const dashboard = page.getByTestId("dashboard-view");
+  for (const sessionId of durableSeedSessionIds) {
+    await dashboard.getByText(sessionId, { exact: true }).waitFor({ state: "visible" });
+  }
 }
 
 async function startProductionSession() {
@@ -1981,19 +1979,19 @@ async function startWebrtcPackageRuntime() {
     hubProcess?.exitCode !== null ? `hub exited before socket readiness (code=${hubProcess.exitCode})` : undefined
   );
 
-  await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", packageRoot]);
-  await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, "botster-web"]);
+  await ensurePackageEnabled("botster-web", packageRoot);
   if (workspacesPackagePath) {
-    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", workspacesPackagePath]);
-    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, "botster-workspaces"]);
+    await ensurePackageEnabled("botster-workspaces", workspacesPackagePath);
   }
   if (contractMatrixMode && contractMatrixPackagePath) {
-    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", contractMatrixPackagePath]);
-    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, contractMatrixPackageName]);
+    await ensurePackageEnabled(contractMatrixPackageName, contractMatrixPackagePath);
   }
   if (payloadContractMode && payloadContractPackagePath) {
-    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", payloadContractPackagePath]);
-    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, payloadContractPackageName]);
+    await ensurePackageEnabled(payloadContractPackageName, payloadContractPackagePath);
+  }
+  if (durableStateMode) {
+    await seedDurableExitedSessions();
+    await restartHubWithDurableState();
   }
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
   await sendDaemonRequest(socketPath, {
@@ -2008,6 +2006,100 @@ async function startWebrtcPackageRuntime() {
   );
   await waitForHtmlShell(url);
   return url;
+}
+
+async function ensurePackageEnabled(packageName, packagePath) {
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  let packages = await listPackages(socketPath);
+  const initialDecision = packageEnsureDecision(packages, packageName);
+  console.log(`live package ensure ${JSON.stringify({ package_name: packageName, ...initialDecision })}`);
+
+  if (initialDecision.install) {
+    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", packagePath]);
+    packages = await listPackages(socketPath);
+  }
+
+  const enableDecision = packageEnsureDecision(packages, packageName);
+  if (enableDecision.enable) {
+    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, packageName]);
+    packages = await listPackages(socketPath);
+  }
+
+  const finalDecision = packageEnsureDecision(packages, packageName);
+  if (finalDecision.install || finalDecision.enable) {
+    throw new Error(
+      `package ensure did not reach enabled state for ${packageName}: ${JSON.stringify(finalDecision)}`
+    );
+  }
+}
+
+async function listPackages(socketPath) {
+  const response = await sendDaemonRequest(socketPath, { type: "list_packages" });
+  if (response.error || !Array.isArray(response.packages)) {
+    throw new Error(`structured package list failed: ${JSON.stringify(response)}`);
+  }
+  return response.packages;
+}
+
+async function seedDurableExitedSessions() {
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  for (const sessionId of durableSeedSessionIds) {
+    const response = await sendDaemonRequest(socketPath, {
+      type: "spawn",
+      session_id: sessionId,
+      command: "sleep 30"
+    });
+    if (response.error) {
+      throw new Error(`durable session seed failed for ${sessionId}: ${JSON.stringify(response.error)}`);
+    }
+    const shutdownResponse = await sendDaemonRequest(socketPath, {
+      type: "shutdown_session",
+      session_id: sessionId
+    });
+    if (shutdownResponse.error) {
+      throw new Error(
+        `durable session seed shutdown failed for ${sessionId}: ${JSON.stringify(shutdownResponse.error)}`
+      );
+    }
+  }
+
+  const deadline = Date.now() + 15_000;
+  let lastSessions = [];
+  while (Date.now() < deadline) {
+    const response = await sendDaemonRequest(socketPath, { type: "list_sessions" });
+    lastSessions = response.sessions ?? [];
+    const exitedIds = new Set(
+      lastSessions
+        .filter((session) => session.lifecycle === "exited")
+        .map((session) => session.session_id)
+    );
+    if (durableSeedSessionIds.every((sessionId) => exitedIds.has(sessionId))) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `durable sessions did not all exit: ${durableSeedSessionIds.join(", ")}; observed=${JSON.stringify(lastSessions)}`
+  );
+}
+
+async function restartHubWithDurableState() {
+  await runHubCommand(["shutdown", "--data-dir", webrtcDataDir]);
+  if (hubProcess?.exitCode === null) {
+    await Promise.race([
+      once(hubProcess, "exit"),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("hub did not exit for durable-state restart")), 5_000)
+      )
+    ]);
+  }
+
+  hubProcess = spawnHubProcess(webrtcDataDir);
+  await waitForSocket(join(webrtcDataDir, "botster-hub.sock"), () =>
+    hubProcess?.exitCode !== null
+      ? `hub exited before durable-state restart readiness (code=${hubProcess.exitCode})`
+      : undefined
+  );
+
+  await ensurePackageEnabled("botster-web", packageRoot);
 }
 
 async function loadBinaryProvenance() {

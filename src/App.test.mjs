@@ -25,10 +25,77 @@ import { createServer } from "vite";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { decodeHubConnection, HubConnectionError } from "../scripts/hubConnection.mjs";
+import {
+  harnessEventMatches,
+  packageEnsureDecision
+} from "../scripts/live-packaged-protocol-helpers.mjs";
 
 const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
 let nextTestResponseMessageId = 0;
+
+assert.deepEqual(packageEnsureDecision([], "botster-web"), {
+  install: true,
+  enable: true,
+  state: "absent"
+});
+assert.deepEqual(packageEnsureDecision([{ package_name: "botster-web", state: "disabled" }], "botster-web"), {
+  install: false,
+  enable: true,
+  state: "disabled"
+});
+assert.deepEqual(packageEnsureDecision([{ package_name: "botster-web", state: "enabled" }], "botster-web"), {
+  install: false,
+  enable: false,
+  state: "enabled"
+});
+
+const multiSessionSnapshot = {
+  kind: "hub_frame",
+  payload: {
+    kind: "entity_snapshot",
+    payload: {
+      family: "botster-web.session",
+      records: [
+        { id: "target", status: "exited", attachable: false },
+        { id: "other", status: "running", attachable: true }
+      ]
+    }
+  }
+};
+assert.equal(
+  harnessEventMatches(multiSessionSnapshot, {
+    kind: "hub_frame",
+    family: "botster-web.session",
+    id: "target",
+    status: "running",
+    attachable: true
+  }),
+  false
+);
+assert.equal(
+  harnessEventMatches(multiSessionSnapshot, {
+    kind: "hub_frame",
+    family: "botster-web.session",
+    id: "other",
+    status: "running",
+    attachable: true
+  }),
+  true
+);
+assert.equal(
+  harnessEventMatches(
+    {
+      kind: "hub_frame",
+      payload: {
+        kind: "entity_snapshot",
+        payload: { family: "botster-web.session", records: [] }
+      }
+    },
+    { kind: "hub_frame", family: "botster-web.session" }
+  ),
+  true
+);
 
 const coreHubConnectionSchema = JSON.parse(
   await readFile(new URL("../fixtures/core-runnable-entrypoint-hub-connection/schema.json", import.meta.url), "utf8")

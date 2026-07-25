@@ -50,6 +50,16 @@ npm run smoke:live-packaged-protocol
 
 The live acceptance builds and installs the package into an isolated Hub, launches Chromium, starts a test-owned session through Hub's generic API, receives authoritative session snapshots and deltas, attaches Restty, exercises input/resize/readback/exit, and proves two fresh WebRTC subscription generations across reloads. It fails if any legacy `list_sessions` hydration occurs.
 
+To exercise restored durable state, use the Web-owned seeded regression:
+
+```bash
+BOTSTER_HUB_BIN=/path/to/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
+npm run smoke:live-packaged-protocol:durable
+```
+
+This mode creates its own temporary data directory, installs and enables the package through Hub, seeds five exited sessions through daemon requests, restarts Hub on the same directory, and then runs the normal browser proof. When `BOTSTER_LIVE_DATA_DIR` is supplied directly, the harness owns only its spawned Hub process: it reuses installed enabled packages, never removes packages or sessions, never edits persistence files, and never deletes the caller-owned directory.
+
 The plugin contract checks use the same production WebRTC harness:
 
 ```bash
