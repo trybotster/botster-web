@@ -30,6 +30,7 @@ import {
   assertPackageReused,
   durableSeedSessionIdsForDiagnosticsLimit,
   harnessEventMatches,
+  htmlAssetUrls,
   packageEnsureDecision
 } from "../scripts/live-packaged-protocol-helpers.mjs";
 
@@ -73,6 +74,12 @@ assert.doesNotThrow(
 assert.throws(
   () => assertPackageReused({ install: true, enable: true, state: "absent" }, "botster-web"),
   /durable package state was not restored enabled/
+);
+assert.deepEqual(
+  htmlAssetUrls(
+    '<link rel="stylesheet" href="/assets/index-a.css"><script type="module" src="/assets/index-b.js"></script>'
+  ),
+  ["/assets/index-a.css", "/assets/index-b.js"]
 );
 
 const multiSessionSnapshot = {
@@ -505,6 +512,7 @@ assert.match(liveProtocolHarnessScript, /BOTSTER_SESSION_WORKER_BIN/);
 assert.match(liveProtocolHarnessScript, /chromium\.launch/);
 assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
 assert.match(liveProtocolHarnessScript, /loadProductionAppRouteFromPathname/);
+assert.doesNotMatch(liveProtocolHarnessScript, /diagnosticsEntityRecordLimit = 4/);
 assert.match(liveProtocolHarnessScript, /appRouteFromPathname\(routeDescriptor\.routePath\)/);
 assert.match(liveProtocolHarnessScript, /packageRecord\?\.app_surfaces/);
 assert.match(liveProtocolHarnessScript, /proveLiveTerminalAfterAttach/);
@@ -824,6 +832,10 @@ try {
 assert.equal(
   packageJson.scripts["smoke:live-packaged-protocol"],
   "npm run build && node scripts/live-packaged-protocol-harness.mjs"
+);
+assert.equal(
+  packageJson.scripts["smoke:live-packaged-protocol:caller-repeatability"],
+  "npm run build && node scripts/live-caller-owned-repeatability.mjs"
 );
 assert.equal(packageManifest.kind, "plugin");
 assert.equal(packageManifest.botster, ">=0.1.0");
@@ -4474,6 +4486,7 @@ try {
       SpawnTargetListItem,
       PluginSurfaceRoutePage,
       PluginSettingsPanel,
+      entityFamilyRecordLimit,
       appRouteFromPathname,
       compareSpawnTargetRows,
       compareInstalledPackageRows,
@@ -4508,6 +4521,7 @@ try {
   };
   assert.equal(resolveTerminalSessionId([runningTerminalSession]), activeHubSessionId);
   assert.equal(resolveTerminalSessionId([exitedTerminalSession]), undefined);
+  assert.equal(entityFamilyRecordLimit, 4);
   assert.equal(
     resolveTerminalSessionId([exitedTerminalSession], activeHubSessionId),
     undefined

@@ -2193,6 +2193,8 @@ interface EntityFamilyPanelProps {
   secondaryField: string;
 }
 
+export const entityFamilyRecordLimit = 4;
+
 function EntityFamilyPanel({ title, records, emptyText, primaryField, secondaryField }: EntityFamilyPanelProps) {
   return (
     <IonCard className="entity-family-panel">
@@ -2202,13 +2204,17 @@ function EntityFamilyPanel({ title, records, emptyText, primaryField, secondaryF
       </div>
       {records.length > 0 ? (
         <div className="entity-record-list">
-          {records.slice(0, 4).map((record) => (
+          {records.slice(0, entityFamilyRecordLimit).map((record) => (
             <div className="entity-record-row" key={String(record.id)}>
               <strong>{stringValue(record[primaryField], String(record.id))}</strong>
               <span>{stringValue(record[secondaryField], "unknown")}</span>
             </div>
           ))}
-          {records.length > 4 ? <p className="entity-overflow">{records.length - 4} more records loaded.</p> : null}
+          {records.length > entityFamilyRecordLimit ? (
+            <p className="entity-overflow">
+              {records.length - entityFamilyRecordLimit} more records loaded.
+            </p>
+          ) : null}
         </div>
       ) : (
         <p className="entity-empty">{emptyText}</p>

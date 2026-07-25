@@ -39,6 +39,13 @@ export function assertPackageReused(decision, packageName) {
   }
 }
 
+export function htmlAssetUrls(html) {
+  return [...String(html).matchAll(/\b(?:src|href)=["']([^"']+)["']/g)]
+    .map((match) => match[1])
+    .filter((url) => url.startsWith("/assets/"))
+    .sort();
+}
+
 export function harnessEventMatches(entry, criteria) {
   if (entry?.kind !== criteria.kind) return false;
   const payload = entry.payload ?? {};

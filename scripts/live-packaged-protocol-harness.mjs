@@ -12,22 +12,26 @@ import {
   assertPackageReused,
   durableSeedSessionIdsForDiagnosticsLimit,
   harnessEventMatches,
+  htmlAssetUrls,
   packageEnsureDecision
 } from "./live-packaged-protocol-helpers.mjs";
 
 const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
 const durableStateMode = process.env.BOTSTER_LIVE_DURABLE_STATE === "1";
-const diagnosticsEntityRecordLimit = 4;
-const durableSeedSessionIds =
-  durableSeedSessionIdsForDiagnosticsLimit(diagnosticsEntityRecordLimit);
 
 assertDurableStateOwnership({
   durableStateMode,
   suppliedDataDir: process.env.BOTSTER_LIVE_DATA_DIR
 });
 
-const appRouteFromPathname = await loadProductionAppRouteFromPathname();
+const {
+  appRouteFromPathname,
+  entityFamilyRecordLimit: diagnosticsEntityRecordLimit
+} = await loadProductionAppRouteFromPathname();
+const durableSeedSessionIds =
+  durableSeedSessionIdsForDiagnosticsLimit(diagnosticsEntityRecordLimit);
+
 const workspacesPackagePath = resolveOptionalPackagePath(
   [process.env.BOTSTER_WORKSPACES_PACKAGE_PATH, process.env.BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH],
   "botster-workspaces"
@@ -79,6 +83,7 @@ const responseErrors = [];
 const responseAssemblyTelemetry = [];
 const attachChronology = [];
 let binaryProvenance;
+let reusedWebPackageProvenance;
 
 try {
   binaryProvenance = await loadBinaryProvenance();
@@ -122,7 +127,7 @@ try {
   await assertMinimumHubCompatibility(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
-  await waitForRemoteAccessPackageConfiguration(page);
+  const originalRemoteAccessValue = await waitForRemoteAccessPackageConfiguration(page);
   await waitForHarnessEvent(
     page,
     { kind: "daemon_request", type: "subscribe_entities", entity_type: "session" },
@@ -135,7 +140,7 @@ try {
   );
   await assertNoLegacySessionHydration(page);
   await openAppsView(page);
-  await assertRemoteAccessSettingsDispatch(page);
+  await assertRemoteAccessSettingsDispatch(page, originalRemoteAccessValue);
   if (contractMatrixMode) {
     await exercisePluginContractMatrix(page);
     if (payloadContractMode) {
@@ -1079,7 +1084,10 @@ async function loadProductionAppRouteFromPathname() {
   });
   try {
     const appModule = await vite.ssrLoadModule("/src/App.tsx");
-    return appModule.appRouteFromPathname;
+    return {
+      appRouteFromPathname: appModule.appRouteFromPathname,
+      entityFamilyRecordLimit: appModule.entityFamilyRecordLimit
+    };
   } finally {
     await vite.close();
   }
@@ -1510,10 +1518,10 @@ async function assertMinimumHubCompatibility(page) {
 }
 
 async function waitForRemoteAccessPackageConfiguration(page) {
-  await page.waitForFunction(
+  return page.waitForFunction(
     () => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      return events.some((entry) => {
+      for (const entry of events) {
         const packageRecords = [];
         if (entry.kind === "daemon_response" && entry.payload?.kind === "packages") {
           packageRecords.push(...(entry.payload.packages ?? []));
@@ -1525,13 +1533,15 @@ async function waitForRemoteAccessPackageConfiguration(page) {
           }
         }
 
-        return packageRecords.some((packageRecord) =>
-          (packageRecord?.package_name === "botster-web" || packageRecord?.id === "botster-web") &&
-            hasRemoteAccessConfiguration(packageRecord)
-        );
-      });
+        for (const packageRecord of packageRecords) {
+          if (packageRecord?.package_name !== "botster-web") continue;
+          const effectiveValue = remoteAccessConfigurationValue(packageRecord);
+          if (effectiveValue !== undefined) return { effectiveValue };
+        }
+      }
+      return false;
 
-      function hasRemoteAccessConfiguration(packageRecord) {
+      function remoteAccessConfigurationValue(packageRecord) {
         const rawFields = packageRecord?.configuration?.schema?.fields ?? [];
         const projectedFields = packageRecord?.configuration_fields ?? [];
         const remoteAccessField = [...rawFields, ...projectedFields].find(
@@ -1545,37 +1555,71 @@ async function waitForRemoteAccessPackageConfiguration(page) {
         const defaultValue = remoteAccessField?.default?.value ?? remoteAccessField?.default ?? false;
         const request = action?.request ?? action?.action?.params?.daemon_request ?? packageRecord?.configuration_submit?.params?.daemon_request;
 
-        return (
+        const ready = (
           (remoteAccessField?.type === "boolean" || remoteAccessField?.config_type === "boolean" || remoteAccessField?.kind === "checkbox") &&
           defaultValue === false &&
-          effectiveValue === false &&
+          typeof effectiveValue === "boolean" &&
           (action?.status === "available" || packageRecord?.configuration_submit?.disabled === false) &&
           request?.request_type === "set_package_configuration"
         );
+        return ready ? effectiveValue : undefined;
       }
     },
     undefined,
     { timeout: 45_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for manifest-sourced botster-web remote access configuration: ${error.message}`);
-  });
+  ).then((handle) => handle.jsonValue())
+    .then((result) => result.effectiveValue)
+    .catch((error) => {
+      throw new Error(`timed out waiting for manifest-sourced botster-web remote access configuration: ${error.message}`);
+    });
 }
 
-async function assertRemoteAccessSettingsDispatch(page) {
-  await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
-  await page.getByText("Package configuration").waitFor();
-  await page.getByText("Remote browser access").first().waitFor();
-  const remoteAccessLabelCount = await page.getByText("Remote browser access").count();
-  if (remoteAccessLabelCount !== 1) {
-    throw new Error(`live packaged protocol expected one Remote browser access label, observed ${remoteAccessLabelCount}`);
+async function assertRemoteAccessSettingsDispatch(page, originalValue) {
+  const nextValue = !originalValue;
+  try {
+    await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
+    await page.getByText("Package configuration").waitFor();
+    await page.getByText("Remote browser access").first().waitFor();
+    const remoteAccessLabelCount = await page.getByText("Remote browser access").count();
+    if (remoteAccessLabelCount !== 1) {
+      throw new Error(`live packaged protocol expected one Remote browser access label, observed ${remoteAccessLabelCount}`);
+    }
+    await page.getByText(
+      originalValue
+        ? "Remote browser rendezvous is opted in."
+        : "Remote browser rendezvous is off."
+    ).waitFor();
+    await page.getByText("Local installed access stays available. Remote access requires opt-in, pairing, and device approval.").waitFor();
+    await page.getByRole("button", { name: originalValue ? "Opt out" : "Opt in" }).click();
+    await waitForRemoteAccessConfigRequest(page, nextValue);
+    await page.getByText("Package action accepted").waitFor();
+    await closePackageSettingsRoute(page);
+    await page.getByText("Package configuration").waitFor({ state: "detached" });
+  } finally {
+    if (!ownsWebrtcDataDir) {
+      await restoreRemoteAccessConfiguration(originalValue);
+    }
   }
-  await page.getByText("Remote browser rendezvous is off.").waitFor();
-  await page.getByText("Local installed access stays available. Remote access requires opt-in, pairing, and device approval.").waitFor();
-  await page.getByRole("button", { name: "Opt in" }).click();
-  await waitForRemoteAccessConfigRequest(page, true);
-  await page.getByText("Package action accepted").waitFor();
-  await closePackageSettingsRoute(page);
-  await page.getByText("Package configuration").waitFor({ state: "detached" });
+}
+
+async function restoreRemoteAccessConfiguration(value) {
+  const response = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
+    type: "set_package_configuration",
+    package_name: "botster-web",
+    values: {
+      remote_browser_rendezvous_enabled: {
+        type: "boolean",
+        value
+      }
+    }
+  });
+  if (response.error) {
+    throw new Error(`could not restore caller-owned remote access configuration: ${JSON.stringify(response)}`);
+  }
+  console.log(`live caller-owned remote access configuration restored ${JSON.stringify({
+    original_value: value,
+    restored_value: value
+  })}`);
 }
 
 async function waitForRemoteAccessConfigRequest(page, value) {
@@ -2016,7 +2060,10 @@ async function startWebrtcPackageRuntime() {
   await waitForHttpOk(new URL("/health", url).toString(), () =>
     hubProcess?.exitCode !== null ? `hub exited before package runtime readiness (code=${hubProcess.exitCode})` : undefined
   );
-  await waitForHtmlShell(url);
+  const servedHtml = await waitForHtmlShell(url);
+  if (reusedWebPackageProvenance) {
+    recordServedWebBuildProvenance(servedHtml, reusedWebPackageProvenance);
+  }
   return url;
 }
 
@@ -2044,7 +2091,7 @@ async function ensurePackageEnabled(packageName, packagePath) {
     );
   }
   if (!initialDecision.install && packageName === "botster-web") {
-    await recordReusedWebPackageProvenance(
+    reusedWebPackageProvenance = await resolveReusedWebPackageProvenance(
       socketPath,
       packages.find((candidate) => candidate.package_name === packageName),
       packagePath
@@ -2053,7 +2100,7 @@ async function ensurePackageEnabled(packageName, packagePath) {
   return { initialDecision, finalDecision };
 }
 
-async function recordReusedWebPackageProvenance(socketPath, packageRecord, expectedPackageRoot) {
+async function resolveReusedWebPackageProvenance(socketPath, packageRecord, expectedPackageRoot) {
   if (!packageRecord || typeof packageRecord.version !== "string") {
     throw new Error("reused botster-web package did not expose authoritative package provenance");
   }
@@ -2081,7 +2128,7 @@ async function recordReusedWebPackageProvenance(socketPath, packageRecord, expec
   const workingDirectory = resolvedWorkingDirectory
     ? resolve(resolvedWorkingDirectory)
     : null;
-  console.log(`live package reuse provenance ${JSON.stringify({
+  return {
     package_name: packageRecord?.package_name,
     package_version: packageRecord?.version,
     source_kind: packageRecord?.source_kind,
@@ -2098,6 +2145,24 @@ async function recordReusedWebPackageProvenance(socketPath, packageRecord, expec
         ? "expected_package_root"
         : "resolved_working_directory_mismatch",
     resolve_app_launch_error: response.error?.code ?? null
+  };
+}
+
+function recordServedWebBuildProvenance(servedHtml, packageProvenance) {
+  const localHtml = readFileSync(join(packageRoot, "dist", "index.html"), "utf8");
+  const localAssetUrls = htmlAssetUrls(localHtml);
+  const servedAssetUrls = htmlAssetUrls(servedHtml);
+  const servedAssetsMatchLocalBuild =
+    localAssetUrls.length > 0 &&
+    JSON.stringify(servedAssetUrls) === JSON.stringify(localAssetUrls);
+  console.log(`live package reuse provenance ${JSON.stringify({
+    ...packageProvenance,
+    local_asset_urls: localAssetUrls,
+    served_asset_urls: servedAssetUrls,
+    served_assets_match_local_build: servedAssetsMatchLocalBuild,
+    build_classification: servedAssetsMatchLocalBuild
+      ? "served_assets_match_local_build"
+      : "served_assets_do_not_match_local_build"
   })}`);
 }
 
@@ -2372,6 +2437,7 @@ async function waitForHtmlShell(url) {
   if (!response.ok || !body.includes("<div id=\"root\"></div>") || !body.includes("__BOTSTER_PACKAGE_RUNTIME__")) {
     throw new Error(`packaged UI shell was not served from ${url}`);
   }
+  return body;
 }
 
 function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) {

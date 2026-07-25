@@ -9,6 +9,7 @@
     "serve:package": "node scripts/local-package-server.mjs",
     "smoke:browser-runtime": "npm run build && node scripts/browser-runtime-smoke.mjs",
     "smoke:live-packaged-protocol": "npm run build && node scripts/live-packaged-protocol-harness.mjs",
+    "smoke:live-packaged-protocol:caller-repeatability": "npm run build && node scripts/live-caller-owned-repeatability.mjs",
     "smoke:live-packaged-protocol:durable": "npm run build && BOTSTER_LIVE_DURABLE_STATE=1 node scripts/live-packaged-protocol-harness.mjs",
     "smoke:plugin-contract-matrix": "npm run build && BOTSTER_LIVE_CONTRACT_MATRIX=1 node scripts/live-packaged-protocol-harness.mjs",
     "smoke:plugin-payload-contract": "npm run build && BOTSTER_LIVE_CONTRACT_MATRIX=1 BOTSTER_LIVE_PAYLOAD_CONTRACT=1 BOTSTER_PLUGIN_PAYLOAD_CONTRACT_PACKAGE_PATH=fixtures/plugin-payload-contract node scripts/live-packaged-protocol-harness.mjs",
