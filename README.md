@@ -58,7 +58,9 @@ BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
 npm run smoke:live-packaged-protocol:durable
 ```
 
-This mode creates its own temporary data directory, installs and enables the package through Hub, seeds five exited sessions through daemon requests, restarts Hub on the same directory, and then runs the normal browser proof. When `BOTSTER_LIVE_DATA_DIR` is supplied directly, the harness owns only its spawned Hub process: it reuses installed enabled packages, never removes packages or sessions, never edits persistence files, and never deletes the caller-owned directory.
+This mode creates its own temporary data directory, installs and enables the package through Hub, seeds five exited sessions through daemon requests, restarts Hub on the same directory, and then runs the normal browser proof. It cannot be combined with `BOTSTER_LIVE_DATA_DIR`, because seeded mode owns the directory it populates.
+
+When `BOTSTER_LIVE_DATA_DIR` is supplied directly without seeded mode, the harness owns only its spawned Hub process: it reuses installed enabled packages, records the Web package version and working-directory provenance available through public Hub contracts, never removes packages or sessions, never edits persistence files, and never deletes the caller-owned directory. Current Hub `resolve_app_launch` supports terminal apps only, so Web package reuse is explicitly classified as having no publicly exposed resolved working directory rather than being reported as an exact path match.
 
 The plugin contract checks use the same production WebRTC harness:
 

@@ -26,6 +26,9 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { decodeHubConnection, HubConnectionError } from "../scripts/hubConnection.mjs";
 import {
+  assertDurableStateOwnership,
+  assertPackageReused,
+  durableSeedSessionIdsForDiagnosticsLimit,
   harnessEventMatches,
   packageEnsureDecision
 } from "../scripts/live-packaged-protocol-helpers.mjs";
@@ -49,6 +52,28 @@ assert.deepEqual(packageEnsureDecision([{ package_name: "botster-web", state: "e
   enable: false,
   state: "enabled"
 });
+assert.deepEqual(packageEnsureDecision([{ name: "botster-web", state: "enabled" }], "botster-web"), {
+  install: true,
+  enable: true,
+  state: "absent"
+});
+assert.throws(
+  () => assertDurableStateOwnership({ durableStateMode: true, suppliedDataDir: "/caller/data" }),
+  /cannot be combined with caller-owned BOTSTER_LIVE_DATA_DIR/
+);
+assert.doesNotThrow(
+  () => assertDurableStateOwnership({ durableStateMode: true, suppliedDataDir: undefined })
+);
+const durableSeedIds = durableSeedSessionIdsForDiagnosticsLimit(4);
+assert.equal(durableSeedIds.length, 5);
+assert.equal(durableSeedIds.length > 4, true);
+assert.doesNotThrow(
+  () => assertPackageReused({ install: false, enable: false, state: "enabled" }, "botster-web")
+);
+assert.throws(
+  () => assertPackageReused({ install: true, enable: true, state: "absent" }, "botster-web"),
+  /durable package state was not restored enabled/
+);
 
 const multiSessionSnapshot = {
   kind: "hub_frame",

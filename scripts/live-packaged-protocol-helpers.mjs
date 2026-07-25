@@ -3,17 +3,40 @@ export function packageEnsureDecision(packages, packageName) {
     throw new Error("package ensure requires a structured package list");
   }
 
-  const packageRecord = packages.find((candidate) =>
-    candidate?.package_name === packageName ||
-    candidate?.name === packageName ||
-    candidate?.id === packageName
-  );
+  const packageRecord = packages.find((candidate) => candidate?.package_name === packageName);
 
   return {
     install: packageRecord == null,
     enable: packageRecord == null || packageRecord.state !== "enabled",
     state: packageRecord?.state ?? "absent"
   };
+}
+
+export function assertDurableStateOwnership({ durableStateMode, suppliedDataDir }) {
+  if (durableStateMode && suppliedDataDir) {
+    throw new Error(
+      "BOTSTER_LIVE_DURABLE_STATE owns and seeds its generated data directory; " +
+      "it cannot be combined with caller-owned BOTSTER_LIVE_DATA_DIR"
+    );
+  }
+}
+
+export function durableSeedSessionIdsForDiagnosticsLimit(limit) {
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new Error("Diagnostics entity record limit must be a non-negative integer");
+  }
+  return Array.from(
+    { length: limit + 1 },
+    (_, index) => `botster-web-durable-exited-${index + 1}`
+  );
+}
+
+export function assertPackageReused(decision, packageName) {
+  if (decision.install || decision.enable) {
+    throw new Error(
+      `durable package state was not restored enabled for ${packageName}: ${JSON.stringify(decision)}`
+    );
+  }
 }
 
 export function harnessEventMatches(entry, criteria) {

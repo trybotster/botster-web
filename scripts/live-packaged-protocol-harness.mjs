@@ -8,12 +8,25 @@ import { dirname, join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { createServer as createViteServer } from "vite";
 import {
+  assertDurableStateOwnership,
+  assertPackageReused,
+  durableSeedSessionIdsForDiagnosticsLimit,
   harnessEventMatches,
   packageEnsureDecision
 } from "./live-packaged-protocol-helpers.mjs";
 
 const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
+const durableStateMode = process.env.BOTSTER_LIVE_DURABLE_STATE === "1";
+const diagnosticsEntityRecordLimit = 4;
+const durableSeedSessionIds =
+  durableSeedSessionIdsForDiagnosticsLimit(diagnosticsEntityRecordLimit);
+
+assertDurableStateOwnership({
+  durableStateMode,
+  suppliedDataDir: process.env.BOTSTER_LIVE_DATA_DIR
+});
+
 const appRouteFromPathname = await loadProductionAppRouteFromPathname();
 const workspacesPackagePath = resolveOptionalPackagePath(
   [process.env.BOTSTER_WORKSPACES_PACKAGE_PATH, process.env.BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH],
@@ -34,11 +47,6 @@ const payloadContractPackagePath = payloadContractMode
 const echoProbe = "keys";
 const attachProbe = "botster-web-production-attach-probe";
 const productionSessionId = "web-prod";
-const durableStateMode = process.env.BOTSTER_LIVE_DURABLE_STATE === "1";
-const durableSeedSessionIds = Array.from(
-  { length: 5 },
-  (_, index) => `botster-web-durable-exited-${index + 1}`
-);
 
 if (!process.env.BOTSTER_HUB_BIN) {
   throw new Error(
@@ -1341,9 +1349,13 @@ async function proveExternalSessionLifecycle(page) {
     "externally spawned session upsert"
   );
   if (durableStateMode) {
-    await page.getByTestId("diagnostics-view").waitFor();
-    await page.getByText(/\d+ more records loaded\./).waitFor();
-    if (await page.getByTestId("diagnostics-view").getByText(sessionId, { exact: true }).count() !== 0) {
+    const diagnostics = page.getByTestId("diagnostics-view");
+    await diagnostics.waitFor();
+    const sessionsPanel = diagnostics.locator(".entity-family-panel").filter({
+      has: page.getByRole("heading", { name: "Sessions", exact: true })
+    });
+    await sessionsPanel.getByText(/\d+ more records loaded\./).waitFor();
+    if (await sessionsPanel.getByText(sessionId, { exact: true }).count() !== 0) {
       throw new Error("durable external session unexpectedly appeared inside the capped Diagnostics summary");
     }
   }
@@ -2031,6 +2043,62 @@ async function ensurePackageEnabled(packageName, packagePath) {
       `package ensure did not reach enabled state for ${packageName}: ${JSON.stringify(finalDecision)}`
     );
   }
+  if (!initialDecision.install && packageName === "botster-web") {
+    await recordReusedWebPackageProvenance(
+      socketPath,
+      packages.find((candidate) => candidate.package_name === packageName),
+      packagePath
+    );
+  }
+  return { initialDecision, finalDecision };
+}
+
+async function recordReusedWebPackageProvenance(socketPath, packageRecord, expectedPackageRoot) {
+  if (!packageRecord || typeof packageRecord.version !== "string") {
+    throw new Error("reused botster-web package did not expose authoritative package provenance");
+  }
+  const entrypoint = packageRecord.runnable_entrypoints?.find(
+    (candidate) => candidate.id === "web-client"
+  );
+  if (!entrypoint) {
+    throw new Error("reused botster-web package did not expose the web-client entrypoint");
+  }
+
+  const response = await sendDaemonRequest(socketPath, {
+    type: "resolve_app_launch",
+    package_name: "botster-web",
+    entrypoint_id: "web-client"
+  });
+  if (response.error && response.error.code !== "unsupported_app_kind") {
+    throw new Error(`could not resolve reused botster-web launch provenance: ${JSON.stringify(response)}`);
+  }
+  if (!response.error && !response.resolved_app_launch) {
+    throw new Error(`reused botster-web launch provenance was empty: ${JSON.stringify(response)}`);
+  }
+
+  const expectedWorkingDirectory = resolve(expectedPackageRoot);
+  const resolvedWorkingDirectory = response.resolved_app_launch?.working_directory;
+  const workingDirectory = resolvedWorkingDirectory
+    ? resolve(resolvedWorkingDirectory)
+    : null;
+  console.log(`live package reuse provenance ${JSON.stringify({
+    package_name: packageRecord?.package_name,
+    package_version: packageRecord?.version,
+    source_kind: packageRecord?.source_kind,
+    working_directory: workingDirectory,
+    working_directory_policy: entrypoint?.working_directory?.policy,
+    working_directory_path: entrypoint?.working_directory?.path,
+    expected_working_directory: expectedWorkingDirectory,
+    matches_expected_working_directory: workingDirectory == null
+      ? null
+      : workingDirectory === expectedWorkingDirectory,
+    classification: workingDirectory == null
+      ? "web_launch_working_directory_not_exposed"
+      : workingDirectory === expectedWorkingDirectory
+        ? "expected_package_root"
+        : "resolved_working_directory_mismatch",
+    resolve_app_launch_error: response.error?.code ?? null
+  })}`);
 }
 
 async function listPackages(socketPath) {
@@ -2099,7 +2167,8 @@ async function restartHubWithDurableState() {
       : undefined
   );
 
-  await ensurePackageEnabled("botster-web", packageRoot);
+  const { initialDecision } = await ensurePackageEnabled("botster-web", packageRoot);
+  assertPackageReused(initialDecision, "botster-web");
 }
 
 async function loadBinaryProvenance() {
