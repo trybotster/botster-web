@@ -25,10 +25,109 @@ import { createServer } from "vite";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { decodeHubConnection, HubConnectionError } from "../scripts/hubConnection.mjs";
+import {
+  assertDurableStateOwnership,
+  assertPackageReused,
+  durableSeedSessionIdsForDiagnosticsLimit,
+  harnessEventMatches,
+  htmlAssetUrls,
+  packageEnsureDecision
+} from "../scripts/live-packaged-protocol-helpers.mjs";
 
 const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
 let nextTestResponseMessageId = 0;
+
+assert.deepEqual(packageEnsureDecision([], "botster-web"), {
+  install: true,
+  enable: true,
+  state: "absent"
+});
+assert.deepEqual(packageEnsureDecision([{ package_name: "botster-web", state: "disabled" }], "botster-web"), {
+  install: false,
+  enable: true,
+  state: "disabled"
+});
+assert.deepEqual(packageEnsureDecision([{ package_name: "botster-web", state: "enabled" }], "botster-web"), {
+  install: false,
+  enable: false,
+  state: "enabled"
+});
+assert.deepEqual(packageEnsureDecision([{ name: "botster-web", state: "enabled" }], "botster-web"), {
+  install: true,
+  enable: true,
+  state: "absent"
+});
+assert.throws(
+  () => assertDurableStateOwnership({ durableStateMode: true, suppliedDataDir: "/caller/data" }),
+  /cannot be combined with caller-owned BOTSTER_LIVE_DATA_DIR/
+);
+assert.doesNotThrow(
+  () => assertDurableStateOwnership({ durableStateMode: true, suppliedDataDir: undefined })
+);
+const durableSeedIds = durableSeedSessionIdsForDiagnosticsLimit(4);
+assert.equal(durableSeedIds.length, 5);
+assert.equal(durableSeedIds.length > 4, true);
+assert.doesNotThrow(
+  () => assertPackageReused({ install: false, enable: false, state: "enabled" }, "botster-web")
+);
+assert.throws(
+  () => assertPackageReused({ install: true, enable: true, state: "absent" }, "botster-web"),
+  /durable package state was not restored enabled/
+);
+assert.deepEqual(
+  htmlAssetUrls(
+    '<link rel="stylesheet" href="/assets/index-a.css"><script type="module" src="/assets/index-b.js"></script>'
+  ),
+  ["/assets/index-a.css", "/assets/index-b.js"]
+);
+
+const multiSessionSnapshot = {
+  kind: "hub_frame",
+  payload: {
+    kind: "entity_snapshot",
+    payload: {
+      family: "botster-web.session",
+      records: [
+        { id: "target", status: "exited", attachable: false },
+        { id: "other", status: "running", attachable: true }
+      ]
+    }
+  }
+};
+assert.equal(
+  harnessEventMatches(multiSessionSnapshot, {
+    kind: "hub_frame",
+    family: "botster-web.session",
+    id: "target",
+    status: "running",
+    attachable: true
+  }),
+  false
+);
+assert.equal(
+  harnessEventMatches(multiSessionSnapshot, {
+    kind: "hub_frame",
+    family: "botster-web.session",
+    id: "other",
+    status: "running",
+    attachable: true
+  }),
+  true
+);
+assert.equal(
+  harnessEventMatches(
+    {
+      kind: "hub_frame",
+      payload: {
+        kind: "entity_snapshot",
+        payload: { family: "botster-web.session", records: [] }
+      }
+    },
+    { kind: "hub_frame", family: "botster-web.session" }
+  ),
+  true
+);
 
 const coreHubConnectionSchema = JSON.parse(
   await readFile(new URL("../fixtures/core-runnable-entrypoint-hub-connection/schema.json", import.meta.url), "utf8")
@@ -413,6 +512,7 @@ assert.match(liveProtocolHarnessScript, /BOTSTER_SESSION_WORKER_BIN/);
 assert.match(liveProtocolHarnessScript, /chromium\.launch/);
 assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
 assert.match(liveProtocolHarnessScript, /loadProductionAppRouteFromPathname/);
+assert.doesNotMatch(liveProtocolHarnessScript, /diagnosticsEntityRecordLimit = 4/);
 assert.match(liveProtocolHarnessScript, /appRouteFromPathname\(routeDescriptor\.routePath\)/);
 assert.match(liveProtocolHarnessScript, /packageRecord\?\.app_surfaces/);
 assert.match(liveProtocolHarnessScript, /proveLiveTerminalAfterAttach/);
@@ -732,6 +832,10 @@ try {
 assert.equal(
   packageJson.scripts["smoke:live-packaged-protocol"],
   "npm run build && node scripts/live-packaged-protocol-harness.mjs"
+);
+assert.equal(
+  packageJson.scripts["smoke:live-packaged-protocol:caller-repeatability"],
+  "npm run build && node scripts/live-caller-owned-repeatability.mjs"
 );
 assert.equal(packageManifest.kind, "plugin");
 assert.equal(packageManifest.botster, ">=0.1.0");
@@ -4382,6 +4486,7 @@ try {
       SpawnTargetListItem,
       PluginSurfaceRoutePage,
       PluginSettingsPanel,
+      entityFamilyRecordLimit,
       appRouteFromPathname,
       compareSpawnTargetRows,
       compareInstalledPackageRows,
@@ -4416,6 +4521,7 @@ try {
   };
   assert.equal(resolveTerminalSessionId([runningTerminalSession]), activeHubSessionId);
   assert.equal(resolveTerminalSessionId([exitedTerminalSession]), undefined);
+  assert.equal(entityFamilyRecordLimit, 4);
   assert.equal(
     resolveTerminalSessionId([exitedTerminalSession], activeHubSessionId),
     undefined
@@ -5432,38 +5538,54 @@ try {
       }
     }
   );
+  const remoteAccessSettingsApp = {
+    id: "botster-web",
+    title: "botster-web",
+    configuration_fields: [
+      {
+        id: "remote_browser_rendezvous_enabled",
+        label: "Remote browser access",
+        kind: "checkbox",
+        config_type: "boolean",
+        value: false,
+        helper: "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
+        errors: ["Remote access configuration failed"]
+      }
+    ],
+    configuration_submit: {
+      id: "botster.package.configuration.save",
+      target: "botster-web",
+      label: "Configure",
+      disabled: false,
+      params: {
+        package_name: "botster-web",
+        daemon_request: { request_type: "set_package_configuration", package_name: "botster-web" }
+      }
+    },
+    settings_surfaces: [],
+    package_actions: []
+  };
   const remoteAccessSettingsMarkup = renderToStaticMarkup(
     createElement(PluginSettingsPanel, {
+      app: remoteAccessSettingsApp,
+      onAction: () => undefined
+    })
+  );
+  const enabledRemoteAccessSettingsMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsPanel, {
       app: {
-        id: "botster-web",
-        title: "botster-web",
-        configuration_fields: [
-          {
-            id: "remote_browser_rendezvous_enabled",
-            label: "Remote browser access",
-            kind: "checkbox",
-            config_type: "boolean",
-            value: false,
-            helper: "Local installed access stays available. Remote browser rendezvous through Botster Cloud requires opt-in, pairing, and device approval.",
-            errors: ["Remote access configuration failed"]
-          }
-        ],
-        configuration_submit: {
-          id: "botster.package.configuration.save",
-          target: "botster-web",
-          label: "Configure",
-          disabled: false,
-          params: {
-            package_name: "botster-web",
-            daemon_request: { request_type: "set_package_configuration", package_name: "botster-web" }
-          }
-        },
-        settings_surfaces: [],
-        package_actions: []
+        ...remoteAccessSettingsApp,
+        configuration_fields: remoteAccessSettingsApp.configuration_fields.map((field) => ({
+          ...field,
+          value: true,
+          errors: []
+        }))
       },
       onAction: () => undefined
     })
   );
+  assert.match(enabledRemoteAccessSettingsMarkup, /Remote browser rendezvous is opted in/);
+  assert.match(enabledRemoteAccessSettingsMarkup, />Opt out</);
   assert.equal((remoteAccessSettingsMarkup.match(/Remote browser access/g) ?? []).length, 1);
   assert.match(remoteAccessSettingsMarkup, /Remote browser rendezvous is off/);
   assert.match(remoteAccessSettingsMarkup, /Remote access configuration failed/);

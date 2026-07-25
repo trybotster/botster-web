@@ -7,10 +7,31 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { createServer as createViteServer } from "vite";
+import {
+  assertDurableStateOwnership,
+  assertPackageReused,
+  durableSeedSessionIdsForDiagnosticsLimit,
+  harnessEventMatches,
+  htmlAssetUrls,
+  packageEnsureDecision
+} from "./live-packaged-protocol-helpers.mjs";
 
 const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
-const appRouteFromPathname = await loadProductionAppRouteFromPathname();
+const durableStateMode = process.env.BOTSTER_LIVE_DURABLE_STATE === "1";
+
+assertDurableStateOwnership({
+  durableStateMode,
+  suppliedDataDir: process.env.BOTSTER_LIVE_DATA_DIR
+});
+
+const {
+  appRouteFromPathname,
+  entityFamilyRecordLimit: diagnosticsEntityRecordLimit
+} = await loadProductionAppRouteFromPathname();
+const durableSeedSessionIds =
+  durableSeedSessionIdsForDiagnosticsLimit(diagnosticsEntityRecordLimit);
+
 const workspacesPackagePath = resolveOptionalPackagePath(
   [process.env.BOTSTER_WORKSPACES_PACKAGE_PATH, process.env.BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH],
   "botster-workspaces"
@@ -62,6 +83,7 @@ const responseErrors = [];
 const responseAssemblyTelemetry = [];
 const attachChronology = [];
 let binaryProvenance;
+let reusedWebPackageProvenance;
 
 try {
   binaryProvenance = await loadBinaryProvenance();
@@ -105,7 +127,7 @@ try {
   await assertMinimumHubCompatibility(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
-  await waitForRemoteAccessPackageConfiguration(page);
+  const originalRemoteAccessValue = await waitForRemoteAccessPackageConfiguration(page);
   await waitForHarnessEvent(
     page,
     { kind: "daemon_request", type: "subscribe_entities", entity_type: "session" },
@@ -118,7 +140,7 @@ try {
   );
   await assertNoLegacySessionHydration(page);
   await openAppsView(page);
-  await assertRemoteAccessSettingsDispatch(page);
+  await assertRemoteAccessSettingsDispatch(page, originalRemoteAccessValue);
   if (contractMatrixMode) {
     await exercisePluginContractMatrix(page);
     if (payloadContractMode) {
@@ -141,6 +163,9 @@ try {
     process.exit(0);
   }
   await openHomeView(page);
+  if (durableStateMode) {
+    await assertDurableSeededSessionsVisible(page);
+  }
   await startProductionSession();
   await waitForSessionStatus(page, "running");
   await openDiagnosticsView(page);
@@ -1059,7 +1084,10 @@ async function loadProductionAppRouteFromPathname() {
   });
   try {
     const appModule = await vite.ssrLoadModule("/src/App.tsx");
-    return appModule.appRouteFromPathname;
+    return {
+      appRouteFromPathname: appModule.appRouteFromPathname,
+      entityFamilyRecordLimit: appModule.entityFamilyRecordLimit
+    };
   } finally {
     await vite.close();
   }
@@ -1258,51 +1286,15 @@ async function waitForPackageConfigurationActionResultCount(page, packageName, a
 }
 
 async function waitForHarnessEvent(page, criteria, label) {
-  await page.waitForFunction(
-    ({ criteria: expectedCriteria }) => {
-      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      return events.some((entry) => {
-        if (entry.kind !== expectedCriteria.kind) return false;
-        const payload = entry.payload ?? {};
-        if (expectedCriteria.frameKind && payload.kind !== expectedCriteria.frameKind) return false;
-        const framePayload = payload.payload ?? {};
-        if (
-          expectedCriteria.family &&
-          framePayload.key?.family !== expectedCriteria.family &&
-          framePayload.family !== expectedCriteria.family
-        ) return false;
-        if (
-          expectedCriteria.id &&
-          framePayload.key?.id !== expectedCriteria.id &&
-          !framePayload.records?.some((record) => record.id === expectedCriteria.id)
-        ) return false;
-        if (
-          expectedCriteria.status &&
-          framePayload.record?.status !== expectedCriteria.status &&
-          !framePayload.records?.some((record) => record.status === expectedCriteria.status)
-        ) return false;
-        if (
-          typeof expectedCriteria.attachable === "boolean" &&
-          framePayload.record?.attachable !== expectedCriteria.attachable &&
-          !framePayload.records?.some((record) => record.attachable === expectedCriteria.attachable)
-        ) return false;
-        if (expectedCriteria.type && payload.type !== expectedCriteria.type) return false;
-        if (expectedCriteria.entity_type && payload.entity_type !== expectedCriteria.entity_type) return false;
-        if (expectedCriteria.package_name && payload.package_name !== expectedCriteria.package_name) return false;
-        if (expectedCriteria.package_name_pattern && !new RegExp(expectedCriteria.package_name_pattern).test(payload.package_name)) return false;
-        if (expectedCriteria.surface_id && payload.surface_id !== expectedCriteria.surface_id) return false;
-        if (typeof expectedCriteria.rows === "number" && payload.rows !== expectedCriteria.rows) return false;
-        if (typeof expectedCriteria.cols === "number" && payload.cols !== expectedCriteria.cols) return false;
-        if (expectedCriteria.state && payload.state !== expectedCriteria.state) return false;
-        if (expectedCriteria.requestType && payload.requestType !== expectedCriteria.requestType) return false;
-        return true;
-      });
-    },
-    { criteria },
-    { timeout: 45_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for ${label}: ${error.message}`);
-  });
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    const events = await page.evaluate(
+      () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []
+    );
+    if (events.some((entry) => harnessEventMatches(entry, criteria))) return;
+    await page.waitForTimeout(100);
+  }
+  throw new Error(`timed out waiting for ${label}`);
 }
 
 async function latestLocalWebrtcGrantId(page) {
@@ -1355,10 +1347,29 @@ async function proveExternalSessionLifecycle(page) {
   }
   await waitForHarnessEvent(
     page,
-    { kind: "hub_frame", family: "botster-web.session", id: sessionId, status: "running" },
+    {
+      kind: "hub_frame",
+      family: "botster-web.session",
+      id: sessionId,
+      status: "running",
+      attachable: true
+    },
     "externally spawned session upsert"
   );
-  await page.getByText(sessionId, { exact: true }).first().waitFor();
+  if (durableStateMode) {
+    const diagnostics = page.getByTestId("diagnostics-view");
+    await diagnostics.waitFor();
+    const sessionsPanel = diagnostics.locator(".entity-family-panel").filter({
+      has: page.getByRole("heading", { name: "Sessions", exact: true })
+    });
+    await sessionsPanel.getByText(/\d+ more records loaded\./).waitFor();
+    if (await sessionsPanel.getByText(sessionId, { exact: true }).count() !== 0) {
+      throw new Error("durable external session unexpectedly appeared inside the capped Diagnostics summary");
+    }
+  }
+  await openHomeView(page);
+  const sessionRow = page.getByTestId("dashboard-view").getByText(sessionId, { exact: true });
+  await sessionRow.waitFor({ state: "visible" });
   const shutdownResponse = await sendDaemonRequest(socketPath, {
     type: "shutdown_session",
     session_id: sessionId
@@ -1383,7 +1394,14 @@ async function proveExternalSessionLifecycle(page) {
     { kind: "hub_frame", frameKind: "entity_remove", family: "botster-web.session", id: sessionId },
     "external session removal"
   );
-  await page.getByText(sessionId, { exact: true }).first().waitFor({ state: "detached" });
+  await sessionRow.waitFor({ state: "detached" });
+}
+
+async function assertDurableSeededSessionsVisible(page) {
+  const dashboard = page.getByTestId("dashboard-view");
+  for (const sessionId of durableSeedSessionIds) {
+    await dashboard.getByText(sessionId, { exact: true }).waitFor({ state: "visible" });
+  }
 }
 
 async function startProductionSession() {
@@ -1500,28 +1518,36 @@ async function assertMinimumHubCompatibility(page) {
 }
 
 async function waitForRemoteAccessPackageConfiguration(page) {
-  await page.waitForFunction(
+  return page.waitForFunction(
     () => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      return events.some((entry) => {
+      for (const entry of events) {
         const packageRecords = [];
         if (entry.kind === "daemon_response" && entry.payload?.kind === "packages") {
-          packageRecords.push(...(entry.payload.packages ?? []));
+          packageRecords.push(...(entry.payload.packages ?? []).map((record) => ({
+            identity: record.package_name,
+            record
+          })));
         }
         if (entry.kind === "hub_frame" && entry.payload?.kind === "entity_snapshot") {
           const payload = entry.payload.payload;
           if (payload?.family === "botster-web.package") {
-            packageRecords.push(...(payload.records ?? []));
+            packageRecords.push(...(payload.records ?? []).map((record) => ({
+              identity: record.id,
+              record
+            })));
           }
         }
 
-        return packageRecords.some((packageRecord) =>
-          (packageRecord?.package_name === "botster-web" || packageRecord?.id === "botster-web") &&
-            hasRemoteAccessConfiguration(packageRecord)
-        );
-      });
+        for (const { identity, record: packageRecord } of packageRecords) {
+          if (identity !== "botster-web") continue;
+          const effectiveValue = remoteAccessConfigurationValue(packageRecord);
+          if (effectiveValue !== undefined) return { effectiveValue };
+        }
+      }
+      return false;
 
-      function hasRemoteAccessConfiguration(packageRecord) {
+      function remoteAccessConfigurationValue(packageRecord) {
         const rawFields = packageRecord?.configuration?.schema?.fields ?? [];
         const projectedFields = packageRecord?.configuration_fields ?? [];
         const remoteAccessField = [...rawFields, ...projectedFields].find(
@@ -1535,37 +1561,85 @@ async function waitForRemoteAccessPackageConfiguration(page) {
         const defaultValue = remoteAccessField?.default?.value ?? remoteAccessField?.default ?? false;
         const request = action?.request ?? action?.action?.params?.daemon_request ?? packageRecord?.configuration_submit?.params?.daemon_request;
 
-        return (
+        const ready = (
           (remoteAccessField?.type === "boolean" || remoteAccessField?.config_type === "boolean" || remoteAccessField?.kind === "checkbox") &&
           defaultValue === false &&
-          effectiveValue === false &&
+          typeof effectiveValue === "boolean" &&
           (action?.status === "available" || packageRecord?.configuration_submit?.disabled === false) &&
           request?.request_type === "set_package_configuration"
         );
+        return ready ? effectiveValue : undefined;
       }
     },
     undefined,
     { timeout: 45_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for manifest-sourced botster-web remote access configuration: ${error.message}`);
-  });
+  ).then((handle) => handle.jsonValue())
+    .then((result) => result.effectiveValue)
+    .catch((error) => {
+      throw new Error(`timed out waiting for manifest-sourced botster-web remote access configuration: ${error.message}`);
+    });
 }
 
-async function assertRemoteAccessSettingsDispatch(page) {
-  await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
-  await page.getByText("Package configuration").waitFor();
-  await page.getByText("Remote browser access").first().waitFor();
-  const remoteAccessLabelCount = await page.getByText("Remote browser access").count();
-  if (remoteAccessLabelCount !== 1) {
-    throw new Error(`live packaged protocol expected one Remote browser access label, observed ${remoteAccessLabelCount}`);
+async function assertRemoteAccessSettingsDispatch(page, originalValue) {
+  const nextValue = !originalValue;
+  let dispatchError;
+  let restorationError;
+  try {
+    await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
+    await page.getByText("Package configuration").waitFor();
+    await page.getByText("Remote browser access").first().waitFor();
+    const remoteAccessLabelCount = await page.getByText("Remote browser access").count();
+    if (remoteAccessLabelCount !== 1) {
+      throw new Error(`live packaged protocol expected one Remote browser access label, observed ${remoteAccessLabelCount}`);
+    }
+    await page.getByText(
+      originalValue
+        ? "Remote browser rendezvous is opted in."
+        : "Remote browser rendezvous is off."
+    ).waitFor();
+    await page.getByText("Local installed access stays available. Remote access requires opt-in, pairing, and device approval.").waitFor();
+    await page.getByRole("button", { name: originalValue ? "Opt out" : "Opt in" }).click();
+    await waitForRemoteAccessConfigRequest(page, nextValue);
+    await page.getByText("Package action accepted").waitFor();
+    await closePackageSettingsRoute(page);
+    await page.getByText("Package configuration").waitFor({ state: "detached" });
+  } catch (error) {
+    dispatchError = error;
+  } finally {
+    if (!ownsWebrtcDataDir) {
+      try {
+        await restoreRemoteAccessConfiguration(originalValue);
+      } catch (error) {
+        console.error(`live caller-owned remote access configuration restoration failed ${JSON.stringify({
+          attempted_value: originalValue,
+          error: error instanceof Error ? error.message : String(error)
+        })}`);
+        restorationError = error;
+      }
+    }
   }
-  await page.getByText("Remote browser rendezvous is off.").waitFor();
-  await page.getByText("Local installed access stays available. Remote access requires opt-in, pairing, and device approval.").waitFor();
-  await page.getByRole("button", { name: "Opt in" }).click();
-  await waitForRemoteAccessConfigRequest(page, true);
-  await page.getByText("Package action accepted").waitFor();
-  await closePackageSettingsRoute(page);
-  await page.getByText("Package configuration").waitFor({ state: "detached" });
+  if (dispatchError) throw dispatchError;
+  if (restorationError) throw restorationError;
+}
+
+async function restoreRemoteAccessConfiguration(value) {
+  const response = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
+    type: "set_package_configuration",
+    package_name: "botster-web",
+    values: {
+      remote_browser_rendezvous_enabled: {
+        type: "boolean",
+        value
+      }
+    }
+  });
+  if (response.error) {
+    throw new Error(`could not restore caller-owned remote access configuration: ${JSON.stringify(response)}`);
+  }
+  console.log(`live caller-owned remote access configuration restored ${JSON.stringify({
+    original_value: value,
+    restored_value: value
+  })}`);
 }
 
 async function waitForRemoteAccessConfigRequest(page, value) {
@@ -1981,19 +2055,19 @@ async function startWebrtcPackageRuntime() {
     hubProcess?.exitCode !== null ? `hub exited before socket readiness (code=${hubProcess.exitCode})` : undefined
   );
 
-  await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", packageRoot]);
-  await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, "botster-web"]);
+  await ensurePackageEnabled("botster-web", packageRoot);
   if (workspacesPackagePath) {
-    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", workspacesPackagePath]);
-    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, "botster-workspaces"]);
+    await ensurePackageEnabled("botster-workspaces", workspacesPackagePath);
   }
   if (contractMatrixMode && contractMatrixPackagePath) {
-    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", contractMatrixPackagePath]);
-    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, contractMatrixPackageName]);
+    await ensurePackageEnabled(contractMatrixPackageName, contractMatrixPackagePath);
   }
   if (payloadContractMode && payloadContractPackagePath) {
-    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", payloadContractPackagePath]);
-    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, payloadContractPackageName]);
+    await ensurePackageEnabled(payloadContractPackageName, payloadContractPackagePath);
+  }
+  if (durableStateMode) {
+    await seedDurableExitedSessions();
+    await restartHubWithDurableState();
   }
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
   await sendDaemonRequest(socketPath, {
@@ -2006,8 +2080,180 @@ async function startWebrtcPackageRuntime() {
   await waitForHttpOk(new URL("/health", url).toString(), () =>
     hubProcess?.exitCode !== null ? `hub exited before package runtime readiness (code=${hubProcess.exitCode})` : undefined
   );
-  await waitForHtmlShell(url);
+  const servedHtml = await waitForHtmlShell(url);
+  if (reusedWebPackageProvenance) {
+    recordServedWebBuildProvenance(servedHtml, reusedWebPackageProvenance);
+  }
   return url;
+}
+
+async function ensurePackageEnabled(packageName, packagePath) {
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  let packages = await listPackages(socketPath);
+  const initialDecision = packageEnsureDecision(packages, packageName);
+  console.log(`live package ensure ${JSON.stringify({ package_name: packageName, ...initialDecision })}`);
+
+  if (initialDecision.install) {
+    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", packagePath]);
+    packages = await listPackages(socketPath);
+  }
+
+  const enableDecision = packageEnsureDecision(packages, packageName);
+  if (enableDecision.enable) {
+    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, packageName]);
+    packages = await listPackages(socketPath);
+  }
+
+  const finalDecision = packageEnsureDecision(packages, packageName);
+  if (finalDecision.install || finalDecision.enable) {
+    throw new Error(
+      `package ensure did not reach enabled state for ${packageName}: ${JSON.stringify(finalDecision)}`
+    );
+  }
+  if (!initialDecision.install && packageName === "botster-web") {
+    reusedWebPackageProvenance = await resolveReusedWebPackageProvenance(
+      socketPath,
+      packages.find((candidate) => candidate.package_name === packageName),
+      packagePath
+    );
+  }
+  return { initialDecision, finalDecision };
+}
+
+async function resolveReusedWebPackageProvenance(socketPath, packageRecord, expectedPackageRoot) {
+  if (!packageRecord || typeof packageRecord.version !== "string") {
+    throw new Error("reused botster-web package did not expose authoritative package provenance");
+  }
+  const entrypoint = packageRecord.runnable_entrypoints?.find(
+    (candidate) => candidate.id === "web-client"
+  );
+  if (!entrypoint) {
+    throw new Error("reused botster-web package did not expose the web-client entrypoint");
+  }
+
+  const response = await sendDaemonRequest(socketPath, {
+    type: "resolve_app_launch",
+    package_name: "botster-web",
+    entrypoint_id: "web-client"
+  });
+  if (response.error && response.error.code !== "unsupported_app_kind") {
+    throw new Error(`could not resolve reused botster-web launch provenance: ${JSON.stringify(response)}`);
+  }
+  if (!response.error && !response.resolved_app_launch) {
+    throw new Error(`reused botster-web launch provenance was empty: ${JSON.stringify(response)}`);
+  }
+
+  const expectedWorkingDirectory = resolve(expectedPackageRoot);
+  const resolvedWorkingDirectory = response.resolved_app_launch?.working_directory;
+  const workingDirectory = resolvedWorkingDirectory
+    ? resolve(resolvedWorkingDirectory)
+    : null;
+  return {
+    package_name: packageRecord?.package_name,
+    package_version: packageRecord?.version,
+    source_kind: packageRecord?.source_kind,
+    working_directory: workingDirectory,
+    working_directory_policy: entrypoint?.working_directory?.policy,
+    working_directory_path: entrypoint?.working_directory?.path,
+    expected_working_directory: expectedWorkingDirectory,
+    matches_expected_working_directory: workingDirectory == null
+      ? null
+      : workingDirectory === expectedWorkingDirectory,
+    classification: workingDirectory == null
+      ? "web_launch_working_directory_not_exposed"
+      : workingDirectory === expectedWorkingDirectory
+        ? "expected_package_root"
+        : "resolved_working_directory_mismatch",
+    resolve_app_launch_error: response.error?.code ?? null
+  };
+}
+
+function recordServedWebBuildProvenance(servedHtml, packageProvenance) {
+  const localHtml = readFileSync(join(packageRoot, "dist", "index.html"), "utf8");
+  const localAssetUrls = htmlAssetUrls(localHtml);
+  const servedAssetUrls = htmlAssetUrls(servedHtml);
+  const servedAssetsMatchLocalBuild =
+    localAssetUrls.length > 0 &&
+    JSON.stringify(servedAssetUrls) === JSON.stringify(localAssetUrls);
+  console.log(`live package reuse provenance ${JSON.stringify({
+    ...packageProvenance,
+    local_asset_urls: localAssetUrls,
+    served_asset_urls: servedAssetUrls,
+    served_assets_match_local_build: servedAssetsMatchLocalBuild,
+    build_classification: servedAssetsMatchLocalBuild
+      ? "served_assets_match_local_build"
+      : "served_assets_do_not_match_local_build"
+  })}`);
+}
+
+async function listPackages(socketPath) {
+  const response = await sendDaemonRequest(socketPath, { type: "list_packages" });
+  if (response.error || !Array.isArray(response.packages)) {
+    throw new Error(`structured package list failed: ${JSON.stringify(response)}`);
+  }
+  return response.packages;
+}
+
+async function seedDurableExitedSessions() {
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  for (const sessionId of durableSeedSessionIds) {
+    const response = await sendDaemonRequest(socketPath, {
+      type: "spawn",
+      session_id: sessionId,
+      command: "sleep 30"
+    });
+    if (response.error) {
+      throw new Error(`durable session seed failed for ${sessionId}: ${JSON.stringify(response.error)}`);
+    }
+    const shutdownResponse = await sendDaemonRequest(socketPath, {
+      type: "shutdown_session",
+      session_id: sessionId
+    });
+    if (shutdownResponse.error) {
+      throw new Error(
+        `durable session seed shutdown failed for ${sessionId}: ${JSON.stringify(shutdownResponse.error)}`
+      );
+    }
+  }
+
+  const deadline = Date.now() + 15_000;
+  let lastSessions = [];
+  while (Date.now() < deadline) {
+    const response = await sendDaemonRequest(socketPath, { type: "list_sessions" });
+    lastSessions = response.sessions ?? [];
+    const exitedIds = new Set(
+      lastSessions
+        .filter((session) => session.lifecycle === "exited")
+        .map((session) => session.session_id)
+    );
+    if (durableSeedSessionIds.every((sessionId) => exitedIds.has(sessionId))) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `durable sessions did not all exit: ${durableSeedSessionIds.join(", ")}; observed=${JSON.stringify(lastSessions)}`
+  );
+}
+
+async function restartHubWithDurableState() {
+  await runHubCommand(["shutdown", "--data-dir", webrtcDataDir]);
+  if (hubProcess?.exitCode === null) {
+    await Promise.race([
+      once(hubProcess, "exit"),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("hub did not exit for durable-state restart")), 5_000)
+      )
+    ]);
+  }
+
+  hubProcess = spawnHubProcess(webrtcDataDir);
+  await waitForSocket(join(webrtcDataDir, "botster-hub.sock"), () =>
+    hubProcess?.exitCode !== null
+      ? `hub exited before durable-state restart readiness (code=${hubProcess.exitCode})`
+      : undefined
+  );
+
+  const { initialDecision } = await ensurePackageEnabled("botster-web", packageRoot);
+  assertPackageReused(initialDecision, "botster-web");
 }
 
 async function loadBinaryProvenance() {
@@ -2211,6 +2457,7 @@ async function waitForHtmlShell(url) {
   if (!response.ok || !body.includes("<div id=\"root\"></div>") || !body.includes("__BOTSTER_PACKAGE_RUNTIME__")) {
     throw new Error(`packaged UI shell was not served from ${url}`);
   }
+  return body;
 }
 
 function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) {
