@@ -18,6 +18,7 @@ import {
   readLocalWebrtcDeliveryChunkConformanceFixture,
   readModeFlagsConformanceFixture,
   readSessionLifecycleSubscriptionConformanceFixture,
+  readUiContractConformanceFixtures,
   verifyPackageAssets
 } from "@trybotster/hub-test-support";
 import ts from "typescript";
@@ -37,6 +38,7 @@ import {
 const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
 let nextTestResponseMessageId = 0;
+const uiContractConformanceFixtures = await readUiContractConformanceFixtures();
 
 assert.deepEqual(packageEnsureDecision([], "botster-web"), {
   install: true,
@@ -380,14 +382,14 @@ assert.match(generatedDaemonProtocol, /\| \{ type: "stop_package_entrypoint"; pa
 assert.match(generatedDaemonProtocol, /\| \{ type: "restart_package_entrypoint"; package_name: string; entrypoint_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "package_entrypoint_status"; package_name: string; entrypoint_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue \}/);
-assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_action"; package_name: string; surface_id: string; action_id: string; payload: JsonValue \}/);
+assert.match(generatedDaemonProtocol, /import type \{ UiActionRequest, UiActionResult, UiNode \} from "@trybotster\/ui-contract"/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_action"; package_name: string; request: UiActionRequest \}/);
 assert.doesNotMatch(app, /action\.id === "contract\.action"/);
 assert.doesNotMatch(hubTransport, /action\.id === "contract\.action"/);
 assert.doesNotMatch(hubTransport, /botster\.plugin-contract-matrix|surface_id:\s*"contract\.app"/);
-assert.match(hubTransport, /pluginSurfaceActionRequest\(action\)/);
+assert.match(hubTransport, /pluginSurfaceActionRequest\(action, request\.request_id\)/);
 assert.match(hubTransport, /package_name:\s*pluginSurfaceAction\.packageName/);
-assert.match(hubTransport, /surface_id:\s*pluginSurfaceAction\.surfaceId/);
-assert.match(hubTransport, /action_id:\s*pluginSurfaceAction\.actionId/);
+assert.match(hubTransport, /request:\s*pluginSurfaceAction\.request/);
 assert.match(liveProtocolHarnessScript, /waitForContractActionResult/);
 assert.match(liveProtocolHarnessScript, /waitForVisibleContractMatrixText/);
 assert.doesNotMatch(liveProtocolHarnessScript, /accepted\|accepted/i);
@@ -395,7 +397,7 @@ assert.doesNotMatch(liveProtocolHarnessScript, /operator\/i/);
 assert.doesNotMatch(liveProtocolHarnessScript, /Rejected contract\\.action\|error/i);
 assert.match(generatedDaemonProtocol, /plugin_surface\?: DaemonPluginSurface \| null;/);
 assert.match(generatedDaemonProtocol, /export interface DaemonPluginSurface/);
-assert.match(generatedDaemonProtocol, /body: JsonValue;/);
+assert.match(generatedDaemonProtocol, /body: UiNode;/);
 assert.match(generatedDaemonProtocol, /ui_tree_snapshot\?: DaemonUiTreeSnapshot \| null;/);
 assert.match(generatedDaemonProtocol, /export interface DaemonUiTreeSnapshot/);
 assert.match(generatedDaemonProtocol, /export interface DaemonPackage/);
@@ -575,7 +577,9 @@ assert.match(
 assert.match(actions, /class CorrelatedActionDispatcher/);
 assert.match(actions, /botster\.session\.select/);
 assert.doesNotMatch(actions, /click|submit|change/);
-assert.match(uiNodes, /dispatchAction\?: \(action: ActionBinding, node: UiNode\) => void/);
+assert.match(uiNodes, /dispatchAction\?: \(dispatch: UiNodeActionDispatch\) => void/);
+assert.doesNotMatch(uiNodes, /export interface UiNode\s*\{/);
+assert.doesNotMatch(actions, /export interface UiActionRequest\s*\{|export interface UiActionResult\s*\{/);
 assert.doesNotMatch(app, /dangerouslySetInnerHTML|srcDoc/);
 assert.doesNotMatch(client, /dangerouslySetInnerHTML|srcDoc/);
 assert.doesNotMatch(hubTransport, /dangerouslySetInnerHTML|srcDoc/);
@@ -686,37 +690,25 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-const hubTestSupportVersion = packageJson.devDependencies["@trybotster/hub-test-support"];
-const expectedHubDaemonProtocolSha256 = "39e9202bd333584be077e1d1ef5c3fa31a9409996607cb4c01471c103e263980";
+const expectedHubDaemonProtocolSha256 = hubTestSupportMetadata.daemon_protocol.sha256;
 const installedDaemonProtocol = readDaemonProtocolTypescript();
-assert.equal(hubTestSupportVersion, "0.1.11");
+assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name], hubTestSupportMetadata.ui_contract.package_version);
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.11");
-assert.equal(hubTestSupportMetadata.protocol_version, 3);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 18);
-assert.equal(hubTestSupportMetadata.daemon_protocol.sha256, expectedHubDaemonProtocolSha256);
+assert.equal(hubTestSupportMetadata.protocol_version, 4);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 22);
 assert.equal(createHash("sha256").update(installedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
 assert.equal(createHash("sha256").update(generatedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
 assert.match(generatedDaemonProtocol, /\{ type: "refresh_local_packages" \}/);
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(hubTestSupportMetadata.application_primitives.surface_id, "contract.app");
-assert.deepEqual(hubTestSupportMetadata.application_primitives.primitive_kinds, [
-  "button",
-  "empty_state",
-  "form",
-  "metric",
-  "metric_grid",
-  "panel",
-  "section",
-  "status_badge",
-  "table",
-  "text_input",
-  "toolbar"
-]);
+for (const primitive of ["button", "dialog", "form", "panel", "text", "text_input", "toolbar"]) {
+  assert.equal(hubTestSupportMetadata.application_primitives.primitive_kinds.includes(primitive), true);
+}
+assert.equal(hubTestSupportMetadata.application_primitives.primitive_kinds.includes("action"), false);
 assert.equal(applicationPrimitivesFixturePath(), pluginContractMatrixFixturePath());
 assert.equal(verifyPackageAssets().ok, true);
 const modeFlagsConformanceFixture = readModeFlagsConformanceFixture();
-assert.equal(modeFlagsConformanceFixture.conformance_fixture_revision, 18);
+assert.equal(modeFlagsConformanceFixture.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.deepEqual(modeFlagsConformanceFixture.request, {
   type: "read_mode_flags",
   session_id: "mode-flags-fixture-session"
@@ -737,7 +729,7 @@ for (const failure of [modeFlagsConformanceFixture.unknown_session, modeFlagsCon
 assert.equal(modeFlagsConformanceFixture.unknown_session.error_code, "unknown_session");
 assert.equal(modeFlagsConformanceFixture.backend_failure.error_code, "runtime_error");
 const lateAttachHistoryConformanceFixture = readLateAttachHistoryConformanceFixture();
-assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, 18);
+assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.deepEqual(
   lateAttachHistoryConformanceFixture.history_then_live.map((event) =>
     event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
@@ -793,7 +785,7 @@ assert.equal(
   "encrypted-operator-error"
 );
 const sessionLifecycleFixture = readSessionLifecycleSubscriptionConformanceFixture();
-assert.equal(sessionLifecycleFixture.conformance_fixture_revision, 18);
+assert.equal(sessionLifecycleFixture.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(sessionLifecycleFixture.fresh_subscription.requires_authoritative_snapshot_before_deltas, true);
 assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
 assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping daemon protocol drift check|check out \.\.\/botster-hub/);
@@ -1233,9 +1225,14 @@ assert.deepEqual(
   {
     type: "plugin_surface_action",
     package_name: "project-pipelines",
-    surface_id: "home",
-    action_id: "ticket.open",
-    payload: { ticket_id: "ticket_1" }
+    request: {
+      request_id: "fixture-action-1",
+      surface_id: "home",
+      action_id: "ticket.open",
+      node_id: "ticket-row-1",
+      kind: "submit",
+      payload: { ticket_id: "ticket_1" }
+    }
   }
 );
 assert.equal(
@@ -1368,7 +1365,7 @@ transport.inject({
     kind: "ui_tree_snapshot",
     surface: "runtime-test",
     version: "test-v1",
-    root: { id: "runtime-root", primitive: "text", props: { text: "Runtime snapshot" } }
+    root: { id: "runtime-root", type: "text", props: { text: "Runtime snapshot" } }
   }
 });
 assert.equal(runtime.uiTree.current().surface, "runtime-test");
@@ -1927,17 +1924,15 @@ const bridge = {
               surface_id: request.surface_id,
               body: {
                 id: `botster-web-${request.surface_id}-root`,
-                primitive: "section",
-                props: { label: settings ? "botster-web Settings" : "botster-web App" },
-                slots: {
-                  children: [
-                    {
-                      id: `botster-web-${request.surface_id}-copy`,
-                      primitive: "text",
-                      props: { text: bodyText }
-                    }
-                  ]
-                }
+                type: "section",
+                props: { title: settings ? "botster-web Settings" : "botster-web App" },
+                children: [
+                  {
+                    id: `botster-web-${request.surface_id}-copy`,
+                    type: "text",
+                    props: { text: bodyText }
+                  }
+                ]
               }
             }
           },
@@ -1957,8 +1952,8 @@ const bridge = {
             surface_id: request.surface_id,
             body: {
               id: `${request.package_name}-${request.surface_id}-root`,
-              primitive: "section",
-              props: { label: "Rendered plugin surface" }
+              type: "section",
+              props: { title: "Rendered plugin surface" }
             }
           }
         },
@@ -1971,8 +1966,12 @@ const bridge = {
       return {
         kind: "plugin_action_result",
         plugin_action_result: {
-          state: "success",
-          message: `${request.action_id} accepted`
+          request_id: request.request.request_id,
+          surface_id: request.request.surface_id,
+          action_id: request.request.action_id,
+          node_id: request.request.node_id,
+          state: "accepted",
+          payload: { message: `${request.request.action_id} accepted` }
         },
         events: [],
         diagnostics: []
@@ -3199,13 +3198,23 @@ await realTransport.send({
     action: {
       id: "ticket.open",
       label: "Open ticket",
-      params: {
-        package_name: "project-pipelines",
-        surface_id: "home",
-        action_id: "ticket.open"
-      },
       payload: {
         ticket_id: "ticket_123"
+      },
+      pluginSurface: {
+        package_name: "project-pipelines",
+        request: {
+          surface_id: "home",
+          action_id: "ticket.open",
+          node_id: "ticket-row-123",
+          kind: "submit",
+          values: {
+            title: "Canonical values"
+          },
+          payload: {
+            ticket_id: "ticket_123"
+          }
+        }
       }
     }
   }
@@ -3347,10 +3356,18 @@ assert.deepEqual(
   {
     type: "plugin_surface_action",
     package_name: "project-pipelines",
-    surface_id: "home",
-    action_id: "ticket.open",
-    payload: {
-      ticket_id: "ticket_123"
+    request: {
+      request_id: "real-plugin-surface-action-1",
+      surface_id: "home",
+      action_id: "ticket.open",
+      node_id: "ticket-row-123",
+      kind: "submit",
+      values: {
+        title: "Canonical values"
+      },
+      payload: {
+        ticket_id: "ticket_123"
+      }
     }
   }
 );
@@ -4476,6 +4493,12 @@ try {
     { ConnectionDiagnosticsPanel },
     { LocalHubFirstScreen },
     { createInMemoryEntityFrameStore },
+    {
+      acceptedResultMatches,
+      applyAcceptedPresentation,
+      presentationValues,
+      replaceAcceptedSurface
+    },
     { configurationFieldType, configurationSaveAction, configurationSubmitValues },
     { resolveTerminalSessionId },
     {
@@ -4504,6 +4527,7 @@ try {
     vite.ssrLoadModule("/src/botster/ConnectionDiagnosticsPanel.tsx"),
     vite.ssrLoadModule("/src/botster/LocalHubFirstScreen.tsx"),
     vite.ssrLoadModule("/src/botster/entities.ts"),
+    vite.ssrLoadModule("/src/botster/uiPresentation.ts"),
     vite.ssrLoadModule("/src/packageConfigurationForm.ts"),
     vite.ssrLoadModule("/src/botster/terminalSession.ts"),
     vite.ssrLoadModule("/src/App.tsx")
@@ -4941,32 +4965,23 @@ try {
     version: "plugin-surface-hub-validated-v1",
     root: {
       id: "production-app-root",
-      primitive: "panel",
-      props: { title: "botster-web App", label: "botster-web App" },
-      slots: {
-        children: [
-          {
-            id: "production-app-copy",
-            primitive: "text",
-            props: { text: "Workspaces rendered" }
-          },
-          {
-            id: "production-app-action",
-            primitive: "button",
-            props: {
-              label: "Run deterministic action",
-              action: {
-                id: "ticket.open",
-                params: {
-                  package_name: "botster-web",
-                  surface_id: "production-app",
-                  action_id: "ticket.open"
-                }
-              }
-            }
+      type: "panel",
+      props: { title: "botster-web App" },
+      children: [
+        {
+          id: "production-app-copy",
+          type: "text",
+          props: { text: "Workspaces rendered" }
+        },
+        {
+          id: "production-app-action",
+          type: "button",
+          props: {
+            label: "Run deterministic action",
+            action: { id: "ticket.open" }
           }
-        ]
-      }
+        }
+      ]
     }
   };
   const successfulValidatedSnapshotSurfaceMarkup = renderPluginSurfaceRoutePage({
@@ -5009,7 +5024,7 @@ try {
                   {
                     id: "production-app-action",
                     type: "button",
-                    props: { label: "Run deterministic action", action: "ticket.open" }
+                    props: { label: "Run deterministic action", action: { id: "ticket.open" } }
                   }
                 ]
               }
@@ -5026,7 +5041,9 @@ try {
       title: "botster-web",
       phase: "rendered",
       status: "botster-web: Workspaces rendered (botster-web/production-app)",
-      snapshot: validatedProductionSnapshot
+      snapshot: validatedProductionSnapshot,
+      packageName: "botster-web",
+      surfaceId: "production-app"
     }
   );
   const applicationPrimitiveSurface = { packageName: "botster.plugin-contract-matrix", surfaceId: "contract.app" };
@@ -5092,7 +5109,7 @@ try {
                 {
                   id: "contract-app-row-toolbar",
                   cells: {
-                    primitive: "toolbar",
+                    type: "toolbar",
                     status: "supported"
                   },
                   action: { id: "contract.row.open", payload: { workspace_id: "workspace-alpha" } }
@@ -5147,35 +5164,23 @@ try {
     ...applicationPrimitiveState,
     title: "Contract App"
   });
-  assert.equal(applicationPrimitiveState.snapshot.root.primitive, "panel");
-  assert.equal(applicationPrimitiveState.snapshot.root.slots.children[0].primitive, "toolbar");
-  assert.equal(applicationPrimitiveState.snapshot.root.slots.children[0].slots.actions[0].primitive, "button");
-  assert.deepEqual(applicationPrimitiveState.snapshot.root.slots.children[0].slots.actions[0].props.action.params, {
-    package_name: "botster.plugin-contract-matrix",
-    surface_id: "contract.app",
-    action_id: "contract.action"
-  });
-  assert.deepEqual(applicationPrimitiveState.snapshot.root.slots.children[0].slots.actions[0].props.action.payload, {
+  assert.equal(applicationPrimitiveState.snapshot.root.type, "panel");
+  assert.equal(applicationPrimitiveState.snapshot.root.children[0].type, "toolbar");
+  assert.equal(applicationPrimitiveState.snapshot.root.children[0].slots.actions[0].type, "button");
+  assert.equal(applicationPrimitiveState.snapshot.root.children[0].slots.actions[0].props.action.params, undefined);
+  assert.deepEqual(applicationPrimitiveState.snapshot.root.children[0].slots.actions[0].props.action.payload, {
     workspace_id: "workspace-toolbar"
   });
-  const translatedTable = applicationPrimitiveState.snapshot.root.slots.children[2].slots.children[1];
-  assert.deepEqual(translatedTable.props.rows[0].action.params, {
-    package_name: "botster.plugin-contract-matrix",
-    surface_id: "contract.app",
-    action_id: "contract.row.open"
-  });
+  const translatedTable = applicationPrimitiveState.snapshot.root.children[2].children[1];
+  assert.equal(translatedTable.props.rows[0].action.params, undefined);
   assert.deepEqual(translatedTable.props.rows[0].action.payload, {
     workspace_id: "workspace-alpha"
   });
-  assert.deepEqual(translatedTable.props.empty_state.props.primary_action.params, {
-    package_name: "botster.plugin-contract-matrix",
-    surface_id: "contract.app",
-    action_id: "contract.table.empty.primary"
-  });
+  assert.equal(translatedTable.props.empty_state.props.primary_action.params, undefined);
   assert.deepEqual(translatedTable.props.empty_state.props.primary_action.payload, {
     workspace_id: "workspace-table-empty"
   });
-  const translatedEmptyState = applicationPrimitiveState.snapshot.root.slots.children[2].slots.children[2];
+  const translatedEmptyState = applicationPrimitiveState.snapshot.root.children[2].children[2];
   assert.deepEqual(translatedEmptyState.props.primary_action.payload, {
     workspace_id: "workspace-empty"
   });
@@ -5710,7 +5715,7 @@ try {
           plugin_surface_sandbox: true,
           isolated_plugin_asset: false
         },
-        collectAction(action, node) {
+        collectAction({ action, node }) {
           collectedActions.push({ action, nodeId: node.id });
         }
       }
@@ -5727,13 +5732,296 @@ try {
   assert.match(markup, /Universal primitives/);
   assert.match(markup, /Renderer registry/);
   assert.match(markup, /Capability fallback/);
-  assert.match(markup, /Title already exists/);
   assert.match(markup, /data-action-id="botster\.session\.select"/);
-  assert.match(markup, /Unsupported capability: isolated_plugin_asset/);
-  assert.match(markup, /data-unsupported-primitive="timeline"/);
   assert.equal(collectedActions.some(({ action }) => action.id === "botster.session.select"), true);
-  assert.equal(fixtureProvenance.mirroredFor, "ticket_1780941197_299829");
+  assert.equal(fixtureProvenance.source, "@trybotster/ui-contract/conformance-fixtures");
+  assert.equal(fixtureProvenance.contractVersion, "0.1.0");
   assert.equal(ionicUiNodeRendererRegistry.supports("iframe"), true);
+  const missingCapabilityMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "fallback.capability",
+        version: "test",
+        root: {
+          id: "capability-gated-node",
+          type: "text",
+          props: {
+            text: "Must not render",
+            requires: ["isolated_plugin_asset"]
+          }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {
+        capabilities: {
+          ionic_shell: true,
+          ui_tree_snapshot: true,
+          entity_frame_store: true,
+          semantic_actions: true,
+          terminal_view_bridge: true,
+          plugin_surface_sandbox: true,
+          isolated_plugin_asset: false
+        }
+      }
+    )
+  );
+  assert.match(missingCapabilityMarkup, /data-missing-capability="isolated_plugin_asset"/);
+  assert.match(missingCapabilityMarkup, /Unsupported capability: isolated_plugin_asset/);
+  assert.doesNotMatch(missingCapabilityMarkup, /Must not render/);
+
+  const unsupportedPrimitiveMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "fallback.primitive",
+        version: "test",
+        root: {
+          id: "unsupported-timeline",
+          type: "timeline"
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.match(unsupportedPrimitiveMarkup, /data-unsupported-primitive="timeline"/);
+  assert.match(unsupportedPrimitiveMarkup, /Unsupported primitive: timeline/);
+
+  const presentedFixtureMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      uiNodeConformanceSnapshot,
+      createInMemoryEntityFrameStore(fixtureEntityFrames),
+      {
+        presentation: {
+          "create-ticket-dialog": true,
+          "selected-workspace": "workspace-alpha"
+        }
+      }
+    )
+  );
+  assert.match(presentedFixtureMarkup, /data-ui-node-id="create-ticket-dialog"/);
+  assert.match(presentedFixtureMarkup, /Create ticket/);
+  assert.match(presentedFixtureMarkup, /Selected workspace/);
+
+  const contractRequest = uiContractConformanceFixtures.fixtures.request;
+  const acceptedContractResult = uiContractConformanceFixtures.fixtures.accepted;
+  const rejectedContractResult = uiContractConformanceFixtures.fixtures.rejected;
+  const rejectedFormMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: rejectedContractResult.surface_id,
+        version: "test",
+        root: uiContractConformanceFixtures.fixtures.form
+      },
+      createInMemoryEntityFrameStore(),
+      { actionResult: rejectedContractResult }
+    )
+  );
+  assert.match(
+    rejectedFormMarkup,
+    /<ion-item[^>]*data-ui-node-id="ticket-title"[^>]*>[\s\S]*?class="uinode-field-error"[\s\S]*?Title is required[\s\S]*?<\/ion-item>/
+  );
+  assert.match(
+    rejectedFormMarkup,
+    /class="uinode-form-error"[\s\S]*?Fix the highlighted fields/
+  );
+
+  const presentationScope = {
+    hubId: "hub-alpha",
+    packageName: "botster.plugin-contract-matrix",
+    surfaceId: contractRequest.surface_id
+  };
+  const isolatedPresentationScope = {
+    ...presentationScope,
+    surfaceId: "tickets.other"
+  };
+  assert.equal(acceptedResultMatches(contractRequest, acceptedContractResult), true);
+  assert.equal(acceptedResultMatches(contractRequest, { ...acceptedContractResult, request_id: "mismatch" }), false);
+  const presentedState = applyAcceptedPresentation({}, presentationScope, contractRequest, acceptedContractResult);
+  assert.deepEqual(presentationValues(presentedState, presentationScope), {
+    notice: "created",
+    details: true
+  });
+  assert.deepEqual(presentationValues(presentedState, isolatedPresentationScope), {});
+  assert.equal(
+    applyAcceptedPresentation(presentedState, presentationScope, contractRequest, rejectedContractResult),
+    presentedState
+  );
+  const dialogSetState = applyAcceptedPresentation({}, presentationScope, contractRequest, {
+    ...acceptedContractResult,
+    presentation: [
+      { kind: "set", key: "create-ticket-dialog", value: true },
+      { kind: "set", key: "details", value: true }
+    ]
+  });
+  const toggleOffState = applyAcceptedPresentation(dialogSetState, presentationScope, contractRequest, {
+    ...acceptedContractResult,
+    presentation: [{ kind: "toggle", key: "details" }]
+  });
+  assert.equal(presentationValues(toggleOffState, presentationScope).details, false);
+  const toggleOnState = applyAcceptedPresentation(toggleOffState, presentationScope, contractRequest, {
+    ...acceptedContractResult,
+    presentation: [{ kind: "toggle", key: "details" }]
+  });
+  assert.equal(presentationValues(toggleOnState, presentationScope).details, true);
+  const dialogClearedState = applyAcceptedPresentation(toggleOnState, presentationScope, contractRequest, {
+    ...acceptedContractResult,
+    presentation: [{ kind: "clear", key: "create-ticket-dialog" }]
+  });
+  assert.equal(Object.hasOwn(presentationValues(dialogClearedState, presentationScope), "create-ticket-dialog"), false);
+  const dialogSetMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      uiNodeConformanceSnapshot,
+      createInMemoryEntityFrameStore(fixtureEntityFrames),
+      { presentation: presentationValues(dialogSetState, presentationScope) }
+    )
+  );
+  const dialogClearedMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      uiNodeConformanceSnapshot,
+      createInMemoryEntityFrameStore(fixtureEntityFrames),
+      { presentation: presentationValues(dialogClearedState, presentationScope) }
+    )
+  );
+  assert.match(dialogSetMarkup, /data-ui-node-id="create-ticket-dialog"/);
+  assert.doesNotMatch(dialogClearedMarkup, /data-ui-node-id="create-ticket-dialog"/);
+
+  const replacementRoot = {
+    id: "replacement-root",
+    type: "stack",
+    children: [
+      {
+        id: "ticket-form",
+        type: "form",
+        props: {
+          action: { id: "ticket.create" },
+          submit_label: "Create ticket"
+        }
+      }
+    ]
+  };
+  assert.equal(replaceAcceptedSurface(replacementRoot, acceptedContractResult).id, "ticket-created");
+  assert.equal(replaceAcceptedSurface(replacementRoot, rejectedContractResult), replacementRoot);
+
+  const bindListStore = createInMemoryEntityFrameStore([
+    {
+      operation: "entity_snapshot",
+      family: "project-pipelines.ticket",
+      records: [
+        {
+          id: "ticket-alpha",
+          title: "Alpha ticket",
+          comments: [{ id: "comment-alpha", body: "Nested alpha comment" }]
+        },
+        {
+          id: "ticket-beta",
+          title: "Beta ticket",
+          comments: []
+        }
+      ]
+    }
+  ]);
+  const bindListSnapshot = {
+    kind: "ui_tree_snapshot",
+    surface: "bind-list.test",
+    version: "test",
+    root: {
+      id: "bind-list-root",
+      type: "stack",
+      children: [
+        {
+          $kind: "bind_list",
+          source: "/project-pipelines.ticket",
+          item_template: {
+            id: "ticket-template",
+            type: "section",
+            children: [
+              { id: "ticket-template-title", type: "text", props: { text: { $bind: "@/title" } } },
+              {
+                $kind: "bind_list",
+                source: "@/comments",
+                item_template: {
+                  id: "comment-template",
+                  type: "text",
+                  props: { text: { $bind: "@/body" } }
+                },
+                empty_template: {
+                  id: "comment-empty",
+                  type: "text",
+                  props: { text: "No comments" }
+                }
+              }
+            ]
+          },
+          empty_template: {
+            id: "ticket-empty",
+            type: "empty_state",
+            props: { title: "No tickets" }
+          }
+        }
+      ]
+    }
+  };
+  const renderBindList = () => renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(bindListSnapshot, bindListStore, {})
+  );
+  assert.match(renderBindList(), /Alpha ticket/);
+  assert.match(renderBindList(), /Nested alpha comment/);
+  assert.match(renderBindList(), /Beta ticket/);
+  assert.match(renderBindList(), /No comments/);
+  bindListStore.apply({
+    operation: "entity_upsert",
+    key: { family: "project-pipelines.ticket", id: "ticket-gamma" },
+    record: { id: "ticket-gamma", title: "Gamma ticket", comments: [] }
+  });
+  assert.match(renderBindList(), /Gamma ticket/);
+  bindListStore.apply({
+    operation: "entity_patch",
+    key: { family: "project-pipelines.ticket", id: "ticket-alpha" },
+    record: { id: "ticket-alpha", title: "Alpha updated" }
+  });
+  assert.match(renderBindList(), /Alpha updated/);
+  bindListStore.apply({
+    operation: "entity_remove",
+    key: { family: "project-pipelines.ticket", id: "ticket-beta" }
+  });
+  assert.doesNotMatch(renderBindList(), /Beta ticket/);
+  bindListStore.apply({
+    operation: "entity_snapshot",
+    family: "project-pipelines.ticket",
+    records: []
+  });
+  assert.match(renderBindList(), /No tickets/);
+
+  const toolbarMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "toolbar-order.test",
+        version: "test",
+        root: {
+          id: "toolbar-order",
+          type: "toolbar",
+          slots: {
+            actions: [
+              { id: "toolbar-first", type: "button", props: { label: "First", overflow: "never", action: { id: "first" } } },
+              { id: "toolbar-second", type: "button", props: { label: "Second", overflow: "auto", action: { id: "second" } } },
+              { id: "toolbar-third", type: "button", props: { label: "Third", overflow: "always", action: { id: "third" } } }
+            ]
+          }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.equal(toolbarMarkup.indexOf("First") < toolbarMarkup.indexOf("Second"), true);
+  assert.equal(toolbarMarkup.indexOf("Second") < toolbarMarkup.indexOf("Third"), true);
+  assert.match(toolbarMarkup, /data-overflow="never"/);
+  assert.match(toolbarMarkup, /data-overflow="auto"/);
+  assert.match(toolbarMarkup, /data-overflow="always"/);
 
   const schemaSelectMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(
@@ -5743,16 +6031,16 @@ try {
         version: "test",
         root: {
           id: "spawn-form",
-          primitive: "form",
+          type: "form",
           props: {
-            action: "spawn.submit",
-            label: "Create"
+            action: { id: "spawn.submit" },
+            submit_label: "Create"
           },
           slots: {
             children: [
               {
                 id: "spawn-point-field",
-                primitive: "form_field",
+                type: "form_field",
                 props: {
                   schema: {
                     kind: "select",
@@ -5787,7 +6075,7 @@ try {
         version: "test",
         root: {
           id: "preview-frame",
-          primitive: "iframe",
+          type: "iframe",
           props: {
             src: "/packages/iframe.plugin/assets/preview.html",
             title: "Preview",
@@ -5815,7 +6103,7 @@ try {
         version: "test",
         root: {
           id: "bad-frame",
-          primitive: "iframe",
+          type: "iframe",
           props: { src: "javascript:alert(1)", title: "Bad" }
         }
       },
@@ -5834,7 +6122,7 @@ try {
         version: "test",
         root: {
           id: "protocol-relative-frame",
-          primitive: "iframe",
+          type: "iframe",
           props: { src: "//example.invalid/preview.html", title: "Protocol relative" }
         }
       },
@@ -5853,27 +6141,27 @@ try {
         version: "test",
         root: {
           id: "workspaces-root",
-          primitive: "section",
+          type: "section",
           props: { title: "Workspaces" },
           slots: {
             children: [
               {
                 id: "workspaces-list",
-                primitive: "list",
+                type: "list",
                 props: { aria_label: "Workspaces" },
                 slots: {
                   children: [
                     {
                       id: "workspace-row-1",
-                      primitive: "list_item",
+                      type: "list_item",
                       slots: {
-                        title: [{ id: "workspace-row-1-title", primitive: "text", props: { text: "Core renderer contract" } }],
-                        subtitle: [{ id: "workspace-row-1-purpose", primitive: "text", props: { text: "Keep plugin UI generic" } }],
-                        meta: [{ id: "workspace-row-1-status", primitive: "badge", props: { text: "active", tone: "success" } }],
+                        title: [{ id: "workspace-row-1-title", type: "text", props: { text: "Core renderer contract" } }],
+                        subtitle: [{ id: "workspace-row-1-purpose", type: "text", props: { text: "Keep plugin UI generic" } }],
+                        meta: [{ id: "workspace-row-1-status", type: "badge", props: { text: "active", tone: "success" } }],
                         actions: [
                           {
                             id: "workspace-row-1-open",
-                            primitive: "button",
+                            type: "button",
                             props: {
                               label: "Open",
                               action: { id: "workspace.open", target: "workspace-row-1", label: "Open workspace" }
@@ -5911,15 +6199,15 @@ try {
         version: "test",
         root: {
           id: "action-node-id",
-          primitive: "action",
-          props: { action: "workspace.action.intent" }
+          type: "button",
+          props: { label: "Workspace action", action: { id: "workspace.action.intent" } }
         }
       },
       createInMemoryEntityFrameStore(),
       {}
     )
   );
-  assert.match(actionPrimitiveMarkup, />workspace\.action\.intent<\/ion-button>/);
+  assert.match(actionPrimitiveMarkup, />Workspace action<\/ion-button>/);
   assert.doesNotMatch(actionPrimitiveMarkup, />action-node-id<\/ion-button>/);
 
   const interactionActions = [];
@@ -5930,13 +6218,13 @@ try {
       version: "test",
       root: {
         id: "interaction-root",
-        primitive: "section",
+        type: "section",
         props: { title: "Interaction props" },
         slots: {
           children: [
             {
               id: "interaction-empty",
-              primitive: "empty_state",
+              type: "empty_state",
               props: {
                 title: "No workspaces",
                 primary_action: { id: "workspace.create", payload: { workspace_id: "new-workspace" } },
@@ -5945,7 +6233,7 @@ try {
             },
             {
               id: "interaction-list",
-              primitive: "list",
+              type: "list",
               props: {
                 aria_label: "Selectable workspaces",
                 selection: { mode: "single", selected: ["workspace-alpha"] }
@@ -5954,37 +6242,37 @@ try {
                 children: [
                   {
                     id: "workspace-alpha-row",
-                    primitive: "list_item",
+                    type: "list_item",
                     props: {
                       value: "workspace-alpha",
                       activation: { id: "workspace.activate", payload: { workspace_id: "workspace-alpha" } },
                       action: { id: "workspace.open", payload: { workspace_id: "workspace-alpha" } }
                     },
                     slots: {
-                      title: [{ id: "workspace-alpha-title", primitive: "text", props: { text: "Workspace alpha" } }]
+                      title: [{ id: "workspace-alpha-title", type: "text", props: { text: "Workspace alpha" } }]
                     }
                   },
                   {
                     id: "workspace-beta-row",
-                    primitive: "list_item",
+                    type: "list_item",
                     props: {
                       value: "workspace-beta",
                       activation: { id: "workspace.activate.beta", payload: { workspace_id: "workspace-beta" } }
                     },
                     slots: {
-                      title: [{ id: "workspace-beta-title", primitive: "text", props: { text: "Workspace beta" } }]
+                      title: [{ id: "workspace-beta-title", type: "text", props: { text: "Workspace beta" } }]
                     }
                   },
                   {
                     id: "workspace-gamma-row",
-                    primitive: "list_item",
+                    type: "list_item",
                     props: {
                       value: "workspace-gamma",
                       activation: { id: "workspace.activate.gamma", payload: { workspace_id: "workspace-gamma" } },
                       action: { id: "workspace.disabled.open", disabled: true, payload: { workspace_id: "workspace-gamma" } }
                     },
                     slots: {
-                      title: [{ id: "workspace-gamma-title", primitive: "text", props: { text: "Workspace gamma" } }]
+                      title: [{ id: "workspace-gamma-title", type: "text", props: { text: "Workspace gamma" } }]
                     }
                   }
                 ]
@@ -5992,7 +6280,7 @@ try {
             },
             {
               id: "interaction-table",
-              primitive: "table",
+              type: "table",
               props: {
                 columns: [{ id: "workspace", label: "Workspace" }],
                 selection: { mode: "single", selected: ["row-alpha"] },
@@ -6013,13 +6301,13 @@ try {
             },
             {
               id: "interaction-empty-table",
-              primitive: "table",
+              type: "table",
               props: {
                 columns: [{ id: "workspace", label: "Workspace" }],
                 rows: [],
                 empty_state: {
                   id: "interaction-empty-table-state",
-                  primitive: "empty_state",
+                  type: "empty_state",
                   props: {
                     title: "No table rows",
                     primary_action: { id: "workspace.table.empty", payload: { workspace_id: "empty-table" } }
@@ -6033,7 +6321,7 @@ try {
     },
     createInMemoryEntityFrameStore(),
     {
-      collectAction: (action, node) => interactionActions.push({ action, nodeId: node.id })
+      collectAction: ({ action, node }) => interactionActions.push({ action, nodeId: node.id })
     }
   );
   const interactionMarkup = renderToStaticMarkup(interactionTree);
@@ -6085,12 +6373,12 @@ try {
         version: "test",
         root: {
           id: "inline-root",
-          primitive: "inline",
+          type: "inline",
           props: { gap: "large", align: "center", justify: "end" },
           slots: {
             children: [
-              { id: "inline-title", primitive: "text", props: { text: "Inline controls" } },
-              { id: "inline-status", primitive: "badge", props: { text: "Blocked", tone: "danger" } }
+              { id: "inline-title", type: "text", props: { text: "Inline controls" } },
+              { id: "inline-status", type: "badge", props: { text: "Blocked", tone: "danger" } }
             ]
           }
         }
@@ -6112,13 +6400,13 @@ try {
         version: "test",
         root: {
           id: "empty-root",
-          primitive: "empty_state",
+          type: "empty_state",
           props: { title: "No workspaces", body: "Create one to start routing sessions." },
           slots: {
             actions: [
               {
                 id: "empty-create",
-                primitive: "button",
+                type: "button",
                 props: {
                   label: "Create",
                   action: { id: "workspace.create", label: "Create workspace" }

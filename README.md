@@ -8,6 +8,8 @@
 - Installed package runtime requires a hub-issued local WebRTC bootstrap grant.
 - Encrypted daemon requests, responses, terminal traffic, and pushed session entity frames travel over the ordered WebRTC data channel.
 - Session state begins with an authoritative subscription snapshot and continues through ordered pushed deltas. The client does not poll or call `list_sessions`.
+- `@trybotster/ui-contract` is the sole `UiNode`, action request, and action result source. The generated daemon declarations and shared conformance fixtures come from the pinned `@trybotster/hub-test-support` release.
+- Plugin form drafts travel in canonical `UiActionRequest.values`; optional action metadata remains in `payload`. Accepted correlated results may replace the owning subtree and mutate Hub/package/surface-scoped presentation state, while rejected results retain the tree, dialog, values, and actionable errors.
 - After binding, the loopback package server requests an origin-bound initial WebRTC grant from Hub and injects it into each HTML load. It handles later bootstrap refresh and signaling at `/request`; it is not a daemon control or terminal-data fallback.
 - Restty is the terminal renderer. It receives terminal data through `TerminalViewHost` and the WebRTC-backed data-plane adapter.
 
@@ -71,6 +73,17 @@ BOTSTER_HUB_BIN=/path/to/botster-hub \
 BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
 npm run smoke:plugin-contract-matrix
 ```
+
+That smoke drives the rendered contract surface through the real adapter: an
+authored action returns an accepted presentation `set`, the dialog appears,
+whitespace-only submission returns structured field/form errors without
+closing it or discarding the draft, and a retry sends worker-visible values
+before the accepted result carries a
+presentation `clear` and its whole-surface replacement renders. Assertions use
+structured requests/results rather than toast timing. Deterministic tests prove
+scoped `set`/`clear`, both directions of `toggle`, dialog disappearance after
+clear, equality, scope isolation, nested/empty `bind_list`, toolbar
+order/overflow intent, and entity snapshot/upsert/patch/remove convergence.
 
 ## Local package server
 

@@ -1,5 +1,6 @@
 // Generated from crates/botster-hub-client Rust serde DTOs.
 // Regenerate/check with: ./test.sh -p botster-hub-client
+import type { UiActionRequest, UiActionResult, UiNode } from "@trybotster/ui-contract";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
@@ -78,8 +79,8 @@ export type DaemonRequest =
   | { type: "read_session_context"; session_id: string; context_id?: string | null; key?: string | null }
   | { type: "list_spawn_targets" }
   | { type: "show_spawn_target"; target_id: string }
-  | { type: "create_spawn_target"; target_id?: string | null; label?: string | null; root: string; enabled?: boolean; kind?: string | null; metadata?: Record<string, string> }
-  | { type: "update_spawn_target"; target_id: string; label?: string | null; root?: string | null; enabled?: boolean | null; kind?: string | null; metadata?: Record<string, string> | null }
+  | { type: "create_spawn_target"; target_id?: string | null; label?: string | null; root: string; enabled?: boolean; kind?: string | null; base_ref?: string | null; metadata?: Record<string, string> }
+  | { type: "update_spawn_target"; target_id: string; label?: string | null; root?: string | null; enabled?: boolean | null; kind?: string | null; base_ref?: string | null; metadata?: Record<string, string> | null }
   | { type: "delete_spawn_target"; target_id: string }
   | { type: "validate_spawn_target"; target_id: string }
   | { type: "list_worktrees" }
@@ -116,7 +117,7 @@ export type DaemonRequest =
   | { type: "plugin_mcp_list_tools" }
   | { type: "plugin_mcp_call_tool"; name: string; arguments: JsonValue }
   | { type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue }
-  | { type: "plugin_surface_action"; package_name: string; surface_id: string; action_id: string; payload: JsonValue }
+  | { type: "plugin_surface_action"; package_name: string; request: UiActionRequest }
   | { type: "local_webrtc_signal"; grant_id: string; grant_secret: string; origin: string; offer: JsonValue }
   | { type: "daemon_shutdown" };
 
@@ -146,7 +147,7 @@ export interface DaemonResponse {
   plugin_tools: JsonValue[];
   plugin_tool_result: JsonValue;
   plugin_surface?: DaemonPluginSurface | null;
-  plugin_action_result?: JsonValue;
+  plugin_action_result?: UiActionResult;
   local_webrtc_bootstrap?: DaemonLocalWebrtcBootstrap | null;
   local_webrtc_answer?: DaemonLocalWebrtcAnswer | null;
   events: DaemonEvent[];
@@ -177,14 +178,14 @@ export interface DaemonCaptureSnapshot {
 export interface DaemonPluginSurface {
   package_name: string;
   surface_id: string;
-  body: JsonValue;
+  body: UiNode;
   ui_tree_snapshot?: DaemonUiTreeSnapshot | null;
 }
 
 export interface DaemonUiTreeSnapshot {
   package_name: string;
   surface_id: string;
-  body: JsonValue;
+  body: UiNode;
 }
 
 export interface DaemonWorktreeLifecycleEvent {
@@ -255,6 +256,7 @@ export interface DaemonSpawnTarget {
   root: string;
   enabled: boolean;
   kind: string;
+  base_ref?: string | null;
   metadata?: Record<string, string>;
 }
 
@@ -270,6 +272,7 @@ export interface DaemonWorktree {
   label: string;
   path: string;
   status: string;
+  management: string;
   git?: DaemonWorktreeGitMetadata | null;
   metadata?: Record<string, string>;
 }
@@ -689,7 +692,33 @@ export interface DaemonStatus {
   session_count: number;
   recovered_sessions: string[];
   stale_sessions: string[];
+  lifecycle_counters?: DaemonLifecycleCounters;
   diagnostics?: DaemonDiagnostic[];
+}
+
+export interface DaemonLifecycleCounters {
+  accepted_connections: number;
+  rejected_connections: number;
+  live_connections: number;
+  high_water_live_connections: number;
+  live_entity_subscriptions: number;
+  high_water_entity_subscriptions: number;
+  live_attach_subscriptions: number;
+  high_water_attach_subscriptions: number;
+  reconnect_registrations: number;
+  cleanup_completed: number;
+  cleanup_failed: number;
+  cleanup_by_reason?: Record<string, number>;
+  reconciliation_wakes: number;
+  lifecycle_change_reads: number;
+  lifecycle_baseline_reads: number;
+  lifecycle_resync_reads: number;
+  lifecycle_session_drains: number;
+  entity_delivery_attempts: number;
+  entity_delivery_successes: number;
+  entity_delivery_overflows: number;
+  entity_delivery_failures: number;
+  stalled_writes: number;
 }
 
 export interface DaemonSession {

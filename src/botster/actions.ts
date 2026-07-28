@@ -1,3 +1,5 @@
+import type { UiActionRequest, UiActionResult } from "@trybotster/ui-contract";
+
 export type SemanticActionId =
   | "botster.session.select"
   | "botster.workspace.toggle"
@@ -15,6 +17,10 @@ export interface ActionBinding {
   payload?: unknown;
   label?: string;
   disabled?: boolean;
+  pluginSurface?: {
+    package_name: string;
+    request: Omit<UiActionRequest, "request_id">;
+  };
 }
 
 export interface ActionDispatchRequest {
@@ -27,20 +33,21 @@ export interface ActionDispatchResult {
   request_id?: string;
   result?: unknown;
   reason?: string;
+  pluginActionResult?: UiActionResult;
 }
 
 export interface ActionDispatcher {
   dispatch(request: ActionDispatchRequest): Promise<ActionDispatchResult>;
-  receiveResult(result: UiActionResult): void;
+  receiveResult(result: ActionResultEnvelope): void;
   rejectPending(reason: string): void;
   pendingCount(): number;
 }
 
-export interface UiActionRequest extends ActionDispatchRequest {
+export interface ActionRequestEnvelope extends ActionDispatchRequest {
   request_id: string;
 }
 
-export interface UiActionResult {
+export interface ActionResultEnvelope {
   request_id: string;
   accepted?: boolean;
   ok?: boolean;
@@ -50,7 +57,7 @@ export interface UiActionResult {
 }
 
 export interface ActionDispatcherOptions {
-  send: (request: UiActionRequest) => Promise<void>;
+  send: (request: ActionRequestEnvelope) => Promise<void>;
   idGenerator?: () => string;
   timeoutMs?: number;
 }
@@ -74,7 +81,7 @@ export class CorrelatedActionDispatcher implements ActionDispatcher {
 
   dispatch(request: ActionDispatchRequest): Promise<ActionDispatchResult> {
     const requestId = this.idGenerator();
-    const envelope: UiActionRequest = {
+    const envelope: ActionRequestEnvelope = {
       request_id: requestId,
       action: request.action,
       origin: request.origin
@@ -103,18 +110,24 @@ export class CorrelatedActionDispatcher implements ActionDispatcher {
     });
   }
 
-  receiveResult(result: UiActionResult): void {
+  receiveResult(result: ActionResultEnvelope): void {
     if (!this.pending.has(result.request_id)) {
       return;
     }
 
     const accepted = result.accepted ?? result.ok ?? false;
 
+    const resultRecord = result.result && typeof result.result === "object" && !Array.isArray(result.result)
+      ? result.result as Record<string, unknown>
+      : {};
+    const pluginActionResult = resultRecord.plugin_action_result as UiActionResult | undefined;
+
     this.resolve(result.request_id, {
       accepted,
       request_id: result.request_id,
       result: result.result,
-      reason: result.reason ?? result.error
+      reason: result.reason ?? result.error,
+      ...(pluginActionResult ? { pluginActionResult } : {})
     });
   }
 

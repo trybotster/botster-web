@@ -777,48 +777,106 @@ async function exerciseContractMatrixSettings(page) {
 async function exerciseContractMatrixActions(page) {
   await navigateToContractSurface(page, "contract.app");
   await assertContractSurfaceRoute(page, "contract.app", "plugin_surface_render");
-  await page.getByRole("button", { name: "Run contract action" }).click();
+  await page.getByRole("button", { name: "Toggle contract state" }).click();
+  await page.getByText("Contract toggle active", { exact: true }).waitFor({ timeout: 15_000 });
+
+  await page.getByRole("button", { name: "Open contract dialog" }).click();
   await waitForHarnessEvent(
     page,
-    { kind: "daemon_request", type: "plugin_surface_action", package_name: contractMatrixPackageName, surface_id: "contract.app" },
-    "contract.action plugin_surface_action request"
+    {
+      kind: "daemon_request",
+      type: "plugin_surface_action",
+      package_name: contractMatrixPackageName,
+      surface_id: "contract.app",
+      action_id: "contract.action"
+    },
+    "contract.action open plugin_surface_action request"
   );
   await waitForContractActionResult(
     page,
     {
       accepted: true,
-      expectedTexts: ["Accepted contract.action", "Contract action accepted", "contract action accepted"],
-      label: "contract.action deterministic success result"
+      expectedStates: ["accepted"],
+      expectedPresentationKinds: ["set"],
+      label: "contract.action accepted presentation set result"
     }
   );
+  await page.locator("[data-ui-node-id='contract-dialog']").waitFor({ timeout: 15_000 });
+  await page.getByText("Workspace alpha selected", { exact: true }).waitFor({ timeout: 15_000 });
 
-  await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchAction));
-  await page.evaluate(({ packageName }) => {
-    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.dispatchAction({
-      id: "contract.action",
-      label: "Run contract action",
-      params: {
-        package_name: packageName,
-        surface_id: "contract.app",
-        action_id: "contract.action"
-      },
-      payload: {
-        fail: true
-      }
-    });
-  }, { packageName: contractMatrixPackageName });
+  const form = page.locator("form[data-ui-node-id='contract-app-form']");
+  const input = form.locator("[data-ui-node-id='contract-app-message'] input");
+  const submit = form.locator(":scope > ion-button[data-action-id='contract.action']:not([data-ui-node-id])");
+  await input.fill("   ");
+  await submit.click();
   await waitForHarnessEvent(
     page,
-    { kind: "daemon_request", type: "plugin_surface_action", package_name: contractMatrixPackageName, surface_id: "contract.app" },
-    "contract.action error plugin_surface_action request"
+    {
+      kind: "daemon_request",
+      type: "plugin_surface_action",
+      package_name: contractMatrixPackageName,
+      surface_id: "contract.app",
+      action_id: "contract.action"
+    },
+    "contract.action rejected form plugin_surface_action request"
   );
   await waitForContractActionResult(
     page,
     {
       accepted: false,
-      expectedTexts: ["contract action failed by request", "Rejected contract.action"],
-      label: "contract.action deterministic failure result"
+      expectedStates: ["rejected"],
+      expectedTexts: ["message is required", "Message is required"],
+      label: "contract.action rejected form result"
     }
+  );
+  await page.locator("[data-ui-node-id='contract-dialog']").waitFor({ timeout: 15_000 });
+  await form.locator("[data-ui-node-id='contract-app-message'] .uinode-field-error").getByText("Message is required", { exact: true }).waitFor({ timeout: 15_000 });
+  await form.locator(".uinode-form-error").getByText("Message is required", { exact: true }).waitFor({ timeout: 15_000 });
+  await input.waitFor({ state: "visible" });
+  if (await input.inputValue() !== "   ") {
+    throw new Error("rejected contract action discarded the typed form draft");
+  }
+
+  await input.fill("Ship canonical values");
+  await submit.click();
+  await waitForPluginSurfaceRequest(page, {
+    packageName: contractMatrixPackageName,
+    surfaceId: "contract.app",
+    actionId: "contract.action",
+    nodeId: "contract-app-form",
+    values: { message: "Ship canonical values" },
+    payload: { operation: "submit" }
+  });
+  await waitForContractActionResult(
+    page,
+    {
+      accepted: true,
+      expectedStates: ["accepted"],
+      expectedPresentationKinds: ["clear"],
+      expectedTexts: ["Ship canonical values", "contract action accepted"],
+      label: "contract.action accepted replacement and clear result"
+    }
+  );
+  await page.getByText("Contract action accepted", { exact: true }).waitFor({ timeout: 15_000 });
+  await page.waitForFunction(() => !globalThis.document.querySelector("[data-ui-node-id='contract-dialog']"), null, { timeout: 15_000 });
+}
+
+async function waitForPluginSurfaceRequest(page, { packageName, surfaceId, actionId, nodeId, values, payload }) {
+  await page.waitForFunction(
+    (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
+      const request = entry.payload?.request;
+      return entry.kind === "daemon_request" &&
+        entry.payload?.type === "plugin_surface_action" &&
+        entry.payload?.package_name === expected.packageName &&
+        request?.surface_id === expected.surfaceId &&
+        request?.action_id === expected.actionId &&
+        request?.node_id === expected.nodeId &&
+        request?.kind === "submit" &&
+        JSON.stringify(request?.values) === JSON.stringify(expected.values) &&
+        JSON.stringify(request?.payload) === JSON.stringify(expected.payload);
+    }),
+    { packageName, surfaceId, actionId, nodeId, values, payload },
+    { timeout: 15_000 }
   );
 }
 
@@ -873,9 +931,12 @@ async function exercisePayloadContract(page) {
   }, null, { timeout: 15_000 });
 }
 
-async function waitForContractActionResult(page, { accepted, expectedTexts, label }) {
+async function waitForContractActionResult(
+  page,
+  { accepted, expectedTexts = [], expectedStates = [], expectedPresentationKinds = [], label }
+) {
   await page.waitForFunction(
-    ({ nextAccepted, texts }) => {
+    ({ nextAccepted, texts, states, presentationKinds }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events.some((entry) => {
         if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
@@ -896,10 +957,19 @@ async function waitForContractActionResult(page, { accepted, expectedTexts, labe
           pluginActionResult.normalized_values?.error,
           pluginActionResult.state
         ].filter((value) => typeof value === "string").join("\n");
-        return texts.some((text) => resultText.includes(text));
+        const stateMatches = states.length === 0 || states.includes(pluginActionResult.state);
+        const textMatches = texts.length === 0 || texts.some((text) => resultText.includes(text));
+        const observedPresentationKinds = (pluginActionResult.presentation ?? []).map((operation) => operation.kind);
+        const presentationMatches = presentationKinds.every((kind) => observedPresentationKinds.includes(kind));
+        return stateMatches && textMatches && presentationMatches;
       });
     },
-    { nextAccepted: accepted, texts: expectedTexts },
+    {
+      nextAccepted: accepted,
+      texts: expectedTexts,
+      states: expectedStates,
+      presentationKinds: expectedPresentationKinds
+    },
     { timeout: 15_000 }
   ).catch(async (error) => {
     const observedResults = await page.evaluate(() =>
