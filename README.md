@@ -76,12 +76,14 @@ npm run smoke:plugin-contract-matrix
 
 That smoke drives the rendered contract surface through the real adapter: an
 authored action returns an accepted presentation `set`, the dialog appears,
-blank submission returns structured field/form errors without closing it, and
-a retry sends worker-visible values before applying the accepted replacement
-and presentation `clear`. Assertions use structured requests/results rather
-than toast timing. Deterministic tests additionally cover `toggle`, equality,
-scope isolation, nested/empty `bind_list`, toolbar order/overflow intent, and
-entity snapshot/upsert/patch/remove convergence.
+whitespace-only submission returns structured field/form errors without
+closing it or discarding the draft, and a retry sends worker-visible values
+before the accepted result carries a
+presentation `clear` and its whole-surface replacement renders. Assertions use
+structured requests/results rather than toast timing. Deterministic tests prove
+scoped `set`/`clear`, both directions of `toggle`, dialog disappearance after
+clear, equality, scope isolation, nested/empty `bind_list`, toolbar
+order/overflow intent, and entity snapshot/upsert/patch/remove convergence.
 
 ## Local package server
 

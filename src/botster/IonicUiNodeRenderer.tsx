@@ -650,13 +650,17 @@ function UiNodeForm({
     ? latestActionResult
     : undefined;
   const initialDraft = useMemo(
-    () => ({
-      ...collectFormControlDefaults(children, store, options, row),
-      ...(actionResult?.normalized_values ?? {})
-    }),
-    [actionResult, children, options, row, store]
+    () => collectFormControlDefaults(children, store, options, row),
+    [children, options, row, store]
   );
   const [draft, setDraft] = useState<Record<string, unknown>>(() => initialDraft);
+  const [appliedResultId, setAppliedResultId] = useState<string>();
+  if (actionResult && actionResult.request_id !== appliedResultId) {
+    setAppliedResultId(actionResult.request_id);
+    if (actionResult.normalized_values) {
+      setDraft((current) => ({ ...current, ...actionResult.normalized_values }));
+    }
+  }
   const submitDispatch: UiNodeActionDispatch = {
     action: submitAction,
     node,
@@ -1038,11 +1042,7 @@ function renderNode(
       );
     }
     case "form": {
-      const latestActionResult = options.actionResult;
-      const resultKey = latestActionResult && latestActionResult.node_id === node.id
-        ? latestActionResult.request_id
-        : "idle";
-      return <UiNodeForm node={node} props={props} store={store} options={options} row={row} key={`${node.id}-${resultKey}`} />;
+      return <UiNodeForm node={node} props={props} store={store} options={options} row={row} key={node.id} />;
     }
     case "form_field": {
       const schema = readRecord(props.schema);

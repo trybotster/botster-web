@@ -807,6 +807,7 @@ async function exerciseContractMatrixActions(page) {
   const form = page.locator("form[data-ui-node-id='contract-app-form']");
   const input = form.locator("[data-ui-node-id='contract-app-message'] input");
   const submit = form.locator(":scope > ion-button[data-action-id='contract.action']:not([data-ui-node-id])");
+  await input.fill("   ");
   await submit.click();
   await waitForHarnessEvent(
     page,
@@ -829,7 +830,12 @@ async function exerciseContractMatrixActions(page) {
     }
   );
   await page.locator("[data-ui-node-id='contract-dialog']").waitFor({ timeout: 15_000 });
-  await form.getByText("Message is required", { exact: true }).first().waitFor({ timeout: 15_000 });
+  await form.locator("[data-ui-node-id='contract-app-message'] .uinode-field-error").getByText("Message is required", { exact: true }).waitFor({ timeout: 15_000 });
+  await form.locator(".uinode-form-error").getByText("Message is required", { exact: true }).waitFor({ timeout: 15_000 });
+  await input.waitFor({ state: "visible" });
+  if (await input.inputValue() !== "   ") {
+    throw new Error("rejected contract action discarded the typed form draft");
+  }
 
   await input.fill("Ship canonical values");
   await submit.click();

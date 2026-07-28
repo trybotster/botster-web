@@ -410,7 +410,7 @@ function pluginSurfaceSnapshot(result: unknown, expectedSurface?: { packageName:
   if (!packageName || !surfaceId) return undefined;
   if (expectedSurface && (packageName !== expectedSurface.packageName || surfaceId !== expectedSurface.surfaceId)) return undefined;
 
-  const root = validatedPluginSurfaceSnapshotNode(hubSnapshot.body, packageName, surfaceId);
+  const root = validatedPluginSurfaceSnapshotNode(hubSnapshot.body);
   if (!root) return undefined;
 
   return {
@@ -421,15 +421,13 @@ function pluginSurfaceSnapshot(result: unknown, expectedSurface?: { packageName:
   };
 }
 
-function validatedPluginSurfaceSnapshotNode(value: unknown, packageName: string, surfaceId: string): UiTreeSnapshot["root"] | undefined {
+function validatedPluginSurfaceSnapshotNode(value: unknown): UiTreeSnapshot["root"] | undefined {
   const record = readRecord(value);
   if (!readString(record.type)) return undefined;
 
   // The Hub has already identity-matched and validated this body against the
   // canonical UI contract. Web preserves that grammar instead of translating
   // it into a second browser-owned node vocabulary.
-  void packageName;
-  void surfaceId;
   return value as UiTreeSnapshot["root"];
 }
 

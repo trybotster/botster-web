@@ -1,6 +1,5 @@
 import uiContractConformance from "@trybotster/ui-contract/conformance-fixtures";
 
-import type { ActionBinding } from "../actions";
 import type { EntityFrame } from "../entities";
 import type { UiBindIf, UiNode, UiTreeSnapshot } from "../uiNodes";
 
@@ -8,17 +7,7 @@ const fixtures = uiContractConformance.fixtures;
 
 export const fixtureProvenance = {
   source: "@trybotster/ui-contract/conformance-fixtures",
-  contractVersion: uiContractConformance.contract_version,
-  mirroredFor: undefined
-};
-
-export const inspectTicketAction: ActionBinding = {
-  id: "botster.session.select",
-  target: "session:alpha",
-  label: "Inspect session",
-  params: {
-    source: "fixture"
-  }
+  contractVersion: uiContractConformance.contract_version
 };
 
 export const fixtureEntityFrames: EntityFrame[] = [

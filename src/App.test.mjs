@@ -690,15 +690,12 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-const hubTestSupportVersion = packageJson.devDependencies["@trybotster/hub-test-support"];
 const expectedHubDaemonProtocolSha256 = hubTestSupportMetadata.daemon_protocol.sha256;
 const installedDaemonProtocol = readDaemonProtocolTypescript();
-assert.equal(hubTestSupportVersion, hubTestSupportMetadata.package_version);
 assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name], hubTestSupportMetadata.ui_contract.package_version);
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.protocol_version >= 4, true);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision >= 20, true);
-assert.equal(hubTestSupportMetadata.daemon_protocol.sha256, expectedHubDaemonProtocolSha256);
+assert.equal(hubTestSupportMetadata.protocol_version, 4);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 22);
 assert.equal(createHash("sha256").update(installedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
 assert.equal(createHash("sha256").update(generatedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
 assert.match(generatedDaemonProtocol, /\{ type: "refresh_local_packages" \}/);
@@ -5740,6 +5737,57 @@ try {
   assert.equal(fixtureProvenance.source, "@trybotster/ui-contract/conformance-fixtures");
   assert.equal(fixtureProvenance.contractVersion, "0.1.0");
   assert.equal(ionicUiNodeRendererRegistry.supports("iframe"), true);
+  const missingCapabilityMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "fallback.capability",
+        version: "test",
+        root: {
+          id: "capability-gated-node",
+          type: "text",
+          props: {
+            text: "Must not render",
+            requires: ["isolated_plugin_asset"]
+          }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {
+        capabilities: {
+          ionic_shell: true,
+          ui_tree_snapshot: true,
+          entity_frame_store: true,
+          semantic_actions: true,
+          terminal_view_bridge: true,
+          plugin_surface_sandbox: true,
+          isolated_plugin_asset: false
+        }
+      }
+    )
+  );
+  assert.match(missingCapabilityMarkup, /data-missing-capability="isolated_plugin_asset"/);
+  assert.match(missingCapabilityMarkup, /Unsupported capability: isolated_plugin_asset/);
+  assert.doesNotMatch(missingCapabilityMarkup, /Must not render/);
+
+  const unsupportedPrimitiveMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "fallback.primitive",
+        version: "test",
+        root: {
+          id: "unsupported-timeline",
+          type: "timeline"
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  assert.match(unsupportedPrimitiveMarkup, /data-unsupported-primitive="timeline"/);
+  assert.match(unsupportedPrimitiveMarkup, /Unsupported primitive: timeline/);
+
   const presentedFixtureMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(
       uiNodeConformanceSnapshot,
@@ -5759,6 +5807,27 @@ try {
   const contractRequest = uiContractConformanceFixtures.fixtures.request;
   const acceptedContractResult = uiContractConformanceFixtures.fixtures.accepted;
   const rejectedContractResult = uiContractConformanceFixtures.fixtures.rejected;
+  const rejectedFormMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: rejectedContractResult.surface_id,
+        version: "test",
+        root: uiContractConformanceFixtures.fixtures.form
+      },
+      createInMemoryEntityFrameStore(),
+      { actionResult: rejectedContractResult }
+    )
+  );
+  assert.match(
+    rejectedFormMarkup,
+    /<ion-item[^>]*data-ui-node-id="ticket-title"[^>]*>[\s\S]*?class="uinode-field-error"[\s\S]*?Title is required[\s\S]*?<\/ion-item>/
+  );
+  assert.match(
+    rejectedFormMarkup,
+    /class="uinode-form-error"[\s\S]*?Fix the highlighted fields/
+  );
+
   const presentationScope = {
     hubId: "hub-alpha",
     packageName: "botster.plugin-contract-matrix",
@@ -5780,6 +5849,45 @@ try {
     applyAcceptedPresentation(presentedState, presentationScope, contractRequest, rejectedContractResult),
     presentedState
   );
+  const dialogSetState = applyAcceptedPresentation({}, presentationScope, contractRequest, {
+    ...acceptedContractResult,
+    presentation: [
+      { kind: "set", key: "create-ticket-dialog", value: true },
+      { kind: "set", key: "details", value: true }
+    ]
+  });
+  const toggleOffState = applyAcceptedPresentation(dialogSetState, presentationScope, contractRequest, {
+    ...acceptedContractResult,
+    presentation: [{ kind: "toggle", key: "details" }]
+  });
+  assert.equal(presentationValues(toggleOffState, presentationScope).details, false);
+  const toggleOnState = applyAcceptedPresentation(toggleOffState, presentationScope, contractRequest, {
+    ...acceptedContractResult,
+    presentation: [{ kind: "toggle", key: "details" }]
+  });
+  assert.equal(presentationValues(toggleOnState, presentationScope).details, true);
+  const dialogClearedState = applyAcceptedPresentation(toggleOnState, presentationScope, contractRequest, {
+    ...acceptedContractResult,
+    presentation: [{ kind: "clear", key: "create-ticket-dialog" }]
+  });
+  assert.equal(Object.hasOwn(presentationValues(dialogClearedState, presentationScope), "create-ticket-dialog"), false);
+  const dialogSetMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      uiNodeConformanceSnapshot,
+      createInMemoryEntityFrameStore(fixtureEntityFrames),
+      { presentation: presentationValues(dialogSetState, presentationScope) }
+    )
+  );
+  const dialogClearedMarkup = renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      uiNodeConformanceSnapshot,
+      createInMemoryEntityFrameStore(fixtureEntityFrames),
+      { presentation: presentationValues(dialogClearedState, presentationScope) }
+    )
+  );
+  assert.match(dialogSetMarkup, /data-ui-node-id="create-ticket-dialog"/);
+  assert.doesNotMatch(dialogClearedMarkup, /data-ui-node-id="create-ticket-dialog"/);
+
   const replacementRoot = {
     id: "replacement-root",
     type: "stack",
@@ -6081,7 +6189,7 @@ try {
   assert.match(directListItemMarkup, /data-action-id="workspace\.open"/);
   assert.match(directListItemMarkup, /uinode-list-item-actions/);
   assert.doesNotMatch(directListItemMarkup, /aria-selected/);
-  assert.doesNotMatch(directListItemMarkup, /Unsupported type: list_item/);
+  assert.doesNotMatch(directListItemMarkup, /Unsupported primitive: list_item/);
 
   const actionPrimitiveMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(
