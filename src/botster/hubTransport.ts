@@ -1,4 +1,4 @@
-import type { ActionBinding, UiActionRequest } from "./actions";
+import type { ActionBinding, ActionRequestEnvelope } from "./actions";
 import { hubStatusFamily } from "./connectionDiagnostics";
 import type { EntityFrame } from "./entities";
 import type { HubControlFrame, HubControlFrameHandler, HubControlTransport } from "./protocol";
@@ -152,7 +152,7 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
       }
 
       if (frame.kind === "action_request") {
-        const request = frame.payload as UiActionRequest;
+        const request = frame.payload as ActionRequestEnvelope;
         await dispatchDaemonAction(bridge, request, emitResponse, emit);
       }
     }
@@ -988,7 +988,7 @@ function entrypointDiagnosticsListSummary(entrypoints: DaemonPackage["runnable_e
 
 async function dispatchDaemonAction(
   bridge: DaemonBridgeClient,
-  request: UiActionRequest,
+  request: ActionRequestEnvelope,
   emitResponse: (response: DaemonResponse) => void,
   emit: (frame: HubControlFrame) => void
 ) {
@@ -1082,23 +1082,29 @@ async function dispatchDaemonAction(
     return;
   }
 
-  const pluginSurfaceAction = pluginSurfaceActionRequest(action);
+  const pluginSurfaceAction = pluginSurfaceActionRequest(action, request.request_id);
   if (pluginSurfaceAction) {
     const response = await bridge.request({
       type: "plugin_surface_action",
       package_name: pluginSurfaceAction.packageName,
-      surface_id: pluginSurfaceAction.surfaceId,
-      action_id: pluginSurfaceAction.actionId,
-      payload: jsonObject(action.payload)
+      request: pluginSurfaceAction.request
     });
-    const pluginActionResult = isRecord(response.plugin_action_result) ? response.plugin_action_result : {};
-    const actionState = readConfigString(pluginActionResult.state);
-    const actionError = readConfigString(pluginActionResult.error, undefined);
+    const pluginActionResult = response.plugin_action_result;
+    const identityMatches = Boolean(
+      pluginActionResult &&
+      pluginActionResult.request_id === pluginSurfaceAction.request.request_id &&
+      pluginActionResult.surface_id === pluginSurfaceAction.request.surface_id &&
+      pluginActionResult.action_id === pluginSurfaceAction.request.action_id &&
+      pluginActionResult.node_id === pluginSurfaceAction.request.node_id
+    );
+    const actionState = pluginActionResult?.state;
+    const actionError = pluginActionResult?.error;
+    const formError = pluginActionResult?.form_errors?.[0];
     emitResponse(response);
-    emit(actionResultFrame(request, !response.error && actionState !== "error", response.error?.message ?? actionError, {
+    emit(actionResultFrame(request, !response.error && identityMatches && actionState === "accepted", response.error?.message ?? actionError ?? formError ?? (!identityMatches ? "Plugin action result identity mismatch" : undefined), {
       package_name: pluginSurfaceAction.packageName,
-      surface_id: pluginSurfaceAction.surfaceId,
-      action_id: pluginSurfaceAction.actionId,
+      surface_id: pluginSurfaceAction.request.surface_id,
+      action_id: pluginSurfaceAction.request.action_id,
       kind: response.kind,
       plugin_action_result: response.plugin_action_result
     }));
@@ -1244,15 +1250,23 @@ function daemonRequestFromDescriptor(request: DaemonPackageActionRequest): Daemo
   return undefined;
 }
 
-function pluginSurfaceActionRequest(action: ActionBinding): { packageName: string; surfaceId: string; actionId: string } | undefined {
-  const packageName = readConfigString(action.params?.package_name);
-  const surfaceId = readConfigString(action.params?.surface_id);
-  const actionId = readConfigString(action.params?.action_id);
-  return packageName && surfaceId && actionId ? { packageName, surfaceId, actionId } : undefined;
+function pluginSurfaceActionRequest(
+  action: ActionBinding,
+  requestId: string
+): { packageName: string; request: import("@trybotster/ui-contract").UiActionRequest } | undefined {
+  if (!action.pluginSurface?.package_name) return undefined;
+
+  return {
+    packageName: action.pluginSurface.package_name,
+    request: {
+      ...action.pluginSurface.request,
+      request_id: requestId
+    }
+  };
 }
 
 function actionResultFrame(
-  request: UiActionRequest,
+  request: ActionRequestEnvelope,
   accepted: boolean,
   reason?: string,
   result?: unknown

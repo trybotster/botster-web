@@ -47,9 +47,14 @@ export const generatedDaemonRequestFixtures = [
   {
     type: "plugin_surface_action",
     package_name: "project-pipelines",
-    surface_id: "home",
-    action_id: "ticket.open",
-    payload: { ticket_id: "ticket_1" }
+    request: {
+      request_id: "fixture-action-1",
+      surface_id: "home",
+      action_id: "ticket.open",
+      node_id: "ticket-row-1",
+      kind: "submit",
+      payload: { ticket_id: "ticket_1" }
+    }
   },
   { type: "read_mode_flags", session_id: "mode-flags-fixture-session" }
 ] satisfies DaemonRequest[];

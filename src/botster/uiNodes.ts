@@ -1,29 +1,44 @@
-import type { EntityFrameStore } from "./entities";
-import type { ActionBinding } from "./actions";
+import type {
+  JsonValue,
+  UiAction,
+  UiActionKind,
+  UiActionResult,
+  UiFormValues,
+  UiNode
+} from "@trybotster/ui-contract";
+
 import type { UiCapabilitySet } from "./capabilities";
+import type { EntityFrameStore } from "./entities";
 
-export type UiNodeId = string;
-
-export interface UiNode {
-  id: UiNodeId;
-  primitive: string;
-  props?: Record<string, unknown>;
-  slots?: Record<string, UiNode[]>;
-  bindings?: UiNodeBinding[];
-}
-
-export interface UiNodeBinding {
-  source: "entity" | "local_state";
-  path: string;
-  prop?: string;
-  where?: Record<string, string | number | boolean>;
-}
+export type {
+  JsonObject,
+  JsonValue,
+  UiAction,
+  UiActionKind,
+  UiActionRequest,
+  UiActionResult,
+  UiBind,
+  UiBindIf,
+  UiBindList,
+  UiChild,
+  UiFormValues,
+  UiNode,
+  UiPresentationOperation,
+  UiPresentationPredicate
+} from "@trybotster/ui-contract";
 
 export interface UiTreeSnapshot {
   kind: "ui_tree_snapshot";
   surface: string;
   root: UiNode;
   version: string;
+}
+
+export interface UiNodeActionDispatch {
+  action: UiAction;
+  node: UiNode;
+  kind: UiActionKind;
+  values?: UiFormValues;
 }
 
 export interface UiNodeRendererRegistry {
@@ -34,6 +49,8 @@ export interface UiNodeRendererRegistry {
 export interface UiNodeRenderOptions {
   capabilities?: UiCapabilitySet;
   localState?: Record<string, unknown>;
-  collectAction?: (action: ActionBinding, node: UiNode) => void;
-  dispatchAction?: (action: ActionBinding, node: UiNode) => void;
+  presentation?: Record<string, JsonValue>;
+  actionResult?: UiActionResult;
+  collectAction?: (dispatch: UiNodeActionDispatch) => void;
+  dispatchAction?: (dispatch: UiNodeActionDispatch) => void;
 }
