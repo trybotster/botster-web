@@ -163,7 +163,7 @@ The current implementation forks that contract in four relevant places:
 ```
 
 8. Return a rejected result and prove the same dialog/tree/presentation state remains open, entered or normalized draft values remain visible, and field/form errors are actionable in the real Ionic controls. No presentation/replacement effect applies.
-9. Retry with an accepted result and prove its owner-authored replacement renders at the correlated location, presentation `clear` closes the dialog, and stale errors disappear.
+9. Retry with an accepted result and prove its owner-authored replacement renders as the whole-surface root, presentation `clear` closes the dialog, and stale errors disappear; `node_id` remains correlation identity only.
 10. Through the live worker round trip, exercise accepted presentation `set` and later `clear`; deterministically exercise `toggle`, `equals`, representative selected-workspace detail, and identical-key isolation across package/surface scopes through the imported contract fixtures and real renderer/store. No workspace-specific React state is allowed, and non-accepted results must never apply any operation.
 11. Open a representative target-first “Spawn session” dialog through the same action -> worker -> accepted `set` mechanics, then submit/reject/accept/clear and apply the replacement result. Prove no workspace/Git policy or imperative list refresh exists in Web.
 12. Feed grouped session lifecycle solely as `entity_snapshot`/`entity_upsert`/`entity_patch`/`entity_remove` frames into the deterministic `bind_list` path and assert rendered detail converges through the generic entity store.

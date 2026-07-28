@@ -53,8 +53,9 @@ Every rendered plugin action crosses the daemon boundary as
 deferred, and error results preserve the current tree and presentation state.
 Rejected normalized values and field/form errors return to the owning Ionic
 form. An accepted result may apply presentation `set`/`clear`/`toggle` and
-replace exactly the correlated `node_id`; clients never infer these effects
-from toast copy or refetch the surface.
+replace the whole surface root. `node_id` correlates the request and result
+only; it never defines an inline patch target. Clients never infer these
+effects from toast copy or refetch the surface.
 
 Plugin surfaces remain host-rendered or isolated assets according to
 hub-provided descriptors.
