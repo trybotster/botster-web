@@ -14,6 +14,7 @@ import {
   IonItem,
   IonLabel,
   IonList,
+  IonModal,
   IonNote,
   IonRow,
   IonSelect,
@@ -22,23 +23,26 @@ import {
   IonTitle,
   IonToolbar
 } from "@ionic/react";
-import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 
 import { defaultUiCapabilitySet } from "./capabilities";
-import type { ActionBinding } from "./actions";
 import type { EntityFrameStore, EntityRecord } from "./entities";
 import type {
+  JsonValue,
+  JsonObject,
+  UiAction,
+  UiChild,
   UiNode,
-  UiNodeBinding,
+  UiNodeActionDispatch,
   UiNodeRendererRegistry,
   UiNodeRenderOptions,
+  UiPresentationPredicate,
   UiTreeSnapshot
 } from "./uiNodes";
 
 type RowContext = Record<string, unknown>;
 
 const supportedPrimitives = new Set([
-  "action",
   "badge",
   "button",
   "checkbox",
@@ -47,7 +51,6 @@ const supportedPrimitives = new Set([
   "form",
   "form_field",
   "form_section",
-  "heading",
   "iframe",
   "inline",
   "list",
@@ -55,7 +58,6 @@ const supportedPrimitives = new Set([
   "metric",
   "metric_grid",
   "panel",
-  "row",
   "section",
   "select",
   "select_option",
@@ -114,49 +116,24 @@ function readTableColumns(value: unknown): Array<{ key: string; label: string }>
 
 function uiNodeFromRecord(value: unknown): UiNode | undefined {
   const record = readRecord(value);
-  const primitive = readString(record.primitive, readString(record.type));
-  const id = readString(record.id);
-  if (!primitive || !id) {
+  const type = readString(record.type);
+  if (!type) {
     return undefined;
   }
 
-  const children = Array.isArray(record.children)
-    ? record.children.map(uiNodeFromRecord).filter((child): child is UiNode => Boolean(child))
-    : [];
-  const slots = Object.entries(readRecord(record.slots)).reduce<Record<string, UiNode[]>>((result, [name, slotValue]) => {
-    if (!Array.isArray(slotValue)) {
-      return result;
-    }
-
-    const slotChildren = slotValue.map(uiNodeFromRecord).filter((child): child is UiNode => Boolean(child));
-    if (slotChildren.length > 0) {
-      result[name] = slotChildren;
-    }
-    return result;
-  }, {});
-
-  if (children.length > 0) {
-    slots.children = [...(slots.children ?? []), ...children];
-  }
-
-  return {
-    id,
-    primitive,
-    props: readRecord(record.props),
-    ...(Object.keys(slots).length > 0 ? { slots } : {})
-  };
+  return value as UiNode;
 }
 
 function hasSlot(node: UiNode, name: string): boolean {
   return readSlot(node, name).length > 0;
 }
 
-function readSlot(node: UiNode, name = "children"): UiNode[] {
+function readSlot(node: UiNode, name = "children"): UiChild[] {
   return node.slots?.[name] ?? [];
 }
 
-function readChildren(node: UiNode): UiNode[] {
-  return readSlot(node, "children");
+function readChildren(node: UiNode): UiChild[] {
+  return [...(node.children ?? []), ...readSlot(node, "children")];
 }
 
 function readRequiredCapabilities(node: UiNode): string[] {
@@ -194,48 +171,76 @@ function readPath(record: Record<string, unknown>, path: string): unknown {
   }, record);
 }
 
-function entityRows(store: EntityFrameStore, binding: UiNodeBinding): EntityRecord[] {
-  const parsed = parseEntityPath(binding.path);
-  if (!parsed || parsed.id) {
-    return [];
-  }
+function entityRows(
+  store: EntityFrameStore,
+  source: string,
+  where: Record<string, JsonValue> = {},
+  row?: RowContext
+): EntityRecord[] {
+  const rowValues = source.startsWith("@/") && row ? readPath(row, source.slice(2)) : undefined;
+  const parsed = source.startsWith("@/") ? undefined : parseEntityPath(source);
+  if (!Array.isArray(rowValues) && (!parsed || parsed.id)) return [];
 
-  const rows = store.list(parsed.family);
-  const where = binding.where ?? {};
+  const rows = Array.isArray(rowValues)
+    ? rowValues
+        .filter((value): value is EntityRecord => Boolean(value && typeof value === "object" && !Array.isArray(value) && typeof (value as EntityRecord).id === "string"))
+    : store.list(parsed!.family);
   const whereEntries = Object.entries(where);
 
   if (whereEntries.length === 0) {
     return rows;
   }
 
-  return rows.filter((record) => whereEntries.every(([key, value]) => record[key] === value));
+  return rows.filter((record) => whereEntries.every(([key, value]) => JSON.stringify(record[key]) === JSON.stringify(value)));
 }
 
-function bindingValue(
-  binding: UiNodeBinding,
+function pathValue(
+  path: string,
   store: EntityFrameStore,
   options: UiNodeRenderOptions,
   row?: RowContext
 ): unknown {
-  if (binding.source === "local_state") {
-    return options.localState?.[binding.path];
+  if (path.startsWith("local:")) {
+    return options.localState?.[path.slice("local:".length)];
   }
 
-  if (binding.path.startsWith("@/")) {
-    return row ? readPath(row, binding.path.slice(2)) : undefined;
+  if (path.startsWith("@/")) {
+    return row ? readPath(row, path.slice(2)) : undefined;
   }
 
-  const parsed = parseEntityPath(binding.path);
+  const parsed = parseEntityPath(path);
   if (!parsed) {
     return undefined;
   }
 
   if (!parsed.id) {
-    return entityRows(store, binding);
+    return entityRows(store, path);
   }
 
   const record = readRecord(store.get(parsed.family, parsed.id));
   return parsed.field ? readPath(record, parsed.field) : record;
+}
+
+function resolvedValue(
+  value: unknown,
+  store: EntityFrameStore,
+  options: UiNodeRenderOptions,
+  row?: RowContext
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => resolvedValue(item, store, options, row));
+  }
+
+  const record = readRecord(value);
+  if (typeof record.$bind === "string") {
+    return pathValue(record.$bind, store, options, row);
+  }
+  if (Object.keys(record).length > 0) {
+    return Object.fromEntries(
+      Object.entries(record).map(([key, item]) => [key, resolvedValue(item, store, options, row)])
+    );
+  }
+  return value;
 }
 
 function resolvedProps(
@@ -244,27 +249,65 @@ function resolvedProps(
   options: UiNodeRenderOptions,
   row?: RowContext
 ): Record<string, unknown> {
-  const props = { ...(node.props ?? {}) };
-
-  for (const binding of node.bindings ?? []) {
-    if (!binding.prop) {
-      continue;
-    }
-
-    props[binding.prop] = bindingValue(binding, store, options, row);
-  }
-
-  return props;
+  return resolvedValue(node.props ?? {}, store, options, row) as Record<string, unknown>;
 }
 
 function renderChildren(
-  nodes: UiNode[],
+  children: UiChild[],
   store: EntityFrameStore,
   options: UiNodeRenderOptions,
   row?: RowContext,
   form?: FormRenderState
 ): ReactNode {
-  return nodes.map((child) => renderNode(child, store, options, row, form));
+  return children.flatMap((child, index) =>
+    resolveChild(child, store, options, row).map(({ node, row: childRow }, childIndex) => (
+      <Fragment key={`${node.id ?? node.type}-${index}-${childIndex}`}>
+        {renderNode(node, store, options, childRow, form)}
+      </Fragment>
+    ))
+  );
+}
+
+function isUiNode(child: UiChild): child is UiNode {
+  return typeof (child as UiNode).type === "string";
+}
+
+function presentationMatches(predicate: UiPresentationPredicate, presentation: Record<string, JsonValue>): boolean {
+  const hasKey = Object.hasOwn(presentation, predicate.key);
+  if (predicate.kind === "present") return hasKey;
+  if (predicate.kind === "truthy") return Boolean(presentation[predicate.key]);
+  return hasKey && JSON.stringify(presentation[predicate.key]) === JSON.stringify(predicate.value);
+}
+
+function resolveChild(
+  child: UiChild,
+  store: EntityFrameStore,
+  options: UiNodeRenderOptions,
+  row?: RowContext
+): Array<{ node: UiNode; row?: RowContext }> {
+  if (isUiNode(child)) return [{ node: child, row }];
+
+  if (child.$kind === "bind_list") {
+    const rows = entityRows(store, child.source, child.where, row);
+    if (rows.length === 0) {
+      return child.empty_template ? [{ node: child.empty_template, row }] : [];
+    }
+    return rows.map((record) => ({ node: child.item_template, row: record }));
+  }
+
+  if (child.$kind === "bind_if") {
+    return pathValue(child.path, store, options, row) ? [{ node: child.node, row }] : [];
+  }
+
+  if (child.$kind === "presentation_if") {
+    return presentationMatches(child.predicate, options.presentation ?? {}) ? [{ node: child.node, row }] : [];
+  }
+
+  const matches =
+    (!child.condition.width || child.condition.width === "regular") &&
+    (!child.condition.pointer || child.condition.pointer === "fine");
+  const visible = child.$kind === "hidden" ? !matches : matches;
+  return visible ? [{ node: child.node, row }] : [];
 }
 
 function renderSlotRegion(
@@ -318,6 +361,7 @@ function iframeSrc(props: Record<string, unknown>): string | undefined {
 type FormRenderState = {
   draft: Record<string, unknown>;
   setDraft: (update: (current: Record<string, unknown>) => Record<string, unknown>) => void;
+  actionResult?: UiNodeRenderOptions["actionResult"];
 };
 
 type SelectOption = {
@@ -401,50 +445,39 @@ function ionicTone(props: Record<string, unknown>, fallback = "medium"): string 
   }[tone] ?? fallback;
 }
 
-function actionFromProps(props: Record<string, unknown>, fallbackLabel: string): ActionBinding {
-  return actionFromValue(props.action, props, fallbackLabel);
+function actionFromProps(props: Record<string, unknown>): UiAction {
+  return actionFromValue(props.action);
 }
 
-function actionFromValue(action: unknown, props: Record<string, unknown>, fallbackLabel: string): ActionBinding {
-  if (typeof action === "string") {
-    return {
-      id: action,
-      label: readString(props.label, fallbackLabel),
-      params: {}
-    };
-  }
-
+function actionFromValue(action: unknown): UiAction {
   const actionRecord = readRecord(action);
   return {
     id: readString(actionRecord.id),
-    target: readString(actionRecord.target, undefined),
-    params: readRecord(actionRecord.params),
-    payload: Object.hasOwn(actionRecord, "payload") ? actionRecord.payload : undefined,
-    label: readString(actionRecord.label, readString(props.label, fallbackLabel)),
-    disabled: readBoolean(actionRecord.disabled, readBoolean(props.disabled))
+    payload: Object.hasOwn(actionRecord, "payload") ? actionRecord.payload as JsonValue : undefined,
+    disabled: readBoolean(actionRecord.disabled)
   };
 }
 
 function actionButton(
-  action: ActionBinding,
+  action: UiAction,
   node: UiNode,
   options: UiNodeRenderOptions,
   label: string,
   className?: string,
   stopPropagation = false
 ): ReactNode {
-  options.collectAction?.(action, node);
+  const dispatch: UiNodeActionDispatch = { action, node, kind: "submit" };
+  options.collectAction?.(dispatch);
 
   return (
     <IonButton
       className={className}
       data-action-id={action.id}
-      data-action-target={action.target}
       disabled={action.disabled}
       key={`${node.id}-${action.id}`}
       onClick={(event) => {
         if (stopPropagation) event.stopPropagation();
-        if (!action.disabled) options.dispatchAction?.(action, node);
+        if (!action.disabled) options.dispatchAction?.(dispatch);
       }}
     >
       {label}
@@ -471,22 +504,22 @@ function isValueSelected(value: unknown, selectedValues: Set<string>): boolean {
   return (typeof value === "string" || typeof value === "number") && selectedValues.has(String(value));
 }
 
-function dispatchActivationOnEnter(event: KeyboardEvent, action: ActionBinding | undefined, node: UiNode, options: UiNodeRenderOptions): void {
+function dispatchActivationOnEnter(event: KeyboardEvent, action: UiAction | undefined, node: UiNode, options: UiNodeRenderOptions): void {
   if (!action || action.disabled || event.key !== "Enter") return;
   event.preventDefault();
-  options.dispatchAction?.(action, node);
+  options.dispatchAction?.({ action, node, kind: "submit" });
 }
 
 function coreControlName(node: UiNode, props: Record<string, unknown>): string {
-  return readString(props.name, node.id);
+  return readString(props.name, node.id ?? "");
 }
 
 function coreControlInitialValue(node: UiNode, props: Record<string, unknown>): unknown {
-  if (node.primitive === "checkbox") {
+  if (node.type === "checkbox") {
     return Object.hasOwn(props, "checked") ? props.checked : Object.hasOwn(props, "default") ? props.default : false;
   }
 
-  if (node.primitive === "select") {
+  if (node.type === "select") {
     return Object.hasOwn(props, "selected")
       ? props.selected
       : Object.hasOwn(props, "value")
@@ -524,22 +557,28 @@ function readSelectOptions(props: Record<string, unknown>, optionNodes: UiNode[]
   });
 }
 
-function collectFormControlDefaults(nodes: UiNode[], store: EntityFrameStore, options: UiNodeRenderOptions, row?: RowContext): Record<string, unknown> {
+function collectFormControlDefaults(children: UiChild[], store: EntityFrameStore, options: UiNodeRenderOptions, row?: RowContext): Record<string, unknown> {
   const entries: Array<[string, unknown]> = [];
   const visit = (node: UiNode, currentRow?: RowContext) => {
     const props = resolvedProps(node, store, options, currentRow);
-    if (["text_input", "textarea", "checkbox", "select"].includes(node.primitive)) {
+    if (["text_input", "textarea", "checkbox", "select"].includes(node.type)) {
       entries.push([coreControlName(node, props), coreControlInitialValue(node, props)]);
-    } else if (node.primitive === "form_field") {
+    } else if (node.type === "form_field") {
       const schema = readRecord(props.schema);
       entries.push([readString(schema.name, node.id), Object.hasOwn(props, "default") ? props.default : schema.default ?? ""]);
     }
-    for (const children of Object.values(node.slots ?? {})) {
-      children.forEach((child) => visit(child, currentRow));
+    for (const child of [...(node.children ?? []), ...Object.values(node.slots ?? {}).flat()]) {
+      for (const resolved of resolveChild(child, store, options, currentRow)) {
+        visit(resolved.node, resolved.row);
+      }
     }
   };
 
-  nodes.forEach((node) => visit(node, row));
+  for (const child of children) {
+    for (const resolved of resolveChild(child, store, options, row)) {
+      visit(resolved.node, resolved.row);
+    }
+  }
   return Object.fromEntries(entries);
 }
 
@@ -557,7 +596,8 @@ function renderCoreControl({
   const name = coreControlName(node, props);
   const label = readString(props.label, name);
   const description = readString(props.description, undefined);
-  const error = readString(props.error, undefined);
+  const fieldErrors = node.id ? form?.actionResult?.field_errors?.[node.id] ?? [] : [];
+  const error = fieldErrors[0] ?? readString(props.error, undefined);
   const required = readBoolean(props.required);
   const disabled = readBoolean(props.disabled) || !form;
   const value = form ? form.draft[name] : coreControlInitialValue(node, props);
@@ -565,19 +605,19 @@ function renderCoreControl({
   const setValue = (nextValue: unknown) => {
     form?.setDraft((current) => ({ ...current, [name]: nextValue }));
   };
-  const selectOptions = node.primitive === "select" ? readSelectOptions(props, optionNodes) : [];
+  const selectOptions = node.type === "select" ? readSelectOptions(props, optionNodes) : [];
 
   const control =
-    node.primitive === "textarea" ? (
+    node.type === "textarea" ? (
       <IonTextarea
         value={readString(value)}
         placeholder={readString(props.placeholder, undefined)}
         onIonInput={(event) => setValue(event.detail.value ?? "")}
         readonly={disabled}
       />
-    ) : node.primitive === "checkbox" ? (
+    ) : node.type === "checkbox" ? (
       <IonCheckbox checked={readBoolean(value)} disabled={disabled} onIonChange={(event) => setValue(event.detail.checked)} />
-    ) : node.primitive === "select" ? (
+    ) : node.type === "select" ? (
       <IonSelect value={value} disabled={disabled} onIonChange={(event) => setValue(event.detail.value)}>
         {selectOptions.map((option) => (
           <IonSelectOption disabled={option.disabled} key={option.key} value={option.value}>
@@ -600,7 +640,7 @@ function renderCoreControl({
       {control}
       {description ? <IonNote slot="helper">{description}</IonNote> : null}
       {error ? (
-        <IonNote color="danger" slot="error">
+        <IonNote className="uinode-field-error" color="danger">
           {error}
         </IonNote>
       ) : null}
@@ -622,33 +662,44 @@ function UiNodeForm({
   row?: RowContext;
 }) {
   const children = readChildren(node);
-  const initialDraft = useMemo(() => collectFormControlDefaults(children, store, options, row), [children, options, row, store]);
+  const submitAction = actionFromProps(props);
+  const latestActionResult = options.actionResult;
+  const actionResult = latestActionResult && latestActionResult.node_id === node.id && latestActionResult.action_id === submitAction.id
+    ? latestActionResult
+    : undefined;
+  const initialDraft = useMemo(
+    () => collectFormControlDefaults(children, store, options, row),
+    [children, options, row, store]
+  );
   const [draft, setDraft] = useState<Record<string, unknown>>(() => initialDraft);
-  const submitAction = actionFromProps(props, "Submit");
-  options.collectAction?.(submitAction, node);
+  const [appliedResultId, setAppliedResultId] = useState<string>();
+  if (actionResult && actionResult.request_id !== appliedResultId) {
+    setAppliedResultId(actionResult.request_id);
+    if (actionResult.normalized_values) {
+      setDraft((current) => ({ ...current, ...actionResult.normalized_values }));
+    }
+  }
+  const submitDispatch: UiNodeActionDispatch = {
+    action: submitAction,
+    node,
+    kind: "submit",
+    values: draft as UiNodeActionDispatch["values"]
+  };
+  options.collectAction?.(submitDispatch);
 
   return (
     <form className="uinode-form" data-ui-node-id={node.id}>
-      {renderChildren(children, store, options, row, { draft, setDraft })}
+      {renderChildren(children, store, options, row, { draft, setDraft, actionResult })}
+      {actionResult?.form_errors?.map((error) => (
+        <IonNote color="danger" className="uinode-form-error" key={error}>{error}</IonNote>
+      ))}
       <IonButton
         data-action-id={submitAction.id}
-        data-action-target={submitAction.target}
         disabled={submitAction.disabled}
         type="button"
-        onClick={() => {
-          options.dispatchAction?.(
-            {
-              ...submitAction,
-              params: {
-                ...submitAction.params,
-                values: draft
-              }
-            },
-            node
-          );
-        }}
+        onClick={() => options.dispatchAction?.({ ...submitDispatch, values: draft as UiNodeActionDispatch["values"] })}
       >
-        {submitAction.label}
+        {readString(props.submit_label, "Submit")}
       </IonButton>
     </form>
   );
@@ -671,22 +722,22 @@ function renderNode(
     );
   }
 
-  if (!supportedPrimitives.has(node.primitive)) {
+  if (!supportedPrimitives.has(node.type)) {
     return (
-      <div className="uinode-fallback" data-ui-node-id={node.id} data-unsupported-primitive={node.primitive} role="note" key={node.id}>
-        Unsupported primitive: {node.primitive}
+      <div className="uinode-fallback" data-ui-node-id={node.id} data-unsupported-primitive={node.type} role="note" key={node.id}>
+        Unsupported primitive: {node.type}
       </div>
     );
   }
 
   const props = resolvedProps(node, store, options, row);
 
-  switch (node.primitive) {
+  switch (node.type) {
     case "stack":
     case "form_section":
       return (
         <section
-          className={`uinode-${node.primitive}`}
+          className={`uinode-${node.type}`}
           data-ui-node-id={node.id}
           aria-label={readString(props.label, undefined)}
           key={node.id}
@@ -746,21 +797,11 @@ function renderNode(
       );
     }
     case "inline":
-    case "row":
       return (
-        <div className={`uinode-${node.primitive}`} data-ui-node-id={node.id} key={node.id} style={layoutStyle(props)}>
-          {renderChildren(readSlot(node), store, options, row, form)}
+        <div className={`uinode-${node.type}`} data-ui-node-id={node.id} key={node.id} style={layoutStyle(props)}>
+          {renderChildren(readChildren(node), store, options, row, form)}
         </div>
       );
-    case "heading": {
-      const level = Math.min(Math.max(Number(props.level) || 2, 1), 4);
-      const Heading = `h${level}` as "h1" | "h2" | "h3" | "h4";
-      return (
-        <Heading data-ui-node-id={node.id} key={node.id}>
-          {readString(props.text)}
-        </Heading>
-      );
-    }
     case "text":
       return (
         <p data-ui-node-id={node.id} key={node.id}>
@@ -801,7 +842,7 @@ function renderNode(
         </IonToolbar>
       );
     case "metric_grid": {
-      const children = readChildren(node);
+      const children = readChildren(node).flatMap((child) => resolveChild(child, store, options, row));
       const compact = readBoolean(props.compact) || readString(props.density) === "compact";
 
       return (
@@ -812,9 +853,9 @@ function renderNode(
           key={node.id}
         >
           <IonRow>
-            {children.map((child) => (
-              <IonCol key={child.id} size="12" sizeMd={compact ? "4" : "6"} sizeLg={compact ? "3" : "4"}>
-                {renderNode(child, store, options, row, form)}
+            {children.map(({ node: child, row: childRow }, index) => (
+              <IonCol key={child.id ?? `${child.type}-${index}`} size="12" sizeMd={compact ? "4" : "6"} sizeLg={compact ? "3" : "4"}>
+                {renderNode(child, store, options, childRow, form)}
               </IonCol>
             ))}
           </IonRow>
@@ -843,8 +884,8 @@ function renderNode(
           ["primary_action", "Primary action"],
           ["secondary_action", "Secondary action"]
         ].map(([propName, fallbackLabel]) => {
-          const action = actionFromValue(props[propName], {}, fallbackLabel);
-          return action.id ? actionButton(action, node, options, action.label ?? fallbackLabel) : null;
+          const action = actionFromValue(props[propName]);
+          return action.id ? actionButton(action, node, options, fallbackLabel) : null;
         }).filter(Boolean);
 
         return (
@@ -862,41 +903,26 @@ function renderNode(
           </div>
         );
       }
-    case "action": {
-      const fallbackActionLabel = typeof props.action === "string"
-        ? props.action
-        : readString(readRecord(props.action).id, node.id);
-      const action = actionFromProps(props, fallbackActionLabel);
-      const label = readString(action.label, action.id);
-      options.collectAction?.(action, node);
-
-      return (
-        <IonButton
-          data-ui-node-id={node.id}
-          data-action-id={action.id}
-          data-action-target={action.target}
-          disabled={action.disabled}
-          key={node.id}
-          onClick={() => options.dispatchAction?.(action, node)}
-        >
-          {label}
-        </IonButton>
-      );
-    }
     case "button": {
-      const action = actionFromProps(props, readString(props.label, node.id));
-      options.collectAction?.(action, node);
+      const action = actionFromProps(props);
+      const dispatch: UiNodeActionDispatch = {
+        action,
+        node,
+        kind: "submit",
+        ...(form ? { values: form.draft as UiNodeActionDispatch["values"] } : {})
+      };
+      options.collectAction?.(dispatch);
 
       return (
         <IonButton
           data-ui-node-id={node.id}
           data-action-id={action.id}
-          data-action-target={action.target}
+          data-overflow={readString(props.overflow, undefined)}
           disabled={readBoolean(props.disabled) || action.disabled}
           key={node.id}
-          onClick={() => options.dispatchAction?.(action, node)}
+          onClick={() => options.dispatchAction?.(dispatch)}
         >
-          {readString(props.label, action.label)}
+          {readString(props.label, action.id)}
         </IonButton>
       );
     }
@@ -907,7 +933,7 @@ function renderNode(
       const selectable = selectionIsActive(props.selection);
       const selectedValues = selectedValueSet(props.selection);
       const listChildren = children.map((child) => {
-        if (child.primitive !== "list_item") return child;
+        if (!isUiNode(child) || child.type !== "list_item") return child;
         const childProps = readRecord(child.props);
         if (!selectable) return child;
         return {
@@ -954,11 +980,11 @@ function renderNode(
     }
     case "list_item": {
       const hasEndContent = hasSlot(node, "meta") || hasSlot(node, "actions");
-      const activation = actionFromValue(props.activation, {}, "Activate");
-      const explicitAction = actionFromValue(props.action, {}, "Open");
+      const activation = actionFromValue(props.activation);
+      const explicitAction = actionFromValue(props.action);
       const selected = readBoolean(props.selected);
       const selectable = readBoolean(props.selectable);
-      if (activation.id) options.collectAction?.(activation, node);
+      if (activation.id) options.collectAction?.({ action: activation, node, kind: "submit" });
       return (
         <IonItem
           aria-selected={selectable ? selected : undefined}
@@ -969,7 +995,7 @@ function renderNode(
           data-ui-node-id={node.id}
           key={node.id}
           onClick={() => {
-            if (activation.id && !activation.disabled) options.dispatchAction?.(activation, node);
+            if (activation.id && !activation.disabled) options.dispatchAction?.({ action: activation, node, kind: "submit" });
           }}
           onKeyDown={(event) => dispatchActivationOnEnter(event, activation.id ? activation : undefined, node, options)}
           role={selectable ? "option" : undefined}
@@ -985,7 +1011,7 @@ function renderNode(
               {hasSlot(node, "actions") ? <IonButtons className="uinode-list-item-actions">{renderChildren(readSlot(node, "actions"), store, options, row, form)}</IonButtons> : null}
               {explicitAction.id ? (
                 <IonButtons className="uinode-list-item-actions">
-                  {actionButton(explicitAction, node, options, explicitAction.label ?? "Open", undefined, true)}
+                  {actionButton(explicitAction, node, options, "Open", undefined, true)}
                 </IonButtons>
               ) : null}
             </div>
@@ -999,8 +1025,8 @@ function renderNode(
       const emptyState = uiNodeFromRecord(props.empty_state);
       const selectable = selectionIsActive(props.selection);
       const selectedValues = selectedValueSet(props.selection);
-      const tableActivation = actionFromValue(props.activation, {}, "Activate row");
-      const tableRowAction = actionFromValue(props.row_action, {}, "Row action");
+      const tableActivation = actionFromValue(props.activation);
+      const tableRowAction = actionFromValue(props.row_action);
       const unsupportedProps = [
         tableActivation.id ? "activation" : undefined,
         tableRowAction.id ? "row_action" : undefined
@@ -1039,7 +1065,7 @@ function renderNode(
           </div>
           {rows.map((tableRow, index) => {
             const rowId = readString(tableRow.id, `${node.id}-${index}`);
-            const rowAction = actionFromValue(tableRow.action, {}, "Row action");
+            const rowAction = actionFromValue(tableRow.action);
             const selected = isValueSelected(rowId, selectedValues);
             return (
               <div
@@ -1056,7 +1082,7 @@ function renderNode(
                 ))}
                 {rowAction.id ? (
                   <div className="uinode-table-row-actions" role="cell">
-                    {actionButton(rowAction, node, options, rowAction.label ?? "Row action", undefined, true)}
+                    {actionButton(rowAction, node, options, "Row action", undefined, true)}
                   </div>
                 ) : null}
               </div>
@@ -1070,9 +1096,11 @@ function renderNode(
     }
     case "form_field": {
       const schema = readRecord(props.schema);
-      const controlNode: UiNode = {
+      const schemaKind = readString(schema.kind, "text");
+      const controlType = schemaKind === "text" ? "text_input" : schemaKind;
+      const controlNode = {
         id: node.id,
-        primitive: readString(schema.kind, "text_input") === "text" ? "text_input" : readString(schema.kind, "text_input"),
+        type: controlType,
         props: {
           ...schema,
           value: props.value,
@@ -1082,8 +1110,8 @@ function renderNode(
           disabled: props.disabled,
           loading: props.loading,
           error: props.error
-        }
-      };
+        } as JsonObject
+      } as UiNode;
       return renderNode(controlNode, store, options, row, form);
     }
     case "text_input":
@@ -1094,7 +1122,9 @@ function renderNode(
         node,
         props,
         form,
-        optionNodes: readSlot(node, "options")
+        optionNodes: readSlot(node, "options").flatMap((child) =>
+          resolveChild(child, store, options, row).map((resolved) => resolved.node)
+        )
       });
     case "select_option":
       return null;
@@ -1122,12 +1152,23 @@ function renderNode(
       );
     }
     case "dialog":
-      return readBoolean(props.open) ? (
-        <div className="uinode-dialog" data-ui-node-id={node.id} role="dialog" aria-modal="false" aria-label={readString(props.title)} key={node.id}>
-          <h3>{readString(props.title)}</h3>
-          {renderChildren(readChildren(node), store, options, row, form)}
-        </div>
-      ) : null;
+      return (
+        <IonModal
+          backdropDismiss={false}
+          className={`uinode-dialog presentation-${readString(props.presentation, "auto")}`}
+          data-ui-node-id={node.id}
+          isOpen
+          key={node.id}
+        >
+          <IonToolbar>
+            <IonTitle>{readString(props.title)}</IonTitle>
+          </IonToolbar>
+          <div className="uinode-dialog-body">
+            {renderChildren(readSlot(node, "body"), store, options, row, form)}
+            {renderChildren(readChildren(node), store, options, row, form)}
+          </div>
+        </IonModal>
+      );
     default:
       return null;
   }

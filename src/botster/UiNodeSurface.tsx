@@ -3,24 +3,35 @@ import { trailSignOutline } from "ionicons/icons";
 import type { ReactNode } from "react";
 
 import { ionicUiNodeRendererRegistry } from "./IonicUiNodeRenderer";
-import type { ActionBinding } from "./actions";
 import type { UiCapabilitySet } from "./capabilities";
 import type { EntityFrameStore } from "./entities";
-import type { UiNode, UiTreeSnapshot } from "./uiNodes";
+import type { JsonValue, UiActionResult, UiNodeActionDispatch, UiTreeSnapshot } from "./uiNodes";
 
 interface UiNodeSurfaceProps {
   snapshot: UiTreeSnapshot;
   entities: EntityFrameStore;
   capabilities?: UiCapabilitySet;
   localState?: Record<string, unknown>;
-  onAction?: (action: ActionBinding, node: UiNode) => void;
+  presentation?: Record<string, JsonValue>;
+  actionResult?: UiActionResult;
+  onAction?: (dispatch: UiNodeActionDispatch) => void;
 }
 
-export function UiNodeSurface({ snapshot, entities, capabilities, localState, onAction }: UiNodeSurfaceProps) {
+export function UiNodeSurface({
+  snapshot,
+  entities,
+  capabilities,
+  localState,
+  presentation,
+  actionResult,
+  onAction
+}: UiNodeSurfaceProps) {
   const renderedTree = ionicUiNodeRendererRegistry.render(snapshot, entities, {
+    actionResult,
     capabilities,
     dispatchAction: onAction,
-    localState
+    localState,
+    presentation
   }) as ReactNode;
 
   return (

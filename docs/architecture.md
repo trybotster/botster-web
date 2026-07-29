@@ -9,7 +9,8 @@
 - `src/botster/webrtcDaemonClient.ts` owns bootstrap refresh, signaling, encrypted ordered data-channel delivery, reconnect generations, and session entity subscriptions.
 - `src/botster/hubTransport.ts` projects daemon DTO responses and pushed entity frames into the web client’s UI/action/entity seams.
 - `src/botster/hubTerminalDataPlane.ts` adapts WebRTC daemon requests and drained terminal events into `TerminalDataPlaneAttachment`.
-- `src/botster/entities.ts`, `uiNodes.ts`, and `actions.ts` implement the canonical read, render, and semantic-dispatch seams.
+- `src/botster/entities.ts`, `uiNodes.ts`, and `actions.ts` implement the canonical read, render, and semantic-dispatch seams. `uiNodes.ts` imports the Hub-owned declarations from `@trybotster/ui-contract`; it does not redeclare a browser wire grammar.
+- `src/botster/uiPresentation.ts` owns the browser-local presentation projection, scoped by Hub/package/surface. Only correlated accepted `UiActionResult` operations mutate it.
 - `src/botster/TerminalViewHost.tsx` mounts Restty and forwards measured input, resize, attach, detach, and readback operations.
 
 ## Production transport
@@ -39,7 +40,25 @@ All other POST requests are rejected. The server has no terminal endpoint and is
 
 ## Renderer boundaries
 
-Ionic owns the shell and layout. UiNode snapshots carry structure, entity frames carry dynamic model state, and semantic action bindings carry intent. Plugin surfaces remain host-rendered or isolated assets according to hub-provided descriptors.
+Ionic owns the shell and layout. Canonical `UiNode` snapshots carry structure,
+entity frames carry dynamic model state, and `UiActionRequest` carries intent.
+The identity-matched Hub-validated `ui_tree_snapshot.body` passes to the
+renderer without translation into a second browser vocabulary. `bind_list`
+reads the generic entity store, including nested row context, while
+`presentation_if` reads the scoped local presentation projection.
+
+Every rendered plugin action crosses the daemon boundary as
+`{ package_name, request }`. Form controls place drafts in `request.values`;
+`request.payload` retains only the authored non-form metadata. Rejected,
+deferred, and error results preserve the current tree and presentation state.
+Rejected normalized values and field/form errors return to the owning Ionic
+form. An accepted result may apply presentation `set`/`clear`/`toggle` and
+replace the whole surface root. `node_id` correlates the request and result
+only; it never defines an inline patch target. Clients never infer these
+effects from toast copy or refetch the surface.
+
+Plugin surfaces remain host-rendered or isolated assets according to
+hub-provided descriptors.
 
 Restty is a terminal renderer only. It does not receive UI/entity frames or own session lifecycle.
 

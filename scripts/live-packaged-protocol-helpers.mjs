@@ -86,7 +86,8 @@ export function harnessEventMatches(entry, criteria) {
     criteria.package_name_pattern &&
     !new RegExp(criteria.package_name_pattern).test(payload.package_name)
   ) return false;
-  if (criteria.surface_id && payload.surface_id !== criteria.surface_id) return false;
+  if (criteria.surface_id && (payload.surface_id ?? payload.request?.surface_id) !== criteria.surface_id) return false;
+  if (criteria.action_id && (payload.action_id ?? payload.request?.action_id) !== criteria.action_id) return false;
   if (typeof criteria.rows === "number" && payload.rows !== criteria.rows) return false;
   if (typeof criteria.cols === "number" && payload.cols !== criteria.cols) return false;
   if (criteria.state && payload.state !== criteria.state) return false;
