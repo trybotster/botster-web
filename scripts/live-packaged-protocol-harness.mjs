@@ -578,6 +578,9 @@ async function openFirstPartyUiAppSurface(page, mode) {
 
 async function exercisePluginContractMatrix(page) {
   await assertContractMatrixPackageLoaded(page);
+  await openContractAppFromNavigation(page);
+  await assertContractSurfaceRoute(page, "contract.app", "plugin_surface_render");
+  await openAppsView(page);
   await openContractAppFromApps(page);
   await assertContractSurfaceRoute(page, "contract.app", "plugin_surface_render");
   await assertContractSurfaceRouteReloadAndDirectLoad(page, "contract.app", "plugin_surface_render");
@@ -597,30 +600,36 @@ async function assertContractMatrixPackageLoaded(page) {
   await page.waitForFunction(
     ({ packageName }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      const packages = [];
+      const daemonPackages = [];
+      const projectedPackages = [];
       const apps = [];
       for (const entry of events) {
         if (entry.kind === "daemon_response" && entry.payload?.kind === "packages") {
-          packages.push(...(entry.payload.packages ?? []));
+          daemonPackages.push(...(entry.payload.packages ?? []));
         }
         if (entry.kind === "daemon_response" && entry.payload?.kind === "apps") {
           apps.push(...(entry.payload.apps ?? []));
         }
         if (entry.kind === "hub_frame" && entry.payload?.kind === "entity_snapshot") {
           const payload = entry.payload.payload;
-          if (payload?.family === "botster-web.package") packages.push(...(payload.records ?? []));
+          if (payload?.family === "botster-web.package") projectedPackages.push(...(payload.records ?? []));
           if (payload?.family === "botster-web.app") apps.push(...(payload.records ?? []));
         }
       }
-      const packageRecord = packages.find((record) => (record.package_name ?? record.name ?? record.id) === packageName);
+      const daemonPackage = daemonPackages.find((record) => record.package_name === packageName);
+      const projectedPackage = projectedPackages.find((record) => record.id === packageName);
       const appRecord = apps.find((record) => record.package_name === packageName);
-      const surfaces = packageRecord?.surfaces ?? packageRecord?.app_surfaces ?? [];
-      return Boolean(packageRecord) &&
-        Boolean(appRecord || surfaces.length > 0) &&
-        JSON.stringify(packageRecord).includes("contract.app") &&
-        JSON.stringify(packageRecord).includes("contract.empty") &&
-        JSON.stringify(packageRecord).includes("contract.blocked") &&
-        JSON.stringify(packageRecord).includes("contract.settings");
+      const daemonSurfaces = daemonPackage?.surfaces ?? [];
+      const projectedAppSurfaces = projectedPackage?.app_surfaces ?? [];
+      const projectedSettingsSurfaces = projectedPackage?.settings_surfaces ?? [];
+      return Boolean(daemonPackage) &&
+        Boolean(projectedPackage) &&
+        Boolean(appRecord || projectedAppSurfaces.length > 0) &&
+        ["contract.app", "contract.empty", "contract.blocked", "contract.settings"]
+          .every((surfaceId) => daemonSurfaces.some((surface) => surface.id === surfaceId)) &&
+        ["contract.app", "contract.empty", "contract.blocked"]
+          .every((surfaceId) => projectedAppSurfaces.some((surface) => surface.surface_id === surfaceId)) &&
+        projectedSettingsSurfaces.some((surface) => surface.surface_id === "contract.settings");
     },
     { packageName: contractMatrixPackageName },
     { timeout: 45_000 }
@@ -630,6 +639,45 @@ async function assertContractMatrixPackageLoaded(page) {
       `contract matrix package/app descriptors were not visible; installed=${JSON.stringify(installedText)}: ${error.message}`
     );
   });
+}
+
+async function openContractAppFromNavigation(page) {
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "list_package_navigation" },
+    "list_package_navigation request"
+  );
+  await page.waitForFunction(
+    ({ packageName }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const daemonNavigation = events
+        .filter((entry) => entry.kind === "daemon_response" && entry.payload?.kind === "package_navigation")
+        .flatMap((entry) => entry.payload.package_navigation ?? []);
+      const projectedNavigation = events
+        .filter(
+          (entry) =>
+            entry.kind === "hub_frame" &&
+            entry.payload?.kind === "entity_snapshot" &&
+            entry.payload.payload?.family === "botster-web.package_navigation"
+        )
+        .flatMap((entry) => entry.payload.payload.records ?? []);
+      return daemonNavigation.some(
+        (entry) => entry.package_name === packageName && entry.item_id === "contract.app"
+      ) && projectedNavigation.some(
+        (entry) =>
+          entry.package_name === packageName &&
+          entry.item_id === "contract.app" &&
+          entry.route_path === `/packages/${packageName}/surfaces/contract.app`
+      );
+    },
+    { packageName: contractMatrixPackageName },
+    { timeout: 45_000 }
+  );
+  const shortcut = page
+    .getByLabel("Admitted plugin navigation")
+    .getByRole("button", { name: "Contract App", exact: true });
+  await shortcut.waitFor({ timeout: 15_000 });
+  await shortcut.click();
 }
 
 async function openContractAppFromApps(page) {
@@ -730,7 +778,7 @@ async function exerciseContractMatrixSettings(page) {
   await page.getByText("Endpoint").waitFor();
   await page.getByText("Mode").waitFor();
   await page.getByText("API token").waitFor();
-  await page.getByText("Contract Settings").click();
+  await page.getByTestId("plugin-settings-route").getByText("Contract Settings", { exact: true }).click();
   await page.waitForURL(new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/settings/contract\\.settings`));
   await waitForHarnessEvent(
     page,

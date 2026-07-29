@@ -7,7 +7,7 @@
 - `src/botster/client.ts` composes UI-tree, entity-store, action, and injected transport seams.
 - `src/botster/hubRuntime.ts` composes the single production WebRTC runtime. A missing bootstrap grant fails closed into a rendered danger diagnostic.
 - `src/botster/webrtcDaemonClient.ts` owns bootstrap refresh, signaling, encrypted ordered data-channel delivery, reconnect generations, and session entity subscriptions.
-- `src/botster/hubTransport.ts` projects daemon DTO responses and pushed entity frames into the web client’s UI/action/entity seams.
+- `src/botster/hubTransport.ts` consumes canonical package-surface types from `@trybotster/ui-contract` and projects Hub-sanitized daemon package/navigation responses and pushed entity frames into the web client’s UI/action/entity seams. Manifest parsing and admission remain Hub-owned.
 - `src/botster/hubTerminalDataPlane.ts` adapts WebRTC daemon requests and drained terminal events into `TerminalDataPlaneAttachment`.
 - `src/botster/entities.ts`, `uiNodes.ts`, and `actions.ts` implement the canonical read, render, and semantic-dispatch seams. `uiNodes.ts` imports the Hub-owned declarations from `@trybotster/ui-contract`; it does not redeclare a browser wire grammar.
 - `src/botster/uiPresentation.ts` owns the browser-local presentation projection, scoped by Hub/package/surface. Only correlated accepted `UiActionResult` operations mutate it.
@@ -58,7 +58,10 @@ only; it never defines an inline patch target. Clients never infer these
 effects from toast copy or refetch the surface.
 
 Plugin surfaces remain host-rendered or isolated assets according to
-hub-provided descriptors.
+Hub-provided descriptors. Renderer-neutral surface and manifest-navigation
+vocabulary comes from `@trybotster/ui-contract`; Hub-projected navigation rows
+carry admitted route/diagnostic state, while the Ionic shell owns placement and
+click routing.
 
 Restty is a terminal renderer only. It does not receive UI/entity frames or own session lifecycle.
 

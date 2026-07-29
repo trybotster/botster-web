@@ -183,6 +183,9 @@ const [
   liveProtocolHarnessScript,
   architecture,
   readme,
+  uiContractDeclarations,
+  uiContractSchemaRaw,
+  contractMatrixManifestRaw,
   css,
   variablesCss,
   vendorReadme
@@ -217,6 +220,9 @@ const [
   readFile(new URL("../scripts/live-packaged-protocol-harness.mjs", import.meta.url), "utf8"),
   readFile(new URL("../docs/architecture.md", import.meta.url), "utf8"),
   readFile(new URL("../README.md", import.meta.url), "utf8"),
+  readFile(new URL("../node_modules/@trybotster/ui-contract/index.d.ts", import.meta.url), "utf8"),
+  readFile(new URL("../node_modules/@trybotster/ui-contract/schema.json", import.meta.url), "utf8"),
+  readFile(new URL("../node_modules/@trybotster/hub-test-support/fixtures/plugin-contract-matrix/botster-package.json", import.meta.url), "utf8"),
   readFile(new URL("./theme/app.css", import.meta.url), "utf8"),
   readFile(new URL("./theme/variables.css", import.meta.url), "utf8"),
   readFile(new URL("./vendor/restty/README.md", import.meta.url), "utf8")
@@ -382,7 +388,13 @@ assert.match(generatedDaemonProtocol, /\| \{ type: "stop_package_entrypoint"; pa
 assert.match(generatedDaemonProtocol, /\| \{ type: "restart_package_entrypoint"; package_name: string; entrypoint_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "package_entrypoint_status"; package_name: string; entrypoint_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue \}/);
-assert.match(generatedDaemonProtocol, /import type \{ UiActionRequest, UiActionResult, UiNode \} from "@trybotster\/ui-contract"/);
+assert.match(generatedDaemonProtocol, /import type \{ PackageSurfaceDescriptor, UiActionRequest, UiActionResult, UiNode \} from "@trybotster\/ui-contract"/);
+assert.doesNotMatch(generatedDaemonProtocol, /DaemonPackageSurfaceDescriptor/);
+assert.match(
+  hubTransport,
+  /import type \{\s*PackageSurfaceDescriptor,\s*PackageSurfaceKind,\s*PackageSurfaceOperation\s*\} from "@trybotster\/ui-contract"/
+);
+assert.doesNotMatch(hubTransport, /DaemonPackageSurfaceDescriptor/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_action"; package_name: string; request: UiActionRequest \}/);
 assert.doesNotMatch(app, /action\.id === "contract\.action"/);
 assert.doesNotMatch(hubTransport, /action\.id === "contract\.action"/);
@@ -435,6 +447,7 @@ assert.doesNotMatch(hubTransport, /createHttpDaemonBridgeClient|EventSource|fetc
 assert.match(hubTransport, /subscribeEvents/);
 assert.match(hubTransport, /daemonEventSubscription/);
 assert.match(hubTransport, /recordLiveHarnessEvent\("hub_frame"/);
+assert.match(hubTransport, /recordLiveHarnessEvent\("daemon_response", response\)/);
 assert.match(hubTransport, /daemonResponseFrames/);
 assert.doesNotMatch(hubTransport, /ui_tree_snapshot/);
 assert.match(hubTransport, /const packageFamily = "botster-web\.package"/);
@@ -517,6 +530,13 @@ assert.match(liveProtocolHarnessScript, /loadProductionAppRouteFromPathname/);
 assert.doesNotMatch(liveProtocolHarnessScript, /diagnosticsEntityRecordLimit = 4/);
 assert.match(liveProtocolHarnessScript, /appRouteFromPathname\(routeDescriptor\.routePath\)/);
 assert.match(liveProtocolHarnessScript, /packageRecord\?\.app_surfaces/);
+assert.doesNotMatch(liveProtocolHarnessScript, /\.surfaces \?\? [^;]*app_surfaces/);
+assert.match(liveProtocolHarnessScript, /const daemonPackages = \[\]/);
+assert.match(liveProtocolHarnessScript, /const projectedPackages = \[\]/);
+assert.match(liveProtocolHarnessScript, /daemonPackage\?\.surfaces/);
+assert.match(liveProtocolHarnessScript, /projectedPackage\?\.app_surfaces/);
+assert.match(liveProtocolHarnessScript, /openContractAppFromNavigation/);
+assert.match(liveProtocolHarnessScript, /getByLabel\("Admitted plugin navigation"\)/);
 assert.match(liveProtocolHarnessScript, /proveLiveTerminalAfterAttach/);
 assert.match(liveProtocolHarnessScript, /const echoProbe = "keys"/);
 assert.match(liveProtocolHarnessScript, /const attachProbe = "botster-web-production-attach-probe"/);
@@ -688,6 +708,8 @@ assert.doesNotMatch(hubTransport, /terminal_input|terminal_output|terminal_resiz
 
 const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
+const uiContractSchema = JSON.parse(uiContractSchemaRaw);
+const contractMatrixManifest = JSON.parse(contractMatrixManifestRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 const expectedHubDaemonProtocolSha256 = hubTestSupportMetadata.daemon_protocol.sha256;
@@ -695,7 +717,24 @@ const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name], hubTestSupportMetadata.ui_contract.package_version);
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.protocol_version, 4);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 22);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 24);
+for (const canonicalType of [
+  "PackageSurfaceDescriptor",
+  "PackageSurfaceKind",
+  "PackageSurfaceOperation",
+  "PackageNavigationEntry",
+  "PackageNavigationTarget"
+]) {
+  assert.match(uiContractDeclarations, new RegExp(`(?:interface|type) ${canonicalType}`));
+  assert.equal(Boolean(uiContractSchema.$defs[canonicalType]), true);
+}
+assert.deepEqual(
+  contractMatrixManifest.navigation.map((entry) => entry.target),
+  [
+    { kind: "surface", surface_id: "contract.app" },
+    { kind: "surface", surface_id: "contract.settings" }
+  ]
+);
 assert.equal(createHash("sha256").update(installedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
 assert.equal(createHash("sha256").update(generatedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
 assert.match(generatedDaemonProtocol, /\{ type: "refresh_local_packages" \}/);
@@ -6019,7 +6058,7 @@ try {
   assert.match(markup, /data-action-id="botster\.session\.select"/);
   assert.equal(collectedActions.some(({ action }) => action.id === "botster.session.select"), true);
   assert.equal(fixtureProvenance.source, "@trybotster/ui-contract/conformance-fixtures");
-  assert.equal(fixtureProvenance.contractVersion, "0.1.0");
+  assert.equal(fixtureProvenance.contractVersion, hubTestSupportMetadata.ui_contract.package_version);
   assert.equal(ionicUiNodeRendererRegistry.supports("iframe"), true);
   const missingCapabilityMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(

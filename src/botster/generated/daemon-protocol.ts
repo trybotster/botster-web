@@ -1,6 +1,6 @@
 // Generated from crates/botster-hub-client Rust serde DTOs.
 // Regenerate/check with: ./test.sh -p botster-hub-client
-import type { UiActionRequest, UiActionResult, UiNode } from "@trybotster/ui-contract";
+import type { PackageSurfaceDescriptor, UiActionRequest, UiActionResult, UiNode } from "@trybotster/ui-contract";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
@@ -144,6 +144,7 @@ export interface DaemonResponse {
   update_status?: DaemonPackageUpdateStatus | null;
   package_decision: DaemonPackageDecision | null;
   lifecycle: DaemonPluginLifecycle[];
+  plugin_worker_counters?: DaemonPluginWorkerCounters | null;
   plugin_tools: JsonValue[];
   plugin_tool_result: JsonValue;
   plugin_surface?: DaemonPluginSurface | null;
@@ -477,7 +478,7 @@ export interface DaemonPackage {
   source_kind: string;
   state: string;
   requested_capabilities: DaemonCapability[];
-  surfaces?: DaemonPackageSurfaceDescriptor[];
+  surfaces?: PackageSurfaceDescriptor[];
   routes?: DaemonPackageRouteDescriptor[];
   runnable_entrypoints: DaemonPackageRunnableEntrypoint[];
   configuration: DaemonPackageConfiguration;
@@ -605,17 +606,6 @@ export interface DaemonPackagePin {
   update_policy: string;
 }
 
-export interface DaemonPackageSurfaceDescriptor {
-  id: string;
-  kind: string;
-  title: string;
-  description?: string | null;
-  icon?: string | null;
-  order?: number | null;
-  category?: string | null;
-  supports?: string[];
-}
-
 export interface DaemonPackageConfiguration {
   schema?: JsonValue | null;
   effective_values?: Record<string, JsonValue>;
@@ -676,6 +666,15 @@ export interface DaemonPluginLifecycle {
   loaded: boolean;
 }
 
+export interface DaemonPluginWorkerCounters {
+  configured_queue_capacity: number;
+  configured_executor_concurrency: number;
+  live_plugin_executors: number;
+  live_executor_workers: number;
+  queued_jobs: number;
+  in_flight_jobs: number;
+}
+
 export interface DaemonStatus {
   lifecycle_state: string;
   compatibility: DaemonCompatibility;
@@ -730,6 +729,7 @@ export interface DaemonSessionEntity {
   session_uuid: string;
   registry_state: string;
   lifecycle?: string | null;
+  lifecycle_class: string;
   rows: number;
   cols: number;
   updated_at: number;

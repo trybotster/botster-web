@@ -1,4 +1,9 @@
 import type { ActionBinding, ActionRequestEnvelope } from "./actions";
+import type {
+  PackageSurfaceDescriptor,
+  PackageSurfaceKind,
+  PackageSurfaceOperation
+} from "@trybotster/ui-contract";
 import { hubStatusFamily } from "./connectionDiagnostics";
 import type { EntityFrame } from "./entities";
 import type { HubControlFrame, HubControlFrameHandler, HubControlTransport } from "./protocol";
@@ -16,7 +21,6 @@ import type {
   DaemonPackageNavigationEntry,
   DaemonPackageRouteDescriptor,
   DaemonPackageRunnableEntrypoint,
-  DaemonPackageSurfaceDescriptor,
   DaemonRequest,
   DaemonResponse,
   DaemonSession,
@@ -73,6 +77,7 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
     queueMicrotask(() => ingress?.(frame));
   };
   const emitResponse = (response: DaemonResponse) => {
+    recordLiveHarnessEvent("daemon_response", response);
     for (const frame of daemonResponseFrames(response, sequence++)) {
       emit(frame);
     }
@@ -702,12 +707,17 @@ function packageNavigationRecord(entry: DaemonPackageNavigationEntry) {
   };
 }
 
-function packageSurfaceRecords(packageRecord: DaemonPackage, kind: "app" | "settings", routes: PackageRouteRecord[] = []) {
+function packageSurfaceRecords(
+  packageRecord: DaemonPackage,
+  kind: Extract<PackageSurfaceKind, "app" | "settings">,
+  routes: PackageRouteRecord[] = []
+) {
   return [...(packageRecord.surfaces ?? [])]
     .filter((surface) => surface.kind === kind)
     .sort(compareSurfaceDescriptors)
     .map((surface) => {
       const route = routes.find((candidate) => candidate.surface_id === surface.id);
+      const supports: PackageSurfaceOperation[] = surface.supports ?? [];
       return {
         id: `${packageRecord.package_name}:${surface.id}`,
         surface_id: surface.id,
@@ -716,7 +726,7 @@ function packageSurfaceRecords(packageRecord: DaemonPackage, kind: "app" | "sett
         description: surface.description ?? "",
         icon: surface.icon ?? "",
         category: surface.category ?? "",
-        supports: surface.supports ?? [],
+        supports,
         route,
         route_id: route?.route_id,
         route_path: route?.route_path,
@@ -732,7 +742,7 @@ function packageSurfaceRecords(packageRecord: DaemonPackage, kind: "app" | "sett
             package_name: packageRecord.package_name,
             surface_id: surface.id,
             surface_kind: surface.kind,
-            supports: surface.supports ?? []
+            supports
           }
         } satisfies ActionBinding
       };
@@ -773,7 +783,7 @@ function comparePackageRouteDescriptors(left: DaemonPackageRouteDescriptor, righ
   return left.route_path.localeCompare(right.route_path) || left.route_id.localeCompare(right.route_id);
 }
 
-function compareSurfaceDescriptors(left: DaemonPackageSurfaceDescriptor, right: DaemonPackageSurfaceDescriptor): number {
+function compareSurfaceDescriptors(left: PackageSurfaceDescriptor, right: PackageSurfaceDescriptor): number {
   const leftOrder = typeof left.order === "number" ? left.order : Number.POSITIVE_INFINITY;
   const rightOrder = typeof right.order === "number" ? right.order : Number.POSITIVE_INFINITY;
   return leftOrder - rightOrder || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
