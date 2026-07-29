@@ -72,6 +72,17 @@ BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
 npm run smoke:plugin-contract-matrix
 ```
 
+The first-party Workspaces compatibility check requires the real package and an
+admitted Installed row. It fails closed when either is unavailable and asserts
+plugin-owned UiNodes rather than accepting route or shell text as proof:
+
+```bash
+BOTSTER_HUB_BIN=/path/to/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
+BOTSTER_WORKSPACES_PACKAGE_PATH=/path/to/botster-workspaces \
+npm run smoke:workspaces-compat
+```
+
 ## Local package server
 
 The package manifest starts:

@@ -4983,6 +4983,290 @@ try {
   assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, /Plugin surface/);
   assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, /workflow-section/);
   assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, />Loading<\/ion-badge>/);
+  const workspacesNamedSlotSurface = { packageName: "botster-workspaces", surfaceId: "workspaces" };
+  const workspacesNamedSlotState = renderedPluginSurfaceState(
+    {
+      accepted: true,
+      result: {
+        kind: "plugin_surface",
+        plugin_surface: {
+          package_name: workspacesNamedSlotSurface.packageName,
+          surface_id: workspacesNamedSlotSurface.surfaceId,
+          body: "Workspaces",
+          ui_tree_snapshot: {
+            package_name: workspacesNamedSlotSurface.packageName,
+            surface_id: workspacesNamedSlotSurface.surfaceId,
+            body: {
+              id: "botster-workspaces-app",
+              type: "panel",
+              props: { title: "Workspaces" },
+              slots: {
+                header: [
+                  {
+                    id: "botster-workspaces-header",
+                    type: "text",
+                    props: { text: "Workspace application header" }
+                  }
+                ],
+                toolbar: [
+                  {
+                    id: "botster-workspaces-toolbar",
+                    type: "toolbar",
+                    props: { label: "Workspace actions" },
+                    slots: {
+                      commands: [
+                        {
+                          id: "botster-workspaces-toolbar-command",
+                          type: "button",
+                          props: { label: "Create", action: "workspace.create" }
+                        }
+                      ],
+                      filters: [
+                        {
+                          id: "botster-workspaces-toolbar-filter",
+                          type: "text",
+                          props: { text: "Active workspaces" }
+                        }
+                      ],
+                      search: [
+                        {
+                          id: "botster-workspaces-toolbar-search",
+                          type: "text",
+                          props: { text: "Search workspaces" }
+                        }
+                      ],
+                      actions: [
+                        {
+                          id: "botster-workspaces-toolbar-action",
+                          type: "button",
+                          props: { label: "Refresh", action: "workspace.refresh" }
+                        }
+                      ]
+                    }
+                  }
+                ],
+                body: [
+                  {
+                    id: "botster-workspaces-read-model",
+                    type: "text",
+                    props: { text: "Read model: botster-workspaces.workspace" }
+                  },
+                  {
+                    id: "botster-workspaces-metrics",
+                    type: "metric_grid",
+                    props: { density: "compact" },
+                    children: [
+                      {
+                        id: "botster-workspaces-metric-count",
+                        type: "metric",
+                        props: { label: "Workspaces", value: 1 }
+                      }
+                    ]
+                  },
+                  {
+                    id: "botster-workspaces-index-section",
+                    type: "section",
+                    props: { title: "Workspace index" },
+                    slots: {
+                      header: [
+                        {
+                          id: "botster-workspaces-index-header",
+                          type: "text",
+                          props: { text: "Workspace index header" }
+                        }
+                      ],
+                      toolbar: [
+                        {
+                          id: "botster-workspaces-index-toolbar",
+                          type: "toolbar",
+                          props: { label: "Index tools" }
+                        }
+                      ],
+                      body: [
+                        {
+                          id: "botster-workspaces-list",
+                          type: "list",
+                          props: { aria_label: "Workspaces" },
+                          children: [
+                            {
+                              id: "workspace-row-alpha",
+                              type: "list_item",
+                              props: { value: "alpha" },
+                              slots: {
+                                title: [
+                                  {
+                                    id: "workspace-row-alpha-title",
+                                    type: "text",
+                                    props: { text: "Alpha workspace" }
+                                  }
+                                ],
+                                subtitle: [
+                                  {
+                                    id: "workspace-row-alpha-purpose",
+                                    type: "text",
+                                    props: { text: "Producer-shaped named-slot coverage" }
+                                  }
+                                ],
+                                meta: [
+                                  {
+                                    id: "workspace-row-alpha-status",
+                                    type: "status_badge",
+                                    props: { label: "active", status: "active" }
+                                  }
+                                ]
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      footer: [
+                        {
+                          id: "botster-workspaces-index-footer",
+                          type: "text",
+                          props: { text: "Workspace index footer" }
+                        }
+                      ],
+                      actions: [
+                        {
+                          id: "botster-workspaces-index-action",
+                          type: "button",
+                          props: { label: "Open index", action: "workspace.index.open" }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    id: "botster-workspaces-create-form",
+                    type: "form",
+                    props: { action: "workspace.create" },
+                    children: [
+                      {
+                        id: "botster-workspaces-create-name",
+                        type: "text_input",
+                        props: { name: "name", label: "Workspace name" }
+                      }
+                    ]
+                  },
+                  {
+                    id: "botster-workspaces-spawn-form",
+                    type: "form",
+                    props: { action: "workspace.spawn" },
+                    children: [
+                      {
+                        id: "botster-workspaces-spawn-id",
+                        type: "text_input",
+                        props: { name: "workspace_id", label: "Workspace" }
+                      }
+                    ]
+                  },
+                  {
+                    id: "botster-workspaces-empty-section",
+                    type: "section",
+                    props: { title: "Empty workspace section" },
+                    slots: {
+                      empty: [
+                        {
+                          id: "botster-workspaces-section-empty-state",
+                          type: "empty_state",
+                          props: { title: "No section rows" }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    id: "botster-workspaces-empty-panel",
+                    type: "panel",
+                    slots: {
+                      header: [
+                        {
+                          id: "botster-workspaces-titleless-panel-header",
+                          type: "text",
+                          props: { text: "Titleless panel header" }
+                        }
+                      ],
+                      empty: [
+                        {
+                          id: "botster-workspaces-panel-empty-state",
+                          type: "empty_state",
+                          props: { title: "No panel rows" }
+                        }
+                      ]
+                    }
+                  }
+                ],
+                empty: [
+                  {
+                    id: "botster-workspaces-populated-empty-state",
+                    type: "empty_state",
+                    props: { title: "Must stay hidden while body content exists" }
+                  }
+                ],
+                footer: [
+                  {
+                    id: "botster-workspaces-footer",
+                    type: "text",
+                    props: { text: "Workspace application footer" }
+                  }
+                ],
+                actions: [
+                  {
+                    id: "botster-workspaces-action",
+                    type: "button",
+                    props: { label: "Open workspace", action: "workspace.open" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "Workspaces",
+    workspacesNamedSlotSurface,
+    "botster-workspaces/workspaces"
+  );
+  const workspacesNamedSlotMarkup = renderPluginSurfaceRoutePage({
+    ...workspacesNamedSlotState,
+    title: "Workspaces"
+  });
+  for (const nodeId of [
+    "botster-workspaces-header",
+    "botster-workspaces-toolbar",
+    "botster-workspaces-toolbar-command",
+    "botster-workspaces-toolbar-filter",
+    "botster-workspaces-toolbar-search",
+    "botster-workspaces-toolbar-action",
+    "botster-workspaces-read-model",
+    "botster-workspaces-metrics",
+    "botster-workspaces-index-section",
+    "botster-workspaces-index-header",
+    "botster-workspaces-index-toolbar",
+    "botster-workspaces-list",
+    "botster-workspaces-index-footer",
+    "botster-workspaces-index-action",
+    "botster-workspaces-create-form",
+    "botster-workspaces-spawn-form",
+    "botster-workspaces-section-empty-state",
+    "botster-workspaces-panel-empty-state",
+    "botster-workspaces-titleless-panel-header",
+    "botster-workspaces-footer",
+    "botster-workspaces-action"
+  ]) {
+    assert.match(workspacesNamedSlotMarkup, new RegExp(`data-ui-node-id="${nodeId}"`));
+  }
+  assert.match(workspacesNamedSlotMarkup, /<ion-buttons slot="start">/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-slot="filters" slot="secondary"/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-slot="search" slot="primary"/);
+  assert.match(workspacesNamedSlotMarkup, /<ion-buttons slot="end">/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-slot="empty" role="status"/);
+  assert.doesNotMatch(workspacesNamedSlotMarkup, /botster-workspaces-populated-empty-state/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="botster-workspaces-toolbar"/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="botster-workspaces-read-model"/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="botster-workspaces-index-section"/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="botster-workspaces-list"/);
+  assert.match(workspacesNamedSlotMarkup, /Alpha workspace/);
+  assert.match(workspacesNamedSlotMarkup, /Producer-shaped named-slot coverage/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="workspace-row-alpha-status"/);
   assert.deepEqual(
     renderedPluginSurfaceState(
       {

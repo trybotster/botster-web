@@ -267,6 +267,24 @@ function renderChildren(
   return nodes.map((child) => renderNode(child, store, options, row, form));
 }
 
+function renderSlotRegion(
+  node: UiNode,
+  name: string,
+  store: EntityFrameStore,
+  options: UiNodeRenderOptions,
+  row?: RowContext,
+  form?: FormRenderState,
+  role?: "status"
+): ReactNode {
+  if (!hasSlot(node, name)) return null;
+
+  return (
+    <div className={`uinode-slot uinode-slot-${name}`} data-ui-slot={name} role={role}>
+      {renderChildren(readSlot(node, name), store, options, row, form)}
+    </div>
+  );
+}
+
 const iframeSandboxTokens = new Set([
   "allow-downloads",
   "allow-forms",
@@ -665,7 +683,6 @@ function renderNode(
 
   switch (node.primitive) {
     case "stack":
-    case "section":
     case "form_section":
       return (
         <section
@@ -680,7 +697,30 @@ function renderNode(
           {renderChildren(readChildren(node), store, options, row, form)}
         </section>
       );
-    case "panel":
+    case "section": {
+      const hasBody = hasSlot(node, "body") || readChildren(node).length > 0;
+      return (
+        <section
+          className={`uinode-section density-${readString(props.density, "regular")} variant-${readString(props.variant, "plain")}`}
+          data-ui-node-id={node.id}
+          aria-label={readString(props.label, undefined)}
+          key={node.id}
+          style={layoutStyle(props)}
+        >
+          {readString(props.title) ? <h2>{readString(props.title)}</h2> : null}
+          {readString(props.description) ? <p>{readString(props.description)}</p> : null}
+          {renderSlotRegion(node, "header", store, options, row, form)}
+          {renderSlotRegion(node, "toolbar", store, options, row, form)}
+          {renderSlotRegion(node, "body", store, options, row, form)}
+          {renderChildren(readChildren(node), store, options, row, form)}
+          {!hasBody ? renderSlotRegion(node, "empty", store, options, row, form, "status") : null}
+          {renderSlotRegion(node, "footer", store, options, row, form)}
+          {renderSlotRegion(node, "actions", store, options, row, form)}
+        </section>
+      );
+    }
+    case "panel": {
+      const hasBody = hasSlot(node, "body") || readChildren(node).length > 0;
       return (
         <IonCard
           className={`uinode-panel density-${readString(props.density, "regular")} variant-${readString(props.variant, "plain")}`}
@@ -691,13 +731,20 @@ function renderNode(
             <IonCardHeader>
               {readString(props.title) ? <IonCardTitle>{readString(props.title)}</IonCardTitle> : null}
               {readString(props.description) ? <IonCardSubtitle>{readString(props.description)}</IonCardSubtitle> : null}
+              {renderSlotRegion(node, "header", store, options, row, form)}
             </IonCardHeader>
-          ) : null}
+          ) : renderSlotRegion(node, "header", store, options, row, form)}
+          {renderSlotRegion(node, "toolbar", store, options, row, form)}
           <IonCardContent>
+            {renderSlotRegion(node, "body", store, options, row, form)}
             {renderChildren(readChildren(node), store, options, row, form)}
+            {!hasBody ? renderSlotRegion(node, "empty", store, options, row, form, "status") : null}
+            {renderSlotRegion(node, "footer", store, options, row, form)}
+            {renderSlotRegion(node, "actions", store, options, row, form)}
           </IonCardContent>
         </IonCard>
       );
+    }
     case "inline":
     case "row":
       return (
@@ -746,6 +793,9 @@ function renderNode(
           key={node.id}
         >
           {readString(props.label) ? <IonTitle>{readString(props.label)}</IonTitle> : null}
+          {hasSlot(node, "commands") ? <IonButtons slot="start">{renderChildren(readSlot(node, "commands"), store, options, row, form)}</IonButtons> : null}
+          {hasSlot(node, "filters") ? <div className="uinode-toolbar-filters" data-ui-slot="filters" slot="secondary">{renderChildren(readSlot(node, "filters"), store, options, row, form)}</div> : null}
+          {hasSlot(node, "search") ? <div className="uinode-toolbar-search" data-ui-slot="search" slot="primary">{renderChildren(readSlot(node, "search"), store, options, row, form)}</div> : null}
           {hasSlot(node, "actions") ? <IonButtons slot="end">{renderChildren(readSlot(node, "actions"), store, options, row, form)}</IonButtons> : null}
           {renderChildren(readChildren(node), store, options, row, form)}
         </IonToolbar>
@@ -1075,7 +1125,7 @@ function renderNode(
       return readBoolean(props.open) ? (
         <div className="uinode-dialog" data-ui-node-id={node.id} role="dialog" aria-modal="false" aria-label={readString(props.title)} key={node.id}>
           <h3>{readString(props.title)}</h3>
-          {renderChildren(readSlot(node), store, options, row, form)}
+          {renderChildren(readChildren(node), store, options, row, form)}
         </div>
       ) : null;
     default:

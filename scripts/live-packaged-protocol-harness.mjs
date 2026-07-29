@@ -36,6 +36,7 @@ const workspacesPackagePath = resolveOptionalPackagePath(
   [process.env.BOTSTER_WORKSPACES_PACKAGE_PATH, process.env.BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH],
   "botster-workspaces"
 );
+const requireWorkspacesMode = process.env.BOTSTER_LIVE_REQUIRE_WORKSPACES === "1";
 const contractMatrixMode = process.env.BOTSTER_LIVE_CONTRACT_MATRIX === "1";
 const contractMatrixPackageName = "botster.plugin-contract-matrix";
 const contractMatrixSeedEndpoint = "https://example.invalid/plugin-contract-matrix/acceptance";
@@ -56,6 +57,12 @@ if (!process.env.BOTSTER_HUB_BIN) {
   throw new Error(
     "Live packaged protocol harness requires BOTSTER_HUB_BIN. " +
       "Use BOTSTER_HUB_BIN with BOTSTER_SESSION_WORKER_BIN for an isolated spawned hub."
+  );
+}
+
+if (requireWorkspacesMode && !workspacesPackagePath) {
+  throw new Error(
+    "Workspaces compatibility mode requires BOTSTER_WORKSPACES_PACKAGE_PATH or BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH."
   );
 }
 
@@ -84,6 +91,7 @@ const responseAssemblyTelemetry = [];
 const attachChronology = [];
 let binaryProvenance;
 let reusedWebPackageProvenance;
+let workspacesCompatibilityProofCount = 0;
 
 try {
   binaryProvenance = await loadBinaryProvenance();
@@ -147,6 +155,7 @@ try {
       await exercisePayloadContract(page);
     }
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+    assertRequiredWorkspacesProof();
     await requestDaemonShutdown();
     console.log(payloadContractMode
       ? "plugin payload contract smoke passed (webrtc)"
@@ -158,6 +167,7 @@ try {
   }
   if (process.env.BOTSTER_LIVE_SURFACE_ONLY === "1") {
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+    assertRequiredWorkspacesProof();
     await requestDaemonShutdown();
     console.log("live packaged protocol surface proof passed");
     process.exit(0);
@@ -259,6 +269,7 @@ try {
 
   await assertNoUnknownSession(page);
   assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+  assertRequiredWorkspacesProof();
   await requestDaemonShutdown();
   console.log(
     "live packaged protocol harness passed (webrtc) " +
@@ -546,7 +557,7 @@ async function openFirstPartyUiAppSurface(page, mode) {
   const foundSurface = await candidate.waitFor({ timeout: 15_000 }).then(() => true).catch(async (error) => {
     const installedText = await installed.innerText().catch(() => "");
     const message = `no first-party UI surface row was visible; installed=${JSON.stringify(installedText)}: ${error.message}`;
-    if (process.env.BOTSTER_LIVE_ALLOW_SURFACE_SKIP === "1") {
+    if (!requireWorkspacesMode && process.env.BOTSTER_LIVE_ALLOW_SURFACE_SKIP === "1") {
       console.log(`skipping first-party app surface proof; ${message}`);
       return false;
     }
@@ -1095,6 +1106,38 @@ async function loadProductionAppRouteFromPathname() {
 
 async function assertSelectedAppSurfaceRendered(page, target) {
   await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
+  if (target.packageName === "botster-workspaces" && target.surfaceId === "workspaces") {
+    const expectedNodeIds = [
+      "botster-workspaces-toolbar",
+      "botster-workspaces-read-model",
+      "botster-workspaces-metrics",
+      "botster-workspaces-index-section",
+      "botster-workspaces-create-form",
+      "botster-workspaces-spawn-form"
+    ];
+    await Promise.all(
+      expectedNodeIds.map((nodeId) =>
+        page.locator(`[data-testid='selected-app-surface'] [data-ui-node-id='${nodeId}']`).waitFor({ timeout: 45_000 })
+      )
+    ).catch(async (error) => {
+      const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
+      throw new Error(
+        `Workspaces surface omitted plugin-owned UiNodes; expected=${JSON.stringify(expectedNodeIds)} text=${JSON.stringify(selectedText)}: ${error.message}`
+      );
+    });
+    const unsupportedNodes = page.locator(
+      "[data-testid='selected-app-surface'] [data-unsupported-primitive], " +
+      "[data-testid='selected-app-surface'] [data-missing-capability]"
+    );
+    if (await unsupportedNodes.count() > 0) {
+      throw new Error(
+        `Workspaces surface rendered unsupported UiNodes: ${JSON.stringify(await unsupportedNodes.allTextContents())}`
+      );
+    }
+    workspacesCompatibilityProofCount += 1;
+    return;
+  }
+
   await page.waitForFunction(
     ({ packageName, surfaceId }) => {
       const text = globalThis.document.querySelector("[data-testid='selected-app-surface']")?.textContent ?? "";
@@ -1110,6 +1153,15 @@ async function assertSelectedAppSurfaceRendered(page, target) {
     const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
     throw new Error(`selected app surface did not render visible first-party content; text=${JSON.stringify(selectedText)}: ${error.message}`);
   });
+}
+
+function assertRequiredWorkspacesProof() {
+  if (!requireWorkspacesMode) return;
+  if (workspacesCompatibilityProofCount !== 3) {
+    throw new Error(
+      `Workspaces compatibility mode expected initial, reload, and direct-load proofs; completed=${workspacesCompatibilityProofCount}`
+    );
+  }
 }
 
 async function openPackageSettings(page, packageName) {
