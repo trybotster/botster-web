@@ -38,7 +38,7 @@
 
 ## Scope
 
-1. Update the Workspaces production-proof path in `scripts/live-packaged-protocol-harness.mjs`.
+1. Update the Workspaces production-proof path in `scripts/live-packaged-protocol-harness.mjs`, including a fail-closed precondition that rejects caller-owned or durable-state data directories because the flow creates plugin state.
 2. Replace the never-satisfiable expected IDs with stable UiNodes actually emitted and visible from a fresh current Workspaces package:
    - root `botster-workspaces-app`;
    - named `toolbar` region `botster-workspaces-toolbar`;
@@ -79,7 +79,7 @@
 
 ## Assumptions and unknowns
 
-- Assumption: acceptance runs against a clean isolated Hub data directory, so Workspaces begins empty; the smoke may create exactly one harness-owned workspace inside that disposable state.
+- Enforced precondition: acceptance runs only against a fresh harness-owned Hub data directory, so Workspaces begins empty; required Workspaces mode rejects both `BOTSTER_LIVE_DATA_DIR` and `BOTSTER_LIVE_DURABLE_STATE=1` before creating exactly one smoke-owned workspace.
 - Assumption: the cold-start IDs plus dynamic row/title/meta ID prefixes are intentional production identities supported by Workspaces `c78f3bf` source and package-owned runtime tests.
 - Assumption: existing renderer cases remain unchanged; this ticket repairs the live proof and fixture labeling rather than reimplementing named-slot rendering.
 - Provenance precondition: Hub and worker must be rebuilt with locked dependencies from clean Hub `527ba0a...`, then hashed; Workspaces must be clean at `c78f3bf...` with `HEAD == origin/main`. The same exact binary hashes and producer commit must run the original-oracle red control and corrected green proof, and Hub must report protocol version 4 matching pinned `@trybotster/hub-test-support@0.1.16`.
@@ -99,7 +99,7 @@
 1. Fetch and verify exact producer sources. Require clean Hub `527ba0a...` and Workspaces `c78f3bf...`, with each `HEAD == origin/main`.
 2. Build `cargo build --locked --bin botster-hub -p botster-hub` and `cargo build --locked --bin botster-session-worker -p botster-core` in that Hub checkout; record SHA-256 for both binaries and require Hub protocol version 4.
 3. With those exact hashes and producer commit, reproduce the original never-satisfiable oracle failure and capture the selected route, delivered identity, cold-start DOM, and first absent `read-model`.
-4. Implement the cold-start assertions, one-time production create action/form/result/replacement flow, dynamic row/title/meta assertions, and reload/direct-load persistence assertions. Preserve unsupported/missing-capability checks and the three-proof ledger.
+4. Implement the fresh-data precondition, cold-start assertions, one-time production create action/form/result/replacement flow, dynamic row/title/meta assertions, and reload/direct-load persistence assertions. Preserve unsupported/missing-capability checks and the three-proof ledger.
 5. Rename/comment only the synthetic named-slot fixture namespace in `src/App.test.mjs`; keep its exhaustive renderer coverage and separate generic `list_item.actions` test behavior unchanged.
 6. Do not touch renderer or package-family code unless the corrected exact-provenance proof exposes a separate delivered-snapshot-versus-DOM failure.
 7. Run deterministic Web gates, inspect the diff for the strict path allowlist, then run required mode with the legacy skip flag enabled to prove it still cannot skip.
@@ -112,7 +112,7 @@
 - Live `list_item.actions` remains outside this narrow flow because Workspaces only emits it for session membership. Mitigation: disclose the gap, retain the generic deterministic actions-slot test, and reserve owner-authored session-action proof for `ticket_1785192726_335558`.
 - Hard-coded product IDs can drift again. Mitigation: keep the set small and limited to package-owned stable cold-start nodes already asserted by Workspaces; do not mirror the full tree.
 - Synthetic fixture IDs can be mistaken for product nodes again. Mitigation: use a fixture-only namespace and explicit warning while preserving the exhaustive slot grammar.
-- A reused data directory could hide the empty-state nodes. Mitigation: retain the harness-owned isolated data directory and record ownership/provenance.
+- A reused data directory could hide the empty-state nodes. Mitigation: fail closed when required Workspaces mode receives `BOTSTER_LIVE_DATA_DIR` or `BOTSTER_LIVE_DURABLE_STATE=1`, then record harness ownership/provenance.
 - A required smoke could pass through the legacy skip flag or after only one route. Mitigation: retain required-mode skip neutralization and the exact three-stage proof count.
 - A renderer regression could be mislabeled as fixture drift. Mitigation: require delivered snapshot identity, no unsupported/missing-capability fallbacks, cold-start plus dynamic list-item DOM nodes, and initial/reload/direct-load completion.
 - Stale binaries can make branch attribution meaningless. Mitigation: locked rebuild from clean exact Hub source, binary hashes, clean exact Workspaces commit, protocol/artifact parity, and identical provenance across red and green runs are preconditions.
@@ -142,7 +142,7 @@
    - Initial route: require the six cold-start nodes; click the rendered empty-create action; require accepted `set`; type/submit a unique name; require worker-visible `values.name`, accepted `clear`, replacement, dynamic row, title text, and `0 sessions` meta text.
    - Reload and direct `/apps/botster-workspaces/workspaces` load: require the same discovered row/title/meta plus root/toolbar/list nodes from durable plugin state, without creating another workspace.
    - Require exactly three completed proofs, each incremented after its stage-specific slot assertions.
-   - The command must exit nonzero if provenance differs, Workspaces is absent, a request/result is rejected or mismatched, a required node is omitted, a fallback marker appears, the workspace identity changes/disappears, any route phase is skipped, or the completion count is not three.
+   - The command must exit nonzero if `BOTSTER_LIVE_DATA_DIR` is supplied, `BOTSTER_LIVE_DURABLE_STATE=1`, provenance differs, Workspaces is absent, a request/result is rejected or mismatched, a required node is omitted, a fallback marker appears, the workspace identity changes/disappears, any route phase is skipped, or the completion count is not three.
 5. Original-oracle negative control:
    - Temporarily restore the never-satisfiable expected IDs (or revert the focused implementation commit) and show the same exact-provenance package smoke fails at the original first missing node.
    - Restore the correction and rerun the exact command green.

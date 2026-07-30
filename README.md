@@ -79,7 +79,10 @@ npm run smoke:plugin-contract-matrix
 
 The first-party Workspaces compatibility check requires the real package and an
 admitted Installed row. It fails closed when either is unavailable and asserts
-plugin-owned UiNodes rather than accepting route or shell text as proof:
+plugin-owned UiNodes rather than accepting route or shell text as proof. Because
+the proof creates one workspace, it also requires a fresh harness-owned data
+directory and rejects `BOTSTER_LIVE_DATA_DIR` or
+`BOTSTER_LIVE_DURABLE_STATE=1`:
 
 ```bash
 BOTSTER_HUB_BIN=/path/to/botster-hub \
@@ -88,16 +91,18 @@ BOTSTER_WORKSPACES_PACKAGE_PATH=/path/to/botster-workspaces \
 npm run smoke:workspaces-compat
 ```
 
-That smoke drives the rendered contract surface through the real adapter: an
-authored action returns an accepted presentation `set`, the dialog appears,
-whitespace-only submission returns structured field/form errors without
-closing it or discarding the draft, and a retry sends worker-visible values
-before the accepted result carries a
-presentation `clear` and its whole-surface replacement renders. Assertions use
-structured requests/results rather than toast timing. Deterministic tests prove
-scoped `set`/`clear`, both directions of `toggle`, dialog disappearance after
-clear, equality, scope isolation, nested/empty `bind_list`, toolbar
-order/overflow intent, and entity snapshot/upsert/patch/remove convergence.
+That smoke drives the production Workspaces surface through the real adapter.
+It proves the cold-start panel toolbar/body slots, clicks the rendered empty
+state action, requires the accepted presentation `set`, submits a unique name
+through the owner-authored create form, and verifies worker-visible values plus
+the accepted presentation `clear` and whole-surface replacement. The replacement,
+reload, and direct-load stages must all render the same package-authored
+list-item title and `0 sessions` meta slots. Assertions use structured
+requests/results rather than toast timing.
+
+The broader contract-matrix smoke separately covers rejected form submissions,
+draft retention, presentation operations, binding behavior, toolbar overflow,
+and entity convergence.
 
 ## Local package server
 

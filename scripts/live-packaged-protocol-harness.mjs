@@ -25,13 +25,6 @@ assertDurableStateOwnership({
   suppliedDataDir: process.env.BOTSTER_LIVE_DATA_DIR
 });
 
-const {
-  appRouteFromPathname,
-  entityFamilyRecordLimit: diagnosticsEntityRecordLimit
-} = await loadProductionAppRouteFromPathname();
-const durableSeedSessionIds =
-  durableSeedSessionIdsForDiagnosticsLimit(diagnosticsEntityRecordLimit);
-
 const workspacesPackagePath = resolveOptionalPackagePath(
   [process.env.BOTSTER_WORKSPACES_PACKAGE_PATH, process.env.BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH],
   "botster-workspaces"
@@ -66,6 +59,23 @@ if (requireWorkspacesMode && !workspacesPackagePath) {
   );
 }
 
+if (
+  requireWorkspacesMode &&
+  (process.env.BOTSTER_LIVE_DATA_DIR || durableStateMode)
+) {
+  throw new Error(
+    "Workspaces compatibility mode creates durable plugin state and requires a fresh harness-owned data directory; " +
+      "unset BOTSTER_LIVE_DATA_DIR and BOTSTER_LIVE_DURABLE_STATE."
+  );
+}
+
+const {
+  appRouteFromPathname,
+  entityFamilyRecordLimit: diagnosticsEntityRecordLimit
+} = await loadProductionAppRouteFromPathname();
+const durableSeedSessionIds =
+  durableSeedSessionIdsForDiagnosticsLimit(diagnosticsEntityRecordLimit);
+
 if (!workspacesPackagePath) {
   console.log(
     "Workspaces package path not provided; live packaged protocol harness will fall back to generic first-party/production surface coverage. " +
@@ -92,6 +102,7 @@ const attachChronology = [];
 let binaryProvenance;
 let reusedWebPackageProvenance;
 let workspacesCompatibilityProofCount = 0;
+let workspacesCompatibilityState;
 
 try {
   binaryProvenance = await loadBinaryProvenance();
@@ -1228,34 +1239,37 @@ async function loadProductionAppRouteFromPathname() {
 async function assertSelectedAppSurfaceRendered(page, target) {
   await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
   if (target.packageName === "botster-workspaces" && target.surfaceId === "workspaces") {
-    const expectedNodeIds = [
+    const stage = workspacesCompatibilityProofCount === 0
+      ? "initial"
+      : workspacesCompatibilityProofCount === 1
+        ? "reload"
+        : "direct-load";
+    await assertWorkspacesNodeIds(page, [
+      "botster-workspaces-app",
       "botster-workspaces-toolbar",
-      "botster-workspaces-read-model",
-      "botster-workspaces-metrics",
-      "botster-workspaces-index-section",
-      "botster-workspaces-create-form",
-      "botster-workspaces-spawn-form"
-    ];
-    await Promise.all(
-      expectedNodeIds.map((nodeId) =>
-        page.locator(`[data-testid='selected-app-surface'] [data-ui-node-id='${nodeId}']`).waitFor({ timeout: 45_000 })
-      )
-    ).catch(async (error) => {
-      const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
-      throw new Error(
-        `Workspaces surface omitted plugin-owned UiNodes; expected=${JSON.stringify(expectedNodeIds)} text=${JSON.stringify(selectedText)}: ${error.message}`
-      );
-    });
-    const unsupportedNodes = page.locator(
-      "[data-testid='selected-app-surface'] [data-unsupported-primitive], " +
-      "[data-testid='selected-app-surface'] [data-missing-capability]"
-    );
-    if (await unsupportedNodes.count() > 0) {
-      throw new Error(
-        `Workspaces surface rendered unsupported UiNodes: ${JSON.stringify(await unsupportedNodes.allTextContents())}`
-      );
+      "botster-workspaces-list"
+    ], stage);
+    await assertNoUnsupportedWorkspacesNodes(page);
+
+    if (stage === "initial") {
+      await assertWorkspacesNodeIds(page, [
+        "botster-workspaces-new",
+        "botster-workspaces-empty",
+        "botster-workspaces-empty-create"
+      ], "initial cold start");
+      workspacesCompatibilityState = await createWorkspacesCompatibilityWorkspace(page);
+    } else {
+      if (!workspacesCompatibilityState) {
+        throw new Error(`Workspaces ${stage} proof has no persisted workspace identity`);
+      }
+      await assertWorkspacesCompatibilityRow(page, workspacesCompatibilityState, stage);
     }
+
+    await assertNoUnsupportedWorkspacesNodes(page);
     workspacesCompatibilityProofCount += 1;
+    console.log(
+      `Workspaces compatibility ${stage} proof passed ${JSON.stringify(workspacesCompatibilityState)}`
+    );
     return;
   }
 
@@ -1274,6 +1288,220 @@ async function assertSelectedAppSurfaceRendered(page, target) {
     const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
     throw new Error(`selected app surface did not render visible first-party content; text=${JSON.stringify(selectedText)}: ${error.message}`);
   });
+}
+
+async function assertWorkspacesNodeIds(page, expectedNodeIds, stage) {
+  const surface = page.getByTestId("selected-app-surface");
+  await Promise.all(
+    expectedNodeIds.map((nodeId) =>
+      surface.locator(`[data-ui-node-id='${nodeId}']`).waitFor({ timeout: 45_000 })
+    )
+  ).catch(async (error) => {
+    const selectedText = await surface.innerText().catch(() => "");
+    throw new Error(
+      `Workspaces ${stage} surface omitted plugin-owned UiNodes; expected=${JSON.stringify(expectedNodeIds)} text=${JSON.stringify(selectedText)}: ${error.message}`
+    );
+  });
+}
+
+async function assertNoUnsupportedWorkspacesNodes(page) {
+  const unsupportedNodes = page.locator(
+    "[data-testid='selected-app-surface'] [data-unsupported-primitive], " +
+    "[data-testid='selected-app-surface'] [data-missing-capability]"
+  );
+  if (await unsupportedNodes.count() > 0) {
+    throw new Error(
+      `Workspaces surface rendered unsupported UiNodes: ${JSON.stringify(await unsupportedNodes.allTextContents())}`
+    );
+  }
+}
+
+async function createWorkspacesCompatibilityWorkspace(page) {
+  const surface = page.getByTestId("selected-app-surface");
+  const openButton = surface.locator("[data-ui-node-id='botster-workspaces-empty-create']");
+  const openActionId = await openButton.getAttribute("data-action-id");
+  if (openActionId !== "botster_workspaces.open") {
+    throw new Error(
+      `Workspaces empty-create rendered unexpected action id ${JSON.stringify(openActionId)}`
+    );
+  }
+
+  const openEventCount = await harnessEventCount(page);
+  await openButton.click();
+  await waitForWorkspacesPluginSurfaceRequest(page, {
+    actionId: openActionId,
+    nodeId: "botster-workspaces-empty-create",
+    kind: "submit",
+    payload: { dialog: "create" },
+    sinceIndex: openEventCount,
+    label: "Workspaces empty-create rendered action request"
+  });
+  await waitForWorkspacesActionResult(page, {
+    actionId: openActionId,
+    nodeId: "botster-workspaces-empty-create",
+    presentation: { kind: "set", key: "workspace-dialog", value: "create" },
+    label: "Workspaces accepted create-dialog presentation set"
+  });
+
+  const form = page.locator("form[data-ui-node-id='botster-workspaces-create-form']");
+  await form.waitFor({ timeout: 15_000 });
+  const input = form.locator("[data-ui-node-id='botster-workspaces-create-name'] input");
+  const submit = form.locator(
+    ":scope > ion-button[data-action-id='botster_workspaces.create']:not([data-ui-node-id])"
+  );
+  const workspaceName = `Named slot smoke ${process.pid}-${Date.now()}`;
+  await input.fill(workspaceName);
+
+  const createEventCount = await harnessEventCount(page);
+  await submit.click();
+  await waitForWorkspacesPluginSurfaceRequest(page, {
+    actionId: "botster_workspaces.create",
+    nodeId: "botster-workspaces-create-form",
+    kind: "submit",
+    values: { name: workspaceName },
+    sinceIndex: createEventCount,
+    label: "Workspaces create form worker-visible values"
+  });
+  await waitForWorkspacesActionResult(page, {
+    actionId: "botster_workspaces.create",
+    nodeId: "botster-workspaces-create-form",
+    presentation: { kind: "clear", key: "workspace-dialog" },
+    normalizedName: workspaceName,
+    replacementRootId: "botster-workspaces-app",
+    label: "Workspaces accepted create replacement and presentation clear"
+  });
+  await page.waitForFunction(
+    () => !globalThis.document.querySelector("[data-ui-node-id='botster-workspaces-create-form']"),
+    null,
+    { timeout: 15_000 }
+  );
+
+  const row = surface.locator(
+    "ion-item.uinode-list-item[data-ui-node-id^='botster-workspaces-row-']"
+  );
+  await row.waitFor({ timeout: 15_000 });
+  const rowCount = await row.count();
+  if (rowCount !== 1) {
+    throw new Error(`Workspaces fresh create expected one rendered row; count=${rowCount}`);
+  }
+  const rowNodeId = await row.getAttribute("data-ui-node-id");
+  const workspaceId = rowNodeId?.slice("botster-workspaces-row-".length);
+  if (!workspaceId || rowNodeId !== `botster-workspaces-row-${workspaceId}`) {
+    throw new Error(`Workspaces create returned an invalid row identity ${JSON.stringify(rowNodeId)}`);
+  }
+  const state = { workspaceId, workspaceName };
+  await assertWorkspacesCompatibilityRow(page, state, "initial replacement");
+  return state;
+}
+
+async function waitForWorkspacesPluginSurfaceRequest(
+  page,
+  { actionId, nodeId, kind, values, payload, sinceIndex, label }
+) {
+  await page.waitForFunction(
+    (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .slice(expected.sinceIndex)
+      .some((entry) => {
+        const request = entry.payload?.request;
+        if (
+          entry.kind !== "daemon_request" ||
+          entry.payload?.type !== "plugin_surface_action" ||
+          entry.payload?.package_name !== "botster-workspaces" ||
+          request?.surface_id !== "workspaces" ||
+          request?.action_id !== expected.actionId ||
+          request?.node_id !== expected.nodeId ||
+          request?.kind !== expected.kind
+        ) return false;
+        if (
+          expected.values !== undefined &&
+          JSON.stringify(request.values) !== JSON.stringify(expected.values)
+        ) return false;
+        return expected.payload === undefined ||
+          JSON.stringify(request.payload) === JSON.stringify(expected.payload);
+      }),
+    { actionId, nodeId, kind, values, payload, sinceIndex },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observed = await page.evaluate((start) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .slice(start)
+        .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "plugin_surface_action")
+        .map((entry) => entry.payload),
+      sinceIndex
+    );
+    throw new Error(`${label} not observed; events=${JSON.stringify(observed, null, 2)}: ${error.message}`);
+  });
+}
+
+async function waitForWorkspacesActionResult(
+  page,
+  { actionId, nodeId, presentation, normalizedName, replacementRootId, label }
+) {
+  await page.waitForFunction(
+    (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
+      if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
+      const payload = entry.payload.payload ?? {};
+      const result = payload.result ?? {};
+      const pluginActionResult = result.plugin_action_result ?? {};
+      if (
+        payload.accepted !== true ||
+        result.package_name !== "botster-workspaces" ||
+        result.surface_id !== "workspaces" ||
+        result.action_id !== expected.actionId ||
+        pluginActionResult.state !== "accepted" ||
+        pluginActionResult.action_id !== expected.actionId ||
+        pluginActionResult.node_id !== expected.nodeId ||
+        !pluginActionResult.request_id ||
+        pluginActionResult.request_id !== payload.request_id
+      ) return false;
+      const presentationMatches = (pluginActionResult.presentation ?? []).some((operation) =>
+        operation.kind === expected.presentation.kind &&
+        operation.key === expected.presentation.key &&
+        (
+          !Object.hasOwn(expected.presentation, "value") ||
+          operation.value === expected.presentation.value
+        )
+      );
+      if (!presentationMatches) return false;
+      if (
+        expected.normalizedName !== undefined &&
+        pluginActionResult.normalized_values?.name !== expected.normalizedName
+      ) return false;
+      return expected.replacementRootId === undefined ||
+        pluginActionResult.replacement?.id === expected.replacementRootId;
+    }),
+    { actionId, nodeId, presentation, normalizedName, replacementRootId },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observed = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
+        .map((entry) => entry.payload?.payload)
+        .filter((payload) => payload?.result?.package_name === "botster-workspaces")
+    );
+    throw new Error(`${label} not observed; results=${JSON.stringify(observed, null, 2)}: ${error.message}`);
+  });
+}
+
+async function assertWorkspacesCompatibilityRow(page, state, stage) {
+  const expectedNodeIds = [
+    `botster-workspaces-row-${state.workspaceId}`,
+    `botster-workspaces-row-title-${state.workspaceId}`,
+    `botster-workspaces-row-count-${state.workspaceId}`
+  ];
+  await assertWorkspacesNodeIds(page, expectedNodeIds, stage);
+  const surface = page.getByTestId("selected-app-surface");
+  const titleText = await surface
+    .locator(`[data-ui-node-id='botster-workspaces-row-title-${state.workspaceId}']`)
+    .innerText();
+  const metaText = await surface
+    .locator(`[data-ui-node-id='botster-workspaces-row-count-${state.workspaceId}']`)
+    .innerText();
+  if (titleText.trim() !== state.workspaceName || metaText.trim() !== "0 sessions") {
+    throw new Error(
+      `Workspaces ${stage} row slot text mismatch; title=${JSON.stringify(titleText)} meta=${JSON.stringify(metaText)}`
+    );
+  }
 }
 
 function assertRequiredWorkspacesProof() {
