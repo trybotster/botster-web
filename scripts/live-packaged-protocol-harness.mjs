@@ -152,7 +152,7 @@ try {
   );
   await waitForHarnessEvent(
     page,
-    { kind: "hub_frame", family: "botster-web.session" },
+    { kind: "hub_frame", family: "session" },
     "authoritative session snapshot"
   );
   await assertNoLegacySessionHydration(page);
@@ -491,7 +491,7 @@ async function reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId,
   );
   await waitForHarnessEvent(
     page,
-    { kind: "hub_frame", family: "botster-web.session" },
+    { kind: "hub_frame", family: "session" },
     `reload ${cycle} authoritative session snapshot`
   );
   const subscriptionId = await latestSessionEntitySubscriptionId(page);
@@ -598,6 +598,8 @@ async function exercisePluginContractMatrix(page) {
   await navigateToContractSurface(page, "contract.empty");
   await assertContractSurfaceRoute(page, "contract.empty", "No fixture rows are available.");
 
+  await exerciseContractSessionBindings(page);
+
   await navigateToContractSurface(page, "contract.blocked");
   await assertContractBlockedSurface(page);
   await assertDaemonResponsiveAfterBlockedSurface(page);
@@ -635,9 +637,9 @@ async function assertContractMatrixPackageLoaded(page) {
       return Boolean(daemonPackage) &&
         Boolean(projectedPackage) &&
         Boolean(appRecord || projectedAppSurfaces.length > 0) &&
-        ["contract.app", "contract.empty", "contract.blocked", "contract.settings"]
+        ["contract.app", "contract.empty", "contract.sessions", "contract.blocked", "contract.settings"]
           .every((surfaceId) => daemonSurfaces.some((surface) => surface.id === surfaceId)) &&
-        ["contract.app", "contract.empty", "contract.blocked"]
+        ["contract.app", "contract.empty", "contract.sessions", "contract.blocked"]
           .every((surfaceId) => projectedAppSurfaces.some((surface) => surface.surface_id === surfaceId)) &&
         projectedSettingsSurfaces.some((surface) => surface.surface_id === "contract.settings");
     },
@@ -649,6 +651,125 @@ async function assertContractMatrixPackageLoaded(page) {
       `contract matrix package/app descriptors were not visible; installed=${JSON.stringify(installedText)}: ${error.message}`
     );
   });
+}
+
+async function exerciseContractSessionBindings(page) {
+  if (!webrtcDataDir) throw new Error("contract.sessions proof requires a WebRTC hub data directory");
+
+  const references = [
+    "session-transition",
+    "session-stable-current",
+    "session-ended",
+    "session-indeterminate",
+    "session-missing"
+  ];
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  for (const sessionId of references.slice(0, 4)) {
+    const response = await sendDaemonRequest(socketPath, {
+      type: "spawn",
+      session_id: sessionId,
+      command: "sleep 300"
+    });
+    if (response.error) {
+      throw new Error(`contract.sessions spawn failed for ${sessionId}: ${JSON.stringify(response.error)}`);
+    }
+    await waitForHarnessEvent(
+      page,
+      { kind: "hub_frame", family: "session", id: sessionId, lifecycle_class: "current" },
+      `contract.sessions current row ${sessionId}`
+    );
+  }
+
+  const endedResponse = await sendDaemonRequest(socketPath, {
+    type: "shutdown_session",
+    session_id: "session-ended"
+  });
+  if (endedResponse.error) {
+    throw new Error(`contract.sessions ended transition failed: ${JSON.stringify(endedResponse.error)}`);
+  }
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "session", id: "session-ended", lifecycle_class: "ended" },
+    "contract.sessions ended row"
+  );
+
+  await navigateToContractSurface(page, "contract.sessions");
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "session" },
+    "contract.sessions authoritative session snapshot"
+  );
+  await assertContractSurfaceRoute(page, "contract.sessions", "Session lifecycle projection");
+  await page.waitForFunction(() =>
+    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.renderPluginSurface === "function"
+  );
+  await dispatchContractSessionsSurface(page, references);
+  await assertContractSessionBindingText(page);
+
+  const previousSubscriptionId = await latestSessionEntitySubscriptionId(page);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "session" },
+    "contract.sessions reconnect authoritative snapshot"
+  );
+  await page.waitForFunction(
+    (priorId) => {
+      const ids = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities")
+        .map((entry) => entry.payload?.subscription_id);
+      return ids.some((id) => typeof id === "string" && id !== priorId);
+    },
+    previousSubscriptionId
+  );
+  await assertContractSurfaceRoute(page, "contract.sessions", "Session lifecycle projection");
+  await page.waitForFunction(() =>
+    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.renderPluginSurface === "function"
+  );
+  await dispatchContractSessionsSurface(page, references);
+  await assertContractSessionBindingText(page);
+}
+
+async function dispatchContractSessionsSurface(page, references) {
+  const eventCount = await harnessEventCount(page);
+  await page.evaluate(
+    ({ packageName, sessionUuids }) => {
+      return globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.renderPluginSurface({
+        id: "botster.package.surface.render",
+        target: packageName,
+        label: "Session Lifecycle Projection",
+        params: {
+          package_name: packageName,
+          surface_id: "contract.sessions",
+          payload: { session_uuids: sessionUuids }
+        }
+      });
+    },
+    { packageName: contractMatrixPackageName, sessionUuids: references }
+  );
+  await page.waitForFunction(
+    ({ packageName, sessionUuids, sinceIndex }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .slice(sinceIndex)
+        .some((entry) =>
+          entry.kind === "daemon_request" &&
+          entry.payload?.type === "plugin_surface_render" &&
+          entry.payload?.package_name === packageName &&
+          entry.payload?.surface_id === "contract.sessions" &&
+          JSON.stringify(entry.payload?.payload?.session_uuids) === JSON.stringify(sessionUuids)
+        ),
+    { packageName: contractMatrixPackageName, sessionUuids: references, sinceIndex: eventCount }
+  );
+}
+
+async function assertContractSessionBindingText(page) {
+  const selectedSurface = page.getByTestId("selected-app-surface");
+  await selectedSurface.getByText("current", { exact: true }).first().waitFor({ timeout: 45_000 });
+  await selectedSurface.getByText("ended", { exact: true }).waitFor({ timeout: 45_000 });
+  const unavailableCount = await selectedSurface.getByText("Session unavailable", { exact: true }).count();
+  if (unavailableCount !== 1) {
+    throw new Error(`contract.sessions expected one absent reference, observed ${unavailableCount}`);
+  }
 }
 
 async function openContractAppFromNavigation(page) {
@@ -1791,10 +1912,9 @@ async function proveExternalSessionLifecycle(page) {
     page,
     {
       kind: "hub_frame",
-      family: "botster-web.session",
+      family: "session",
       id: sessionId,
-      status: "running",
-      attachable: true
+      lifecycle: "running"
     },
     "externally spawned session upsert"
   );
@@ -1821,7 +1941,7 @@ async function proveExternalSessionLifecycle(page) {
   }
   await waitForHarnessEvent(
     page,
-    { kind: "hub_frame", family: "botster-web.session", id: sessionId, status: "exited" },
+    { kind: "hub_frame", family: "session", id: sessionId, lifecycle: "exited" },
     "external session exit patch"
   );
   const removeResponse = await sendDaemonRequest(socketPath, {
@@ -1833,7 +1953,7 @@ async function proveExternalSessionLifecycle(page) {
   }
   await waitForHarnessEvent(
     page,
-    { kind: "hub_frame", frameKind: "entity_remove", family: "botster-web.session", id: sessionId },
+    { kind: "hub_frame", frameKind: "entity_remove", family: "session", id: sessionId },
     "external session removal"
   );
   await sessionRow.waitFor({ state: "detached" });
@@ -2320,30 +2440,32 @@ async function waitForResizeProof(page, requestedResize) {
   );
 }
 
-async function waitForSessionStatus(page, status) {
+async function waitForSessionStatus(page, lifecycle) {
   await waitForHarnessEvent(
     page,
     {
       kind: "hub_frame",
-      family: "botster-web.session",
+      family: "session",
       id: productionSessionId,
-      status
+      lifecycle
     },
-    `session entity status ${status}`
+    `session entity lifecycle ${lifecycle}`
   );
 }
 
 async function waitForSessionAttachable(page, attachable) {
+  if (!attachable) {
+    throw new Error("live session attachability proof only supports the canonical running lifecycle");
+  }
   await waitForHarnessEvent(
     page,
     {
       kind: "hub_frame",
-      family: "botster-web.session",
+      family: "session",
       id: productionSessionId,
-      status: "running",
-      attachable
+      lifecycle: "running"
     },
-    `restored session attachable=${attachable}`
+    "restored running session used by the terminal attachment path"
   );
 }
 

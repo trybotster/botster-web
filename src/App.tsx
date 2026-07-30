@@ -73,7 +73,12 @@ import { webRtcDaemonLifecycleEventName, type LocalWebrtcBootstrap, type WebrtcD
 import type { ActionBinding } from "./botster/actions";
 import type { EntityFrameStore } from "./botster/entities";
 import type { TerminalAttachmentStatus, TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
-import { isAttachableSession, resolveTerminalSessionId } from "./botster/terminalSession";
+import {
+  isAttachableSession,
+  resolveTerminalSessionId,
+  sessionDisplayStatus,
+  sessionDisplayTitle
+} from "./botster/terminalSession";
 import type { UiActionRequest, UiNodeActionDispatch, UiTreeSnapshot } from "./botster/uiNodes";
 import {
   acceptedResultMatches,
@@ -850,7 +855,7 @@ export default function App() {
       if (!cancelled) {
         setSelectedRealHubTerminalSessionId((currentSessionId) =>
           resolveTerminalSessionId(
-            runtimeClient.entities.list("botster-web.session"),
+            runtimeClient.entities.list("session"),
             currentSessionId,
             attachedRealHubTerminalSessionId.current
           )
@@ -897,7 +902,7 @@ export default function App() {
       .then(() => pullProductionEntity("package", { family: "botster-web.package" }))
       .then(() => pullProductionEntity("availablePackage", { family: "botster-web.available_package" }))
       .then(() => pullProductionEntity("spawnTarget", { family: "botster-web.spawn_target" }))
-      .then(() => pullProductionEntity("session", { family: "botster-web.session" }))
+      .then(() => pullProductionEntity("session", { family: "session" }))
       .catch((error: unknown) => {
         if (!cancelled) {
           updateLocalState({
@@ -1309,6 +1314,42 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    if (!routePluginSurfaceKey || !routePluginSurface || !routePluginSurfaceRecord) return;
+    const harness = (window as typeof window & {
+      __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
+        renderPluginSurface?: (action: ActionBinding) => Promise<void>;
+      };
+    }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    if (!harness) return;
+
+    const renderPluginSurface = async (action: ActionBinding) => {
+      const expectedSurface = {
+        packageName: routePluginSurface.packageName,
+        surfaceId: routePluginEffectiveSurfaceId ?? routePluginSurface.surfaceId
+      };
+      const result = await runtimeClient.actions.dispatch({ origin: "ui_node", action });
+      setSelectedPluginSurface(renderedPluginSurfaceState(
+        result,
+        action.label ?? surfaceTitle(routePluginSurfaceRecord),
+        expectedSurface,
+        routePluginSurfaceKey
+      ));
+    };
+    harness.renderPluginSurface = renderPluginSurface;
+    return () => {
+      if (harness.renderPluginSurface === renderPluginSurface) {
+        delete harness.renderPluginSurface;
+      }
+    };
+  }, [
+    routePluginEffectiveSurfaceId,
+    routePluginSurface,
+    routePluginSurfaceKey,
+    routePluginSurfaceRecord,
+    runtimeClient
+  ]);
+
+  useEffect(() => {
     if (routeSettingsSurfaceDiagnostic) return;
     if (!routeSettingsPackageName || !routeSettingsSurfaceId) return;
     if (!routeSettingsSurfaceKey || !routeSettingsSurfaceRecord || !routeSettingsLaunchAction) return;
@@ -1435,7 +1476,7 @@ export default function App() {
     }
   }, [navigateToHubRoutePath, navigateToPluginSurface]);
   const packageNavigationShortcuts = packageNavigation;
-  const sessions = runtimeClient.entities.list("botster-web.session");
+  const sessions = runtimeClient.entities.list("session");
   const attachSession = useCallback((sessionId: string) => {
     dispatchAction({
       id: "botster.session.attach",
@@ -1449,7 +1490,7 @@ export default function App() {
     }
     setSelectedRealHubTerminalSessionId((currentSessionId) =>
       currentSessionId === sessionId
-        ? resolveTerminalSessionId(runtimeClient.entities.list("botster-web.session"))
+        ? resolveTerminalSessionId(runtimeClient.entities.list("session"))
         : currentSessionId
     );
   }, [runtimeClient]);
@@ -1617,8 +1658,8 @@ export default function App() {
                             <IonItem key={sessionId}>
                               <IonIcon icon={serverOutline} slot="start" aria-hidden="true" />
                               <IonLabel>
-                                <h2>{stringValue(session.title, sessionId)}</h2>
-                                <p>{stringValue(session.status, "Unknown status")}</p>
+                                <h2>{sessionDisplayTitle(session)}</h2>
+                                <p>{sessionDisplayStatus(session)}</p>
                               </IonLabel>
                               {attachable ? (
                                 <IonButton slot="end" fill="outline" onClick={() => attachSession(sessionId)}>Open</IonButton>

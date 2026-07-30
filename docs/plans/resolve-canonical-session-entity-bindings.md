@@ -123,14 +123,16 @@ Additional role and surface guidance:
 - `src/botster/hubTransport.ts`: canonical session family, canonical record preservation, held-subscription frame projection.
 - `src/App.tsx`: canonical session reads/pull plus read-boundary home presentation.
 - `src/botster/terminalSession.ts`: derive attachability and retained-session selection from canonical lifecycle fields rather than store-injected presentation keys.
+- `src/botster/LocalHubFirstScreen.tsx`: derive diagnostics session summary state from canonical lifecycle fields at the read boundary.
 - `src/botster/entities.ts`: expected to remain unchanged; touch only if a fixture exposes a ticket-required generic reconciliation defect.
 - `src/botster/IonicUiNodeRenderer.tsx`: expected to remain structurally generic; touch only for a proven owner-neutral `UiChild` materialization defect or silent-child-drop bug.
 - `src/botster/uiNodes.ts`: expected to remain a direct `@trybotster/ui-contract` consumer; no local grammar.
+- `src/botster/__fixtures__/sessionBindingUiChildren.ts`: small Web-authored `UiChild[]` fixture for conditional, `bind_if`, and nested-child variants absent from the published surface.
 - `src/App.test.mjs`: published-fixture import, canonical-family assertions, deterministic materialization and reconciliation proof.
 - `scripts/live-packaged-protocol-harness.mjs`: real `contract.sessions` plugin-worker/browser/reconnect proof and canonical family expectations.
 - `scripts/check-daemon-protocol-drift.mjs`: include the published session fixture/metadata in drift checks only if it is not already protected by the package verification path.
-- `scripts/live-packaged-protocol-helpers.mjs`: only if a small owner-neutral harness matcher is required.
-- `README.md` and `docs/architecture.md`: bounded contract/run-command updates if implementation changes a stable documented claim.
+- `scripts/live-packaged-protocol-helpers.mjs`: extend the owner-neutral entity-frame matcher with canonical session lifecycle fields.
+- `README.md` and `docs/architecture.md`: document canonical family `session` and the live contract-matrix `/session` binding proof.
 
 ## Implementation sequence
 

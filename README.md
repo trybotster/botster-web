@@ -7,7 +7,7 @@
 - Local development uses the deterministic fixture transport.
 - Installed package runtime requires a hub-issued local WebRTC bootstrap grant.
 - Encrypted daemon requests, responses, terminal traffic, and pushed session entity frames travel over the ordered WebRTC data channel.
-- Session state begins with an authoritative subscription snapshot and continues through ordered pushed deltas. The client does not poll or call `list_sessions`.
+- Session state materializes in canonical entity family `session`, beginning with an authoritative subscription snapshot and continuing through ordered pushed deltas. The client does not poll or call `list_sessions`.
 - `@trybotster/ui-contract` is the sole `UiNode`, action request/result, package-surface descriptor, supported-operation, and manifest-navigation vocabulary source. Hub owns package admission and projects sanitized package/navigation rows; the generated daemon declarations and shared conformance fixtures come from the pinned `@trybotster/hub-test-support` release.
 - Plugin form drafts travel in canonical `UiActionRequest.values`; optional action metadata remains in `payload`. Accepted correlated results may replace the owning subtree and mutate Hub/package/surface-scoped presentation state, while rejected results retain the tree, dialog, values, and actionable errors.
 - After binding, the loopback package server requests an origin-bound initial WebRTC grant from Hub and injects it into each HTML load. It handles later bootstrap refresh and signaling at `/request`; it is not a daemon control or terminal-data fallback.
@@ -68,8 +68,9 @@ Run `npm run smoke:live-packaged-protocol:caller-repeatability` with the same Hu
 
 The plugin contract checks use the same production WebRTC harness. They prove
 Hub-projected package navigation through a visible sidebar control and route
-click, then exercise package list/detail, launch/render, and structured action
-results through the production transport and React components:
+click, then exercise package list/detail, launch/render, canonical `/session`
+bindings with reconnect hydration, and structured action results through the
+production transport and React components:
 
 ```bash
 BOTSTER_HUB_BIN=/path/to/botster-hub \

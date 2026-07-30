@@ -18,6 +18,7 @@ import {
   readLocalWebrtcDeliveryChunkConformanceFixture,
   readModeFlagsConformanceFixture,
   readSessionLifecycleSubscriptionConformanceFixture,
+  readSessionPluginBindingConformanceFixture,
   readUiContractConformanceFixtures,
   verifyPackageAssets
 } from "@trybotster/hub-test-support";
@@ -121,10 +122,10 @@ const multiSessionSnapshot = {
   payload: {
     kind: "entity_snapshot",
     payload: {
-      family: "botster-web.session",
+      family: "session",
       records: [
-        { id: "target", status: "exited", attachable: false },
-        { id: "other", status: "running", attachable: true }
+        { id: "target", lifecycle: "exited" },
+        { id: "other", lifecycle: "running" }
       ]
     }
   }
@@ -132,20 +133,18 @@ const multiSessionSnapshot = {
 assert.equal(
   harnessEventMatches(multiSessionSnapshot, {
     kind: "hub_frame",
-    family: "botster-web.session",
+    family: "session",
     id: "target",
-    status: "running",
-    attachable: true
+    lifecycle: "running"
   }),
   false
 );
 assert.equal(
   harnessEventMatches(multiSessionSnapshot, {
     kind: "hub_frame",
-    family: "botster-web.session",
+    family: "session",
     id: "other",
-    status: "running",
-    attachable: true
+    lifecycle: "running"
   }),
   true
 );
@@ -155,10 +154,10 @@ assert.equal(
       kind: "hub_frame",
       payload: {
         kind: "entity_snapshot",
-        payload: { family: "botster-web.session", records: [] }
+        payload: { family: "session", records: [] }
       }
     },
-    { kind: "hub_frame", family: "botster-web.session" }
+    { kind: "hub_frame", family: "session" }
   ),
   true
 );
@@ -619,7 +618,8 @@ assert.match(liveProtocolHarnessScript, /proveExternalSessionLifecycle/);
 assert.match(liveProtocolHarnessScript, /entity_remove/);
 assert.match(liveProtocolHarnessScript, /waitForSessionStatus/);
 assert.match(liveProtocolHarnessScript, /hub_frame/);
-assert.match(liveProtocolHarnessScript, /botster-web\.session/);
+assert.match(liveProtocolHarnessScript, /family: "session"/);
+assert.doesNotMatch(liveProtocolHarnessScript, /family: "botster-web\.session"/);
 assert.match(liveProtocolHarnessScript, /runHubCommand\(\["shutdown"/);
 assert.match(liveProtocolHarnessScript, /assertNoBrowserFailures/);
 assert.match(liveProtocolHarnessScript, /browserFailureSummary/);
@@ -866,6 +866,20 @@ assert.equal(
 const sessionLifecycleFixture = readSessionLifecycleSubscriptionConformanceFixture();
 assert.equal(sessionLifecycleFixture.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(sessionLifecycleFixture.fresh_subscription.requires_authoritative_snapshot_before_deltas, true);
+const sessionPluginBindingFixture = readSessionPluginBindingConformanceFixture();
+assert.equal(sessionPluginBindingFixture.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
+assert.equal(sessionPluginBindingFixture.binding_family, "/session");
+assert.equal(sessionPluginBindingFixture.entity_type, "session");
+assert.deepEqual(
+  sessionPluginBindingFixture.references,
+  [
+    "session-transition",
+    "session-stable-current",
+    "session-ended",
+    "session-indeterminate",
+    "session-missing"
+  ]
+);
 assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
 assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping daemon protocol drift check|check out \.\.\/botster-hub/);
 assert.match(liveProtocolHarnessScript, /@trybotster\/hub-test-support/);
@@ -1409,6 +1423,61 @@ assert.equal(
     .payload.records[0].id,
   "github-provider"
 );
+
+const sessionLifecycleStore = createInMemoryEntityFrameStore();
+const applySessionLifecycleFrame = (frame) => {
+  const projected = daemonEntityFrame(frame);
+  assert.ok(projected);
+  sessionLifecycleStore.apply(projected.payload);
+};
+const [
+  lifecycleInitialSnapshot,
+  lifecycleUpsert,
+  lifecycleDimensionsPatch,
+  lifecycleEndedPatch,
+  lifecycleRemove
+] = sessionLifecycleFixture.normalized_frames;
+applySessionLifecycleFrame(lifecycleInitialSnapshot);
+assert.deepEqual(sessionLifecycleStore.list("session"), []);
+applySessionLifecycleFrame(lifecycleUpsert);
+assert.deepEqual(sessionLifecycleStore.get("session", "slc-session"), {
+  ...lifecycleUpsert.entity,
+  id: "slc-session"
+});
+applySessionLifecycleFrame(lifecycleDimensionsPatch);
+assert.equal(sessionLifecycleStore.get("session", "slc-session").rows, 31);
+assert.equal(sessionLifecycleStore.get("session", "slc-session").cols, 101);
+applySessionLifecycleFrame(lifecycleEndedPatch);
+assert.equal(sessionLifecycleStore.get("session", "slc-session").lifecycle, "exited");
+assert.equal(sessionLifecycleStore.get("session", "slc-session").lifecycle_class, "ended");
+applySessionLifecycleFrame(lifecycleRemove);
+assert.equal(sessionLifecycleStore.get("session", "slc-session"), undefined);
+
+sessionLifecycleStore.apply({
+  operation: "entity_upsert",
+  key: { family: "session", id: "prior-generation-row" },
+  sequence: 3,
+  record: { id: "prior-generation-row", session_uuid: "prior-generation-row" }
+});
+applySessionLifecycleFrame(sessionLifecycleFixture.fresh_subscription.snapshot);
+assert.deepEqual(sessionLifecycleStore.list("session"), []);
+assert.equal(sessionLifecycleFixture.fresh_subscription.prior_generation_frames_discarded, true);
+assert.equal(sessionLifecycleFixture.overflow.resync_reason, "subscriber_overflow");
+applySessionLifecycleFrame(sessionLifecycleFixture.overflow.resync_snapshot);
+assert.deepEqual(sessionLifecycleStore.list("session"), []);
+sessionLifecycleStore.apply({
+  operation: "entity_upsert",
+  key: { family: "session", id: "post-resync-row" },
+  sequence: sessionLifecycleFixture.overflow.resync_snapshot.snapshot_seq + 1,
+  record: {
+    id: "post-resync-row",
+    session_uuid: "post-resync-row",
+    lifecycle: "running",
+    lifecycle_class: "current",
+    registry_state: "active"
+  }
+});
+assert.equal(sessionLifecycleStore.get("session", "post-resync-row").lifecycle_class, "current");
 
 const transport = {
   sent: [],
@@ -3172,7 +3241,7 @@ const realFrames = [];
 await realTransport.connect({ client: "botster-web", capabilities: [] }, (frame) => realFrames.push(frame));
 await flushMicrotasks();
 await realTransport.send({ kind: "subscribe", payload: {} });
-await realTransport.send({ kind: "entity_pull", payload: { family: "botster-web.session" } });
+await realTransport.send({ kind: "entity_pull", payload: { family: "session" } });
 bridgeEntitySubscriptions[0].onFrame({
   type: "entity_upsert",
   subscription_id: "bridge-session-generation-1",
@@ -3389,7 +3458,7 @@ assert.equal(
   realFrames.some(
     (frame) =>
       frame.kind === "entity_snapshot" &&
-      frame.payload.family === "botster-web.session" &&
+      frame.payload.family === "session" &&
       frame.payload.records.length === 0
   ),
   true
@@ -3512,11 +3581,11 @@ await realRuntime.hub.connect({ client: "botster-web", capabilities: [] });
 await realRuntime.hub.subscribeSurface({ surface: "botster-web.production.session", path: "/sessions/real-hub" });
 await realRuntime.entities.pull({ family: "botster-web.hub_status" });
 await realRuntime.entities.pull({ family: "botster-web.package" });
-await realRuntime.entities.pull({ family: "botster-web.session" });
+await realRuntime.entities.pull({ family: "session" });
 await flushMicrotasks();
 assert.equal(realRuntime.uiTree.current(), undefined);
-assert.deepEqual(realRuntime.entities.list("botster-web.session").map((record) => record.id), []);
-assert.equal(realRuntime.entities.get("botster-web.session", "session-local-1"), undefined);
+assert.deepEqual(realRuntime.entities.list("session").map((record) => record.id), []);
+assert.equal(realRuntime.entities.get("session", "session-local-1"), undefined);
 assert.equal(realRuntime.entities.get("botster-web.hub_status", "local-hub").host_id, "production-host");
 assert.deepEqual(realRuntime.entities.list("botster-web.package").map((record) => record.id), [
   "botster-web",
@@ -3594,44 +3663,23 @@ assert.deepEqual(realRuntime.entities.get("botster-web.hub_status", "local-hub")
 ]);
 assert.equal(
   daemonResponseFrames({ kind: "status", sessions: [], packages: [], events: [] }, 21)
-    .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session"),
+    .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "session"),
   false
 );
 assert.equal(
   daemonResponseFrames({ kind: "sessions", sessions: [], packages: [], events: [] }, 21)
-    .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session"),
+    .some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "session"),
   false
 );
-const optimisticSpawnFrame = daemonResponseFrames({
+assert.equal(
+  daemonResponseFrames({
     kind: "spawned",
     sessions: [{ session_id: "spawned-target", lifecycle: "running" }],
     packages: [],
     events: []
-  }, 22).find(
-  (frame) =>
-    frame.kind === "entity_upsert" &&
-    frame.payload.key.family === "botster-web.session" &&
-    frame.payload.key.id === "spawned-target"
+  }, 22).some((frame) => frame.kind.startsWith("entity_") && frame.payload.family === "session"),
+  false
 );
-assert.ok(optimisticSpawnFrame);
-assert.equal(optimisticSpawnFrame.payload.sequence, undefined);
-const optimisticSpawnStore = createInMemoryEntityFrameStore();
-optimisticSpawnStore.apply({
-  operation: "entity_snapshot",
-  family: "botster-web.session",
-  sequence: 0,
-  records: []
-});
-optimisticSpawnStore.apply(optimisticSpawnFrame.payload);
-optimisticSpawnStore.apply(daemonEntityFrame({
-  type: "entity_patch",
-  subscription_id: "spawn-regression-subscription",
-  entity_type: "session",
-  snapshot_seq: 1,
-  id: "spawned-target",
-  patch: { registry_state: "exited", exit_code: 0, updated_at: 2 }
-}).payload);
-assert.equal(optimisticSpawnStore.get("botster-web.session", "spawned-target").status, "exited");
 
 const runtimeDiagnostics = [];
 const diagnosticRuntime = createBotsterWebClient({
@@ -4579,7 +4627,9 @@ try {
       replaceAcceptedSurface
     },
     { configurationFieldType, configurationSaveAction, configurationSubmitValues },
-    { resolveTerminalSessionId },
+    { resolveTerminalSessionId, sessionDisplayStatus, sessionDisplayTitle },
+    { UiNodeSurface },
+    { sessionBindingVariantSnapshot },
     {
       AppListItem,
       PackageNavigationShortcutButton,
@@ -4609,19 +4659,26 @@ try {
     vite.ssrLoadModule("/src/botster/uiPresentation.ts"),
     vite.ssrLoadModule("/src/packageConfigurationForm.ts"),
     vite.ssrLoadModule("/src/botster/terminalSession.ts"),
+    vite.ssrLoadModule("/src/botster/UiNodeSurface.tsx"),
+    vite.ssrLoadModule("/src/botster/__fixtures__/sessionBindingUiChildren.ts"),
     vite.ssrLoadModule("/src/App.tsx")
   ]);
 
   const runningTerminalSession = {
     id: activeHubSessionId,
-    status: "running",
-    attachable: true
+    session_uuid: activeHubSessionId,
+    registry_state: "active",
+    lifecycle: "running"
   };
   const exitedTerminalSession = {
     id: activeHubSessionId,
-    status: "exited",
-    attachable: false
+    session_uuid: activeHubSessionId,
+    registry_state: "exited",
+    lifecycle: "exited"
   };
+  assert.equal(sessionDisplayTitle(runningTerminalSession), activeHubSessionId);
+  assert.equal(sessionDisplayStatus(runningTerminalSession), "running");
+  assert.equal(sessionDisplayStatus({ id: "stale-session", registry_state: "stale" }), "stale");
   assert.equal(resolveTerminalSessionId([runningTerminalSession]), activeHubSessionId);
   assert.equal(resolveTerminalSessionId([exitedTerminalSession]), undefined);
   assert.equal(entityFamilyRecordLimit, 4);
@@ -4631,14 +4688,14 @@ try {
   );
   assert.equal(
     resolveTerminalSessionId(
-      [exitedTerminalSession, { id: "next-running-session", status: "running", attachable: true }],
+      [exitedTerminalSession, { id: "next-running-session", lifecycle: "running" }],
       activeHubSessionId
     ),
     "next-running-session"
   );
   assert.equal(
     resolveTerminalSessionId(
-      [exitedTerminalSession, { id: "next-running-session", status: "running", attachable: true }],
+      [exitedTerminalSession, { id: "next-running-session", lifecycle: "running" }],
       activeHubSessionId,
       activeHubSessionId
     ),
@@ -4646,7 +4703,7 @@ try {
   );
   assert.equal(
     resolveTerminalSessionId(
-      [{ id: "next-running-session", status: "running", attachable: true }],
+      [{ id: "next-running-session", lifecycle: "running" }],
       activeHubSessionId
     ),
     "next-running-session"
@@ -6360,6 +6417,99 @@ try {
   });
   assert.match(renderBindList(), /No tickets/);
 
+  const sessionBindingStore = createInMemoryEntityFrameStore();
+  const sessionBindingSnapshot = {
+    kind: "ui_tree_snapshot",
+    surface: "contract.sessions",
+    version: `hub-test-support-revision-${sessionPluginBindingFixture.conformance_fixture_revision}`,
+    root: sessionPluginBindingFixture.surface
+  };
+  const renderSessionBindings = () => renderToStaticMarkup(
+    createElement(UiNodeSurface, {
+      snapshot: sessionBindingSnapshot,
+      entities: sessionBindingStore
+    })
+  );
+  const applyPublishedSessionFrame = (frame) => {
+    const projected = daemonEntityFrame(frame);
+    assert.ok(projected);
+    sessionBindingStore.apply(projected.payload);
+  };
+
+  applyPublishedSessionFrame(sessionPluginBindingFixture.initial_snapshot);
+  const initialSessionBindings = renderSessionBindings();
+  assert.equal((initialSessionBindings.match(/>current</g) ?? []).length, 2);
+  assert.equal((initialSessionBindings.match(/>ended</g) ?? []).length, 1);
+  assert.equal((initialSessionBindings.match(/>indeterminate</g) ?? []).length, 1);
+  assert.equal((initialSessionBindings.match(/Session unavailable/g) ?? []).length, 1);
+  assert.doesNotMatch(initialSessionBindings, /data-unsupported-ui-node/);
+
+  const canonicalSessionRecord = sessionBindingStore.get("session", "session-transition");
+  assert.deepEqual(
+    Object.keys(canonicalSessionRecord).sort(),
+    [...Object.keys(sessionPluginBindingFixture.initial_snapshot.items[0]), "id"].sort()
+  );
+  assert.equal(canonicalSessionRecord.session_uuid, "session-transition");
+  assert.equal(canonicalSessionRecord.lifecycle, "running");
+  assert.equal(canonicalSessionRecord.lifecycle_class, "current");
+  for (const webOnlyField of [
+    "title",
+    "target",
+    "last_result",
+    "status",
+    "attachable",
+    "attach_status",
+    "attach_action"
+  ]) {
+    assert.equal(webOnlyField in canonicalSessionRecord, false);
+  }
+
+  applyPublishedSessionFrame(sessionPluginBindingFixture.transition_frames[0]);
+  assert.equal((renderSessionBindings().match(/>ended</g) ?? []).length, 2);
+  applyPublishedSessionFrame(sessionPluginBindingFixture.transition_frames[1]);
+  assert.equal((renderSessionBindings().match(/>indeterminate</g) ?? []).length, 2);
+  applyPublishedSessionFrame(sessionPluginBindingFixture.transition_frames[2]);
+  assert.equal((renderSessionBindings().match(/Session unavailable/g) ?? []).length, 2);
+
+  applyPublishedSessionFrame(sessionPluginBindingFixture.reconnect_snapshot);
+  const reconnectSessionBindings = renderSessionBindings();
+  assert.equal((reconnectSessionBindings.match(/Session unavailable/g) ?? []).length, 2);
+  assert.equal(sessionBindingStore.get("session", "session-transition"), undefined);
+  assert.equal(
+    Object.hasOwn(sessionBindingStore.get("session", "session-indeterminate"), "lifecycle"),
+    false
+  );
+  assert.equal(
+    sessionBindingStore.get("session", "session-indeterminate").lifecycle_class,
+    "indeterminate"
+  );
+
+  const childVariantMarkup = renderToStaticMarkup(
+    createElement(UiNodeSurface, {
+      snapshot: sessionBindingVariantSnapshot,
+      entities: sessionBindingStore
+    })
+  );
+  assert.match(childVariantMarkup, /Conditional child/);
+  assert.match(childVariantMarkup, />current</);
+  assert.match(childVariantMarkup, /Nested bound child/);
+  assert.doesNotMatch(childVariantMarkup, /data-unsupported-ui-node/);
+
+  sessionBindingStore.apply({
+    operation: "entity_patch",
+    key: { family: "session", id: "session-stable-current" },
+    record: { id: "session-stable-current", lifecycle: null }
+  });
+  const hiddenBoundChildrenMarkup = renderToStaticMarkup(
+    createElement(UiNodeSurface, {
+      snapshot: sessionBindingVariantSnapshot,
+      entities: sessionBindingStore
+    })
+  );
+  assert.match(hiddenBoundChildrenMarkup, /Conditional child/);
+  assert.match(hiddenBoundChildrenMarkup, />current</);
+  assert.doesNotMatch(hiddenBoundChildrenMarkup, /Nested bound child/);
+
   const toolbarMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(
       {
@@ -6794,18 +6944,6 @@ try {
   const productionStore = createInMemoryEntityFrameStore();
   productionStore.apply({
     operation: "entity_snapshot",
-    family: "botster-web.session",
-    records: [
-      {
-        id: "session-local-1",
-        title: "Local validation session",
-        status: "running",
-        last_result: "action_request accepted by local validation adapter"
-      }
-    ]
-  });
-  productionStore.apply({
-    operation: "entity_snapshot",
     family: "botster-web.session_draft",
     records: [
       {
@@ -7092,7 +7230,7 @@ try {
         }
       ],
       packageLoadStatus: "loaded",
-      sessions: [{ id: activeHubSessionId, status: "running" }],
+      sessions: [{ id: activeHubSessionId, lifecycle: "running" }],
       sessionLoadStatus: "loaded",
       actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })
@@ -7171,7 +7309,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
         }
       ],
       packageLoadStatus: "loaded",
-      sessions: [{ id: activeHubSessionId, status: "running" }],
+      sessions: [{ id: activeHubSessionId, lifecycle: "running" }],
       sessionLoadStatus: "loaded",
       actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })
@@ -7186,7 +7324,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
       diagnostics: [terminalUnavailableDiagnostic(new Error("terminal stream closed"))],
       packages: [{ id: "botster-web", status: "enabled", entrypoint_process_summary: "web-client running" }],
       packageLoadStatus: "loaded",
-      sessions: [{ id: activeHubSessionId, status: "running" }],
+      sessions: [{ id: activeHubSessionId, lifecycle: "running" }],
       sessionLoadStatus: "loaded",
       actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })
