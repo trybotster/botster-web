@@ -29,6 +29,7 @@ import { decodeHubConnection, HubConnectionError } from "../scripts/hubConnectio
 import {
   assertDurableStateOwnership,
   assertPackageReused,
+  assertWorkspacesStateOwnership,
   durableSeedSessionIdsForDiagnosticsLimit,
   harnessEventMatches,
   htmlAssetUrls,
@@ -64,8 +65,39 @@ assert.throws(
   () => assertDurableStateOwnership({ durableStateMode: true, suppliedDataDir: "/caller/data" }),
   /cannot be combined with caller-owned BOTSTER_LIVE_DATA_DIR/
 );
+assert.throws(
+  () => assertDurableStateOwnership({ durableStateMode: true, suppliedDataDir: "" }),
+  /cannot be combined with caller-owned BOTSTER_LIVE_DATA_DIR/
+);
 assert.doesNotThrow(
   () => assertDurableStateOwnership({ durableStateMode: true, suppliedDataDir: undefined })
+);
+assert.doesNotThrow(() =>
+  assertWorkspacesStateOwnership({
+    requireWorkspacesMode: true,
+    durableStateMode: false,
+    suppliedDataDir: undefined
+  })
+);
+for (const suppliedDataDir of ["", "/caller/data"]) {
+  assert.throws(
+    () =>
+      assertWorkspacesStateOwnership({
+        requireWorkspacesMode: true,
+        durableStateMode: false,
+        suppliedDataDir
+      }),
+    /requires a fresh harness-owned data directory/
+  );
+}
+assert.throws(
+  () =>
+    assertWorkspacesStateOwnership({
+      requireWorkspacesMode: true,
+      durableStateMode: true,
+      suppliedDataDir: undefined
+    }),
+  /requires a fresh harness-owned data directory/
 );
 const durableSeedIds = durableSeedSessionIdsForDiagnosticsLimit(4);
 assert.equal(durableSeedIds.length, 5);
@@ -5046,6 +5078,8 @@ try {
   assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, /workflow-section/);
   assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, />Loading<\/ion-badge>/);
   const workspacesNamedSlotSurface = { packageName: "botster-workspaces", surfaceId: "workspaces" };
+  // Synthetic named-slot renderer coverage deliberately exercises exhaustive slot shapes,
+  // including list.empty. These fixture-only IDs must not be mined for production-package oracles.
   const workspacesNamedSlotState = renderedPluginSurfaceState(
     {
       accepted: true,
@@ -5059,47 +5093,47 @@ try {
             package_name: workspacesNamedSlotSurface.packageName,
             surface_id: workspacesNamedSlotSurface.surfaceId,
             body: {
-              id: "botster-workspaces-app",
+              id: "named-slot-fixture-app",
               type: "panel",
               props: { title: "Workspaces" },
               slots: {
                 header: [
                   {
-                    id: "botster-workspaces-header",
+                    id: "named-slot-fixture-header",
                     type: "text",
                     props: { text: "Workspace application header" }
                   }
                 ],
                 toolbar: [
                   {
-                    id: "botster-workspaces-toolbar",
+                    id: "named-slot-fixture-toolbar",
                     type: "toolbar",
                     props: { label: "Workspace actions" },
                     slots: {
                       commands: [
                         {
-                          id: "botster-workspaces-toolbar-command",
+                          id: "named-slot-fixture-toolbar-command",
                           type: "button",
                           props: { label: "Create", action: "workspace.create" }
                         }
                       ],
                       filters: [
                         {
-                          id: "botster-workspaces-toolbar-filter",
+                          id: "named-slot-fixture-toolbar-filter",
                           type: "text",
                           props: { text: "Active workspaces" }
                         }
                       ],
                       search: [
                         {
-                          id: "botster-workspaces-toolbar-search",
+                          id: "named-slot-fixture-toolbar-search",
                           type: "text",
                           props: { text: "Search workspaces" }
                         }
                       ],
                       actions: [
                         {
-                          id: "botster-workspaces-toolbar-action",
+                          id: "named-slot-fixture-toolbar-action",
                           type: "button",
                           props: { label: "Refresh", action: "workspace.refresh" }
                         }
@@ -5109,44 +5143,44 @@ try {
                 ],
                 body: [
                   {
-                    id: "botster-workspaces-read-model",
+                    id: "named-slot-fixture-read-model",
                     type: "text",
-                    props: { text: "Read model: botster-workspaces.workspace" }
+                    props: { text: "Read model: named-slot-fixture.record" }
                   },
                   {
-                    id: "botster-workspaces-metrics",
+                    id: "named-slot-fixture-metrics",
                     type: "metric_grid",
                     props: { density: "compact" },
                     children: [
                       {
-                        id: "botster-workspaces-metric-count",
+                        id: "named-slot-fixture-metric-count",
                         type: "metric",
                         props: { label: "Workspaces", value: 1 }
                       }
                     ]
                   },
                   {
-                    id: "botster-workspaces-index-section",
+                    id: "named-slot-fixture-index-section",
                     type: "section",
                     props: { title: "Workspace index" },
                     slots: {
                       header: [
                         {
-                          id: "botster-workspaces-index-header",
+                          id: "named-slot-fixture-index-header",
                           type: "text",
                           props: { text: "Workspace index header" }
                         }
                       ],
                       toolbar: [
                         {
-                          id: "botster-workspaces-index-toolbar",
+                          id: "named-slot-fixture-index-toolbar",
                           type: "toolbar",
                           props: { label: "Index tools" }
                         }
                       ],
                       body: [
                         {
-                          id: "botster-workspaces-list",
+                          id: "named-slot-fixture-list",
                           type: "list",
                           props: { aria_label: "Workspaces" },
                           children: [
@@ -5166,7 +5200,7 @@ try {
                                   {
                                     id: "workspace-row-alpha-purpose",
                                     type: "text",
-                                    props: { text: "Producer-shaped named-slot coverage" }
+                                    props: { text: "Synthetic named-slot renderer coverage" }
                                   }
                                 ],
                                 meta: [
@@ -5183,14 +5217,14 @@ try {
                       ],
                       footer: [
                         {
-                          id: "botster-workspaces-index-footer",
+                          id: "named-slot-fixture-index-footer",
                           type: "text",
                           props: { text: "Workspace index footer" }
                         }
                       ],
                       actions: [
                         {
-                          id: "botster-workspaces-index-action",
+                          id: "named-slot-fixture-index-action",
                           type: "button",
                           props: { label: "Open index", action: "workspace.index.open" }
                         }
@@ -5198,37 +5232,37 @@ try {
                     }
                   },
                   {
-                    id: "botster-workspaces-create-form",
+                    id: "named-slot-fixture-create-form",
                     type: "form",
                     props: { action: "workspace.create" },
                     children: [
                       {
-                        id: "botster-workspaces-create-name",
+                        id: "named-slot-fixture-create-name",
                         type: "text_input",
                         props: { name: "name", label: "Workspace name" }
                       }
                     ]
                   },
                   {
-                    id: "botster-workspaces-spawn-form",
+                    id: "named-slot-fixture-spawn-form",
                     type: "form",
                     props: { action: "workspace.spawn" },
                     children: [
                       {
-                        id: "botster-workspaces-spawn-id",
+                        id: "named-slot-fixture-spawn-id",
                         type: "text_input",
                         props: { name: "workspace_id", label: "Workspace" }
                       }
                     ]
                   },
                   {
-                    id: "botster-workspaces-empty-section",
+                    id: "named-slot-fixture-empty-section",
                     type: "section",
                     props: { title: "Empty workspace section" },
                     slots: {
                       empty: [
                         {
-                          id: "botster-workspaces-section-empty-state",
+                          id: "named-slot-fixture-section-empty-state",
                           type: "empty_state",
                           props: { title: "No section rows" }
                         }
@@ -5236,19 +5270,19 @@ try {
                     }
                   },
                   {
-                    id: "botster-workspaces-empty-panel",
+                    id: "named-slot-fixture-empty-panel",
                     type: "panel",
                     slots: {
                       header: [
                         {
-                          id: "botster-workspaces-titleless-panel-header",
+                          id: "named-slot-fixture-titleless-panel-header",
                           type: "text",
                           props: { text: "Titleless panel header" }
                         }
                       ],
                       empty: [
                         {
-                          id: "botster-workspaces-panel-empty-state",
+                          id: "named-slot-fixture-panel-empty-state",
                           type: "empty_state",
                           props: { title: "No panel rows" }
                         }
@@ -5258,21 +5292,21 @@ try {
                 ],
                 empty: [
                   {
-                    id: "botster-workspaces-populated-empty-state",
+                    id: "named-slot-fixture-populated-empty-state",
                     type: "empty_state",
                     props: { title: "Must stay hidden while body content exists" }
                   }
                 ],
                 footer: [
                   {
-                    id: "botster-workspaces-footer",
+                    id: "named-slot-fixture-footer",
                     type: "text",
                     props: { text: "Workspace application footer" }
                   }
                 ],
                 actions: [
                   {
-                    id: "botster-workspaces-action",
+                    id: "named-slot-fixture-action",
                     type: "button",
                     props: { label: "Open workspace", action: "workspace.open" }
                   }
@@ -5292,27 +5326,27 @@ try {
     title: "Workspaces"
   });
   for (const nodeId of [
-    "botster-workspaces-header",
-    "botster-workspaces-toolbar",
-    "botster-workspaces-toolbar-command",
-    "botster-workspaces-toolbar-filter",
-    "botster-workspaces-toolbar-search",
-    "botster-workspaces-toolbar-action",
-    "botster-workspaces-read-model",
-    "botster-workspaces-metrics",
-    "botster-workspaces-index-section",
-    "botster-workspaces-index-header",
-    "botster-workspaces-index-toolbar",
-    "botster-workspaces-list",
-    "botster-workspaces-index-footer",
-    "botster-workspaces-index-action",
-    "botster-workspaces-create-form",
-    "botster-workspaces-spawn-form",
-    "botster-workspaces-section-empty-state",
-    "botster-workspaces-panel-empty-state",
-    "botster-workspaces-titleless-panel-header",
-    "botster-workspaces-footer",
-    "botster-workspaces-action"
+    "named-slot-fixture-header",
+    "named-slot-fixture-toolbar",
+    "named-slot-fixture-toolbar-command",
+    "named-slot-fixture-toolbar-filter",
+    "named-slot-fixture-toolbar-search",
+    "named-slot-fixture-toolbar-action",
+    "named-slot-fixture-read-model",
+    "named-slot-fixture-metrics",
+    "named-slot-fixture-index-section",
+    "named-slot-fixture-index-header",
+    "named-slot-fixture-index-toolbar",
+    "named-slot-fixture-list",
+    "named-slot-fixture-index-footer",
+    "named-slot-fixture-index-action",
+    "named-slot-fixture-create-form",
+    "named-slot-fixture-spawn-form",
+    "named-slot-fixture-section-empty-state",
+    "named-slot-fixture-panel-empty-state",
+    "named-slot-fixture-titleless-panel-header",
+    "named-slot-fixture-footer",
+    "named-slot-fixture-action"
   ]) {
     assert.match(workspacesNamedSlotMarkup, new RegExp(`data-ui-node-id="${nodeId}"`));
   }
@@ -5321,13 +5355,13 @@ try {
   assert.match(workspacesNamedSlotMarkup, /data-ui-slot="search" slot="primary"/);
   assert.match(workspacesNamedSlotMarkup, /<ion-buttons slot="end">/);
   assert.match(workspacesNamedSlotMarkup, /data-ui-slot="empty" role="status"/);
-  assert.doesNotMatch(workspacesNamedSlotMarkup, /botster-workspaces-populated-empty-state/);
-  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="botster-workspaces-toolbar"/);
-  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="botster-workspaces-read-model"/);
-  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="botster-workspaces-index-section"/);
-  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="botster-workspaces-list"/);
+  assert.doesNotMatch(workspacesNamedSlotMarkup, /named-slot-fixture-populated-empty-state/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="named-slot-fixture-toolbar"/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="named-slot-fixture-read-model"/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="named-slot-fixture-index-section"/);
+  assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="named-slot-fixture-list"/);
   assert.match(workspacesNamedSlotMarkup, /Alpha workspace/);
-  assert.match(workspacesNamedSlotMarkup, /Producer-shaped named-slot coverage/);
+  assert.match(workspacesNamedSlotMarkup, /Synthetic named-slot renderer coverage/);
   assert.match(workspacesNamedSlotMarkup, /data-ui-node-id="workspace-row-alpha-status"/);
   assert.deepEqual(
     renderedPluginSurfaceState(
