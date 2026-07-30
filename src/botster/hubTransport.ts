@@ -23,14 +23,13 @@ import type {
   DaemonPackageRunnableEntrypoint,
   DaemonRequest,
   DaemonResponse,
-  DaemonSession,
   DaemonSessionEntity,
   JsonValue
 } from "./realHubDaemonDto";
 
 export const hubTerminalSubscriptionId = "botster-web-terminal";
 
-const sessionFamily = "botster-web.session";
+const sessionFamily = "session";
 const appFamily = "botster-web.app";
 const packageNavigationFamily = "botster-web.package_navigation";
 const packageFamily = "botster-web.package";
@@ -177,19 +176,6 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
         records: [statusRecord(response.status, response.diagnostics)]
       } satisfies EntityFrame
     });
-  }
-
-  if (response.kind === "spawned" && Array.isArray(response.sessions)) {
-    for (const session of response.sessions) {
-      frames.push({
-        kind: "entity_upsert",
-        payload: {
-          operation: "entity_upsert",
-          key: { family: sessionFamily, id: session.session_id },
-          record: sessionRecord(session)
-        } satisfies EntityFrame
-      });
-    }
   }
 
   if (responseOwnsApps(response)) {
@@ -361,11 +347,6 @@ export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | u
   }
 
   const patch = isRecord(frame.patch) ? frame.patch : {};
-  const lifecycle = typeof patch.lifecycle === "string"
-    ? patch.lifecycle
-    : typeof patch.registry_state === "string"
-      ? patch.registry_state
-      : undefined;
   return {
     kind: "entity_patch",
     payload: {
@@ -374,8 +355,7 @@ export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | u
       sequence: frame.snapshot_seq,
       record: {
         ...patch,
-        id: frame.id,
-        ...(lifecycle ? sessionAttachFields(frame.id, lifecycle) : {})
+        id: frame.id
       }
     } satisfies EntityFrame
   };
@@ -399,47 +379,10 @@ function statusRecord(
   };
 }
 
-function sessionRecord(session: DaemonSession) {
-  return {
-    title: session.session_id,
-    target: "isolated-local-hub",
-    last_result: `daemon session ${session.lifecycle}`,
-    ...sessionAttachFields(session.session_id, session.lifecycle)
-  };
-}
-
 function sessionEntityRecord(session: DaemonSessionEntity) {
-  const lifecycle = session.lifecycle ?? session.registry_state;
   return {
-    session_uuid: session.session_uuid,
-    registry_state: session.registry_state,
-    rows: session.rows,
-    cols: session.cols,
-    updated_at: session.updated_at,
-    exit_code: session.exit_code,
-    failure_reason: session.failure_reason,
-    title: session.session_uuid,
-    target: "isolated-local-hub",
-    last_result: `daemon session ${lifecycle}`,
-    ...sessionAttachFields(session.session_uuid, lifecycle)
-  };
-}
-
-function sessionAttachFields(sessionId: string, lifecycle: string) {
-  const isRunning = lifecycle === "running";
-
-  return {
-    id: sessionId,
-    status: lifecycle,
-    attachable: isRunning,
-    attach_status: isRunning ? "Attachable" : "Exited sessions cannot attach",
-    attach_action: {
-      id: "botster.session.attach",
-      target: sessionId,
-      label: isRunning ? `Attach ${sessionId}` : "Not attachable",
-      disabled: !isRunning,
-      params: {}
-    } satisfies ActionBinding
+    ...session,
+    id: session.session_uuid
   };
 }
 

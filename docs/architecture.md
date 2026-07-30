@@ -7,7 +7,7 @@
 - `src/botster/client.ts` composes UI-tree, entity-store, action, and injected transport seams.
 - `src/botster/hubRuntime.ts` composes the single production WebRTC runtime. A missing bootstrap grant fails closed into a rendered danger diagnostic.
 - `src/botster/webrtcDaemonClient.ts` owns bootstrap refresh, signaling, encrypted ordered data-channel delivery, reconnect generations, and session entity subscriptions.
-- `src/botster/hubTransport.ts` consumes canonical package-surface types from `@trybotster/ui-contract` and projects Hub-sanitized daemon package/navigation responses and pushed entity frames into the web client’s UI/action/entity seams. Manifest parsing and admission remain Hub-owned.
+- `src/botster/hubTransport.ts` consumes canonical package-surface types from `@trybotster/ui-contract` and projects Hub-sanitized daemon package/navigation responses plus unmodified session DTO fields into canonical entity family `session`. Manifest parsing, admission, and lifecycle classification remain Hub-owned.
 - `src/botster/hubTerminalDataPlane.ts` adapts WebRTC daemon requests and drained terminal events into `TerminalDataPlaneAttachment`.
 - `src/botster/entities.ts`, `uiNodes.ts`, and `actions.ts` implement the canonical read, render, and semantic-dispatch seams. `uiNodes.ts` imports the Hub-owned declarations from `@trybotster/ui-contract`; it does not redeclare a browser wire grammar.
 - `src/botster/uiPresentation.ts` owns the browser-local presentation projection, scoped by Hub/package/surface. Only correlated accepted `UiActionResult` operations mutate it.
@@ -17,7 +17,7 @@
 
 Installed package runtime uses one ordered WebRTC data channel. Generated `DaemonLocalWebrtcDeliveryChunk` frames multiplex correlated daemon responses and unsolicited entity frames. Encrypted payloads remain generated `DaemonRequest`, `DaemonResponse`, or `DaemonEntityFrame` DTOs.
 
-Session state uses a held entity subscription:
+Session state uses a held entity subscription and canonical family `session`:
 
 1. Each peer generation sends a fresh `subscribe_entities` request.
 2. The matching authoritative snapshot establishes the family baseline, including an empty snapshot.

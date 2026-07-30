@@ -71,6 +71,8 @@ export function harnessEventMatches(entry, criteria) {
   const hasRecordCriteria =
     criteria.id != null ||
     criteria.status != null ||
+    criteria.lifecycle != null ||
+    criteria.lifecycle_class != null ||
     typeof criteria.attachable === "boolean";
 
   const family = framePayload.key?.family ?? framePayload.family;
@@ -91,6 +93,8 @@ export function harnessEventMatches(entry, criteria) {
     if (!records.some((record) =>
       (criteria.id == null || record.id === criteria.id) &&
       (criteria.status == null || record.status === criteria.status) &&
+      (criteria.lifecycle == null || record.lifecycle === criteria.lifecycle) &&
+      (criteria.lifecycle_class == null || record.lifecycle_class === criteria.lifecycle_class) &&
       (typeof criteria.attachable !== "boolean" || record.attachable === criteria.attachable)
     )) return false;
   }

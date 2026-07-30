@@ -73,7 +73,12 @@ import { webRtcDaemonLifecycleEventName, type LocalWebrtcBootstrap, type WebrtcD
 import type { ActionBinding } from "./botster/actions";
 import type { EntityFrameStore } from "./botster/entities";
 import type { TerminalAttachmentStatus, TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
-import { isAttachableSession, resolveTerminalSessionId } from "./botster/terminalSession";
+import {
+  isAttachableSession,
+  resolveTerminalSessionId,
+  sessionDisplayStatus,
+  sessionDisplayTitle
+} from "./botster/terminalSession";
 import type { UiActionRequest, UiNodeActionDispatch, UiTreeSnapshot } from "./botster/uiNodes";
 import {
   acceptedResultMatches,
@@ -702,6 +707,29 @@ export function SpawnTargetListItem({
   );
 }
 
+export function SessionListItem({
+  session,
+  onOpen
+}: {
+  session: Record<string, unknown>;
+  onOpen: (sessionId: string) => void;
+}) {
+  const sessionId = String(session.id);
+  const attachable = isAttachableSession(session);
+  return (
+    <IonItem>
+      <IonIcon icon={serverOutline} slot="start" aria-hidden="true" />
+      <IonLabel>
+        <h2>{sessionDisplayTitle(session)}</h2>
+        <p>{sessionDisplayStatus(session)}</p>
+      </IonLabel>
+      {attachable ? (
+        <IonButton slot="end" fill="outline" onClick={() => onOpen(sessionId)}>Open</IonButton>
+      ) : null}
+    </IonItem>
+  );
+}
+
 export default function App() {
   const hubRuntime = useMemo(
     () => {
@@ -850,7 +878,7 @@ export default function App() {
       if (!cancelled) {
         setSelectedRealHubTerminalSessionId((currentSessionId) =>
           resolveTerminalSessionId(
-            runtimeClient.entities.list("botster-web.session"),
+            runtimeClient.entities.list("session"),
             currentSessionId,
             attachedRealHubTerminalSessionId.current
           )
@@ -897,7 +925,7 @@ export default function App() {
       .then(() => pullProductionEntity("package", { family: "botster-web.package" }))
       .then(() => pullProductionEntity("availablePackage", { family: "botster-web.available_package" }))
       .then(() => pullProductionEntity("spawnTarget", { family: "botster-web.spawn_target" }))
-      .then(() => pullProductionEntity("session", { family: "botster-web.session" }))
+      .then(() => pullProductionEntity("session", { family: "session" }))
       .catch((error: unknown) => {
         if (!cancelled) {
           updateLocalState({
@@ -918,7 +946,13 @@ export default function App() {
   }, [recordDiagnostic, recordDiagnostics, runtimeClient, updateLocalState]);
 
   const dispatchAction = useCallback(
-    (action: ActionBinding) => {
+    (
+      action: ActionBinding,
+      renderedSurfaceContext?: {
+        expectedSurface: { packageName: string; surfaceId: string };
+        routeKey: string;
+      }
+    ) => {
       const statusKey = "production.diagnostic_action_status";
       updateLocalState({ [statusKey]: `Dispatching ${action.id}` });
       void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
@@ -927,7 +961,12 @@ export default function App() {
           setSelectedRealHubTerminalSessionId(action.target);
         }
         const renderedSurface = action.id === "botster.package.surface.render"
-          ? renderedPluginSurfaceState(result, action.label ?? "Plugin surface")
+          ? renderedPluginSurfaceState(
+              result,
+              action.label ?? "Plugin surface",
+              renderedSurfaceContext?.expectedSurface,
+              renderedSurfaceContext?.routeKey
+            )
           : undefined;
         if (renderedSurface) {
           setSelectedPluginSurface(renderedSurface);
@@ -1057,7 +1096,13 @@ export default function App() {
   useEffect(() => {
     const harness = (window as typeof window & {
       __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
-        dispatchAction?: (action: ActionBinding) => void;
+        dispatchAction?: (
+          action: ActionBinding,
+          renderedSurfaceContext?: {
+            expectedSurface: { packageName: string; surfaceId: string };
+            routeKey: string;
+          }
+        ) => void;
       };
     }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
     if (!harness) return;
@@ -1435,7 +1480,7 @@ export default function App() {
     }
   }, [navigateToHubRoutePath, navigateToPluginSurface]);
   const packageNavigationShortcuts = packageNavigation;
-  const sessions = runtimeClient.entities.list("botster-web.session");
+  const sessions = runtimeClient.entities.list("session");
   const attachSession = useCallback((sessionId: string) => {
     dispatchAction({
       id: "botster.session.attach",
@@ -1449,7 +1494,7 @@ export default function App() {
     }
     setSelectedRealHubTerminalSessionId((currentSessionId) =>
       currentSessionId === sessionId
-        ? resolveTerminalSessionId(runtimeClient.entities.list("botster-web.session"))
+        ? resolveTerminalSessionId(runtimeClient.entities.list("session"))
         : currentSessionId
     );
   }, [runtimeClient]);
@@ -1610,22 +1655,13 @@ export default function App() {
                       <p className="entity-empty">Sessions could not be loaded. Check Diagnostics for connection details.</p>
                     ) : sessions.length > 0 ? (
                       <IonList lines="full" aria-label="Sessions">
-                        {sessions.map((session) => {
-                          const sessionId = String(session.id);
-                          const attachable = isAttachableSession(session);
-                          return (
-                            <IonItem key={sessionId}>
-                              <IonIcon icon={serverOutline} slot="start" aria-hidden="true" />
-                              <IonLabel>
-                                <h2>{stringValue(session.title, sessionId)}</h2>
-                                <p>{stringValue(session.status, "Unknown status")}</p>
-                              </IonLabel>
-                              {attachable ? (
-                                <IonButton slot="end" fill="outline" onClick={() => attachSession(sessionId)}>Open</IonButton>
-                              ) : null}
-                            </IonItem>
-                          );
-                        })}
+                        {sessions.map((session) => (
+                          <SessionListItem
+                            key={String(session.id)}
+                            session={session}
+                            onOpen={attachSession}
+                          />
+                        ))}
                       </IonList>
                     ) : (
                       <div className="home-empty-state">
