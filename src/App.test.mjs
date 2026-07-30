@@ -529,12 +529,20 @@ assert.match(liveProtocolHarnessScript, /__BOTSTER_LIVE_PROTOCOL_HARNESS__/);
 assert.match(liveProtocolHarnessScript, /loadProductionAppRouteFromPathname/);
 assert.doesNotMatch(liveProtocolHarnessScript, /diagnosticsEntityRecordLimit = 4/);
 assert.match(liveProtocolHarnessScript, /appRouteFromPathname\(routeDescriptor\.routePath\)/);
-assert.match(liveProtocolHarnessScript, /packageRecord\?\.app_surfaces/);
 assert.doesNotMatch(liveProtocolHarnessScript, /\.surfaces \?\? [^;]*app_surfaces/);
 assert.match(liveProtocolHarnessScript, /const daemonPackages = \[\]/);
 assert.match(liveProtocolHarnessScript, /const projectedPackages = \[\]/);
 assert.match(liveProtocolHarnessScript, /daemonPackage\?\.surfaces/);
 assert.match(liveProtocolHarnessScript, /projectedPackage\?\.app_surfaces/);
+const pluginSurfaceRouteDescriptorSource = liveProtocolHarnessScript.slice(
+  liveProtocolHarnessScript.indexOf("async function pluginSurfaceRouteDescriptor"),
+  liveProtocolHarnessScript.indexOf("async function loadProductionAppRouteFromPathname")
+);
+assert.match(pluginSurfaceRouteDescriptorSource, /daemonPackages\.find\(\(record\) => record\.package_name === packageName\)/);
+assert.match(pluginSurfaceRouteDescriptorSource, /projectedPackages\.find\(\(record\) => record\.id === packageName\)/);
+assert.match(pluginSurfaceRouteDescriptorSource, /const surfaces = projectedPackage\?\.app_surfaces \?\? \[\]/);
+assert.doesNotMatch(pluginSurfaceRouteDescriptorSource, /package_name \?\? record\.name \?\? record\.id/);
+assert.match(liveProtocolHarnessScript, /events\.slice\(sinceIndex\)\.some/);
 assert.match(liveProtocolHarnessScript, /openContractAppFromNavigation/);
 assert.match(liveProtocolHarnessScript, /getByLabel\("Admitted plugin navigation"\)/);
 assert.match(liveProtocolHarnessScript, /proveLiveTerminalAfterAttach/);

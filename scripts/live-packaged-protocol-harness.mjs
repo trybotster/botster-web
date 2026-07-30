@@ -581,8 +581,9 @@ async function exercisePluginContractMatrix(page) {
   await openContractAppFromNavigation(page);
   await assertContractSurfaceRoute(page, "contract.app", "plugin_surface_render");
   await openAppsView(page);
+  const previousEventCount = await harnessEventCount(page);
   await openContractAppFromApps(page);
-  await assertContractSurfaceRoute(page, "contract.app", "plugin_surface_render");
+  await assertContractSurfaceRoute(page, "contract.app", "plugin_surface_render", previousEventCount);
   await assertContractSurfaceRouteReloadAndDirectLoad(page, "contract.app", "plugin_surface_render");
 
   await navigateToContractSurface(page, "contract.empty");
@@ -706,12 +707,13 @@ async function navigateToContractSurface(page, surfaceId) {
   });
 }
 
-async function assertContractSurfaceRoute(page, surfaceId, visibleText) {
+async function assertContractSurfaceRoute(page, surfaceId, visibleText, sinceIndex = 0) {
   await page.waitForURL(new RegExp(escapedRoutePathPattern(contractSurfaceRoutePath(surfaceId))), { timeout: 15_000 });
   await waitForHarnessEvent(
     page,
     { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: surfaceId },
-    `${surfaceId} plugin_surface_render request`
+    `${surfaceId} plugin_surface_render request`,
+    sinceIndex
   );
   await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
   await page.getByText(visibleText).waitFor({ timeout: 45_000 });
@@ -1169,28 +1171,29 @@ async function assertPluginSurfaceRouteReloadAndDirectLoad(page, target) {
 async function pluginSurfaceRouteDescriptor(page, target) {
   return page.evaluate(({ packageName, surfaceId }) => {
     const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-    const packages = [];
+    const daemonPackages = [];
+    const projectedPackages = [];
     for (const entry of events) {
       if (entry.kind === "daemon_response" && entry.payload?.kind === "packages") {
-        packages.push(...(entry.payload.packages ?? []));
+        daemonPackages.push(...(entry.payload.packages ?? []));
       }
       if (entry.kind === "hub_frame" && entry.payload?.kind === "entity_snapshot") {
         const payload = entry.payload.payload;
         if (payload?.family === "botster-web.package") {
-          packages.push(...(payload.records ?? []));
+          projectedPackages.push(...(payload.records ?? []));
         }
       }
     }
-    const packageRecord = packages.find((record) =>
-      (record.package_name ?? record.name ?? record.id) === packageName
-    );
-    const surfaces = packageRecord?.app_surfaces ?? [];
-    const surfaceRecord = surfaces.find((record) => (record.surface_id ?? record.id) === surfaceId);
+    const daemonPackage = daemonPackages.find((record) => record.package_name === packageName);
+    const projectedPackage = projectedPackages.find((record) => record.id === packageName);
+    const surfaces = projectedPackage?.app_surfaces ?? [];
+    const surfaceRecord = surfaces.find((record) => record.surface_id === surfaceId);
     return {
       routePath: typeof surfaceRecord?.route_path === "string" && surfaceRecord.route_path.length > 0
         ? surfaceRecord.route_path
         : undefined,
-      packageRecord,
+      daemonPackage,
+      projectedPackage,
       surfaceRecord
     };
   }, target);
@@ -1376,23 +1379,53 @@ async function assertContractSettingsSummary(page, expectedText) {
 
 async function waitForPackageEffectiveConfiguration(page, packageName, expectedValues) {
   await page.waitForFunction(
-    ({ nextPackageName, nextExpectedValues }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
-        if (entry.kind !== "daemon_response" && entry.kind !== "hub_frame") return false;
-        const packages = entry.kind === "daemon_response"
-          ? entry.payload?.packages
-          : entry.payload?.kind === "entity_snapshot" && entry.payload.payload?.family === "botster-web.package"
-            ? entry.payload.payload.records
-            : undefined;
-        if (!Array.isArray(packages)) return false;
-        const record = packages.find((candidate) => candidate.name === nextPackageName || candidate.id === nextPackageName);
-        const effectiveValues = record?.configuration?.effective_values ?? Object.fromEntries(
-          (record?.configuration_fields ?? []).map((field) => [field.id, field.secret_state ? { type: field.config_type, state: field.secret_state } : { type: field.config_type, value: field.value }])
+    ({ nextPackageName, nextExpectedValues }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const daemonPackages = events
+        .filter((entry) => entry.kind === "daemon_response" && entry.payload?.kind === "packages")
+        .flatMap((entry) => entry.payload.packages ?? []);
+      const projectedPackages = events
+        .filter(
+          (entry) =>
+            entry.kind === "hub_frame" &&
+            entry.payload?.kind === "entity_snapshot" &&
+            entry.payload.payload?.family === "botster-web.package"
+        )
+        .flatMap((entry) => entry.payload.payload.records ?? []);
+      const daemonMatches = daemonPackages.some((record) =>
+        record.package_name === nextPackageName &&
+        configurationMatches(record.configuration?.effective_values ?? {}, nextExpectedValues)
+      );
+      const projectedMatches = projectedPackages.some((record) => {
+        if (record.id !== nextPackageName) return false;
+        const effectiveValues = Object.fromEntries(
+          (record.configuration_fields ?? []).map((field) => [
+            field.id,
+            field.secret_state
+              ? { type: field.config_type, state: field.secret_state }
+              : { type: field.config_type, value: field.value }
+          ])
         );
-        return Object.entries(nextExpectedValues).every(([key, expectedValue]) =>
-          JSON.stringify(effectiveValues[key]) === JSON.stringify(expectedValue)
+        return configurationMatches(effectiveValues, nextExpectedValues);
+      });
+      return daemonMatches && projectedMatches;
+
+      function configurationMatches(effectiveValues, expected) {
+        return Object.entries(expected).every(([key, expectedValue]) =>
+          JSON.stringify(normalizeJson(effectiveValues[key])) === JSON.stringify(normalizeJson(expectedValue))
         );
-      }),
+      }
+
+      function normalizeJson(value) {
+        if (Array.isArray(value)) return value.map(normalizeJson);
+        if (value && typeof value === "object") {
+          return Object.fromEntries(
+            Object.keys(value).sort().map((key) => [key, normalizeJson(value[key])])
+          );
+        }
+        return value;
+      }
+    },
     { nextPackageName: packageName, nextExpectedValues: expectedValues },
     { timeout: 15_000 }
   ).catch(async (error) => {
@@ -1406,9 +1439,10 @@ async function waitForPackageEffectiveConfiguration(page, packageName, expectedV
               : [];
           return Array.isArray(packages) ? packages : [];
         })
-        .filter((record) => record?.name === nextPackageName || record?.id === nextPackageName)
+        .filter((record) => record?.package_name === nextPackageName || record?.id === nextPackageName)
         .map((record) => ({
-          name: record.name ?? record.id,
+          family: record.package_name ? "daemon" : "projected",
+          name: record.package_name ?? record.id,
           effective_values: record.configuration?.effective_values,
           fields: record.configuration_fields
         })),
@@ -1455,13 +1489,19 @@ async function waitForPackageConfigurationActionResultCount(page, packageName, a
   });
 }
 
-async function waitForHarnessEvent(page, criteria, label) {
+async function harnessEventCount(page) {
+  return page.evaluate(
+    () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events?.length ?? 0
+  );
+}
+
+async function waitForHarnessEvent(page, criteria, label, sinceIndex = 0) {
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     const events = await page.evaluate(
       () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []
     );
-    if (events.some((entry) => harnessEventMatches(entry, criteria))) return;
+    if (events.slice(sinceIndex).some((entry) => harnessEventMatches(entry, criteria))) return;
     await page.waitForTimeout(100);
   }
   throw new Error(`timed out waiting for ${label}`);
@@ -1691,55 +1731,48 @@ async function waitForRemoteAccessPackageConfiguration(page) {
   return page.waitForFunction(
     () => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const daemonPackages = [];
+      const projectedPackages = [];
       for (const entry of events) {
-        const packageRecords = [];
         if (entry.kind === "daemon_response" && entry.payload?.kind === "packages") {
-          packageRecords.push(...(entry.payload.packages ?? []).map((record) => ({
-            identity: record.package_name,
-            record
-          })));
+          daemonPackages.push(...(entry.payload.packages ?? []));
         }
         if (entry.kind === "hub_frame" && entry.payload?.kind === "entity_snapshot") {
           const payload = entry.payload.payload;
           if (payload?.family === "botster-web.package") {
-            packageRecords.push(...(payload.records ?? []).map((record) => ({
-              identity: record.id,
-              record
-            })));
+            projectedPackages.push(...(payload.records ?? []));
           }
         }
-
-        for (const { identity, record: packageRecord } of packageRecords) {
-          if (identity !== "botster-web") continue;
-          const effectiveValue = remoteAccessConfigurationValue(packageRecord);
-          if (effectiveValue !== undefined) return { effectiveValue };
-        }
       }
-      return false;
-
-      function remoteAccessConfigurationValue(packageRecord) {
-        const rawFields = packageRecord?.configuration?.schema?.fields ?? [];
-        const projectedFields = packageRecord?.configuration_fields ?? [];
-        const remoteAccessField = [...rawFields, ...projectedFields].find(
-          (field) => field.key === "remote_browser_rendezvous_enabled" || field.id === "remote_browser_rendezvous_enabled"
-        );
-        const action = [...(packageRecord?.actions ?? []), ...(packageRecord?.package_actions ?? [])].find(
-          (candidate) => candidate.action_id === "set_package_configuration"
-        );
-        const effectiveValue = packageRecord?.configuration?.effective_values?.remote_browser_rendezvous_enabled?.value ??
-          remoteAccessField?.value;
-        const defaultValue = remoteAccessField?.default?.value ?? remoteAccessField?.default ?? false;
-        const request = action?.request ?? action?.action?.params?.daemon_request ?? packageRecord?.configuration_submit?.params?.daemon_request;
-
-        const ready = (
-          (remoteAccessField?.type === "boolean" || remoteAccessField?.config_type === "boolean" || remoteAccessField?.kind === "checkbox") &&
-          defaultValue === false &&
-          typeof effectiveValue === "boolean" &&
-          (action?.status === "available" || packageRecord?.configuration_submit?.disabled === false) &&
-          request?.request_type === "set_package_configuration"
-        );
-        return ready ? effectiveValue : undefined;
-      }
+      const daemonPackage = daemonPackages.find((record) => record.package_name === "botster-web");
+      const projectedPackage = projectedPackages.find((record) => record.id === "botster-web");
+      const rawField = (daemonPackage?.configuration?.schema?.fields ?? []).find(
+        (field) => field.key === "remote_browser_rendezvous_enabled"
+      );
+      const projectedField = (projectedPackage?.configuration_fields ?? []).find(
+        (field) => field.id === "remote_browser_rendezvous_enabled"
+      );
+      const rawAction = (daemonPackage?.actions ?? []).find(
+        (action) => action.action_id === "set_package_configuration"
+      );
+      const rawEffectiveValue =
+        daemonPackage?.configuration?.effective_values?.remote_browser_rendezvous_enabled?.value;
+      const projectedEffectiveValue = projectedField?.value;
+      const rawReady =
+        rawField?.type === "boolean" &&
+        (rawField?.default?.value ?? rawField?.default) === false &&
+        typeof rawEffectiveValue === "boolean" &&
+        rawAction?.status === "available" &&
+        rawAction?.request?.request_type === "set_package_configuration";
+      const projectedReady =
+        projectedField?.config_type === "boolean" &&
+        projectedField?.kind === "checkbox" &&
+        typeof projectedEffectiveValue === "boolean" &&
+        projectedPackage?.configuration_submit?.disabled === false &&
+        projectedPackage?.configuration_submit?.params?.daemon_request?.request_type === "set_package_configuration";
+      return rawReady && projectedReady && rawEffectiveValue === projectedEffectiveValue
+        ? { effectiveValue: projectedEffectiveValue }
+        : false;
     },
     undefined,
     { timeout: 45_000 }
