@@ -10,6 +10,7 @@ import { createServer as createViteServer } from "vite";
 import {
   assertDurableStateOwnership,
   assertPackageReused,
+  assertWorkspacesStateOwnership,
   durableSeedSessionIdsForDiagnosticsLimit,
   harnessEventMatches,
   htmlAssetUrls,
@@ -19,10 +20,11 @@ import {
 const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
 const durableStateMode = process.env.BOTSTER_LIVE_DURABLE_STATE === "1";
+const suppliedDataDir = process.env.BOTSTER_LIVE_DATA_DIR;
 
 assertDurableStateOwnership({
   durableStateMode,
-  suppliedDataDir: process.env.BOTSTER_LIVE_DATA_DIR
+  suppliedDataDir
 });
 
 const workspacesPackagePath = resolveOptionalPackagePath(
@@ -59,15 +61,11 @@ if (requireWorkspacesMode && !workspacesPackagePath) {
   );
 }
 
-if (
-  requireWorkspacesMode &&
-  (process.env.BOTSTER_LIVE_DATA_DIR || durableStateMode)
-) {
-  throw new Error(
-    "Workspaces compatibility mode creates durable plugin state and requires a fresh harness-owned data directory; " +
-      "unset BOTSTER_LIVE_DATA_DIR and BOTSTER_LIVE_DURABLE_STATE."
-  );
-}
+assertWorkspacesStateOwnership({
+  requireWorkspacesMode,
+  durableStateMode,
+  suppliedDataDir
+});
 
 const {
   appRouteFromPathname,
@@ -86,9 +84,9 @@ if (!workspacesPackagePath) {
 let hubProcess;
 let hubStdout = "";
 let hubStderr = "";
-const ownsWebrtcDataDir = !process.env.BOTSTER_LIVE_DATA_DIR;
+const ownsWebrtcDataDir = suppliedDataDir === undefined;
 const webrtcDataDir =
-  process.env.BOTSTER_LIVE_DATA_DIR ??
+  suppliedDataDir ??
   await mkdtemp(join(process.platform === "win32" ? tmpdir() : "/tmp", "botster-web-webrtc-"));
 let appUrl;
 
@@ -1340,6 +1338,7 @@ async function createWorkspacesCompatibilityWorkspace(page) {
     actionId: openActionId,
     nodeId: "botster-workspaces-empty-create",
     presentation: { kind: "set", key: "workspace-dialog", value: "create" },
+    sinceIndex: openEventCount,
     label: "Workspaces accepted create-dialog presentation set"
   });
 
@@ -1368,6 +1367,7 @@ async function createWorkspacesCompatibilityWorkspace(page) {
     presentation: { kind: "clear", key: "workspace-dialog" },
     normalizedName: workspaceName,
     replacementRootId: "botster-workspaces-app",
+    sinceIndex: createEventCount,
     label: "Workspaces accepted create replacement and presentation clear"
   });
   await page.waitForFunction(
@@ -1435,49 +1435,53 @@ async function waitForWorkspacesPluginSurfaceRequest(
 
 async function waitForWorkspacesActionResult(
   page,
-  { actionId, nodeId, presentation, normalizedName, replacementRootId, label }
+  { actionId, nodeId, presentation, normalizedName, replacementRootId, sinceIndex, label }
 ) {
   await page.waitForFunction(
-    (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
-      if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
-      const payload = entry.payload.payload ?? {};
-      const result = payload.result ?? {};
-      const pluginActionResult = result.plugin_action_result ?? {};
-      if (
-        payload.accepted !== true ||
-        result.package_name !== "botster-workspaces" ||
-        result.surface_id !== "workspaces" ||
-        result.action_id !== expected.actionId ||
-        pluginActionResult.state !== "accepted" ||
-        pluginActionResult.action_id !== expected.actionId ||
-        pluginActionResult.node_id !== expected.nodeId ||
-        !pluginActionResult.request_id ||
-        pluginActionResult.request_id !== payload.request_id
-      ) return false;
-      const presentationMatches = (pluginActionResult.presentation ?? []).some((operation) =>
-        operation.kind === expected.presentation.kind &&
-        operation.key === expected.presentation.key &&
-        (
-          !Object.hasOwn(expected.presentation, "value") ||
-          operation.value === expected.presentation.value
-        )
-      );
-      if (!presentationMatches) return false;
-      if (
-        expected.normalizedName !== undefined &&
-        pluginActionResult.normalized_values?.name !== expected.normalizedName
-      ) return false;
-      return expected.replacementRootId === undefined ||
-        pluginActionResult.replacement?.id === expected.replacementRootId;
-    }),
-    { actionId, nodeId, presentation, normalizedName, replacementRootId },
+    (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .slice(expected.sinceIndex)
+      .some((entry) => {
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
+        const payload = entry.payload.payload ?? {};
+        const result = payload.result ?? {};
+        const pluginActionResult = result.plugin_action_result ?? {};
+        if (
+          payload.accepted !== true ||
+          result.package_name !== "botster-workspaces" ||
+          result.surface_id !== "workspaces" ||
+          result.action_id !== expected.actionId ||
+          pluginActionResult.state !== "accepted" ||
+          pluginActionResult.action_id !== expected.actionId ||
+          pluginActionResult.node_id !== expected.nodeId ||
+          !pluginActionResult.request_id ||
+          pluginActionResult.request_id !== payload.request_id
+        ) return false;
+        const presentationMatches = (pluginActionResult.presentation ?? []).some((operation) =>
+          operation.kind === expected.presentation.kind &&
+          operation.key === expected.presentation.key &&
+          (
+            !Object.hasOwn(expected.presentation, "value") ||
+            operation.value === expected.presentation.value
+          )
+        );
+        if (!presentationMatches) return false;
+        if (
+          expected.normalizedName !== undefined &&
+          pluginActionResult.normalized_values?.name !== expected.normalizedName
+        ) return false;
+        return expected.replacementRootId === undefined ||
+          pluginActionResult.replacement?.id === expected.replacementRootId;
+      }),
+    { actionId, nodeId, presentation, normalizedName, replacementRootId, sinceIndex },
     { timeout: 15_000 }
   ).catch(async (error) => {
-    const observed = await page.evaluate(() =>
+    const observed = await page.evaluate((start) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .slice(start)
         .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
         .map((entry) => entry.payload?.payload)
-        .filter((payload) => payload?.result?.package_name === "botster-workspaces")
+        .filter((payload) => payload?.result?.package_name === "botster-workspaces"),
+      sinceIndex
     );
     throw new Error(`${label} not observed; results=${JSON.stringify(observed, null, 2)}: ${error.message}`);
   });

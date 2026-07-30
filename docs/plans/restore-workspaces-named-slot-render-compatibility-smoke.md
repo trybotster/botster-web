@@ -38,7 +38,7 @@
 
 ## Scope
 
-1. Update the Workspaces production-proof path in `scripts/live-packaged-protocol-harness.mjs`, including a fail-closed precondition that rejects caller-owned or durable-state data directories because the flow creates plugin state.
+1. Update the Workspaces production-proof path in `scripts/live-packaged-protocol-harness.mjs`, including a fail-closed precondition that rejects caller-owned or durable-state data directories because the flow creates plugin state. Keep shared presence semantics and focused unset/empty/non-empty regression coverage in `scripts/live-packaged-protocol-helpers.mjs` and `src/App.test.mjs`.
 2. Replace the never-satisfiable expected IDs with stable UiNodes actually emitted and visible from a fresh current Workspaces package:
    - root `botster-workspaces-app`;
    - named `toolbar` region `botster-workspaces-toolbar`;
@@ -89,6 +89,7 @@
 ## Affected surfaces and files
 
 - `scripts/live-packaged-protocol-harness.mjs`: Workspaces initial-create, structured action/result, dynamic row-slot, reload, direct-load, and proof-ledger assertions.
+- `scripts/live-packaged-protocol-helpers.mjs`: shared supplied-directory presence semantics used by durable and Workspaces ownership guards.
 - `README.md`: correct the Workspaces compatibility description to the executable live flow and its boundary.
 - `src/App.test.mjs`: fixture-only node namespace/comment/text correction; renderer assertions and raw-versus-projected package-family coverage remain behaviorally unchanged.
 - `src/botster/IonicUiNodeRenderer.tsx`, `src/botster/UiNodeSurface.tsx`, and `src/App.tsx`: expected unchanged production path, verified by tests and live smoke.
@@ -129,6 +130,7 @@
    - `npm run typecheck`
    - `npm run lint`
    - `npm run build`
+   - Focused ownership-helper assertions cover unset, explicitly empty, and non-empty `BOTSTER_LIVE_DATA_DIR` values plus durable-state rejection.
    - `src/App.test.mjs` named-slot registry assertions remain green under the fixture-only namespace, including panel/section/toolbar/list-item slots and the raw-versus-projected package-family route descriptor controls.
    - The separate `directListItemMarkup` test still proves `list_item.actions`.
 3. Fail-closed runtime provenance:
@@ -142,7 +144,7 @@
    - Initial route: require the six cold-start nodes; click the rendered empty-create action; require accepted `set`; type/submit a unique name; require worker-visible `values.name`, accepted `clear`, replacement, dynamic row, title text, and `0 sessions` meta text.
    - Reload and direct `/apps/botster-workspaces/workspaces` load: require the same discovered row/title/meta plus root/toolbar/list nodes from durable plugin state, without creating another workspace.
    - Require exactly three completed proofs, each incremented after its stage-specific slot assertions.
-   - The command must exit nonzero if `BOTSTER_LIVE_DATA_DIR` is supplied, `BOTSTER_LIVE_DURABLE_STATE=1`, provenance differs, Workspaces is absent, a request/result is rejected or mismatched, a required node is omitted, a fallback marker appears, the workspace identity changes/disappears, any route phase is skipped, or the completion count is not three.
+   - The command must exit nonzero if `BOTSTER_LIVE_DATA_DIR` is supplied (including an explicitly empty value), `BOTSTER_LIVE_DURABLE_STATE=1`, provenance differs, Workspaces is absent, a request/result is rejected or mismatched, a required node is omitted, a fallback marker appears, the workspace identity changes/disappears, any route phase is skipped, or the completion count is not three.
 5. Original-oracle negative control:
    - Temporarily restore the never-satisfiable expected IDs (or revert the focused implementation commit) and show the same exact-provenance package smoke fails at the original first missing node.
    - Restore the correction and rerun the exact command green.

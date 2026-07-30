@@ -29,6 +29,7 @@ import { decodeHubConnection, HubConnectionError } from "../scripts/hubConnectio
 import {
   assertDurableStateOwnership,
   assertPackageReused,
+  assertWorkspacesStateOwnership,
   durableSeedSessionIdsForDiagnosticsLimit,
   harnessEventMatches,
   htmlAssetUrls,
@@ -64,8 +65,39 @@ assert.throws(
   () => assertDurableStateOwnership({ durableStateMode: true, suppliedDataDir: "/caller/data" }),
   /cannot be combined with caller-owned BOTSTER_LIVE_DATA_DIR/
 );
+assert.throws(
+  () => assertDurableStateOwnership({ durableStateMode: true, suppliedDataDir: "" }),
+  /cannot be combined with caller-owned BOTSTER_LIVE_DATA_DIR/
+);
 assert.doesNotThrow(
   () => assertDurableStateOwnership({ durableStateMode: true, suppliedDataDir: undefined })
+);
+assert.doesNotThrow(() =>
+  assertWorkspacesStateOwnership({
+    requireWorkspacesMode: true,
+    durableStateMode: false,
+    suppliedDataDir: undefined
+  })
+);
+for (const suppliedDataDir of ["", "/caller/data"]) {
+  assert.throws(
+    () =>
+      assertWorkspacesStateOwnership({
+        requireWorkspacesMode: true,
+        durableStateMode: false,
+        suppliedDataDir
+      }),
+    /requires a fresh harness-owned data directory/
+  );
+}
+assert.throws(
+  () =>
+    assertWorkspacesStateOwnership({
+      requireWorkspacesMode: true,
+      durableStateMode: true,
+      suppliedDataDir: undefined
+    }),
+  /requires a fresh harness-owned data directory/
 );
 const durableSeedIds = durableSeedSessionIdsForDiagnosticsLimit(4);
 assert.equal(durableSeedIds.length, 5);
@@ -5113,7 +5145,7 @@ try {
                   {
                     id: "named-slot-fixture-read-model",
                     type: "text",
-                    props: { text: "Read model: botster-workspaces.workspace" }
+                    props: { text: "Read model: named-slot-fixture.record" }
                   },
                   {
                     id: "named-slot-fixture-metrics",

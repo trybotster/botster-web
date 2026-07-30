@@ -101,8 +101,9 @@ list-item title and `0 sessions` meta slots. Assertions use structured
 requests/results rather than toast timing.
 
 The broader contract-matrix smoke separately covers rejected form submissions,
-draft retention, presentation operations, binding behavior, toolbar overflow,
-and entity convergence.
+draft retention, and presentation operations. Deterministic tests cover
+nested/empty `bind_list`, toolbar order/overflow intent, and entity
+snapshot/upsert/patch/remove convergence.
 
 ## Local package server
 
