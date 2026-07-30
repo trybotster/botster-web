@@ -13,10 +13,26 @@ export function packageEnsureDecision(packages, packageName) {
 }
 
 export function assertDurableStateOwnership({ durableStateMode, suppliedDataDir }) {
-  if (durableStateMode && suppliedDataDir) {
+  if (durableStateMode && suppliedDataDir !== undefined) {
     throw new Error(
       "BOTSTER_LIVE_DURABLE_STATE owns and seeds its generated data directory; " +
       "it cannot be combined with caller-owned BOTSTER_LIVE_DATA_DIR"
+    );
+  }
+}
+
+export function assertWorkspacesStateOwnership({
+  requireWorkspacesMode,
+  durableStateMode,
+  suppliedDataDir
+}) {
+  if (
+    requireWorkspacesMode &&
+    (suppliedDataDir !== undefined || durableStateMode)
+  ) {
+    throw new Error(
+      "Workspaces compatibility mode creates durable plugin state and requires a fresh harness-owned data directory; " +
+        "unset BOTSTER_LIVE_DATA_DIR and BOTSTER_LIVE_DURABLE_STATE."
     );
   }
 }
