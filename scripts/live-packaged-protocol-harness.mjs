@@ -188,7 +188,7 @@ try {
   await startProductionSession();
   await waitForSessionStatus(page, "running");
   await openDiagnosticsView(page);
-  await waitForSessionAttachable(page, true);
+  await waitForRunningSessionFrame(page);
   await waitForTerminalSession(page, productionSessionId);
   responseAssemblyTelemetry.push({ cycle: 0, ...await waitForAutomaticTerminalRestore(page) });
   await proveLiveTerminalAfterAttach(page, `${attachProbe}-0`);
@@ -208,7 +208,7 @@ try {
     previousEntitySubscriptionId = reconnect.subscriptionId;
     await openDiagnosticsView(page);
     await waitForSessionStatus(page, "running");
-    await waitForSessionAttachable(page, true);
+    await waitForRunningSessionFrame(page);
     await waitForTerminalSession(page, productionSessionId);
     responseAssemblyTelemetry.push({ cycle, ...await waitForAutomaticTerminalRestore(page) });
     await proveLiveTerminalAfterAttach(page, `${attachProbe}-${cycle}`);
@@ -701,7 +701,7 @@ async function exerciseContractSessionBindings(page) {
   );
   await assertContractSurfaceRoute(page, "contract.sessions", "Session lifecycle projection");
   await page.waitForFunction(() =>
-    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.renderPluginSurface === "function"
+    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchAction === "function"
   );
   await dispatchContractSessionsSurface(page, references);
   await assertContractSessionBindingText(page);
@@ -724,7 +724,7 @@ async function exerciseContractSessionBindings(page) {
   );
   await assertContractSurfaceRoute(page, "contract.sessions", "Session lifecycle projection");
   await page.waitForFunction(() =>
-    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.renderPluginSurface === "function"
+    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchAction === "function"
   );
   await dispatchContractSessionsSurface(page, references);
   await assertContractSessionBindingText(page);
@@ -734,16 +734,25 @@ async function dispatchContractSessionsSurface(page, references) {
   const eventCount = await harnessEventCount(page);
   await page.evaluate(
     ({ packageName, sessionUuids }) => {
-      return globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.renderPluginSurface({
-        id: "botster.package.surface.render",
-        target: packageName,
-        label: "Session Lifecycle Projection",
-        params: {
-          package_name: packageName,
-          surface_id: "contract.sessions",
-          payload: { session_uuids: sessionUuids }
+      return globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.dispatchAction(
+        {
+          id: "botster.package.surface.render",
+          target: packageName,
+          label: "Session Lifecycle Projection",
+          params: {
+            package_name: packageName,
+            surface_id: "contract.sessions",
+            payload: { session_uuids: sessionUuids }
+          }
+        },
+        {
+          expectedSurface: {
+            packageName,
+            surfaceId: "contract.sessions"
+          },
+          routeKey: `${packageName}/contract.sessions`
         }
-      });
+      );
     },
     { packageName: contractMatrixPackageName, sessionUuids: references }
   );
@@ -2453,10 +2462,7 @@ async function waitForSessionStatus(page, lifecycle) {
   );
 }
 
-async function waitForSessionAttachable(page, attachable) {
-  if (!attachable) {
-    throw new Error("live session attachability proof only supports the canonical running lifecycle");
-  }
+async function waitForRunningSessionFrame(page) {
   await waitForHarnessEvent(
     page,
     {

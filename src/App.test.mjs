@@ -591,7 +591,7 @@ assert.match(liveProtocolHarnessScript, /latestLocalWebrtcGrantId/);
 assert.doesNotMatch(liveProtocolHarnessScript, /type: "stop_package_entrypoint"/);
 assert.doesNotMatch(liveProtocolHarnessScript, /startSessionButton|observeStartSessionButtonTransitions|Start session button/);
 assert.match(liveProtocolHarnessScript, /proveExternalSessionLifecycle/);
-assert.match(liveProtocolHarnessScript, /waitForSessionAttachable\(page, true\)/);
+assert.match(liveProtocolHarnessScript, /waitForRunningSessionFrame\(page\)/);
 assert.match(liveProtocolHarnessScript, /waitForAutomaticTerminalRestore/);
 assert.match(liveProtocolHarnessScript, /assertMinimumHubCompatibility/);
 assert.match(liveProtocolHarnessScript, /required revision 14 with terminal_readback/);
@@ -4627,7 +4627,7 @@ try {
       replaceAcceptedSurface
     },
     { configurationFieldType, configurationSaveAction, configurationSubmitValues },
-    { resolveTerminalSessionId, sessionDisplayStatus, sessionDisplayTitle },
+    { isAttachableSession, resolveTerminalSessionId, sessionDisplayStatus, sessionDisplayTitle },
     { UiNodeSurface },
     { sessionBindingVariantSnapshot },
     {
@@ -4635,6 +4635,7 @@ try {
       PackageNavigationShortcutButton,
       PluginNavigationShortcuts,
       PluginListItem,
+      SessionListItem,
       SpawnTargetListItem,
       PluginSurfaceRoutePage,
       PluginSettingsPanel,
@@ -4668,19 +4669,62 @@ try {
     id: activeHubSessionId,
     session_uuid: activeHubSessionId,
     registry_state: "active",
-    lifecycle: "running"
+    lifecycle: "running",
+    lifecycle_class: "current"
   };
   const exitedTerminalSession = {
     id: activeHubSessionId,
     session_uuid: activeHubSessionId,
     registry_state: "exited",
-    lifecycle: "exited"
+    lifecycle: "exited",
+    lifecycle_class: "ended"
+  };
+  const indeterminateTerminalSession = {
+    id: "indeterminate-session",
+    session_uuid: "indeterminate-session",
+    registry_state: "running",
+    lifecycle_class: "indeterminate"
+  };
+  const contradictoryTerminalSession = {
+    ...indeterminateTerminalSession,
+    lifecycle: "running"
   };
   assert.equal(sessionDisplayTitle(runningTerminalSession), activeHubSessionId);
-  assert.equal(sessionDisplayStatus(runningTerminalSession), "running");
-  assert.equal(sessionDisplayStatus({ id: "stale-session", registry_state: "stale" }), "stale");
+  assert.equal(sessionDisplayStatus(runningTerminalSession), "current");
+  assert.equal(sessionDisplayStatus(indeterminateTerminalSession), "indeterminate");
+  assert.equal(sessionDisplayStatus(contradictoryTerminalSession), "indeterminate");
+  assert.equal(sessionDisplayStatus({ id: "unknown-session", registry_state: "running" }), "Unknown status");
+  assert.equal(isAttachableSession(runningTerminalSession), true);
+  assert.equal(isAttachableSession(indeterminateTerminalSession), false);
+  assert.equal(isAttachableSession(contradictoryTerminalSession), false);
+  const currentSessionListItem = renderToStaticMarkup(
+    createElement(SessionListItem, {
+      session: runningTerminalSession,
+      onOpen: () => {}
+    })
+  );
+  assert.match(currentSessionListItem, />current</);
+  assert.match(currentSessionListItem, />Open</);
+  const indeterminateSessionListItem = renderToStaticMarkup(
+    createElement(SessionListItem, {
+      session: indeterminateTerminalSession,
+      onOpen: () => {}
+    })
+  );
+  assert.match(indeterminateSessionListItem, />indeterminate</);
+  assert.doesNotMatch(indeterminateSessionListItem, />Open</);
+  const contradictorySessionListItem = renderToStaticMarkup(
+    createElement(SessionListItem, {
+      session: contradictoryTerminalSession,
+      onOpen: () => {}
+    })
+  );
+  assert.match(contradictorySessionListItem, />indeterminate</);
+  assert.doesNotMatch(contradictorySessionListItem, />Open</);
   assert.equal(resolveTerminalSessionId([runningTerminalSession]), activeHubSessionId);
   assert.equal(resolveTerminalSessionId([exitedTerminalSession]), undefined);
+  assert.equal(resolveTerminalSessionId([indeterminateTerminalSession]), undefined);
+  assert.equal(resolveTerminalSessionId([contradictoryTerminalSession]), undefined);
   assert.equal(entityFamilyRecordLimit, 4);
   assert.equal(
     resolveTerminalSessionId([exitedTerminalSession], activeHubSessionId),
@@ -4688,14 +4732,14 @@ try {
   );
   assert.equal(
     resolveTerminalSessionId(
-      [exitedTerminalSession, { id: "next-running-session", lifecycle: "running" }],
+      [exitedTerminalSession, { id: "next-running-session", lifecycle: "running", lifecycle_class: "current" }],
       activeHubSessionId
     ),
     "next-running-session"
   );
   assert.equal(
     resolveTerminalSessionId(
-      [exitedTerminalSession, { id: "next-running-session", lifecycle: "running" }],
+      [exitedTerminalSession, { id: "next-running-session", lifecycle: "running", lifecycle_class: "current" }],
       activeHubSessionId,
       activeHubSessionId
     ),
@@ -4703,7 +4747,7 @@ try {
   );
   assert.equal(
     resolveTerminalSessionId(
-      [{ id: "next-running-session", lifecycle: "running" }],
+      [{ id: "next-running-session", lifecycle: "running", lifecycle_class: "current" }],
       activeHubSessionId
     ),
     "next-running-session"
@@ -6430,6 +6474,27 @@ try {
       entities: sessionBindingStore
     })
   );
+  const renderedSessionBindingMap = () => Object.fromEntries(
+    sessionPluginBindingFixture.surface.children.map((child) => {
+      const markup = renderToStaticMarkup(
+        createElement(UiNodeSurface, {
+          snapshot: {
+            ...sessionBindingSnapshot,
+            root: {
+              ...sessionPluginBindingFixture.surface,
+              children: [child]
+            }
+          },
+          entities: sessionBindingStore
+        })
+      );
+      const lifecycleClass = markup.match(/>(current|ended|indeterminate)</)?.[1];
+      return [
+        child.where.session_uuid,
+        lifecycleClass ?? (markup.includes("Session unavailable") ? "unavailable" : "unrecognized")
+      ];
+    })
+  );
   const applyPublishedSessionFrame = (frame) => {
     const projected = daemonEntityFrame(frame);
     assert.ok(projected);
@@ -6443,6 +6508,7 @@ try {
   assert.equal((initialSessionBindings.match(/>indeterminate</g) ?? []).length, 1);
   assert.equal((initialSessionBindings.match(/Session unavailable/g) ?? []).length, 1);
   assert.doesNotMatch(initialSessionBindings, /data-unsupported-ui-node/);
+  assert.deepEqual(renderedSessionBindingMap(), sessionPluginBindingFixture.expected.initial);
 
   const canonicalSessionRecord = sessionBindingStore.get("session", "session-transition");
   assert.deepEqual(
@@ -6465,15 +6531,26 @@ try {
   }
 
   applyPublishedSessionFrame(sessionPluginBindingFixture.transition_frames[0]);
-  assert.equal((renderSessionBindings().match(/>ended</g) ?? []).length, 2);
+  assert.deepEqual(
+    renderedSessionBindingMap(),
+    sessionPluginBindingFixture.expected.after_ended_patch
+  );
   applyPublishedSessionFrame(sessionPluginBindingFixture.transition_frames[1]);
-  assert.equal((renderSessionBindings().match(/>indeterminate</g) ?? []).length, 2);
+  assert.deepEqual(
+    renderedSessionBindingMap(),
+    sessionPluginBindingFixture.expected.after_indeterminate_patch
+  );
   applyPublishedSessionFrame(sessionPluginBindingFixture.transition_frames[2]);
-  assert.equal((renderSessionBindings().match(/Session unavailable/g) ?? []).length, 2);
+  assert.deepEqual(
+    renderedSessionBindingMap(),
+    sessionPluginBindingFixture.expected.after_remove
+  );
 
   applyPublishedSessionFrame(sessionPluginBindingFixture.reconnect_snapshot);
-  const reconnectSessionBindings = renderSessionBindings();
-  assert.equal((reconnectSessionBindings.match(/Session unavailable/g) ?? []).length, 2);
+  assert.deepEqual(
+    renderedSessionBindingMap(),
+    sessionPluginBindingFixture.expected.after_reconnect
+  );
   assert.equal(sessionBindingStore.get("session", "session-transition"), undefined);
   assert.equal(
     Object.hasOwn(sessionBindingStore.get("session", "session-indeterminate"), "lifecycle"),
@@ -7185,6 +7262,7 @@ try {
       session_uuid: activeHubSessionId,
       registry_state: "active",
       lifecycle: "running",
+      lifecycle_class: "current",
       rows: 24,
       cols: 80,
       updated_at: 1
@@ -7230,7 +7308,7 @@ try {
         }
       ],
       packageLoadStatus: "loaded",
-      sessions: [{ id: activeHubSessionId, lifecycle: "running" }],
+      sessions: [{ id: activeHubSessionId, lifecycle: "running", lifecycle_class: "current" }],
       sessionLoadStatus: "loaded",
       actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })
@@ -7309,7 +7387,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
         }
       ],
       packageLoadStatus: "loaded",
-      sessions: [{ id: activeHubSessionId, lifecycle: "running" }],
+      sessions: [{ id: activeHubSessionId, lifecycle: "running", lifecycle_class: "current" }],
       sessionLoadStatus: "loaded",
       actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })
@@ -7324,7 +7402,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
       diagnostics: [terminalUnavailableDiagnostic(new Error("terminal stream closed"))],
       packages: [{ id: "botster-web", status: "enabled", entrypoint_process_summary: "web-client running" }],
       packageLoadStatus: "loaded",
-      sessions: [{ id: activeHubSessionId, lifecycle: "running" }],
+      sessions: [{ id: activeHubSessionId, lifecycle: "running", lifecycle_class: "current" }],
       sessionLoadStatus: "loaded",
       actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })

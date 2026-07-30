@@ -85,7 +85,7 @@ Additional role and surface guidance:
 5. Exercise the published session binding fixture through the production `UiNodeSurface` and Ionic renderer registry, not through renderer internals or a local resolver.
 6. Prove the published flat `bind_list`/`$bind` surface unchanged. Prove conditional, `bind_if`, and nested-child handling separately with small Web-authored trees typed directly as the published `@trybotster/ui-contract` `UiChild` union (`UiConditional | UiNode | UiBindList | UiBindIf`), including a negative assertion that typed children are not silently dropped. These trees exercise the production generic resolver; they do not define a second grammar or resolver.
 7. Extend the real packaged browser harness to install the normal published contract-matrix fixture, render `contract.sessions` through `plugin_surface_render`, and observe canonical session frames through the actual React transport/entity store.
-8. Derive existing home/terminal presentation at the read boundary from canonical `session_uuid`, `lifecycle`, and `registry_state`; keep browser-only labels and attach actions out of the entity store so plugins and the TUI observe the same canonical keys.
+8. Derive existing home/terminal presentation at the read boundary from canonical `session_uuid`, Hub-authored `lifecycle_class`, and raw `lifecycle` only for live attachment eligibility; keep browser-only labels and attach actions out of the entity store so plugins and the TUI observe the same canonical keys.
 9. Update stable architecture or runbook claims only where the canonical family name or new live acceptance command needs documentation.
 
 ## Non-scope
@@ -120,7 +120,7 @@ Additional role and surface guidance:
 
 ## Affected surfaces and files
 
-- `src/botster/hubTransport.ts`: canonical session family, canonical record preservation, held-subscription frame projection.
+- `src/botster/hubTransport.ts`: canonical session family, canonical record preservation, held-subscription frame projection, and removal of the former optimistic spawned-response projection from the authoritative family.
 - `src/App.tsx`: canonical session reads/pull plus read-boundary home presentation.
 - `src/botster/terminalSession.ts`: derive attachability and retained-session selection from canonical lifecycle fields rather than store-injected presentation keys.
 - `src/botster/LocalHubFirstScreen.tsx`: derive diagnostics session summary state from canonical lifecycle fields at the read boundary.
@@ -139,7 +139,7 @@ Additional role and surface guidance:
 1. Integrate current main, install from the lockfile, and rerun the deterministic baseline before edits. Record exact unrelated failures rather than accepting a blanket pre-existing-failure claim.
 2. Add or strengthen drift assertions that identify the locked Hub test-support revision and both published session fixtures used by the tests.
 3. Replace the private browser session family with canonical `session` across the production transport and consumers. Snapshot/upsert records contain `id: session_uuid` plus every unmodified `DaemonSessionEntity` field; patches contain `id` plus only the Hub patch keys. Assert that no Web-derived key shadows, overwrites, or augments the canonical contract.
-4. Move existing home/terminal display derivation to the read boundary: UUID supplies the title/attach target, canonical lifecycle supplies running status/attachability, and registry state supplies only the existing local display fallback. Do not write those derived values back to the entity store.
+4. Move existing home/terminal display derivation to the read boundary: UUID supplies the title/attach target, Hub-authored `lifecycle_class` supplies displayed status, and attachment requires both `lifecycle_class: "current"` and raw `lifecycle: "running"`. Do not fall back to `registry_state`, reclassify lifecycle meaning in Web, or write derived values back to the entity store. The canonical-record rule intentionally removes the former optimistic spawned-response entity upsert; the authoritative Hub snapshot/delta is the only post-spawn store ingress.
 5. Drive the published session-plugin-binding fixture through `UiNodeSurface` with the production Ionic registry and generic entity store:
    - authoritative snapshot with matching current, ended, and indeterminate rows plus an absent reference;
    - patch to ended;
@@ -178,7 +178,7 @@ Deterministic checks:
 8. Binding-fixture tests prove current/ended/indeterminate, canonical `lifecycle` Some-to-None on reconnect, matching-versus-absent, unrelated-row negative control, patch/remove, and empty-template recovery without changing the fixture's permanently missing reference.
 9. Lifecycle-subscription-fixture tests prove snapshot/upsert/patch/remove, overflow resync, fresh-generation authoritative snapshot before deltas, prior-generation discard, stale-row removal, and later-delta ordering.
 10. Published-type Web-authored trees prove nested `$bind`, conditional, and `bind_if` updates plus no silent child dropping through the production resolver path; they introduce no local grammar or resolver.
-11. Canonical record assertions allow only generic `id` plus `DaemonSessionEntity` fields and prove `lifecycle`, `lifecycle_class`, and `session_uuid` survive; Web-derived `title`, `target`, `last_result`, `status`, `attachable`, `attach_status`, and `attach_action` are absent. Home/terminal behavior still derives the expected display and attachability after reads.
+11. Canonical record assertions allow only generic `id` plus `DaemonSessionEntity` fields and prove `lifecycle`, `lifecycle_class`, and `session_uuid` survive; Web-derived `title`, `target`, `last_result`, `status`, `attachable`, `attach_status`, and `attach_action` are absent. Home/terminal behavior displays Hub-authored `lifecycle_class`, offers attachment only for `current` plus raw `running`, and does not synthesize an optimistic spawned-response entity before the authoritative Hub frame.
 12. Transport tests prove one sanctioned raw `session` subscription feeds canonical family `session`; no dual family remains.
 
 Live downstream proof required by the Web charter:

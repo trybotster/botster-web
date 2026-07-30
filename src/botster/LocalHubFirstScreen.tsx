@@ -2,7 +2,7 @@ import { IonBadge } from "@ionic/react";
 
 import type { ConnectionDiagnostic } from "./connectionDiagnostics";
 import type { EntityRecord } from "./entities";
-import { sessionDisplayStatus } from "./terminalSession";
+import { isAttachableSession } from "./terminalSession";
 
 export type HubEntityLoadStatus = "not_loaded" | "loading" | "loaded" | "error";
 
@@ -93,8 +93,8 @@ function hubStatusSummaries({
   const actionDiagnostic =
     actionDiagnostics.find((diagnostic) => diagnostic.title === "Hub action failed") ??
     highestSeverityDiagnostic(actionDiagnostics);
-  const runningSession = sessions.find((session) => sessionDisplayStatus(session) === "running");
-  const pendingSession = sessions.find((session) => sessionDisplayStatus(session) === "pending");
+  const runningSession = sessions.find(isAttachableSession);
+  const pendingSession = sessions.find((session) => session.lifecycle === "starting");
   const localHubMode = mode === "webrtc";
 
   return [

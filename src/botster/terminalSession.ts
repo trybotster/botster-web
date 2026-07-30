@@ -4,7 +4,8 @@ export function isAttachableSession(
   return Boolean(
     record &&
     typeof record.id === "string" &&
-    record.lifecycle === "running"
+    record.lifecycle === "running" &&
+    record.lifecycle_class === "current"
   );
 }
 
@@ -15,12 +16,8 @@ export function sessionDisplayTitle(record: Record<string, unknown>): string {
 }
 
 export function sessionDisplayStatus(record: Record<string, unknown>): string {
-  if (typeof record.lifecycle === "string") {
-    return record.lifecycle;
-  }
-
-  return typeof record.registry_state === "string"
-    ? record.registry_state
+  return typeof record.lifecycle_class === "string"
+    ? record.lifecycle_class
     : "Unknown status";
 }
 
