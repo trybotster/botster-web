@@ -78,6 +78,24 @@ export const generatedModeFlagsResponseFixture = {
   error: null
 } satisfies DaemonResponse;
 
+export const generatedPluginResourceCountersResponseFixture = {
+  kind: "status",
+  status: null,
+  sessions: [],
+  packages: [],
+  package_decision: null,
+  lifecycle: [],
+  plugin_resource_counters: {
+    active_timer_resources: 3
+  },
+  plugin_tools: [],
+  plugin_tool_result: null,
+  events: [],
+  cleanup: null,
+  coordination: null,
+  error: null
+} satisfies DaemonResponse;
+
 export const generatedPackageResponseFixture = {
   kind: "packages",
   status: null,

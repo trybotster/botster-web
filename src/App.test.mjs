@@ -757,7 +757,7 @@ const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name], hubTestSupportMetadata.ui_contract.package_version);
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.protocol_version, 4);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 24);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 25);
 for (const canonicalType of [
   "PackageSurfaceDescriptor",
   "PackageSurfaceKind",
@@ -777,6 +777,8 @@ assert.deepEqual(
 );
 assert.equal(createHash("sha256").update(installedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
 assert.equal(createHash("sha256").update(generatedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
+assert.match(installedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
+assert.match(installedDaemonProtocol, /interface DaemonPluginResourceCounters/);
 assert.match(generatedDaemonProtocol, /\{ type: "refresh_local_packages" \}/);
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(hubTestSupportMetadata.application_primitives.surface_id, "contract.app");
@@ -1231,6 +1233,7 @@ const {
   generatedDaemonRequestFixtures,
   generatedAppResponseFixture,
   generatedModeFlagsResponseFixture,
+  generatedPluginResourceCountersResponseFixture,
   generatedPackageNavigationResponseFixture,
   generatedPackageResponseFixture
 } = requireRuntime("./botster/__fixtures__/generatedDaemonProtocol.js");
@@ -1283,6 +1286,7 @@ assert.deepEqual(
 );
 assert.equal(generatedModeFlagsResponseFixture.kind, modeFlagsConformanceFixture.mouse_on.response_kind);
 assert.deepEqual(generatedModeFlagsResponseFixture.mode_flags, modeFlagsConformanceFixture.mouse_on.mode_flags);
+assert.equal(generatedPluginResourceCountersResponseFixture.plugin_resource_counters.active_timer_resources, 3);
 assert.deepEqual(
   generatedDaemonRequestFixtures.find((request) => request.type === "set_package_configuration" && request.package_name === "project-pipelines"),
   {
@@ -6198,10 +6202,50 @@ try {
   assert.match(markup, /Universal primitives/);
   assert.match(markup, /Renderer registry/);
   assert.match(markup, /Capability fallback/);
+  assert.match(markup, /data-ui-node-id="sess-alpha"/);
+  assert.match(markup, /data-ui-node-id="sess-beta"/);
+  assert.doesNotMatch(markup, /data-ui-node-id="sess-historic"/);
   assert.match(markup, /data-action-id="botster\.session\.select"/);
   assert.equal(collectedActions.some(({ action }) => action.id === "botster.session.select"), true);
+  assert.deepEqual(
+    collectedActions
+      .filter(({ action }) => action.id === "contract.action")
+      .map(({ action, nodeId }) => ({ nodeId, payload: action.payload })),
+    [
+      { nodeId: "sess-alpha", payload: { operation: "select_session", session_uuid: "sess-alpha" } },
+      { nodeId: "sess-beta", payload: { operation: "select_session", session_uuid: "sess-beta" } }
+    ]
+  );
   assert.equal(fixtureProvenance.source, "@trybotster/ui-contract/conformance-fixtures");
   assert.equal(fixtureProvenance.contractVersion, hubTestSupportMetadata.ui_contract.package_version);
+  const renderBoundRowIdentity = (records) => renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "bound-row-identity-negative",
+        version: "test",
+        root: uiContractConformanceFixtures.fixtures.bound_row_identity
+      },
+      createInMemoryEntityFrameStore([
+        { operation: "entity_snapshot", family: "session", records }
+      ])
+    )
+  );
+  assert.throws(
+    () => renderBoundRowIdentity([{ id: "missing", lifecycle_class: "current" }]),
+    /identity binding must resolve to a non-blank string/
+  );
+  assert.throws(
+    () => renderBoundRowIdentity([{ id: "blank", session_uuid: " ", lifecycle_class: "current" }]),
+    /identity binding must resolve to a non-blank string/
+  );
+  assert.throws(
+    () => renderBoundRowIdentity([
+      { id: "duplicate-a", session_uuid: "sess-duplicate", lifecycle_class: "current" },
+      { id: "duplicate-b", session_uuid: "sess-duplicate", lifecycle_class: "current" }
+    ]),
+    /identity binding resolved duplicate id sess-duplicate/
+  );
   assert.equal(ionicUiNodeRendererRegistry.supports("iframe"), true);
   const missingCapabilityMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(
@@ -6475,25 +6519,27 @@ try {
     })
   );
   const renderedSessionBindingMap = () => Object.fromEntries(
-    sessionPluginBindingFixture.surface.children.map((child) => {
-      const markup = renderToStaticMarkup(
-        createElement(UiNodeSurface, {
-          snapshot: {
-            ...sessionBindingSnapshot,
-            root: {
-              ...sessionPluginBindingFixture.surface,
-              children: [child]
-            }
-          },
-          entities: sessionBindingStore
-        })
-      );
-      const lifecycleClass = markup.match(/>(current|ended|indeterminate)</)?.[1];
-      return [
-        child.where.session_uuid,
-        lifecycleClass ?? (markup.includes("Session unavailable") ? "unavailable" : "unrecognized")
-      ];
-    })
+    sessionPluginBindingFixture.surface.children
+      .filter((child) => child.where?.session_uuid)
+      .map((child) => {
+        const markup = renderToStaticMarkup(
+          createElement(UiNodeSurface, {
+            snapshot: {
+              ...sessionBindingSnapshot,
+              root: {
+                ...sessionPluginBindingFixture.surface,
+                children: [child]
+              }
+            },
+            entities: sessionBindingStore
+          })
+        );
+        const lifecycleClass = markup.match(/>(current|ended|indeterminate)</)?.[1];
+        return [
+          child.where.session_uuid,
+          lifecycleClass ?? (markup.includes("Session unavailable") ? "unavailable" : "unrecognized")
+        ];
+      })
   );
   const applyPublishedSessionFrame = (frame) => {
     const projected = daemonEntityFrame(frame);

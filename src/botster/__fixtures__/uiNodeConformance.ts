@@ -30,12 +30,22 @@ export const fixtureEntityFrames: EntityFrame[] = [
         comments: []
       }
     ]
+  },
+  {
+    operation: "entity_snapshot",
+    family: "session",
+    records: [
+      { id: "session-alpha", session_uuid: "sess-alpha", lifecycle_class: "current" },
+      { id: "session-beta", session_uuid: "sess-beta", lifecycle_class: "current" },
+      { id: "session-historic", session_uuid: "sess-historic", lifecycle_class: "historic" }
+    ]
   }
 ];
 
 const dialogPresence = fixtures.dialog_presence as UiBindIf;
 const selectedWorkspaceEquality = fixtures.selected_workspace_equality as UiBindIf;
 const contractForm = fixtures.form as UiNode;
+const boundRowIdentity = fixtures.bound_row_identity as UiNode;
 
 export const uiNodeConformanceSnapshot: UiTreeSnapshot = {
   kind: "ui_tree_snapshot",
@@ -81,6 +91,7 @@ export const uiNodeConformanceSnapshot: UiTreeSnapshot = {
           props: { title: "No tickets", description: "The entity-backed list has no records." }
         }
       },
+      boundRowIdentity,
       contractForm,
       dialogPresence,
       selectedWorkspaceEquality

@@ -37,6 +37,7 @@ import type {
   UiNodeRendererRegistry,
   UiNodeRenderOptions,
   UiPresentationPredicate,
+  RealizedUiNode,
   UiTreeSnapshot
 } from "./uiNodes";
 
@@ -252,6 +253,22 @@ function resolvedProps(
   return resolvedValue(node.props ?? {}, store, options, row) as Record<string, unknown>;
 }
 
+function realizedNodeIdentity(node: UiNode, row?: RowContext): RealizedUiNode {
+  if (node.id === undefined || typeof node.id === "string") {
+    return node as RealizedUiNode;
+  }
+
+  const binding = readRecord(node.id).$bind;
+  const resolved = typeof binding === "string" && binding.startsWith("@/") && row
+    ? readPath(row, binding.slice(2))
+    : undefined;
+  if (typeof resolved !== "string" || resolved.trim().length === 0) {
+    throw new Error(`UiNode ${node.type} identity binding must resolve to a non-blank string`);
+  }
+
+  return { ...node, id: resolved } as RealizedUiNode;
+}
+
 function renderChildren(
   children: UiChild[],
   store: EntityFrameStore,
@@ -284,30 +301,39 @@ function resolveChild(
   store: EntityFrameStore,
   options: UiNodeRenderOptions,
   row?: RowContext
-): Array<{ node: UiNode; row?: RowContext }> {
-  if (isUiNode(child)) return [{ node: child, row }];
+): Array<{ node: RealizedUiNode; row?: RowContext }> {
+  if (isUiNode(child)) return [{ node: realizedNodeIdentity(child, row), row }];
 
   if (child.$kind === "bind_list") {
     const rows = entityRows(store, child.source, child.where, row);
     if (rows.length === 0) {
-      return child.empty_template ? [{ node: child.empty_template, row }] : [];
+      return child.empty_template ? [{ node: realizedNodeIdentity(child.empty_template, row), row }] : [];
     }
-    return rows.map((record) => ({ node: child.item_template, row: record }));
+    const boundIdentity = typeof child.item_template.id === "object";
+    const identities = new Set<string>();
+    return rows.map((record) => {
+      const node = realizedNodeIdentity(child.item_template, record);
+      if (boundIdentity && node.id && identities.has(node.id)) {
+        throw new Error(`UiNode ${node.type} identity binding resolved duplicate id ${node.id}`);
+      }
+      if (boundIdentity && node.id) identities.add(node.id);
+      return { node, row: record };
+    });
   }
 
   if (child.$kind === "bind_if") {
-    return pathValue(child.path, store, options, row) ? [{ node: child.node, row }] : [];
+    return pathValue(child.path, store, options, row) ? [{ node: realizedNodeIdentity(child.node, row), row }] : [];
   }
 
   if (child.$kind === "presentation_if") {
-    return presentationMatches(child.predicate, options.presentation ?? {}) ? [{ node: child.node, row }] : [];
+    return presentationMatches(child.predicate, options.presentation ?? {}) ? [{ node: realizedNodeIdentity(child.node, row), row }] : [];
   }
 
   const matches =
     (!child.condition.width || child.condition.width === "regular") &&
     (!child.condition.pointer || child.condition.pointer === "fine");
   const visible = child.$kind === "hidden" ? !matches : matches;
-  return visible ? [{ node: child.node, row }] : [];
+  return visible ? [{ node: realizedNodeIdentity(child.node, row), row }] : [];
 }
 
 function renderSlotRegion(
@@ -460,7 +486,7 @@ function actionFromValue(action: unknown): UiAction {
 
 function actionButton(
   action: UiAction,
-  node: UiNode,
+  node: RealizedUiNode,
   options: UiNodeRenderOptions,
   label: string,
   className?: string,
@@ -504,17 +530,17 @@ function isValueSelected(value: unknown, selectedValues: Set<string>): boolean {
   return (typeof value === "string" || typeof value === "number") && selectedValues.has(String(value));
 }
 
-function dispatchActivationOnEnter(event: KeyboardEvent, action: UiAction | undefined, node: UiNode, options: UiNodeRenderOptions): void {
+function dispatchActivationOnEnter(event: KeyboardEvent, action: UiAction | undefined, node: RealizedUiNode, options: UiNodeRenderOptions): void {
   if (!action || action.disabled || event.key !== "Enter") return;
   event.preventDefault();
   options.dispatchAction?.({ action, node, kind: "submit" });
 }
 
-function coreControlName(node: UiNode, props: Record<string, unknown>): string {
+function coreControlName(node: RealizedUiNode, props: Record<string, unknown>): string {
   return readString(props.name, node.id ?? "");
 }
 
-function coreControlInitialValue(node: UiNode, props: Record<string, unknown>): unknown {
+function coreControlInitialValue(node: RealizedUiNode, props: Record<string, unknown>): unknown {
   if (node.type === "checkbox") {
     return Object.hasOwn(props, "checked") ? props.checked : Object.hasOwn(props, "default") ? props.default : false;
   }
@@ -530,7 +556,7 @@ function coreControlInitialValue(node: UiNode, props: Record<string, unknown>): 
   return Object.hasOwn(props, "value") ? props.value : Object.hasOwn(props, "default") ? props.default : "";
 }
 
-function readSelectOptions(props: Record<string, unknown>, optionNodes: UiNode[]): SelectOption[] {
+function readSelectOptions(props: Record<string, unknown>, optionNodes: RealizedUiNode[]): SelectOption[] {
   const schemaOptions = readRecords(props.options).map((option, index) => {
     const value = Object.hasOwn(option, "value") ? option.value : readString(option.id, `${index}`);
     return {
@@ -559,7 +585,7 @@ function readSelectOptions(props: Record<string, unknown>, optionNodes: UiNode[]
 
 function collectFormControlDefaults(children: UiChild[], store: EntityFrameStore, options: UiNodeRenderOptions, row?: RowContext): Record<string, unknown> {
   const entries: Array<[string, unknown]> = [];
-  const visit = (node: UiNode, currentRow?: RowContext) => {
+  const visit = (node: RealizedUiNode, currentRow?: RowContext) => {
     const props = resolvedProps(node, store, options, currentRow);
     if (["text_input", "textarea", "checkbox", "select"].includes(node.type)) {
       entries.push([coreControlName(node, props), coreControlInitialValue(node, props)]);
@@ -588,10 +614,10 @@ function renderCoreControl({
   form,
   optionNodes = []
 }: {
-  node: UiNode;
+  node: RealizedUiNode;
   props: Record<string, unknown>;
   form?: FormRenderState;
-  optionNodes?: UiNode[];
+  optionNodes?: RealizedUiNode[];
 }): ReactNode {
   const name = coreControlName(node, props);
   const label = readString(props.label, name);
@@ -655,7 +681,7 @@ function UiNodeForm({
   options,
   row
 }: {
-  node: UiNode;
+  node: RealizedUiNode;
   props: Record<string, unknown>;
   store: EntityFrameStore;
   options: UiNodeRenderOptions;
@@ -706,7 +732,7 @@ function UiNodeForm({
 }
 
 function renderNode(
-  node: UiNode,
+  node: RealizedUiNode,
   store: EntityFrameStore,
   options: UiNodeRenderOptions,
   row?: RowContext,
@@ -1042,7 +1068,7 @@ function renderNode(
             key={node.id}
           >
             {emptyState
-              ? renderNode(emptyState, store, options, row, form)
+              ? renderNode(realizedNodeIdentity(emptyState, row), store, options, row, form)
               : <div className="uinode-empty-state" role="status"><div className="uinode-empty-state-copy"><h3>No rows</h3></div></div>}
           </div>
         );
@@ -1112,7 +1138,7 @@ function renderNode(
           error: props.error
         } as JsonObject
       } as UiNode;
-      return renderNode(controlNode, store, options, row, form);
+      return renderNode(realizedNodeIdentity(controlNode, row), store, options, row, form);
     }
     case "text_input":
     case "textarea":
@@ -1176,7 +1202,7 @@ function renderNode(
 
 export const ionicUiNodeRendererRegistry: UiNodeRendererRegistry = {
   render(snapshot: UiTreeSnapshot, entities: EntityFrameStore, options: UiNodeRenderOptions = {}) {
-    return renderNode(snapshot.root, entities, options);
+    return renderNode(realizedNodeIdentity(snapshot.root), entities, options);
   },
   supports(primitive: string) {
     return supportedPrimitives.has(primitive);

@@ -4,7 +4,8 @@ import type {
   UiActionKind,
   UiActionResult,
   UiFormValues,
-  UiNode
+  UiNode,
+  UiNodeId
 } from "@trybotster/ui-contract";
 
 import type { UiCapabilitySet } from "./capabilities";
@@ -34,9 +35,15 @@ export interface UiTreeSnapshot {
   version: string;
 }
 
+type RealizeNodeIdentity<T extends UiNode = UiNode> = T extends UiNode
+  ? Omit<T, "id"> & { id?: UiNodeId }
+  : never;
+
+export type RealizedUiNode = RealizeNodeIdentity;
+
 export interface UiNodeActionDispatch {
   action: UiAction;
-  node: UiNode;
+  node: RealizedUiNode;
   kind: UiActionKind;
   values?: UiFormValues;
 }
