@@ -2,9 +2,11 @@ import type {
   JsonValue,
   UiAction,
   UiActionKind,
+  UiActionRequest,
   UiActionResult,
   UiFormValues,
-  UiNode
+  UiNode,
+  UiNodeId
 } from "@trybotster/ui-contract";
 
 import type { UiCapabilitySet } from "./capabilities";
@@ -34,11 +36,32 @@ export interface UiTreeSnapshot {
   version: string;
 }
 
+type RealizeNodeIdentity<T extends UiNode = UiNode> = T extends UiNode
+  ? Omit<T, "id"> & { id?: UiNodeId }
+  : never;
+
+export type RealizedUiNode = RealizeNodeIdentity;
+
 export interface UiNodeActionDispatch {
   action: UiAction;
-  node: UiNode;
+  node: RealizedUiNode;
   kind: UiActionKind;
   values?: UiFormValues;
+}
+
+export function pluginSurfaceActionRequest(
+  surfaceId: string,
+  dispatch: UiNodeActionDispatch
+): Omit<UiActionRequest, "request_id"> {
+  const nodeId = dispatch.node.id;
+  return {
+    surface_id: surfaceId,
+    action_id: dispatch.action.id,
+    ...(nodeId ? { node_id: nodeId } : {}),
+    kind: dispatch.kind,
+    ...(dispatch.values ? { values: dispatch.values } : {}),
+    ...(dispatch.action.payload !== undefined ? { payload: dispatch.action.payload } : {})
+  };
 }
 
 export interface UiNodeRendererRegistry {
