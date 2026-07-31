@@ -1286,6 +1286,11 @@ assert.deepEqual(
 );
 assert.equal(generatedModeFlagsResponseFixture.kind, modeFlagsConformanceFixture.mouse_on.response_kind);
 assert.deepEqual(generatedModeFlagsResponseFixture.mode_flags, modeFlagsConformanceFixture.mouse_on.mode_flags);
+assert.equal(generatedPluginResourceCountersResponseFixture.kind, "plugin_lifecycle");
+assert.deepEqual(generatedPluginResourceCountersResponseFixture.lifecycle, [
+  { package_name: "project-pipelines", state: "running", loaded: true }
+]);
+assert.equal(generatedPluginResourceCountersResponseFixture.plugin_worker_counters.live_plugin_executors, 1);
 assert.equal(generatedPluginResourceCountersResponseFixture.plugin_resource_counters.active_timer_resources, 3);
 assert.deepEqual(
   generatedDaemonRequestFixtures.find((request) => request.type === "set_package_configuration" && request.package_name === "project-pipelines"),
@@ -4634,6 +4639,7 @@ try {
     { isAttachableSession, resolveTerminalSessionId, sessionDisplayStatus, sessionDisplayTitle },
     { UiNodeSurface },
     { sessionBindingVariantSnapshot },
+    { pluginSurfaceActionRequest },
     {
       AppListItem,
       PackageNavigationShortcutButton,
@@ -4666,6 +4672,7 @@ try {
     vite.ssrLoadModule("/src/botster/terminalSession.ts"),
     vite.ssrLoadModule("/src/botster/UiNodeSurface.tsx"),
     vite.ssrLoadModule("/src/botster/__fixtures__/sessionBindingUiChildren.ts"),
+    vite.ssrLoadModule("/src/botster/uiNodes.ts"),
     vite.ssrLoadModule("/src/App.tsx")
   ]);
 
@@ -6185,8 +6192,8 @@ try {
           plugin_surface_sandbox: true,
           isolated_plugin_asset: false
         },
-        collectAction({ action, node }) {
-          collectedActions.push({ action, nodeId: node.id });
+        collectAction(dispatch) {
+          collectedActions.push(dispatch);
         }
       }
     )
@@ -6210,42 +6217,62 @@ try {
   assert.deepEqual(
     collectedActions
       .filter(({ action }) => action.id === "contract.action")
-      .map(({ action, nodeId }) => ({ nodeId, payload: action.payload })),
+      .map(({ action, node }) => ({ nodeId: node.id, payload: action.payload })),
     [
       { nodeId: "sess-alpha", payload: { operation: "select_session", session_uuid: "sess-alpha" } },
       { nodeId: "sess-beta", payload: { operation: "select_session", session_uuid: "sess-beta" } }
     ]
   );
+  const boundRowDispatch = collectedActions.find(({ action, node }) =>
+    action.id === "contract.action" && node.id === "sess-alpha"
+  );
+  assert.deepEqual(
+    pluginSurfaceActionRequest("contract.sessions", boundRowDispatch),
+    {
+      surface_id: "contract.sessions",
+      action_id: "contract.action",
+      node_id: "sess-alpha",
+      kind: "submit",
+      payload: { operation: "select_session", session_uuid: "sess-alpha" }
+    }
+  );
   assert.equal(fixtureProvenance.source, "@trybotster/ui-contract/conformance-fixtures");
   assert.equal(fixtureProvenance.contractVersion, hubTestSupportMetadata.ui_contract.package_version);
-  const renderBoundRowIdentity = (records) => renderToStaticMarkup(
-    ionicUiNodeRendererRegistry.render(
-      {
-        kind: "ui_tree_snapshot",
-        surface: "bound-row-identity-negative",
-        version: "test",
-        root: uiContractConformanceFixtures.fixtures.bound_row_identity
-      },
-      createInMemoryEntityFrameStore([
-        { operation: "entity_snapshot", family: "session", records }
-      ])
-    )
-  );
-  assert.throws(
-    () => renderBoundRowIdentity([{ id: "missing", lifecycle_class: "current" }]),
-    /identity binding must resolve to a non-blank string/
-  );
-  assert.throws(
-    () => renderBoundRowIdentity([{ id: "blank", session_uuid: " ", lifecycle_class: "current" }]),
-    /identity binding must resolve to a non-blank string/
-  );
-  assert.throws(
-    () => renderBoundRowIdentity([
+  const renderBoundRowIdentity = (records) => {
+    const actions = [];
+    const markup = renderToStaticMarkup(
+      ionicUiNodeRendererRegistry.render(
+        {
+          kind: "ui_tree_snapshot",
+          surface: "bound-row-identity-negative",
+          version: "test",
+          root: uiContractConformanceFixtures.fixtures.bound_row_identity
+        },
+        createInMemoryEntityFrameStore([
+          { operation: "entity_snapshot", family: "session", records }
+        ]),
+        { collectAction: (dispatch) => actions.push(dispatch) }
+      )
+    );
+    return { actions, markup };
+  };
+  for (const invalidRecords of [
+    [{ id: "missing", lifecycle_class: "current" }],
+    [{ id: "blank", session_uuid: " ", lifecycle_class: "current" }],
+    [
       { id: "duplicate-a", session_uuid: "sess-duplicate", lifecycle_class: "current" },
       { id: "duplicate-b", session_uuid: "sess-duplicate", lifecycle_class: "current" }
-    ]),
-    /identity binding resolved duplicate id sess-duplicate/
-  );
+    ]
+  ]) {
+    const { actions, markup: invalidIdentityMarkup } = renderBoundRowIdentity([
+      ...invalidRecords,
+      { id: "valid", session_uuid: "sess-valid", lifecycle_class: "current" }
+    ]);
+    assert.match(invalidIdentityMarkup, /data-ui-node-id="sess-valid"/);
+    assert.doesNotMatch(invalidIdentityMarkup, /data-ui-node-id="sess-duplicate"/);
+    assert.doesNotMatch(invalidIdentityMarkup, /data-ui-node-id=" "/);
+    assert.deepEqual(actions.map(({ node }) => node.id), ["sess-valid"]);
+  }
   assert.equal(ionicUiNodeRendererRegistry.supports("iframe"), true);
   const missingCapabilityMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(
@@ -6518,6 +6545,8 @@ try {
       entities: sessionBindingStore
     })
   );
+  const renderedBoundRowIds = () => [...renderSessionBindings().matchAll(/data-ui-node-id="(session-[^"]+)"/g)]
+    .map((match) => match[1]);
   const renderedSessionBindingMap = () => Object.fromEntries(
     sessionPluginBindingFixture.surface.children
       .filter((child) => child.where?.session_uuid)
@@ -6555,6 +6584,7 @@ try {
   assert.equal((initialSessionBindings.match(/Session unavailable/g) ?? []).length, 1);
   assert.doesNotMatch(initialSessionBindings, /data-unsupported-ui-node/);
   assert.deepEqual(renderedSessionBindingMap(), sessionPluginBindingFixture.expected.initial);
+  assert.deepEqual(renderedBoundRowIds(), sessionPluginBindingFixture.row_expected.initial);
 
   const canonicalSessionRecord = sessionBindingStore.get("session", "session-transition");
   assert.deepEqual(
@@ -6581,22 +6611,26 @@ try {
     renderedSessionBindingMap(),
     sessionPluginBindingFixture.expected.after_ended_patch
   );
+  assert.deepEqual(renderedBoundRowIds(), sessionPluginBindingFixture.row_expected.after_ended_patch);
   applyPublishedSessionFrame(sessionPluginBindingFixture.transition_frames[1]);
   assert.deepEqual(
     renderedSessionBindingMap(),
     sessionPluginBindingFixture.expected.after_indeterminate_patch
   );
+  assert.deepEqual(renderedBoundRowIds(), sessionPluginBindingFixture.row_expected.after_indeterminate_patch);
   applyPublishedSessionFrame(sessionPluginBindingFixture.transition_frames[2]);
   assert.deepEqual(
     renderedSessionBindingMap(),
     sessionPluginBindingFixture.expected.after_remove
   );
+  assert.deepEqual(renderedBoundRowIds(), sessionPluginBindingFixture.row_expected.after_remove);
 
   applyPublishedSessionFrame(sessionPluginBindingFixture.reconnect_snapshot);
   assert.deepEqual(
     renderedSessionBindingMap(),
     sessionPluginBindingFixture.expected.after_reconnect
   );
+  assert.deepEqual(renderedBoundRowIds(), sessionPluginBindingFixture.row_expected.after_reconnect);
   assert.equal(sessionBindingStore.get("session", "session-transition"), undefined);
   assert.equal(
     Object.hasOwn(sessionBindingStore.get("session", "session-indeterminate"), "lifecycle"),

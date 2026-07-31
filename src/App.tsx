@@ -79,7 +79,12 @@ import {
   sessionDisplayStatus,
   sessionDisplayTitle
 } from "./botster/terminalSession";
-import type { UiActionRequest, UiNodeActionDispatch, UiTreeSnapshot } from "./botster/uiNodes";
+import {
+  pluginSurfaceActionRequest,
+  type UiActionRequest,
+  type UiNodeActionDispatch,
+  type UiTreeSnapshot
+} from "./botster/uiNodes";
 import {
   acceptedResultMatches,
   applyAcceptedPresentation,
@@ -1013,15 +1018,7 @@ export default function App() {
   );
   const dispatchPluginSurfaceAction = useCallback(
     (packageName: string, surfaceId: string, dispatch: UiNodeActionDispatch) => {
-      const nodeId = dispatch.node.id;
-      const requestWithoutId: Omit<UiActionRequest, "request_id"> = {
-        surface_id: surfaceId,
-        action_id: dispatch.action.id,
-        ...(nodeId ? { node_id: nodeId } : {}),
-        kind: dispatch.kind,
-        ...(dispatch.values ? { values: dispatch.values } : {}),
-        ...(dispatch.action.payload !== undefined ? { payload: dispatch.action.payload } : {})
-      };
+      const requestWithoutId = pluginSurfaceActionRequest(surfaceId, dispatch);
       const action: ActionBinding = {
         id: dispatch.action.id,
         payload: dispatch.action.payload,

@@ -79,12 +79,22 @@ export const generatedModeFlagsResponseFixture = {
 } satisfies DaemonResponse;
 
 export const generatedPluginResourceCountersResponseFixture = {
-  kind: "status",
+  kind: "plugin_lifecycle",
   status: null,
   sessions: [],
   packages: [],
   package_decision: null,
-  lifecycle: [],
+  lifecycle: [
+    { package_name: "project-pipelines", state: "running", loaded: true }
+  ],
+  plugin_worker_counters: {
+    configured_queue_capacity: 64,
+    configured_executor_concurrency: 4,
+    live_plugin_executors: 1,
+    live_executor_workers: 4,
+    queued_jobs: 0,
+    in_flight_jobs: 0
+  },
   plugin_resource_counters: {
     active_timer_resources: 3
   },

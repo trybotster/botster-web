@@ -2,6 +2,7 @@ import type {
   JsonValue,
   UiAction,
   UiActionKind,
+  UiActionRequest,
   UiActionResult,
   UiFormValues,
   UiNode,
@@ -46,6 +47,21 @@ export interface UiNodeActionDispatch {
   node: RealizedUiNode;
   kind: UiActionKind;
   values?: UiFormValues;
+}
+
+export function pluginSurfaceActionRequest(
+  surfaceId: string,
+  dispatch: UiNodeActionDispatch
+): Omit<UiActionRequest, "request_id"> {
+  const nodeId = dispatch.node.id;
+  return {
+    surface_id: surfaceId,
+    action_id: dispatch.action.id,
+    ...(nodeId ? { node_id: nodeId } : {}),
+    kind: dispatch.kind,
+    ...(dispatch.values ? { values: dispatch.values } : {}),
+    ...(dispatch.action.payload !== undefined ? { payload: dispatch.action.payload } : {})
+  };
 }
 
 export interface UiNodeRendererRegistry {

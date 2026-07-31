@@ -253,7 +253,7 @@ function resolvedProps(
   return resolvedValue(node.props ?? {}, store, options, row) as Record<string, unknown>;
 }
 
-function realizedNodeIdentity(node: UiNode, row?: RowContext): RealizedUiNode {
+function realizedNodeIdentity(node: UiNode, row?: RowContext): RealizedUiNode | undefined {
   if (node.id === undefined || typeof node.id === "string") {
     return node as RealizedUiNode;
   }
@@ -263,7 +263,7 @@ function realizedNodeIdentity(node: UiNode, row?: RowContext): RealizedUiNode {
     ? readPath(row, binding.slice(2))
     : undefined;
   if (typeof resolved !== "string" || resolved.trim().length === 0) {
-    throw new Error(`UiNode ${node.type} identity binding must resolve to a non-blank string`);
+    return undefined;
   }
 
   return { ...node, id: resolved } as RealizedUiNode;
@@ -302,38 +302,49 @@ function resolveChild(
   options: UiNodeRenderOptions,
   row?: RowContext
 ): Array<{ node: RealizedUiNode; row?: RowContext }> {
-  if (isUiNode(child)) return [{ node: realizedNodeIdentity(child, row), row }];
+  if (isUiNode(child)) {
+    const node = realizedNodeIdentity(child, row);
+    return node ? [{ node, row }] : [];
+  }
 
   if (child.$kind === "bind_list") {
     const rows = entityRows(store, child.source, child.where, row);
     if (rows.length === 0) {
-      return child.empty_template ? [{ node: realizedNodeIdentity(child.empty_template, row), row }] : [];
+      const node = child.empty_template ? realizedNodeIdentity(child.empty_template, row) : undefined;
+      return node ? [{ node, row }] : [];
     }
     const boundIdentity = typeof child.item_template.id === "object";
-    const identities = new Set<string>();
-    return rows.map((record) => {
+    const resolvedRows = rows.flatMap((record) => {
       const node = realizedNodeIdentity(child.item_template, record);
-      if (boundIdentity && node.id && identities.has(node.id)) {
-        throw new Error(`UiNode ${node.type} identity binding resolved duplicate id ${node.id}`);
-      }
-      if (boundIdentity && node.id) identities.add(node.id);
-      return { node, row: record };
+      return node ? [{ node, row: record }] : [];
     });
+    if (!boundIdentity) return resolvedRows;
+
+    const identityCounts = new Map<string, number>();
+    for (const { node } of resolvedRows) {
+      if (node.id) identityCounts.set(node.id, (identityCounts.get(node.id) ?? 0) + 1);
+    }
+    return resolvedRows.filter(({ node }) => !node.id || identityCounts.get(node.id) === 1);
   }
 
   if (child.$kind === "bind_if") {
-    return pathValue(child.path, store, options, row) ? [{ node: realizedNodeIdentity(child.node, row), row }] : [];
+    const node = pathValue(child.path, store, options, row) ? realizedNodeIdentity(child.node, row) : undefined;
+    return node ? [{ node, row }] : [];
   }
 
   if (child.$kind === "presentation_if") {
-    return presentationMatches(child.predicate, options.presentation ?? {}) ? [{ node: realizedNodeIdentity(child.node, row), row }] : [];
+    const node = presentationMatches(child.predicate, options.presentation ?? {})
+      ? realizedNodeIdentity(child.node, row)
+      : undefined;
+    return node ? [{ node, row }] : [];
   }
 
   const matches =
     (!child.condition.width || child.condition.width === "regular") &&
     (!child.condition.pointer || child.condition.pointer === "fine");
   const visible = child.$kind === "hidden" ? !matches : matches;
-  return visible ? [{ node: realizedNodeIdentity(child.node, row), row }] : [];
+  const node = visible ? realizedNodeIdentity(child.node, row) : undefined;
+  return node ? [{ node, row }] : [];
 }
 
 function renderSlotRegion(
@@ -1049,6 +1060,7 @@ function renderNode(
       const columns = readTableColumns(props.columns);
       const rows = readRecords(props.rows);
       const emptyState = uiNodeFromRecord(props.empty_state);
+      const realizedEmptyState = emptyState ? realizedNodeIdentity(emptyState, row) : undefined;
       const selectable = selectionIsActive(props.selection);
       const selectedValues = selectedValueSet(props.selection);
       const tableActivation = actionFromValue(props.activation);
@@ -1067,8 +1079,8 @@ function renderNode(
             data-unsupported-interaction-props={unsupportedPropsAttr}
             key={node.id}
           >
-            {emptyState
-              ? renderNode(realizedNodeIdentity(emptyState, row), store, options, row, form)
+            {realizedEmptyState
+              ? renderNode(realizedEmptyState, store, options, row, form)
               : <div className="uinode-empty-state" role="status"><div className="uinode-empty-state-copy"><h3>No rows</h3></div></div>}
           </div>
         );
@@ -1138,7 +1150,8 @@ function renderNode(
           error: props.error
         } as JsonObject
       } as UiNode;
-      return renderNode(realizedNodeIdentity(controlNode, row), store, options, row, form);
+      const realizedControlNode = realizedNodeIdentity(controlNode, row);
+      return realizedControlNode ? renderNode(realizedControlNode, store, options, row, form) : null;
     }
     case "text_input":
     case "textarea":
@@ -1202,7 +1215,10 @@ function renderNode(
 
 export const ionicUiNodeRendererRegistry: UiNodeRendererRegistry = {
   render(snapshot: UiTreeSnapshot, entities: EntityFrameStore, options: UiNodeRenderOptions = {}) {
-    return renderNode(realizedNodeIdentity(snapshot.root), entities, options);
+    const root = realizedNodeIdentity(snapshot.root);
+    return root
+      ? renderNode(root, entities, options)
+      : <div className="uinode-fallback" data-unsupported-identity="unresolved" role="note">Unsupported node identity</div>;
   },
   supports(primitive: string) {
     return supportedPrimitives.has(primitive);
