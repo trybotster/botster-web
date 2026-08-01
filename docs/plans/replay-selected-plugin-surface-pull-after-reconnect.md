@@ -1,5 +1,5 @@
 ---
-description: Plan to retain the selected plugin route and replay only its owner-authored surface pull after WebRTC reconnect
+description: Plan to preserve the selected plugin URL across packaged WebRTC reconnect and prove its route-owned surface pull replays through Hub
 ---
 
 # Replay the selected plugin surface pull after reconnect
@@ -7,12 +7,12 @@ description: Plan to retain the selected plugin route and replay only its owner-
 ## Target repository and routing
 
 - Ticket: `ticket_1785553389_894623`, "Web: replay selected plugin surface pull after reconnect".
-- Run: `run_1785553417_250750`, Plan step `botster_stack_plan`.
+- Run: `run_1785553417_250750`, returned Plan step `run_step_1785554568_309118`.
 - Authoritative target repository: `trybotster/botster-web`.
 - Target ID: `tgt_40abcf71ccf049f4ac0c99953a799869`.
 - Repository ownership charter: [[botster-web-playbook]].
-- The target was resolved from `project_pipelines_current_context` through the admitted spawn-target registry, not inferred from the process directory. The registry display name is misspelled `booster-web`, but its path, Git remote, and `repo_name` all identify `trybotster/botster-web` unambiguously.
-- Assigned worktree: branch `project-pipelines/ticket_1785553389_894623` at baseline `8672e149c5eec2f750cf000de921d2032807d144`.
+- The target was resolved from Project Pipelines context through the spawn-target registry and confirmed by Git remote. The registry display name is misspelled `booster-web`, but path and `repo_name` identify `trybotster/botster-web` unambiguously.
+- Worktree branch: `project-pipelines/ticket_1785553389_894623`. Baseline is merge `8672e149c5eec2f750cf000de921d2032807d144`; the first Plan artifact is commit `6e27b2b` and this revision supersedes its unsupported diagnosis.
 
 ## Playbooks and atomic notes loaded
 
@@ -21,8 +21,8 @@ Loaded in the required order:
 1. [[planner-playbook]]
 2. [[botster-planner-playbook]]
 3. [[botster-web-playbook]]
-4. The targeted Botster/Web/reconnect notes below
-5. [[project-pipelines-playbook]] for this run's durable checklist, artifact, gate, dependency, and advancement workflow; Project Pipelines implementation is not in scope
+4. Targeted Web, route, surface, hydration, and reconnect notes
+5. [[project-pipelines-playbook]] for durable review findings, checklists, artifacts, gates, and advancement; Project Pipelines implementation is not in scope
 
 Botster role and architecture guidance:
 
@@ -60,144 +60,149 @@ Targeted reconnect and surface guidance:
 - [[browser transport helper modules must depend inward via injected callbacks]]
 - [[packaged botster web reloads need fresh webrtc grants]]
 
-## Context loaded
+## Context loaded and reproduced failure
 
-- `project_pipelines_current_context` supplied the ticket, active run/step, Plan gate schema, empty initial artifacts/findings/reviews/questions, and dependency state.
-- `README.md`, `docs/architecture.md`, `package.json`, `package-lock.json`, current production sources, deterministic tests, the live packaged protocol harness, and repo-local prior plans were inspected. There is no `.github` workflow in this repository; the npm scripts documented by the README are the repository gates. Existing mainline artifacts establish `docs/plans/` as the plan destination.
-- The baseline is clean. `npm test` exits 0 with protocol-drift plus runtime/renderer assertions, and `npm run typecheck` exits 0.
-- `src/App.tsx` derives the selected plugin surface from the stable URL and dispatches its Hub-provided `botster.package.surface.render` action once per route key. `lastPluginRouteRenderKey` prevents a second dispatch for the same selected route for the lifetime of the mounted app.
-- `src/botster/webrtcDaemonClient.ts` owns transport generations and automatically recreates the held `session` entity subscription after a DataChannel close. Its lifecycle events currently feed diagnostics but do not cause the selected route's surface request to replay.
-- `src/botster/hubTransport.ts` is the normal Web-to-Hub adapter. Descriptor-backed surface renders travel through `runtimeClient.actions.dispatch` -> `HubControlFrame(action_request)` -> `plugin_surface_render`; reconnect recovery must keep using that path rather than call the daemon bridge directly.
-- `src/botster/entities.ts` already treats full snapshots as authoritative replacements and tracks explicit entity pulls, but replaying every active package/app/list pull would violate this ticket's narrow selected-surface recovery requirement. The held `session` subscription already supplies the authoritative model baseline needed by the selected surface's bindings.
-- `scripts/live-packaged-protocol-harness.mjs` already proves stable plugin routes, fresh WebRTC generations, authoritative `session` snapshots, owner-authored UiNode rendering, and bounded last-state evidence. The Workspaces lifecycle mode merged in the baseline exposes the generic Web defect when the selected surface does not reopen after reconnect.
-- `fixtures/plugin-payload-contract` and the Hub-test-support contract matrix establish the repository's package-fixture and live-harness patterns. The regression must use a generic Web-owned plugin surface fixture, not Workspaces-specific semantics.
-- Downstream ticket `ticket_1785296184_677408` targets `botster-workspaces` (`tgt_71266a8d976d4535902ffed09c18a7ba`) and already has dependency `dependency_1785553403_441166` on this Web ticket. No new or reversed dependency edge is needed.
+- `project_pipelines_current_context` supplied the returned Plan step, prior artifact/gate, Plan Review verdict, six open findings, dependency state, and both workflow/vault checklists.
+- `README.md`, `docs/architecture.md`, `package.json`, `package-lock.json`, production route/transport/entity/action sources, deterministic tests, live harness, and relevant prior plans were inspected. There is no `.github` workflow; README/package npm scripts are repository gates. `docs/plans/` remains the authoritative artifact destination.
+- Baseline `npm test` and `npm run typecheck` exit 0. Plan Review independently repeated both after fetching current remote refs.
+- `src/App.tsx` parses the selected plugin URL, performs normal startup pulls, resolves the Hub-provided surface descriptor, and dispatches `botster.package.surface.render` through `runtimeClient.actions` once after route resolution. A hard reload remounts `App`, so `lastPluginRouteRenderKey` is recreated as `undefined`; it cannot suppress the post-reload request.
+- The initial plan's generation-aware `webrtcDaemonClient -> hubRuntime -> App` design is rejected. The live harness has no in-place mounted-document DataChannel-drop path, and the reported Workspaces boundary is a hard navigation/remount.
+- `reloadSamePackageUrlAndAssertWebrtc` in `scripts/live-packaged-protocol-harness.mjs` checks only origin equality. It reloads the current URL only when `cycle === 1`; all other values call `revisitPackageRuntime(page)`, which navigates to root `appUrl`.
+- `exerciseWorkspacesLifecycle` passes string `"workspaces-lifecycle"` as `cycle`. The strict numeric comparison fails, so the helper navigates from the selected Workspaces route to package root. The next statement calls `assertSelectedAppSurfaceRendered`, which must time out because root has no selected plugin route.
+- This was reproduced against Web baseline `8672e14` with Hub binaries from the authoritative `botster-hub` checkout and an immutable `/private/tmp` archive of exact Workspaces PR #11 commit `fce8aba572e80f07db4041f915f4c2d9860b9e40` (not a sibling worktree and without changing that repository). Exact command:
+
+  `BOTSTER_HUB_BIN=<authoritative debug botster-hub> BOTSTER_SESSION_WORKER_BIN=<authoritative debug botster-session-worker> BOTSTER_WORKSPACES_PACKAGE_PATH=<immutable fce8aba archive> npm run smoke:workspaces-lifecycle`
+
+- The escalated live run exits 1 after the initial compatibility/create/current-to-ended/removal path. Post-navigation WebRTC signaling, DataChannel open, encrypted stream readiness, fresh `session` subscription, authoritative `session` snapshot, and standard startup entity pulls all occur. It then fails at `scripts/live-packaged-protocol-harness.mjs:1392` with `locator.waitFor: Timeout 15000ms exceeded` waiting for `getByTestId('selected-app-surface')`.
+- The failure is therefore pinned to `exerciseWorkspacesLifecycle` immediately after `reloadSamePackageUrlAndAssertWebrtc`, before `selectWorkspacesLifecycleWorkspace`, `reconnect-authoritative-history`, or `reconnectGenerationEvidence`.
+- The generic `@trybotster/hub-test-support` contract-matrix package is already materialized by this repository's harness and supplies owner-authored `contract.app`/`contract.sessions` surfaces. It is the generic fixture required for the primary regression; no new published fixture or Workspaces-specific test double is needed.
+- Downstream `ticket_1785296184_677408` targets `botster-workspaces` and already depends on this ticket through `dependency_1785553403_441166` in the correct direction.
 
 ## Scope
 
-1. Preserve the selected plugin app route and its exact Hub-provided render descriptor as the mounted view's active surface pull across a WebRTC transport generation change.
-2. Make the route render guard generation-aware: dispatch once on the initial selected route and exactly once again after each confirmed fresh reconnect generation while that same route remains selected. Route changes replace the active request; leaving the route clears it.
-3. Feed reconnect readiness into the route-owned replay coordinator through the existing typed WebRTC/Hub composition seam. Keep transport lifecycle ownership below the React view, and inject/forward only the minimal reconnect-ready signal needed by the route coordinator; do not make request consumers inspect peer internals.
-4. Replay the selected surface through `runtimeClient.actions.dispatch` and the normal `HubControlFrame`/`createHubTransport` action path. Do not invoke `DaemonBridgeClient.request`, `plugin_surface_render`, or plugin code directly from `App.tsx`.
-5. Correlate the replayed result to the current route's package, surface, route key, request, and transport generation. Ignore stale results from a prior route or generation. Preserve explicit `rendering | rendered | error` completion and bounded diagnostics.
-6. Reconcile the accepted matching `plugin_surface.ui_tree_snapshot` as the new selected owner-authored tree. Let the existing entity store and frame-version invalidation render its `ui.bind`/`ui.bind_list` content against the fresh authoritative `session` snapshot; do not synthesize tree content or lifecycle state in Web.
-7. Add a deterministic generic plugin-surface reconnect fixture/test that distinguishes the initial owner-authored tree from the replayed owner-authored tree and proves one request per generation, stable route ownership, matching-result replacement, and stale-result rejection.
-8. Extend the existing packaged WebRTC browser harness with a generic opt-in reconnect proof using a repository-owned generic plugin package fixture. It must keep the page on the selected stable app URL, observe a fresh transport/subscription generation, observe exactly one replayed `plugin_surface_render`, and assert the replay response changes the real rendered Ionic surface.
-9. Retain compact failure evidence: selected route, transport/subscription generation, surface-render request/result identities and counts, latest accepted owner tree, rendered surface text/node ids, and relevant entity chronology. Do not dump secrets, grants, or broad process logs.
-10. Update `README.md` and `docs/architecture.md` only to describe the verified selected-surface reconnect behavior and the new focused command/fixture if implementation adds one.
+1. Correct the packaged browser reconnect helper contract so route-preserving reconnect is explicit and cannot be selected accidentally by overloading a label/cycle argument. Preserve the exact current origin, pathname, search, and hash when the caller is proving a selected plugin route.
+2. Keep the reconnect boundary production-shaped: perform a hard reload or same-URL direct revisit that fetches a fresh package HTML bootstrap, opens a fresh WebRTC generation, remounts the real React/Ionic application, and re-enters the stable route.
+3. Prove the remounted route performs its existing pull-owned behavior through the normal production path: normal startup descriptor pulls -> route resolution -> `runtimeClient.actions.dispatch` -> `HubControlFrame(action_request)` -> `createHubTransport` -> `plugin_surface_render` -> matching owner-authored tree -> `UiNodeSurface`.
+4. Add an exact URL invariant to the route-preserving helper. Before continuing to diagnostics, fail if the full selected route differs after reconnect. Origin-only equality is insufficient.
+5. Extend the existing generic contract-matrix browser proof to select an admitted generic plugin surface, record its exact URL and render-request count, cross the route-preserving WebRTC reconnect boundary, and assert:
+   - the exact URL is unchanged;
+   - grant and `session` subscription identities are fresh;
+   - one new matching `plugin_surface_render` travels through the normal Hub transport;
+   - an accepted matching owner-authored tree renders in the real selected-surface region;
+   - no client-synthesized surface or fixture-specific production branch exists.
+6. Change Workspaces lifecycle acceptance to use that same route-preserving helper. Do not pass a semantic label through a numeric navigation branch. After reconnect, keep the selected Workspaces route, wait for its normal owner surface request/result, reselect through rendered controls, and continue existing lifecycle oracles.
+7. Retain bounded last-state diagnostics and add the route fields needed to diagnose this class of failure: expected/before/after URL, navigation mode, latest surface render request/result identity/count, latest accepted tree, rendered selected-surface text/node ids, transport/subscription ids, and relevant entity chronology. Continue redacting grant secrets and avoiding broad logs.
+8. Add deterministic regression coverage for helper navigation semantics, exact URL preservation, the generic surface request-count oracle, and the Workspaces call-site regression. The test must fail against `8672e14` because that call navigates to root before the selected-surface assertion.
+9. Document the corrected route-preserving reconnect proof only if README/architecture wording changes materially; do not claim an in-place transport reconnect that the harness does not exercise.
 
 ## Non-scope
 
-- No Workspaces-specific package name, surface id, lifecycle class, row identity, client state, fixture branch, or locally synthesized workspace/session truth.
-- No changes to `botster-workspaces`, Hub, Hub Client, Core, TUI/TUI-kit, UI Contract, Project Pipelines plugin code, or published test-support packages in this run.
-- No subscribe-time hydration, `list_sessions`, imperative list refresh, replay of every package/app/marketplace/spawn-target pull, or global entity-store reset. The sanctioned held `session` subscription remains the model-state reconnect path.
-- No new physical connection owner, second WebRTC client, direct bridge request, HTTP fallback, polling, timing retry, fixed sleep, or retry-until-green loop.
-- No browser-authored UiNode tree, surface body fallback, lifecycle projection, compatibility route, or fixture-specific production branch.
-- No weakening of identity matching, stale-generation filtering, action correlation, explicit render phases, or bounded failure diagnostics.
-- No sibling worktree consumption. The downstream Workspaces rerun must occur in its own routed ticket/worktree against its real branch.
-- No dependency/version changes unless the authoritative protocol drift check proves an actual consumed-contract prerequisite; if so, stop and register that separately rather than guessing DTOs.
-- No adjacent route, renderer, terminal, marketplace, settings, or package-list cleanup.
+- No generation-aware `lastPluginRouteRenderKey`, new WebRTC lifecycle observer, in-place DataChannel-drop harness, or production reconnect coordinator. The reproduced hard reload remounts `App` and does not need them.
+- No production changes to `src/App.tsx`, `src/botster/webrtcDaemonClient.ts`, `src/botster/hubRuntime.ts`, `src/botster/hubTransport.ts`, `src/botster/protocol.ts`, `src/botster/client.ts`, or `src/botster/entities.ts` unless the focused generic regression disproves the reproduced route-loss diagnosis.
+- No split or generation rewrite of the shared app/settings `lastPluginRouteRenderKey`. Because this plan no longer changes that ref, settings behavior remains untouched; deterministic/source coverage should guard that non-change.
+- No Workspaces-specific production state, package name/surface branch, lifecycle classifier, row synthesis, or locally-authored UiNode tree.
+- No changes to Workspaces, Hub, Hub Client, Core, TUI/TUI-kit, UI Contract, Project Pipelines plugin code, or published test-support packages.
+- No subscribe-time hydration, `list_sessions`, polling, retry loop, fixed sleep, second WebRTC connection owner, HTTP fallback, or direct `DaemonBridgeClient.request` surface call.
+- No added post-reconnect global replay/list-refresh workaround. A hard document load naturally performs the existing explicit startup pulls needed to resolve descriptors; those baseline requests are allowed and must not be mislabeled as an added fallback.
+- No sibling worktree consumption. The Plan reproduction used an immutable commit archive; the required final downstream run remains in the Workspaces ticket's own routed worktree.
+- No adjacent route/settings/terminal/renderer/package cleanup or dependency bump.
 
 ## Repository ownership boundaries and cross-repository dependencies
 
-- **botster-web owns:** the stable browser route, selected-surface request lifetime, reconnect replay coordination, normal Hub transport adaptation, matching-result reconciliation, Ionic rendering, diagnostics, generic fixture, deterministic tests, and packaged browser acceptance.
-- **botster-workspaces owns:** workspace records, session-reference lifecycle semantics, current/ended/unavailable grouping, and the owner-authored production tree. `ticket_1785296184_677408` already depends on this ticket and must rerun the corrected merged Web mode against its real branch before closing.
-- **botster-hub / hub-client own:** WebRTC daemon protocol, fresh session subscription generations, authoritative session snapshots/deltas, package descriptors, plugin worker execution, and daemon request/result truth. This run consumes those public contracts unchanged.
-- **botster-core / UI Contract own:** renderer-neutral UiNode/action/binding grammar and validation. Web accepts the identity-matched `ui_tree_snapshot` and renders it without inventing a second grammar.
-- **Project Pipelines owns:** this run's durable checklist, gate, artifact, and existing dependency edge only. Its plugin/package implementation is not touched.
-- There is no blocking cross-repository prerequisite for the Web implementation. If the generic fixture cannot express the required behavior through current admitted public contracts, stop and register the missing contract against its owning target rather than broadening this run.
+- **botster-web owns:** packaged browser navigation/reload semantics, stable route preservation, the route-owned request path, real Ionic rendering assertions, generic fixture consumption, bounded diagnostics, and deterministic/live harness coverage.
+- **botster-workspaces owns:** workspace records, lifecycle grouping, owner-authored tree, and the final real-branch consumer pass. `ticket_1785296184_677408` already depends on this Web ticket and must rerun the merged mode before closing.
+- **botster-hub / hub-client own:** fresh WebRTC grants/generations, canonical `session` subscription/snapshots, descriptors, plugin worker execution, and daemon request/result truth. Web consumes unchanged public behavior.
+- **botster-core / UI Contract own:** accepted UiNode/action/binding grammar. Web renders the identity-matched owner tree without creating another grammar.
+- **Project Pipelines owns:** durable review findings, checklists, artifacts, gates, and the existing dependency edge only.
+- No blocking cross-repository prerequisite remains. If the generic contract-matrix surface cannot pass after exact-route preservation, stop and route the newly reproduced external contract defect rather than reviving the speculative generation design.
 
-## Assumptions and unknowns
+## Convention reconciliation, assumptions, and unknowns
 
-- Assumption: a typed reconnect-ready event can identify a fresh transport generation without exposing `RTCPeerConnection` or DataChannel objects to React. The implementer should use the narrowest existing lifecycle seam and include generation identity if needed to deduplicate opens.
-- Assumption: the selected route's descriptor-backed render action is the surface pull to retain. It is read-shaped even though the current adapter carries it through the correlated action envelope; this ticket does not rename or fork the public Hub request.
-- Assumption: the initial DataChannel open must not cause a duplicate render. The replay key therefore needs to distinguish initial route hydration from later confirmed generations.
-- Assumption: the replayed owner tree may arrive before or after the reconnect `session` snapshot. Existing frame-driven rerendering must converge either ordering without a second surface render or list refresh.
-- Assumption: settings surfaces are outside the reported `selected-app-surface` defect unless a generic failing test proves they share the same route-owned pull path. Do not bulk-retrofit them speculatively.
-- Unknown: whether the smallest clean seam is a generation callback on the injected daemon client, a transport lifecycle callback, or a Hub-level reconnect event. Choose after a focused failing test, but keep the dependency direction runtime/transport -> injected coordinator -> route and never helper -> React import.
-- Unknown: whether the generic live fixture should extend the existing repository payload-contract package or use a dedicated reconnect package. Prefer the smallest fixture change that exposes two distinguishable owner-authored renders without coupling unrelated payload assertions.
-- Unknown: whether a response from the failed generation can reach the action dispatcher after reconnect. Deterministic coverage must settle this; if possible, gate it by request plus route/generation identity rather than relying on timing.
-- Convention conflicts: none. The plan keeps runtime and producer truth in their owners, uses one route-owned connection, preserves pull-based hydration, reuses framework/repository seams, and avoids speculative abstraction or compatibility paths.
+- [[botster browser pull requests must retry after webrtc reconnect]] still constrains the result. Here the hard reload creates a fresh application instance, whose stable selected URL reactivates normal explicit startup pulls and the route-owned surface pull. No additional global replay mechanism is needed.
+- The narrowing is safe because `src/botster/entities.ts` retains families across an in-place transport generation, while this reproduced boundary is stronger: a full remount reconstructs stores and performs the normal explicit startup pulls. The fix must not add a second refresh after those normal requests.
+- [[botster client subscriptions should not hydrate global state]] is preserved: subscribe remains transport/session-subscription setup; app/package descriptors and the selected surface remain explicit requests from the remounted route.
+- Assumption: preserving the full selected URL is the intended hard-reconnect behavior. This is directly supported by the ticket wording, the stable-route note, and the reproduced root-navigation failure.
+- Assumption: the existing generic contract-matrix fixture's owner-authored `contract.app` is sufficient to prove surface replay. The live oracle must use structured request/result/tree evidence, not static shell text.
+- Assumption: normal hard-load `list_apps`, `list_packages`, navigation, and session-subscription requests are expected startup behavior. The prohibition is against adding an imperative global refresh/retry to fix route loss.
+- Unknown: whether the cleanest helper is a dedicated `reloadCurrentRouteAndAssertWebrtc` function or a discriminated navigation-mode argument. Prefer the smallest unambiguous API; do not retain a parameter whose type silently chooses unrelated navigation semantics.
+- Unknown: after route preservation, the exact `fce8aba` Workspaces run may expose a later producer-owned lifecycle assertion. That later result must be recorded precisely, but it does not justify weakening the generic route proof.
+- Convention conflict found and reconciled: the broad replay note can sound like every cached family needs replay, but the actual hard-remount boundary already issues normal view-owned startup pulls. The plan explicitly allows those and rejects any additional global fallback.
 
 ## Affected surfaces and files
 
-- `src/App.tsx`: retain the selected route's active surface pull, make the once-per-route guard generation-aware, dispatch replay through the normal runtime client, reject stale route/generation results, and reconcile the returned tree/status.
-- `src/botster/webrtcDaemonClient.ts`: likely expose a typed fresh-generation/reconnect-ready lifecycle signal through the existing injected lifecycle seam; no React import or request-specific policy.
-- `src/botster/hubRuntime.ts` and/or `src/botster/hubTransport.ts`: likely forward/inject the minimal lifecycle signal at the existing composition boundary. Do not add a second transport or direct surface daemon call.
-- `src/botster/protocol.ts` or `src/botster/client.ts`: only if a Hub/runtime-level reconnect observer is the smallest way to keep React independent of WebRTC internals. Avoid broad protocol vocabulary changes.
-- `src/botster/entities.ts`: expected unchanged; its authoritative snapshot reconciliation is exercised, not expanded into global pull replay.
-- `src/App.test.mjs`: add deterministic route/generation/request/reconciliation regression coverage and source guards against direct bridge/list-refresh/Workspaces-specific paths.
-- `fixtures/plugin-payload-contract/{botster-package.json,plugin.lua}` or a focused sibling fixture under `fixtures/`: generic owner-authored surface whose initial and replayed render trees are distinguishable. Final placement follows the smallest established fixture pattern.
-- `scripts/live-packaged-protocol-harness.mjs`: add the focused generic reconnect scenario and bounded last-state evidence while reusing current Hub/browser/WebRTC setup.
-- `scripts/live-packaged-protocol-helpers.mjs`: only if a small pure chronology/evidence helper is needed by both the harness and deterministic tests.
-- `package.json`: only if a focused opt-in smoke command is added.
-- `README.md`, `docs/architecture.md`: document only the shipped reconnect behavior and runnable proof.
-- `docs/plans/replay-selected-plugin-surface-pull-after-reconnect.md`: this plan artifact.
+- `scripts/live-packaged-protocol-harness.mjs`: replace the ambiguous reconnect navigation contract, preserve/assert exact selected URLs, add the generic selected-surface reconnect proof, route Workspaces lifecycle through it, and extend bounded evidence.
+- `scripts/live-packaged-protocol-helpers.mjs`: only if a small pure URL/request chronology helper makes deterministic coverage direct and reusable.
+- `src/App.test.mjs`: deterministic assertions for helper semantics, exact route preservation, generic surface request/result chronology, pre-fix negative control, and absence of speculative production reconnect wiring.
+- `README.md`: update only if the focused proof/command or documented reconnect semantics change.
+- `docs/architecture.md`: update only if needed to distinguish hard route-preserving reload from in-place WebRTC transport recovery.
+- `package.json`: expected unchanged because `smoke:plugin-contract-matrix` and `smoke:workspaces-lifecycle` already exist.
+- `fixtures/`: expected unchanged; the installed Hub-test-support contract matrix is the existing generic owner fixture.
+- `docs/plans/replay-selected-plugin-surface-pull-after-reconnect.md`: revised durable plan artifact.
 
 ## Implementation outline
 
-1. Add a failing deterministic regression around the current selected-route guard: one initial surface request succeeds, a fresh reconnect generation occurs without a route change, the pull replays once, and the second matching owner tree replaces the first.
-2. Expose/forward the minimal typed generation-ready signal through the existing WebRTC -> runtime/transport composition boundary. Prove initial open and reconnect are distinguishable and duplicate lifecycle notifications do not duplicate requests.
-3. Replace the lifetime-only `lastPluginRouteRenderKey` rule with route-plus-generation pull ownership. Preserve the route URL and current surface during reconnect; mark rendering/error only when the current generation's correlated request warrants it.
-4. Send initial and replay requests through the same descriptor-backed runtime action path. Apply only the matching current result and preserve existing explicit phase, diagnostics, presentation scope, and UiNode snapshot adaptation rules.
-5. Add the generic owner-authored plugin fixture and exercise it through the existing packaged WebRTC browser harness. Force the real reconnect boundary already used by the harness, then assert fresh generation, one replay request, accepted matching response, and changed rendered tree with no global list refresh.
-6. Add negative assertions for duplicate replays, stale route/generation responses, `list_sessions`, package/list refresh during reconnect, direct daemon-bridge surface calls, Workspaces literals in production code, and timing-retry loops.
-7. Update focused docs, run repository gates, and attach both generic runtime proof and the downstream Workspaces handoff requirement.
+1. Preserve the reproduced pre-fix evidence in implementation reporting: exact baseline, Workspaces SHA, command, successful pre-reconnect stages, failing selected-surface assertion, and root-navigation cause.
+2. Refactor the reconnect helper/call site so labels do not select navigation behavior. Add exact full-URL before/after assertions for route-preserving reload/revisit.
+3. Extend the generic contract-matrix flow to cross that helper while `contract.app` is selected. Capture the prior grant/subscription/render count, then require fresh identities, exact route, one additional matching surface request, accepted result, and rendered owner tree.
+4. Use the same route-preserving helper in Workspaces lifecycle and continue the existing reconnect/history assertions. Preserve current bounded diagnostics and add exact route/request evidence.
+5. Add deterministic helper/chronology/source tests, including a negative assertion that the old string-through-numeric-cycle call shape no longer exists.
+6. Run repository and live gates. If the exact Workspaces archive progresses to a later producer-owned failure, record it without changing Web production semantics; the downstream real-branch run remains mandatory.
 
 ## Risks
 
-- **Initial-open duplication:** treating every DataChannel open as reconnect can issue two initial renders. Gate replay on a fresh post-initial generation and assert exact request counts.
-- **Reconnect ordering:** session snapshot and surface result can arrive in either order. Keep structural tree replacement separate from entity-frame reconciliation and prove eventual rendered convergence.
-- **Stale response overwrite:** a failed generation or prior route may complete late and replace the current tree. Correlate package, surface, route key, request id, and generation before applying.
-- **Over-hydration:** calling `replayActivePulls()` globally would refresh unrelated lists and violate subscribe/pull ownership. Replay only the selected surface; retain the held session subscription for bound model state.
-- **Reconnect storm:** close/error and resubscribe signals may describe one generation more than once. Use generation identity and an idempotent route-generation key, not debounce sleeps.
-- **Fixture leakage:** a generic fixture can accidentally create a production special case. Keep fixture behavior in Lua/package assets and assert production source contains no fixture/package identifiers.
-- **Diagnostic bloat or secrets:** transport evidence can contain grant material. Project only bounded identities/counts/tree/text/entity chronology and retain existing redaction checks.
-- **Downstream false green:** a static tree could render after reconnect without proving replay. The fixture must expose distinguishable owner-authored generations and the harness must observe the second `plugin_surface_render` request/result.
+- **Helper regression:** changing the shared numeric terminal reload loop could weaken its reload-versus-revisit coverage. Prefer a dedicated route-preserving helper or discriminated mode and keep cycles 1/2 behavior covered.
+- **Origin-only false green:** a package-root page shares the selected route's origin. Exact URL equality must be asserted before any surface assertion.
+- **Static-content false green:** shell or fixture title text could exist without a replay. Require a new matching `plugin_surface_render`, accepted identity-matched result/tree, and real selected-surface DOM.
+- **Startup-pull misclassification:** hard reload legitimately reissues explicit descriptor pulls. Test against added extra refreshes, not the baseline remount sequence.
+- **Workspaces leakage:** the primary proof must stay generic. Workspaces remains downstream confirmation and no production branch may contain its identifiers.
+- **Overbroad helper option:** a boolean such as `preserveRoute` can recreate ambiguity. Prefer names/types that make navigation behavior explicit at the call site.
+- **Later producer failure:** fixing route loss may expose a genuine Workspaces lifecycle assertion. Keep stage-specific evidence and ownership boundaries rather than treating all red as Web.
+- **Diagnostic secrets/bloat:** route evidence is safe; grant secrets remain redacted and broad event dumps stay bounded.
 
 ## Acceptance checks and tests
 
-Repository gates:
+Baseline and repository gates:
 
-- `npm test`
-  - Protocol drift passes.
-  - Deterministic runtime coverage proves initial request once, reconnect replay once, route preservation, current-result matching, stale-result rejection, owner-tree replacement, and entity snapshot convergence.
-  - Source guards reject direct bridge surface calls, `list_sessions`, global refresh fallback, Workspaces literals, and timing retry loops.
+- `npm test`: protocol drift plus deterministic route/helper/request chronology assertions pass.
 - `npm run typecheck`.
-- `npm run lint` with no new errors or warnings attributable to this change.
+- `npm run lint` with no new errors or warnings attributable to the change.
 - `npm run build`.
-- `npm run smoke:browser-runtime` to keep ordinary fixture and missing-bootstrap behavior green.
+- `npm run smoke:browser-runtime` remains green.
 
-Focused production-path proof:
+Generic production-path proof:
 
-- Run the focused generic plugin-surface reconnect mode through `scripts/live-packaged-protocol-harness.mjs` with explicit `BOTSTER_HUB_BIN` and `BOTSTER_SESSION_WORKER_BIN` (using the final repo-owned npm command if one is added).
-- The harness must install/enable the generic fixture through Hub, open its admitted stable route in the real React/Ionic app, and render the initial owner tree.
-- Without navigating away or synthesizing DOM/state, cross the existing real WebRTC reconnect boundary and prove a fresh transport/session-subscription generation.
-- Observe exactly one additional normal `plugin_surface_render` request for the selected package/surface, its correlated accepted response, and the changed owner-authored tree in `data-testid="selected-app-surface"`.
-- Assert no `list_sessions`, no package/app/navigation/spawn-target list refresh caused by reconnect, no second connection owner, no unsupported UiNode, no page/console/404 error, no leaked grant secret, and normal cleanup.
-- On failure, retain bounded last-state diagnostics named in Scope item 9 and exit non-zero; no retry timing may turn the result green.
+- `BOTSTER_HUB_BIN=<authoritative hub> BOTSTER_SESSION_WORKER_BIN=<authoritative worker> npm run smoke:plugin-contract-matrix`.
+- The existing generic contract package is installed through Hub and `contract.app` is opened through admitted navigation.
+- Record the exact selected URL and current `plugin_surface_render` count, then perform the explicit route-preserving hard reconnect.
+- Assert the full URL is unchanged, grant and `session` subscription ids are fresh, exactly one new matching surface render request/result is observed through normal Hub transport, and the accepted owner-authored tree renders inside `selected-app-surface`.
+- Assert no unsupported UiNode, client-synthesized surface, direct bridge surface call, `list_sessions`, retry loop, leaked grant, page/console/404 error, or unexpected extra surface render.
+- The new oracle must fail against `8672e14`; the reproduced negative control is the old root-navigation call followed by the 15-second selected-surface timeout.
 
-Regression and downstream proof:
+Exact defect confirmation:
 
-- `npm run smoke:plugin-contract-matrix` remains green, including canonical session snapshot/delta/reconnect bindings and existing stable route/direct-load behavior.
-- `npm run smoke:workspaces-lifecycle` remains the real product consumer mode, but this Web run must not read a sibling Workspaces worktree or encode Workspaces behavior in the fix.
-- After the Web fix is merged, downstream `ticket_1785296184_677408` must run the corrected merged `smoke:workspaces-lifecycle` against its real Workspaces branch (the defect was observed at PR #11 commit `fce8aba`) and obtain exit 0 before that producer ticket closes. The existing dependency `dependency_1785553403_441166` enforces this ordering.
-- If the downstream command still times out reopening `selected-app-surface`, or only passes after a list refresh/retry/synthetic tree, this ticket's acceptance is not satisfied.
+- Re-run `npm run smoke:workspaces-lifecycle` against an explicit immutable snapshot/path for Workspaces commit `fce8aba572e80f07db4041f915f4c2d9860b9e40`, never a sibling worktree.
+- Post-fix, exact route evidence must show the selected Workspaces URL survives the hard reconnect, a new matching `plugin_surface_render` succeeds, and `assertSelectedAppSurfaceRendered` no longer times out.
+- Continue through `selectWorkspacesLifecycleWorkspace`, `reconnect-authoritative-history`, and fresh subscription/snapshot oracles. If a later assertion fails, report its exact stage/oracle and classify ownership.
 
-## Pipeline artifacts and gates
+Downstream proof:
 
-- Commit this repo-local plan and attach it as the Plan artifact/gate evidence.
-- The Project Pipelines workflow checklist records target resolution, prescribed playbook order, code/CI/prior-art inspection, bounded ownership, tests, and downstream proof.
-- The vault checklist records exact note titles, convention conflicts (`none`), baseline verification (`npm test`, `npm run typecheck` both exit 0), and capture disposition.
-- Plan Review should verify the current target/remote, this artifact, the already-registered downstream dependency, and that the plan does not silently turn a Web reconnect fix into Workspaces, Hub, or Project Pipelines implementation.
+- After this Web change merges, `ticket_1785296184_677408` must run the corrected merged `smoke:workspaces-lifecycle` in its own routed worktree against its real branch and obtain exit 0 before closing. Existing dependency `dependency_1785553403_441166` enforces the order.
+- A pass caused by navigating to root, skipping the selected route, static shell text, retry timing, global refresh, or locally synthesized tree does not satisfy acceptance.
+
+## Pipeline artifacts, findings, and gates
+
+- Commit this revised plan and attach a new artifact that supersedes `artifact_1785553989_705957` while preserving the earlier artifact as review history.
+- Gate evidence must cite the live reproduction, explicitly withdraw the generation-aware root-cause claim, and map each Plan Review finding to the revised section that resolves it.
+- Workflow and vault checklists must record the new reproduction command/result, the discovered convention reconciliation, and unchanged capture disposition.
+- Resolve review findings only after the revised artifact and evidence exist; then submit the Plan gate and request Plan Review again without waiver.
 
 ## Vault gaps worth capturing
 
-- No new note is needed at Plan time: [[botster browser pull requests must retry after webrtc reconnect]] already states the durable rule, while [[botster web plugin app routes are stable host routes]] and [[plugin surface route completion needs explicit render phase]] cover route and completion ownership.
-- Capture after implementation only if the concrete route-plus-transport-generation replay key becomes a reusable Botster Web pattern not already present in those notes.
-- Capture after implementation only if owner-authored tree reconciliation has a stable ordering rule relative to authoritative entity snapshots that is not covered by [[botster entity snapshots are authoritative reconnect baselines]].
-- Do not capture Workspaces commit ids, fixture markers, ticket ids, or one-off harness commands as architectural knowledge.
+- Candidate after implementation: overloaded test-helper parameters must not silently select navigation semantics when route persistence is the oracle. Capture only if this proves reusable beyond this harness.
+- Existing notes already cover stable plugin URLs, reconnect pull replay, explicit render phases, and authoritative snapshots; no new architectural note is needed at Plan time.
+- Do not capture ticket ids, Workspaces SHA, temporary archive paths, or the one-time failure as durable conventions.
 
 ## Convention check
 
-- No convention conflict. Every planned runtime line traces to reconnecting the currently selected surface, accepting the authoritative producer tree, or proving that path. The plan uses the existing route, WebRTC runtime, Hub action transport, Ionic renderer, entity store, and live harness; it adds no speculative product abstraction, compatibility path, global refresh, or cross-repository implementation.
+- One apparent conflict is now explicit and reconciled: the broad reconnect-pull note requires mounted view dependencies to be re-requested, while this ticket's actual boundary is a full remount that naturally performs the normal explicit pulls. The surgical fix preserves the selected route so those existing pulls run; it does not add global hydration or a second refresh.
+- No other convention conflict. The revised plan removes speculative production plumbing, keeps Hub/Workspaces truth in their owners, uses the existing stable route and normal Hub transport, and proves the exact user path that failed.
