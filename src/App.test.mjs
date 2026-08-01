@@ -39,6 +39,7 @@ import {
   harnessEventMatches,
   htmlAssetUrls,
   latestAcceptedWorkspacesUiTree,
+  packageRuntimeNavigation,
   packageEnsureDecision,
   reconnectGenerationEvidence,
   workspacesLifecycleAbsenceResult,
@@ -51,6 +52,35 @@ const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
 let nextTestResponseMessageId = 0;
 const uiContractConformanceFixtures = await readUiContractConformanceFixtures();
+
+assert.deepEqual(
+  packageRuntimeNavigation({
+    appUrl: "http://127.0.0.1:4200/",
+    currentUrl: "http://127.0.0.1:4200/packages/botster.plugin/surfaces/main?tab=active#row-2",
+    mode: "reload-current-route"
+  }),
+  {
+    action: "reload",
+    expectedUrl: "http://127.0.0.1:4200/packages/botster.plugin/surfaces/main?tab=active#row-2",
+    mode: "reload-current-route"
+  }
+);
+assert.deepEqual(
+  packageRuntimeNavigation({
+    appUrl: "http://127.0.0.1:4200/",
+    currentUrl: "http://127.0.0.1:4200/packages/botster.plugin/surfaces/main?tab=active#row-2",
+    mode: "revisit-package-root"
+  }),
+  { action: "goto", expectedUrl: "http://127.0.0.1:4200/", mode: "revisit-package-root" }
+);
+assert.throws(
+  () => packageRuntimeNavigation({
+    appUrl: "http://127.0.0.1:4200/",
+    currentUrl: "http://localhost:4200/packages/botster.plugin/surfaces/main",
+    mode: "reload-current-route"
+  }),
+  /unexpected origin/
+);
 
 assert.deepEqual(packageEnsureDecision([], "botster-web"), {
   install: true,
@@ -904,7 +934,12 @@ assert.match(liveProtocolHarnessScript, /package_version: packageVersion/);
 assert.doesNotMatch(webrtcDaemonClient, /terminal_stream_batch/);
 assert.match(webrtcDaemonClient, /terminal_stream_error/);
 assert.match(liveProtocolHarnessScript, /page\.reload/);
-assert.match(liveProtocolHarnessScript, /reloadSamePackageUrlAndAssertWebrtc/);
+assert.match(liveProtocolHarnessScript, /navigatePackageRuntimeAndAssertWebrtc/);
+assert.match(liveProtocolHarnessScript, /assertContractSurfaceRouteReconnect/);
+assert.match(liveProtocolHarnessScript, /renderCount !== 1/);
+assert.match(liveProtocolHarnessScript, /workspaces lifecycle selected route reconnect/);
+assert.doesNotMatch(liveProtocolHarnessScript, /reloadSamePackageUrlAndAssertWebrtc/);
+assert.doesNotMatch(liveProtocolHarnessScript, /navigatePackageRuntimeAndAssertWebrtc\(page, "workspaces-lifecycle"/);
 assert.match(liveProtocolHarnessScript, /latestLocalWebrtcGrantId/);
 assert.doesNotMatch(liveProtocolHarnessScript, /type: "stop_package_entrypoint"/);
 assert.doesNotMatch(liveProtocolHarnessScript, /startSessionButton|observeStartSessionButtonTransitions|Start session button/);

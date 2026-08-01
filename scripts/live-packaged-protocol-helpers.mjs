@@ -490,3 +490,21 @@ export function harnessEventMatches(entry, criteria) {
   if (criteria.requestType && payload.requestType !== criteria.requestType) return false;
   return true;
 }
+
+export function packageRuntimeNavigation({ appUrl, currentUrl, mode }) {
+  const packageUrl = new URL(appUrl);
+  const selectedUrl = new URL(currentUrl);
+  if (selectedUrl.origin !== packageUrl.origin) {
+    throw new Error(
+      `package runtime navigation started on unexpected origin: page=${selectedUrl} app=${packageUrl}`
+    );
+  }
+
+  if (mode === "reload-current-route") {
+    return { action: "reload", expectedUrl: selectedUrl.toString(), mode };
+  }
+  if (mode === "revisit-package-root") {
+    return { action: "goto", expectedUrl: packageUrl.toString(), mode };
+  }
+  throw new Error(`unsupported package runtime navigation mode ${JSON.stringify(mode)}`);
+}
