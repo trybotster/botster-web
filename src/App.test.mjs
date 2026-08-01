@@ -57,7 +57,8 @@ import {
   assertTwoGenerationLedger,
   chooseCreateControl,
   parseWorkspacesSpawnAssignment,
-  requiredProvenanceField
+  requiredProvenanceField,
+  WORKSPACES_SPAWN_OPENER_SELECTOR
 } from "../scripts/workspaces-shared-hub-browser-helpers.mjs";
 
 const hostForTests = "127.0.0.1";
@@ -150,6 +151,19 @@ assert.throws(() => assertReconciliationCounts(
 const coldLedgerSummary = {
   generation: "cold-1", entry_state: "cold", create_control: "botster-workspaces-empty-create",
   workspace: { workspace_id: "workspace-a" }, cases: [{
+    case_id: "case-a",
+    spawn_opener: {
+      dom: { action_id: "botster_workspaces.open_spawn", node_id: "opaque-opener-a" },
+      request: {
+        action_id: "botster_workspaces.open_spawn", node_id: "opaque-opener-a",
+        payload: { selected_workspace: "workspace-a", dialog: "spawn-target:workspace-a" }
+      },
+      result: {
+        accepted: true, request_id: "open-request-a", state: "accepted",
+        action_id: "botster_workspaces.open_spawn", node_id: "opaque-opener-a"
+      }
+    },
+    workspace: { workspace_id: "workspace-a" },
     session: { session_id: "session-a" }, action_result: { accepted: true },
     reconciliation: { request_counts_unchanged: true }
   }],
@@ -159,6 +173,19 @@ const reusedLedgerSummary = {
   generation: "reused-2", entry_state: "reused", create_control: "botster-workspaces-new",
   observed_prior: { workspace_id: "workspace-a", session_id: "session-a" },
   cases: [{
+    case_id: "case-b",
+    spawn_opener: {
+      dom: { action_id: "botster_workspaces.open_spawn", node_id: "opaque-opener-b" },
+      request: {
+        action_id: "botster_workspaces.open_spawn", node_id: "opaque-opener-b",
+        payload: { selected_workspace: "workspace-a", dialog: "spawn-target:workspace-a" }
+      },
+      result: {
+        accepted: true, request_id: "open-request-b", state: "accepted",
+        action_id: "botster_workspaces.open_spawn", node_id: "opaque-opener-b"
+      }
+    },
+    workspace: { workspace_id: "workspace-a" },
     session: { session_id: "session-b" }, action_result: { accepted: true },
     reconciliation: { request_counts_unchanged: true }
   }], case_count: 1,
@@ -168,6 +195,24 @@ assert.deepEqual(assertTwoGenerationLedger([coldLedgerSummary, reusedLedgerSumma
   generations: ["cold-1", "reused-2"], completed: true
 });
 assert.throws(() => assertTwoGenerationLedger([coldLedgerSummary]), /requires two driver generations/);
+const genericOpenerLedgerSummary = structuredClone(reusedLedgerSummary);
+genericOpenerLedgerSummary.cases[0].spawn_opener.request.action_id = "botster_workspaces.open";
+assert.throws(
+  () => assertTwoGenerationLedger([coldLedgerSummary, genericOpenerLedgerSummary]),
+  /did not prove captured open_spawn identity/
+);
+const mismatchedOpenerLedgerSummary = structuredClone(reusedLedgerSummary);
+mismatchedOpenerLedgerSummary.cases[0].spawn_opener.result.node_id = "different-opener";
+assert.throws(
+  () => assertTwoGenerationLedger([coldLedgerSummary, mismatchedOpenerLedgerSummary]),
+  /did not preserve opaque opener node identity/
+);
+const missingPayloadLedgerSummary = structuredClone(reusedLedgerSummary);
+delete missingPayloadLedgerSummary.cases[0].spawn_opener.request.payload;
+assert.throws(
+  () => assertTwoGenerationLedger([coldLedgerSummary, missingPayloadLedgerSummary]),
+  /did not preserve the producer-authored opener payload/
+);
 const sharedHubResultCase = {
   case_id: "case-a", target_id: "target-a", branch: "branch-a",
   expect_created_branch: true, expect_created_worktree: true, expect_reused_worktree: false
@@ -1442,6 +1487,8 @@ assert.match(liveProtocolHarnessScript, /binaryProvenanceFor/);
 assert.match(liveProtocolHarnessScript, /requiredProvenanceField\(compatibility, "protocol"/);
 assert.match(liveProtocolHarnessScript, /if \(!sharedHubDriverMode\)/);
 assert.match(liveProtocolHarnessScript, /live packaged protocol binary provenance/);
+assert.match(liveProtocolHarnessScript, /locator\(WORKSPACES_SPAWN_OPENER_SELECTOR\)/);
+assert.doesNotMatch(liveProtocolHarnessScript, /hasText:\s*\/\^Spawn\$\//);
 assert.doesNotMatch(
   liveProtocolHarnessScript,
   /BOTSTER_HUB_SOURCE_DIR \? join\(process\.env\.BOTSTER_HUB_SOURCE_DIR, "fixtures\/plugins\/plugin-contract-matrix"\)/
@@ -7462,6 +7509,63 @@ try {
   );
   assert.match(actionPrimitiveMarkup, />Workspace action<\/ion-button>/);
   assert.doesNotMatch(actionPrimitiveMarkup, />action-node-id<\/ion-button>/);
+
+  const semanticActionId = WORKSPACES_SPAWN_OPENER_SELECTOR.match(
+    /^ion-button\[data-action-id='([^']+)'\]$/
+  )?.[1];
+  assert.equal(semanticActionId, "botster_workspaces.open_spawn");
+  const renderSpawnOpener = (label, actionId, payload) => renderToStaticMarkup(
+    ionicUiNodeRendererRegistry.render(
+      {
+        kind: "ui_tree_snapshot",
+        surface: "workspaces.spawn-opener",
+        version: "test",
+        root: {
+          id: "opaque-producer-owned-spawn-opener",
+          type: "button",
+          props: { label, action: { id: actionId, payload } }
+        }
+      },
+      createInMemoryEntityFrameStore(),
+      {}
+    )
+  );
+  const semanticOpenerMatchCount = (markup) => Array.from(
+    markup.matchAll(/<ion-button\b[^>]*\bdata-action-id="([^"]+)"[^>]*>/g)
+  ).filter((match) => match[1] === semanticActionId).length;
+  const requireUniqueSemanticOpener = (markup) => {
+    const count = semanticOpenerMatchCount(markup);
+    if (count !== 1) throw new Error(`expected one semantic Spawn opener; count=${count}`);
+  };
+  const openerPayload = {
+    selected_workspace: "workspace-opaque",
+    dialog: "spawn-target:workspace-opaque"
+  };
+  const spawnOpenerMarkup = renderSpawnOpener(
+    "Spawn",
+    "botster_workspaces.open_spawn",
+    openerPayload
+  );
+  const renamedSpawnOpenerMarkup = renderSpawnOpener(
+    "Launch in workspace",
+    "botster_workspaces.open_spawn",
+    openerPayload
+  );
+  const genericSpawnOpenerMarkup = renderSpawnOpener(
+    "Spawn",
+    "botster_workspaces.open",
+    openerPayload
+  );
+  for (const markup of [spawnOpenerMarkup, renamedSpawnOpenerMarkup]) {
+    assert.doesNotThrow(() => requireUniqueSemanticOpener(markup));
+    assert.match(markup, /data-action-id="botster_workspaces\.open_spawn"/);
+    assert.match(markup, /data-ui-node-id="opaque-producer-owned-spawn-opener"/);
+  }
+  assert.throws(() => requireUniqueSemanticOpener(genericSpawnOpenerMarkup), /count=0/);
+  assert.throws(
+    () => requireUniqueSemanticOpener(`${spawnOpenerMarkup}${renamedSpawnOpenerMarkup}`),
+    /count=2/
+  );
 
   const interactionActions = [];
   const interactionTree = ionicUiNodeRendererRegistry.render(

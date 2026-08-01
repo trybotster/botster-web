@@ -36,7 +36,8 @@ import {
   assertSharedHubSpawnResult,
   chooseCreateControl,
   parseWorkspacesSpawnAssignment,
-  requiredProvenanceField
+  requiredProvenanceField,
+  WORKSPACES_SPAWN_OPENER_SELECTOR
 } from "./workspaces-shared-hub-browser-helpers.mjs";
 
 const protocol = "botster-hub-daemon-v1";
@@ -1705,18 +1706,39 @@ async function createSharedHubWorkspace(page, workspaceName, createControlId) {
 async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCounts) {
   const surface = page.getByTestId("selected-app-surface");
   await selectSharedHubWorkspace(page, workspace);
-  const spawnButton = surface.locator("ion-button[data-action-id]").filter({ hasText: /^Spawn$/ }).first();
-  await spawnButton.waitFor({ timeout: 15_000 });
+  const spawnButtons = surface.locator(WORKSPACES_SPAWN_OPENER_SELECTOR);
+  await spawnButtons.first().waitFor({ timeout: 15_000 }).catch(async (error) => {
+    throw new Error(
+      `${spawnCase.case_id} did not render a semantic Spawn opener; ` +
+      `candidates=${JSON.stringify(await renderedActionDiagnostics(surface))}: ${error.message}`
+    );
+  });
+  const spawnButtonCount = await spawnButtons.count();
+  if (spawnButtonCount !== 1) {
+    throw new Error(
+      `${spawnCase.case_id} expected one semantic Spawn opener; count=${spawnButtonCount} ` +
+      `candidates=${JSON.stringify(await renderedActionDiagnostics(surface))}`
+    );
+  }
+  const spawnButton = spawnButtons.first();
   const openActionId = await spawnButton.getAttribute("data-action-id");
   const openNodeId = await spawnButton.getAttribute("data-ui-node-id");
+  if (!openActionId || !openNodeId) {
+    throw new Error(`${spawnCase.case_id} semantic Spawn opener omitted rendered action/node identity`);
+  }
+  const openPayload = {
+    selected_workspace: workspace.workspace_id,
+    dialog: `spawn-target:${workspace.workspace_id}`
+  };
   const openSince = await harnessEventCount(page);
   await spawnButton.click();
   await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId: openActionId,
     nodeId: openNodeId,
     kind: "submit",
+    payload: openPayload,
     sinceIndex: openSince,
-    label: `${spawnCase.case_id} rendered Spawn action`
+    label: `${spawnCase.case_id} rendered semantic Spawn action`
   });
   await waitForWorkspacesActionResult(page, {
     actionId: openActionId,
@@ -1725,6 +1747,11 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
     sinceIndex: openSince,
     label: `${spawnCase.case_id} accepted target-first presentation`
   });
+  const openRequest = await latestWorkspacesActionRequest(page, openSince, openActionId, openNodeId);
+  const openResult = await latestWorkspacesActionResult(page, openSince, openActionId, openNodeId);
+  if (!openRequest || !openResult) {
+    throw new Error(`${spawnCase.case_id} semantic Spawn opener omitted captured request/result evidence`);
+  }
 
   const targetForm = page.locator("ion-modal.show-modal form:has([data-ui-node-id='botster-workspaces-spawn-target'])").first();
   await targetForm.waitFor({ timeout: 15_000 });
@@ -1803,6 +1830,21 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
   const accepted = result.accepted === true && result.plugin_action_result?.state === "accepted";
   return {
     case_id: spawnCase.case_id,
+    spawn_opener: {
+      dom: { node_id: openNodeId, action_id: openActionId },
+      request: {
+        node_id: openRequest.request?.node_id,
+        action_id: openRequest.request?.action_id,
+        payload: openRequest.request?.payload
+      },
+      result: {
+        accepted: openResult.accepted === true,
+        request_id: openResult.request_id,
+        state: openResult.plugin_action_result?.state,
+        node_id: openResult.plugin_action_result?.node_id,
+        action_id: openResult.plugin_action_result?.action_id
+      }
+    },
     rendered: { package_name: "botster-workspaces", surface_id: "workspaces", node_id: nodeId, action_id: actionId },
     submitted_values: request.request?.values,
     action_request: { request_id: result.request_id, node_id: request.request?.node_id, action_id: request.request?.action_id },
@@ -1818,6 +1860,15 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
     hub_result: hubResult,
     reconciliation
   };
+}
+
+async function renderedActionDiagnostics(surface) {
+  return surface.locator("ion-button[data-action-id]").evaluateAll((buttons) =>
+    buttons.slice(0, 10).map((button) => ({
+      action_id: button.getAttribute("data-action-id"),
+      node_id: button.getAttribute("data-ui-node-id")
+    }))
+  );
 }
 
 async function selectSharedHubWorkspace(page, workspace) {
