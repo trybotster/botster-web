@@ -1723,8 +1723,8 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
   const spawnButton = spawnButtons.first();
   const openActionId = await spawnButton.getAttribute("data-action-id");
   const openNodeId = await spawnButton.getAttribute("data-ui-node-id");
-  if (!openActionId || !openNodeId) {
-    throw new Error(`${spawnCase.case_id} semantic Spawn opener omitted rendered action/node identity`);
+  if (!openNodeId) {
+    throw new Error(`${spawnCase.case_id} semantic Spawn opener omitted rendered node identity`);
   }
   const openPayload = {
     selected_workspace: workspace.workspace_id,

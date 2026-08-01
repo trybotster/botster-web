@@ -58,6 +58,7 @@ import {
   chooseCreateControl,
   parseWorkspacesSpawnAssignment,
   requiredProvenanceField,
+  WORKSPACES_SPAWN_OPENER_ACTION_ID,
   WORKSPACES_SPAWN_OPENER_SELECTOR
 } from "../scripts/workspaces-shared-hub-browser-helpers.mjs";
 
@@ -199,7 +200,7 @@ const genericOpenerLedgerSummary = structuredClone(reusedLedgerSummary);
 genericOpenerLedgerSummary.cases[0].spawn_opener.request.action_id = "botster_workspaces.open";
 assert.throws(
   () => assertTwoGenerationLedger([coldLedgerSummary, genericOpenerLedgerSummary]),
-  /did not prove captured open_spawn identity/
+  /omitted consistent open_spawn evidence/
 );
 const mismatchedOpenerLedgerSummary = structuredClone(reusedLedgerSummary);
 mismatchedOpenerLedgerSummary.cases[0].spawn_opener.result.node_id = "different-opener";
@@ -1489,6 +1490,9 @@ assert.match(liveProtocolHarnessScript, /if \(!sharedHubDriverMode\)/);
 assert.match(liveProtocolHarnessScript, /live packaged protocol binary provenance/);
 assert.match(liveProtocolHarnessScript, /locator\(WORKSPACES_SPAWN_OPENER_SELECTOR\)/);
 assert.doesNotMatch(liveProtocolHarnessScript, /hasText:\s*\/\^Spawn\$\//);
+assert.match(liveProtocolHarnessScript, /const openRequest = await latestWorkspacesActionRequest\(page, openSince/);
+assert.match(liveProtocolHarnessScript, /const openResult = await latestWorkspacesActionResult\(page, openSince/);
+assert.match(liveProtocolHarnessScript, /spawn_opener:\s*\{/);
 assert.doesNotMatch(
   liveProtocolHarnessScript,
   /BOTSTER_HUB_SOURCE_DIR \? join\(process\.env\.BOTSTER_HUB_SOURCE_DIR, "fixtures\/plugins\/plugin-contract-matrix"\)/
@@ -7510,10 +7514,11 @@ try {
   assert.match(actionPrimitiveMarkup, />Workspace action<\/ion-button>/);
   assert.doesNotMatch(actionPrimitiveMarkup, />action-node-id<\/ion-button>/);
 
-  const semanticActionId = WORKSPACES_SPAWN_OPENER_SELECTOR.match(
-    /^ion-button\[data-action-id='([^']+)'\]$/
-  )?.[1];
-  assert.equal(semanticActionId, "botster_workspaces.open_spawn");
+  const semanticActionId = WORKSPACES_SPAWN_OPENER_ACTION_ID;
+  assert.equal(
+    WORKSPACES_SPAWN_OPENER_SELECTOR,
+    `ion-button[data-action-id='${semanticActionId}']`
+  );
   const renderSpawnOpener = (label, actionId, payload) => renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(
       {

@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 
+export const WORKSPACES_SPAWN_OPENER_ACTION_ID = "botster_workspaces.open_spawn";
 export const WORKSPACES_SPAWN_OPENER_SELECTOR =
-  "ion-button[data-action-id='botster_workspaces.open_spawn']";
+  `ion-button[data-action-id='${WORKSPACES_SPAWN_OPENER_ACTION_ID}']`;
 
 const allowSkipPattern = /^BOTSTER_LIVE_ALLOW_.*_SKIP$/;
 export function assertNoRequiredSmokeSkip(environment = process.env) {
@@ -182,9 +183,9 @@ export function assertTwoGenerationLedger(summaries) {
     for (const entry of summary.cases) {
       const opener = entry.spawn_opener;
       const actionIds = [opener?.dom?.action_id, opener?.request?.action_id, opener?.result?.action_id];
-      if (actionIds.some((actionId) => actionId !== "botster_workspaces.open_spawn")) {
+      if (actionIds.some((actionId) => actionId !== WORKSPACES_SPAWN_OPENER_ACTION_ID)) {
         throw new Error(
-          `shared-Hub case ${entry.case_id} did not prove captured open_spawn identity: ${JSON.stringify(actionIds)}`
+          `shared-Hub case ${entry.case_id} omitted consistent open_spawn evidence: ${JSON.stringify(actionIds)}`
         );
       }
       const nodeIds = [opener?.dom?.node_id, opener?.request?.node_id, opener?.result?.node_id];
