@@ -48,11 +48,72 @@ import {
   workspacesLifecyclePartitionExpectations,
   workspacesLifecycleRegion
 } from "../scripts/live-packaged-protocol-helpers.mjs";
+import {
+  assignmentDigest,
+  assertNoRequiredSmokeSkip,
+  assertReconciliationCounts,
+  assertTwoGenerationLedger,
+  chooseCreateControl,
+  parseWorkspacesSpawnAssignment
+} from "../scripts/workspaces-shared-hub-browser-helpers.mjs";
 
 const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
 let nextTestResponseMessageId = 0;
 const uiContractConformanceFixtures = await readUiContractConformanceFixtures();
+
+const sharedHubColdAssignment = parseWorkspacesSpawnAssignment(JSON.stringify({
+  generation: "cold-1",
+  entry_state: "cold",
+  workspace_name: "Cold workspace",
+  cases: [{
+    case_id: "case-a",
+    target_id: "target-a",
+    branch: "branch-a",
+    template_id: "template-a"
+  }]
+}));
+assert.equal(sharedHubColdAssignment.cases[0].expected_lifecycle, "ended");
+assert.equal(assignmentDigest(sharedHubColdAssignment).length, 64);
+assert.throws(() => parseWorkspacesSpawnAssignment(""), /BOTSTER_WORKSPACES_SPAWN_CASES is required/);
+assert.throws(() => parseWorkspacesSpawnAssignment("{"), /must be JSON/);
+assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
+  ...sharedHubColdAssignment,
+  entry_state: "reused"
+})), /requires observe/);
+assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
+  ...sharedHubColdAssignment,
+  cases: [sharedHubColdAssignment.cases[0], sharedHubColdAssignment.cases[0]]
+})), /duplicate case_id/);
+assert.throws(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_SURFACE_SKIP: "1" }), /rejects allow-skip inputs/);
+assert.throws(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_BROWSER_SKIP: "true" }), /rejects allow-skip inputs/);
+assert.doesNotThrow(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_SURFACE_SKIP: "0" }));
+assert.equal(chooseCreateControl("cold", ["botster-workspaces-empty-create"]), "botster-workspaces-empty-create");
+assert.equal(chooseCreateControl("reused", ["botster-workspaces-new"]), "botster-workspaces-new");
+assert.throws(() => chooseCreateControl("reused", ["botster-workspaces-empty-create"]), /omitted required rendered create control/);
+assert.deepEqual(assertReconciliationCounts(
+  { plugin_surface_render: 1, list_sessions: 0 },
+  { plugin_surface_render: 1, list_sessions: 0 }
+), { plugin_surface_render: 1, list_sessions: 0 });
+assert.throws(() => assertReconciliationCounts(
+  { plugin_surface_render: 1, list_sessions: 0 },
+  { plugin_surface_render: 2, list_sessions: 0 }
+), /changed plugin_surface_render/);
+const coldLedgerSummary = {
+  generation: "cold-1", entry_state: "cold", create_control: "botster-workspaces-empty-create",
+  workspace: { workspace_id: "workspace-a" }, cases: [{ session: { session_id: "session-a" } }],
+  case_count: 1, lifecycle_reconciliation: true, completed: true
+};
+const reusedLedgerSummary = {
+  generation: "reused-2", entry_state: "reused", create_control: "botster-workspaces-new",
+  observed_prior: { workspace_id: "workspace-a", session_id: "session-a" },
+  cases: [{ session: { session_id: "session-b" } }], case_count: 1,
+  lifecycle_reconciliation: true, completed: true
+};
+assert.deepEqual(assertTwoGenerationLedger([coldLedgerSummary, reusedLedgerSummary]), {
+  generations: ["cold-1", "reused-2"], completed: true
+});
+assert.throws(() => assertTwoGenerationLedger([coldLedgerSummary]), /requires two driver generations/);
 
 assert.deepEqual(
   packageRuntimeNavigation({

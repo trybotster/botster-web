@@ -29,11 +29,24 @@ import {
   workspacesLifecyclePartitionExpectations,
   workspacesLifecycleRegion
 } from "./live-packaged-protocol-helpers.mjs";
+import {
+  assignmentDigest,
+  assertNoRequiredSmokeSkip,
+  assertReconciliationCounts,
+  chooseCreateControl,
+  parseWorkspacesSpawnAssignment
+} from "./workspaces-shared-hub-browser-helpers.mjs";
 
 const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
 const durableStateMode = process.env.BOTSTER_LIVE_DURABLE_STATE === "1";
 const suppliedDataDir = process.env.BOTSTER_LIVE_DATA_DIR;
+const sharedHubDriverMode = process.env.BOTSTER_LIVE_SHARED_HUB_DRIVER === "1";
+const sharedHubAssignment = sharedHubDriverMode
+  ? parseWorkspacesSpawnAssignment(process.env.BOTSTER_WORKSPACES_SPAWN_CASES)
+  : undefined;
+
+if (sharedHubDriverMode) assertNoRequiredSmokeSkip();
 
 assertDurableStateOwnership({
   durableStateMode,
@@ -62,7 +75,7 @@ const echoProbe = "keys";
 const attachProbe = "botster-web-production-attach-probe";
 const productionSessionId = "web-prod";
 
-if (!process.env.BOTSTER_HUB_BIN) {
+if (!sharedHubDriverMode && !process.env.BOTSTER_HUB_BIN) {
   throw new Error(
     "Live packaged protocol harness requires BOTSTER_HUB_BIN. " +
       "Use BOTSTER_HUB_BIN with BOTSTER_SESSION_WORKER_BIN for an isolated spawned hub."
@@ -122,7 +135,9 @@ let workspacesCompatibilityProofCount = 0;
 let workspacesCompatibilityState;
 
 try {
-  binaryProvenance = await loadBinaryProvenance();
+  binaryProvenance = sharedHubDriverMode
+    ? { hub: { path: null, source: "caller-owned" }, session_worker: { path: null, source: "caller-owned" } }
+    : await loadBinaryProvenance();
   console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
   appUrl = await startWebrtcPackageRuntime();
 
@@ -175,6 +190,14 @@ try {
     "authoritative session snapshot"
   );
   await assertNoLegacySessionHydration(page);
+  if (sharedHubDriverMode) {
+    const summary = await exerciseSharedHubWorkspaces(page, sharedHubAssignment);
+    assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+    await browser.close();
+    browser = undefined;
+    console.log(`workspaces-shared-hub-browser-summary ${JSON.stringify(summary)}`);
+    process.exit(0);
+  }
   await openAppsView(page);
   await assertRemoteAccessSettingsDispatch(page, originalRemoteAccessValue);
   if (contractMatrixMode) {
@@ -314,6 +337,9 @@ try {
       })
   );
 } catch (error) {
+  if (sharedHubDriverMode) {
+    error.compactLifecycleEvidence = true;
+  }
   const harnessState = page
     ? await page.evaluate(() => {
         const state = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
@@ -585,7 +611,7 @@ function installedList(page) {
 
 async function openFirstPartyUiAppSurface(page, mode) {
   const installed = installedList(page);
-  const target = mode === "webrtc" && workspacesPackagePath
+  const target = mode === "webrtc" && (workspacesPackagePath || sharedHubDriverMode)
     ? {
         packageName: "botster-workspaces",
         surfaceId: "workspaces",
@@ -617,7 +643,7 @@ async function openFirstPartyUiAppSurface(page, mode) {
   );
   await assertSelectedAppSurfaceRendered(page, target);
   if (target.packageName && target.surfaceId) {
-    if (!workspacesLifecycleMode) {
+    if (!workspacesLifecycleMode && !sharedHubDriverMode) {
       await assertPluginSurfaceRouteReloadAndDirectLoad(page, target);
     }
   }
@@ -1440,6 +1466,15 @@ async function loadProductionAppRouteFromPathname() {
 async function assertSelectedAppSurfaceRendered(page, target) {
   await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
   if (target.packageName === "botster-workspaces" && target.surfaceId === "workspaces") {
+    if (sharedHubDriverMode) {
+      await assertWorkspacesNodeIds(page, [
+        "botster-workspaces-app",
+        "botster-workspaces-toolbar",
+        "botster-workspaces-list"
+      ], "shared-Hub driver");
+      await assertNoUnsupportedWorkspacesNodes(page);
+      return;
+    }
     const stage = workspacesCompatibilityProofCount === 0
       ? "initial"
       : workspacesCompatibilityProofCount === 1
@@ -1515,6 +1550,347 @@ async function assertNoUnsupportedWorkspacesNodes(page) {
       `Workspaces surface rendered unsupported UiNodes: ${JSON.stringify(await unsupportedNodes.allTextContents())}`
     );
   }
+}
+
+async function exerciseSharedHubWorkspaces(page, assignment) {
+  await openAppsView(page);
+  await openFirstPartyUiAppSurface(page, "webrtc");
+  const surface = page.getByTestId("selected-app-surface");
+  const baselineCounts = await sharedHubRequestCounts(page);
+  const renderedNodeIds = await surface.locator("[data-ui-node-id]").evaluateAll((nodes) =>
+    nodes.map((node) => node.getAttribute("data-ui-node-id")).filter(Boolean)
+  );
+  const createControlId = chooseCreateControl(assignment.entry_state, renderedNodeIds);
+  const observedPrior = assignment.observe
+    ? await observeSharedHubPriorState(page, assignment.observe)
+    : null;
+  const workspace = await createSharedHubWorkspace(page, assignment.workspace_name, createControlId);
+  const cases = [];
+  for (const spawnCase of assignment.cases) {
+    cases.push(await driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCounts));
+  }
+  const finalCounts = await sharedHubRequestCounts(page);
+  assertReconciliationCounts(baselineCounts, finalCounts);
+  return {
+    kind: "workspaces_shared_hub_browser",
+    generation: assignment.generation,
+    entry_state: assignment.entry_state,
+    create_control: createControlId,
+    assignment_digest: assignmentDigest(assignment),
+    observed_prior: observedPrior,
+    workspace,
+    cases,
+    case_count: assignment.cases.length,
+    request_counts: { before: baselineCounts, after: finalCounts },
+    lifecycle_reconciliation: cases.every((entry) => entry.reconciliation.request_counts_unchanged),
+    binary_provenance: binaryProvenance,
+    app_url: appUrl,
+    completed: true
+  };
+}
+
+async function observeSharedHubPriorState(page, expected) {
+  const surface = page.getByTestId("selected-app-surface");
+  const workspaceTitle = surface.getByText(expected.workspace_name, { exact: true }).first();
+  await workspaceTitle.waitFor({ timeout: 20_000 });
+  const workspaceNodeId = await workspaceTitle.evaluate((node) =>
+    node.closest("ion-item[data-ui-node-id]")?.getAttribute("data-ui-node-id") ?? null
+  );
+  if (!workspaceNodeId) throw new Error("retained workspace title did not materialize inside a realized list row");
+  await selectSharedHubWorkspace(page, {
+    workspace_id: expected.workspace_id,
+    rendered_row_node_id: workspaceNodeId
+  });
+  const record = await waitForExactSessionLifecycle(page, expected.session_id, expected.lifecycle);
+  const rendered = await waitForRenderedSessionLifecycle(page, expected.session_id, expected.lifecycle);
+  return {
+    workspace_id: expected.workspace_id,
+    workspace_node_id: workspaceNodeId,
+    workspace_name: expected.workspace_name,
+    session_id: expected.session_id,
+    lifecycle: record.lifecycle_class,
+    rendered_node_id: rendered.node_id,
+    rendered_region_id: rendered.region_id
+  };
+}
+
+async function createSharedHubWorkspace(page, workspaceName, createControlId) {
+  const surface = page.getByTestId("selected-app-surface");
+  const openButton = surface.locator(`[data-ui-node-id='${createControlId}']`);
+  await openButton.waitFor({ timeout: 15_000 });
+  const openActionId = await openButton.getAttribute("data-action-id");
+  const openNodeId = await openButton.getAttribute("data-ui-node-id");
+  if (!openActionId || !openNodeId) throw new Error("rendered workspace create control omitted action metadata");
+  const openSince = await harnessEventCount(page);
+  await openButton.click();
+  await waitForWorkspacesPluginSurfaceRequest(page, {
+    actionId: openActionId,
+    nodeId: openNodeId,
+    kind: "submit",
+    payload: { dialog: "create" },
+    sinceIndex: openSince,
+    label: "shared-Hub rendered create-dialog action"
+  });
+  await waitForWorkspacesActionResult(page, {
+    actionId: openActionId,
+    nodeId: openNodeId,
+    presentation: { kind: "set", key: "workspace-dialog", value: "create" },
+    sinceIndex: openSince,
+    label: "shared-Hub accepted create-dialog presentation"
+  });
+
+  const form = page.locator("form[data-ui-node-id='botster-workspaces-create-form']");
+  await form.waitFor({ timeout: 15_000 });
+  await form.locator("[data-ui-node-id='botster-workspaces-create-name'] input").fill(workspaceName);
+  const submit = form.locator(":scope > ion-button[data-action-id]");
+  const actionId = await submit.getAttribute("data-action-id");
+  const nodeId = await form.getAttribute("data-ui-node-id");
+  const sinceIndex = await harnessEventCount(page);
+  await submit.click();
+  await waitForWorkspacesPluginSurfaceRequest(page, {
+    actionId,
+    nodeId,
+    kind: "submit",
+    values: { name: workspaceName },
+    sinceIndex,
+    label: "shared-Hub renderer-collected create values"
+  });
+  await waitForWorkspacesActionResult(page, {
+    actionId,
+    nodeId,
+    presentation: { kind: "clear", key: "workspace-dialog" },
+    normalizedName: workspaceName,
+    replacementRootId: "botster-workspaces-app",
+    sinceIndex,
+    label: "shared-Hub accepted create result"
+  });
+  const result = await latestWorkspacesActionResult(page, sinceIndex, actionId, nodeId);
+  const workspaceId = result.plugin_action_result?.payload?.workspace?.id;
+  if (typeof workspaceId !== "string" || workspaceId.length === 0) {
+    throw new Error(`workspace create result omitted structured identity: ${JSON.stringify(result)}`);
+  }
+  const title = surface.getByText(workspaceName, { exact: true }).first();
+  await title.waitFor({ timeout: 15_000 });
+  const rowNodeId = await title.evaluate((node) =>
+    node.closest("ion-item[data-ui-node-id]")?.getAttribute("data-ui-node-id") ?? null
+  );
+  if (!rowNodeId) throw new Error("created workspace title did not materialize inside a realized list row");
+  return {
+    workspace_id: workspaceId,
+    workspace_name: workspaceName,
+    rendered_row_node_id: rowNodeId,
+    create_request_id: result.request_id
+  };
+}
+
+async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCounts) {
+  const surface = page.getByTestId("selected-app-surface");
+  await selectSharedHubWorkspace(page, workspace);
+  const spawnButton = surface.locator("ion-button[data-action-id]").filter({ hasText: /^Spawn$/ }).first();
+  await spawnButton.waitFor({ timeout: 15_000 });
+  const openActionId = await spawnButton.getAttribute("data-action-id");
+  const openNodeId = await spawnButton.getAttribute("data-ui-node-id");
+  const openSince = await harnessEventCount(page);
+  await spawnButton.click();
+  await waitForWorkspacesPluginSurfaceRequest(page, {
+    actionId: openActionId,
+    nodeId: openNodeId,
+    kind: "submit",
+    sinceIndex: openSince,
+    label: `${spawnCase.case_id} rendered Spawn action`
+  });
+  await waitForWorkspacesActionResult(page, {
+    actionId: openActionId,
+    nodeId: openNodeId,
+    presentation: { kind: "set", key: "workspace-dialog", value: `spawn-target:${workspace.workspace_id}` },
+    sinceIndex: openSince,
+    label: `${spawnCase.case_id} accepted target-first presentation`
+  });
+
+  const targetForm = page.locator("ion-modal.show-modal form:has([data-ui-node-id='botster-workspaces-spawn-target'])").first();
+  await targetForm.waitFor({ timeout: 15_000 });
+  await setUiNodeSelectValue(targetForm.locator("[data-ui-node-id='botster-workspaces-spawn-target'] ion-select"), spawnCase.target_id);
+  const targetSubmitMetadata = targetForm.locator(":scope > ion-button[data-action-id]");
+  const targetActionId = await targetSubmitMetadata.getAttribute("data-action-id");
+  const targetNodeId = await targetForm.getAttribute("data-ui-node-id");
+  const targetSince = await harnessEventCount(page);
+  await targetSubmitMetadata.evaluate((button) => button.click());
+  await waitForWorkspacesPluginSurfaceRequest(page, {
+    actionId: targetActionId,
+    nodeId: targetNodeId,
+    kind: "submit",
+    sinceIndex: targetSince,
+    label: `${spawnCase.case_id} target-first form request`
+  });
+  await waitForWorkspacesActionResult(page, {
+    actionId: targetActionId,
+    nodeId: targetNodeId,
+    presentation: { kind: "set", key: "workspace-dialog", value: `spawn:${workspace.workspace_id}:${spawnCase.target_id}` },
+    replacementRootId: "botster-workspaces-app",
+    sinceIndex: targetSince,
+    label: `${spawnCase.case_id} accepted target selection`
+  });
+
+  const spawnForm = page.locator("ion-modal.show-modal form:has([data-ui-node-id='botster-workspaces-spawn-branch'])").first();
+  await spawnForm.waitFor({ timeout: 15_000 });
+  await spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-branch'] input").fill(spawnCase.branch);
+  await setUiNodeSelectValue(spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-template'] ion-select"), spawnCase.template_id);
+  if (spawnCase.prompt) await spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-prompt'] input").fill(spawnCase.prompt);
+  if (spawnCase.ticket_id) await spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-ticket'] input").fill(spawnCase.ticket_id);
+  const submitMetadata = spawnForm.locator(":scope > ion-button[data-action-id]");
+  const actionId = await submitMetadata.getAttribute("data-action-id");
+  const nodeId = await spawnForm.getAttribute("data-ui-node-id");
+  const sinceIndex = await harnessEventCount(page);
+  await submitMetadata.evaluate((button) => button.click());
+  await waitForWorkspacesPluginSurfaceRequest(page, {
+    actionId,
+    nodeId,
+    kind: "submit",
+    sinceIndex,
+    label: `${spawnCase.case_id} renderer-collected Spawn request`
+  });
+  await waitForWorkspacesActionResult(page, {
+    actionId,
+    nodeId,
+    presentation: { kind: "clear", key: "workspace-dialog" },
+    replacementRootId: "botster-workspaces-app",
+    sinceIndex,
+    label: `${spawnCase.case_id} accepted Spawn result`
+  });
+  const result = await latestWorkspacesActionResult(page, sinceIndex, actionId, nodeId);
+  const request = await latestWorkspacesActionRequest(page, sinceIndex, actionId, nodeId);
+  const payload = result.plugin_action_result?.payload;
+  const sessionId = payload?.session_id;
+  const hubResult = payload?.hub_result;
+  if (typeof sessionId !== "string" || !hubResult || hubResult.session_id !== sessionId) {
+    throw new Error(`${spawnCase.case_id} Spawn result omitted correlated Hub/session identity: ${JSON.stringify(result)}`);
+  }
+  await waitForExactSessionLifecycle(page, sessionId, "current");
+  const currentRendered = await waitForRenderedSessionLifecycle(page, sessionId, "current");
+  const terminalRecord = spawnCase.expected_lifecycle === "current"
+    ? await waitForExactSessionLifecycle(page, sessionId, "current")
+    : await waitForExactSessionLifecycle(page, sessionId, "ended");
+  const terminalRendered = await waitForRenderedSessionLifecycle(page, sessionId, spawnCase.expected_lifecycle);
+  const finalCounts = await sharedHubRequestCounts(page);
+  assertReconciliationCounts(baselineCounts, finalCounts);
+  return {
+    case_id: spawnCase.case_id,
+    rendered: { package_name: "botster-workspaces", surface_id: "workspaces", node_id: nodeId, action_id: actionId },
+    submitted_values: request.request?.values,
+    action_request: { request_id: result.request_id, node_id: request.request?.node_id, action_id: request.request?.action_id },
+    action_result: { accepted: true, request_id: result.request_id, state: result.plugin_action_result?.state },
+    workspace: { workspace_id: workspace.workspace_id, rendered_row_node_id: workspace.rendered_row_node_id },
+    session: {
+      session_id: sessionId,
+      lifecycle: terminalRecord.lifecycle_class,
+      current_rendered_node_id: currentRendered.node_id,
+      terminal_rendered_node_id: terminalRendered.node_id,
+      terminal_region_id: terminalRendered.region_id
+    },
+    hub_result: hubResult,
+    reconciliation: { before: baselineCounts, after: finalCounts, request_counts_unchanged: true }
+  };
+}
+
+async function selectSharedHubWorkspace(page, workspace) {
+  const surface = page.getByTestId("selected-app-surface");
+  const row = surface.locator(`[data-ui-node-id='${workspace.rendered_row_node_id}']`);
+  const action = row.locator("ion-button[data-action-id]");
+  await action.waitFor({ timeout: 15_000 });
+  const actionId = await action.getAttribute("data-action-id");
+  const nodeId = await row.getAttribute("data-ui-node-id");
+  const sinceIndex = await harnessEventCount(page);
+  await action.click();
+  await waitForWorkspacesPluginSurfaceRequest(page, {
+    actionId, nodeId, kind: "submit", sinceIndex,
+    label: "shared-Hub rendered workspace selection"
+  });
+  await waitForWorkspacesActionResult(page, {
+    actionId, nodeId,
+    presentation: { kind: "set", key: "selected-workspace", value: workspace.workspace_id },
+    sinceIndex,
+    label: "shared-Hub accepted workspace selection"
+  });
+}
+
+async function setUiNodeSelectValue(locator, value) {
+  await locator.evaluate((select, nextValue) => {
+    select.value = nextValue;
+    select.dispatchEvent(new CustomEvent("ionChange", { bubbles: true, detail: { value: nextValue } }));
+  }, value);
+}
+
+async function latestWorkspacesActionResult(page, sinceIndex, actionId, nodeId) {
+  return page.evaluate(({ sinceIndex, actionId, nodeId }) => {
+    const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex);
+    for (const entry of entries) {
+      const payload = entry.payload?.payload;
+      const plugin = payload?.result?.plugin_action_result;
+      if (entry.kind === "hub_frame" && entry.payload?.kind === "action_result" &&
+          payload?.result?.package_name === "botster-workspaces" &&
+          payload?.result?.surface_id === "workspaces" &&
+          plugin?.action_id === actionId && plugin?.node_id === nodeId) {
+        return { ...payload, plugin_action_result: plugin };
+      }
+    }
+    return null;
+  }, { sinceIndex, actionId, nodeId });
+}
+
+async function latestWorkspacesActionRequest(page, sinceIndex, actionId, nodeId) {
+  return page.evaluate(({ sinceIndex, actionId, nodeId }) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).find((entry) =>
+      entry.kind === "daemon_request" && entry.payload?.type === "plugin_surface_action" &&
+      entry.payload?.request?.action_id === actionId && entry.payload?.request?.node_id === nodeId
+    )?.payload ?? null,
+  { sinceIndex, actionId, nodeId });
+}
+
+async function waitForExactSessionLifecycle(page, sessionId, lifecycleClass) {
+  await page.waitForFunction(({ sessionId, lifecycleClass }) => {
+    const records = new Map();
+    for (const entry of globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []) {
+      if (entry.kind !== "hub_frame") continue;
+      const frame = entry.payload ?? {};
+      const payload = frame.payload ?? {};
+      if ((payload.family ?? payload.key?.family) !== "session") continue;
+      if (frame.kind === "entity_snapshot") {
+        records.clear();
+        for (const record of payload.records ?? []) records.set(record.session_uuid ?? record.session_id ?? record.id, record);
+      } else {
+        const id = payload.key?.id ?? payload.record?.session_uuid ?? payload.record?.session_id ?? payload.record?.id;
+        if (!id) continue;
+        if (frame.kind === "entity_remove") records.delete(id);
+        else records.set(id, { ...(records.get(id) ?? {}), ...(payload.record ?? payload.patch ?? {}) });
+      }
+    }
+    return records.get(sessionId)?.lifecycle_class === lifecycleClass;
+  }, { sessionId, lifecycleClass }, { timeout: 30_000 });
+  const events = await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []);
+  return convergeEntityFamily(events, "session").records.find((record) =>
+    (record.session_uuid ?? record.session_id ?? record.id) === sessionId
+  );
+}
+
+async function waitForRenderedSessionLifecycle(page, sessionId, lifecycleClass) {
+  const exactText = page.getByTestId("selected-app-surface").getByText(sessionId, { exact: true });
+  await exactText.waitFor({ timeout: 30_000 });
+  await page.waitForFunction(({ sessionId, lifecycleClass }) => {
+    const nodes = [...globalThis.document.querySelectorAll("[data-testid='selected-app-surface'] [data-ui-node-id]")];
+    return nodes.some((node) => node.textContent?.trim() === sessionId &&
+      node.closest(`[data-ui-node-id*='-sessions-${lifecycleClass}-']`));
+  }, { sessionId, lifecycleClass }, { timeout: 30_000 });
+  return exactText.evaluate((node, lifecycleClass) => ({
+    node_id: node.closest("[data-ui-node-id]")?.getAttribute("data-ui-node-id") ?? null,
+    region_id: node.closest(`[data-ui-node-id*='-sessions-${lifecycleClass}-']`)?.getAttribute("data-ui-node-id") ?? null
+  }), lifecycleClass);
+}
+
+async function sharedHubRequestCounts(page) {
+  return {
+    plugin_surface_render: await daemonRequestCount(page, { type: "plugin_surface_render" }),
+    list_sessions: await daemonRequestCount(page, { type: "list_sessions" })
+  };
 }
 
 async function createWorkspacesCompatibilityWorkspace(page) {
@@ -3202,6 +3578,19 @@ async function assertNoUnknownSession(page) {
 }
 
 async function startWebrtcPackageRuntime() {
+  if (sharedHubDriverMode) {
+    if (!webrtcDataDir) throw new Error("shared-Hub browser driver requires BOTSTER_LIVE_DATA_DIR");
+    const socketPath = join(webrtcDataDir, "botster-hub.sock");
+    await waitForSocket(socketPath);
+    const status = await sendDaemonRequest(socketPath, { type: "status" });
+    if (status.error) {
+      throw new Error(`shared-Hub browser driver could not handshake with caller-owned Hub: ${JSON.stringify(status)}`);
+    }
+    const url = await waitForPackageAppUrl(socketPath);
+    await waitForHttpOk(new URL("/health", url).toString());
+    await waitForHtmlShell(url);
+    return url;
+  }
   if (!process.env.BOTSTER_HUB_BIN) {
     throw new Error("WebRTC live packaged protocol harness requires BOTSTER_HUB_BIN so it can own an isolated hub.");
   }
