@@ -19,6 +19,7 @@ import {
   formatWorkspacesLifecycleFailure,
   harnessEventMatches,
   htmlAssetUrls,
+  latestAcceptedWorkspacesUiTree,
   packageEnsureDecision,
   reconnectGenerationEvidence
 } from "./live-packaged-protocol-helpers.mjs";
@@ -1561,12 +1562,13 @@ async function waitForWorkspacesPluginSurfaceRequest(
           request?.node_id !== expected.nodeId ||
           request?.kind !== expected.kind
         ) return false;
-        const shallowMatches = (actual, wanted) =>
-          actual && wanted &&
-          Object.keys(actual).length === Object.keys(wanted).length &&
-          Object.entries(wanted).every(([key, value]) => actual[key] === value);
-        if (expected.values !== undefined && !shallowMatches(request.values, expected.values)) return false;
-        return expected.payload === undefined || shallowMatches(request.payload, expected.payload);
+        const stableJson = (value) => JSON.stringify(value, (_key, nested) =>
+          nested && typeof nested === "object" && !Array.isArray(nested)
+            ? Object.fromEntries(Object.entries(nested).sort(([left], [right]) => left.localeCompare(right)))
+            : nested
+        );
+        if (expected.values !== undefined && stableJson(request.values) !== stableJson(expected.values)) return false;
+        return expected.payload === undefined || stableJson(request.payload) === stableJson(expected.payload);
       }),
     { actionId, nodeId, kind, values, payload, sinceIndex },
     { timeout: 15_000 }
@@ -1743,6 +1745,9 @@ async function exerciseWorkspacesLifecycle(page) {
       { oracle: "transitioned-ended-reference", referenceId: scenario.transition, lifecycleClass: "ended" },
       { oracle: "stable-ended-reference", referenceId: scenario.stableEnded, lifecycleClass: "ended" },
       { oracle: "never-existing-reference", referenceId: scenario.neverExisting, lifecycleClass: "unavailable" }
+    ],
+    absentExpectations: [
+      { oracle: "departed-current-reference", referenceId: scenario.transition, lifecycleClass: "current" }
     ]
   });
   assertLifecycleRequestCountsUnchanged(
@@ -1770,6 +1775,9 @@ async function exerciseWorkspacesLifecycle(page) {
     expectations: [
       { oracle: "removed-reference", referenceId: scenario.removed, lifecycleClass: "unavailable" },
       { oracle: "never-existing-reference", referenceId: scenario.neverExisting, lifecycleClass: "unavailable" }
+    ],
+    absentExpectations: [
+      { oracle: "departed-ended-reference-after-remove", referenceId: scenario.removed, lifecycleClass: "ended" }
     ]
   });
   assertLifecycleRequestCountsUnchanged(
@@ -1794,6 +1802,9 @@ async function exerciseWorkspacesLifecycle(page) {
       { oracle: "stable-ended-reference", referenceId: scenario.stableEnded, lifecycleClass: "ended" },
       { oracle: "never-existing-reference", referenceId: scenario.neverExisting, lifecycleClass: "unavailable" },
       { oracle: "removed-reference", referenceId: scenario.removed, lifecycleClass: "unavailable" }
+    ],
+    absentExpectations: [
+      { oracle: "departed-ended-reference-after-reconnect", referenceId: scenario.removed, lifecycleClass: "ended" }
     ]
   });
   const reconnect = reconnectGenerationEvidence(reconnected.events, previousSubscriptionId);
@@ -1802,7 +1813,8 @@ async function exerciseWorkspacesLifecycle(page) {
       ...reconnected,
       stage: "reconnect-generation",
       oracle: "fresh-subscription-authoritative-snapshot",
-      classifications: [reconnect]
+      classifications: reconnected.classifications,
+      requestCounts: { ...reconnected.requestCounts, reconnect }
     }));
   }
   assertStableLifecycleIdentity(initial, reconnected, scenario.stableEnded, "ended");
@@ -1890,7 +1902,7 @@ async function addWorkspacesLifecycleReference(page, state, sessionId) {
   });
 }
 
-async function assertWorkspacesLifecycleOracles(page, { stage, expectations }) {
+async function assertWorkspacesLifecycleOracles(page, { stage, expectations, absentExpectations = [] }) {
   const evidence = await workspacesLifecycleEvidence(page);
   const recordsById = new Map(evidence.canonicalRecords.map((record) => [
     record.session_uuid ?? record.session_id ?? record.id,
@@ -1903,19 +1915,39 @@ async function assertWorkspacesLifecycleOracles(page, { stage, expectations }) {
       referenceId: expectation.referenceId,
       lifecycleClass: expectation.lifecycleClass,
       canonicalRecord: recordsById.get(expectation.referenceId),
+      canonicalRecords: evidence.canonicalRecords,
       renderedNodeIds: evidence.renderedRows.map((row) => row.id)
     })
   }));
+  for (const classification of classifications) {
+    if (classification.outcome === "materialized") {
+      classification.dom = await workspacesLifecycleDomEvidence(page, classification);
+    }
+  }
+  const negativeClassifications = [];
+  for (const expectation of absentExpectations) {
+    const regions = await workspacesLifecycleRegionsForReference(
+      page,
+      expectation.referenceId,
+      expectation.lifecycleClass
+    );
+    if (regions.length > 0) {
+      negativeClassifications.push({ ...expectation, outcome: "unexpected-materialized", regions });
+    }
+  }
   const unresolvedIds = evidence.renderedRows.filter((row) => row.id.includes("$bind") || row.id.includes("@/"));
   const duplicateIds = duplicateValues(evidence.renderedRows.map((row) => row.id));
   const identityCollisions = duplicateValues(classifications.map((entry) => entry.resolvedValue));
-  const failed = classifications.find((classification) => classification.outcome !== "materialized");
-  if (failed || unresolvedIds.length > 0 || duplicateIds.length > 0 || identityCollisions.length > 0) {
+  const failed = classifications.find((classification) =>
+    classification.outcome !== "materialized" || classification.dom?.valid !== true
+  );
+  const negativeFailure = negativeClassifications[0];
+  if (failed || negativeFailure || unresolvedIds.length > 0 || duplicateIds.length > 0 || identityCollisions.length > 0) {
     throw lifecycleOracleError(formatWorkspacesLifecycleFailure({
       ...evidence,
       stage,
-      oracle: failed?.oracle ?? "unique-stable-literal-identity",
-      classifications,
+      oracle: failed?.oracle ?? negativeFailure?.oracle ?? "unique-stable-literal-identity",
+      classifications: [...classifications, ...negativeClassifications],
       renderedRows: evidence.renderedRows,
       requestCounts: {
         ...evidence.requestCounts,
@@ -1928,10 +1960,76 @@ async function assertWorkspacesLifecycleOracles(page, { stage, expectations }) {
   return { ...evidence, stage, classifications };
 }
 
+async function workspacesLifecycleDomEvidence(page, classification) {
+  const surface = page.getByTestId("selected-app-surface");
+  const row = surface.locator(`[data-ui-node-id='${classification.resolvedValue}']`);
+  const count = await row.count();
+  if (count !== 1) return { valid: false, reason: "row-count", count };
+  const visible = await row.isVisible();
+  const details = await row.evaluate((node, expectedClass) => {
+    const patterns = {
+      current: /\bcurrent\b/i,
+      ended: /\b(ended|history|historical)\b/i,
+      unavailable: /\b(unavailable|unknown|uncertain|missing|deleted)\b/i
+    };
+    const surfaceRoot = node.closest("[data-testid='selected-app-surface']");
+    let region = null;
+    for (let candidate = node; candidate && candidate !== surfaceRoot; candidate = candidate.parentElement) {
+      const text = (candidate.textContent ?? "").trim().replace(/\s+/g, " ");
+      const lifecycleClasses = Object.entries(patterns)
+        .filter(([, pattern]) => pattern.test(text))
+        .map(([name]) => name);
+      if (lifecycleClasses.length === 1 && lifecycleClasses[0] === expectedClass) {
+        region = {
+          id: candidate.getAttribute("data-ui-node-id"),
+          text: text.slice(0, 320),
+          lifecycleClasses
+        };
+        break;
+      }
+    }
+    const text = (node.textContent ?? "").trim().replace(/\s+/g, " ");
+    const actions = [...node.querySelectorAll("[data-action-id]")].map((action) => ({
+      actionId: action.getAttribute("data-action-id"),
+      nodeId: action.getAttribute("data-ui-node-id"),
+      label: (action.textContent ?? "").trim().replace(/\s+/g, " ")
+    }));
+    return { text, region, actions };
+  }, classification.lifecycleClass);
+  return {
+    ...details,
+    visible,
+    valid: visible && details.text.length > 0 && details.region != null && details.actions.length > 0
+  };
+}
+
+async function workspacesLifecycleRegionsForReference(page, referenceId, lifecycleClass) {
+  return page.getByTestId("selected-app-surface").locator("[data-ui-node-id]").evaluateAll(
+    (nodes, expected) => {
+      const patterns = {
+        current: /\bcurrent\b/i,
+        ended: /\b(ended|history|historical)\b/i,
+        unavailable: /\b(unavailable|unknown|uncertain|missing|deleted)\b/i
+      };
+      return nodes.flatMap((node) => {
+        const text = (node.textContent ?? "").trim().replace(/\s+/g, " ");
+        if (!text.includes(expected.referenceId)) return [];
+        const lifecycleClasses = Object.entries(patterns)
+          .filter(([, pattern]) => pattern.test(text))
+          .map(([name]) => name);
+        return lifecycleClasses.length === 1 && lifecycleClasses[0] === expected.lifecycleClass
+          ? [{ id: node.getAttribute("data-ui-node-id"), text: text.slice(0, 320) }]
+          : [];
+      });
+    },
+    { referenceId, lifecycleClass }
+  );
+}
+
 async function workspacesLifecycleEvidence(page) {
   const events = await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []);
   const { records, chronology } = convergeEntityFamily(events, "session");
-  const uiTree = latestWorkspacesUiTree(events);
+  const uiTree = latestAcceptedWorkspacesUiTree(events);
   const renderedRows = await page.getByTestId("selected-app-surface")
     .locator("[data-ui-node-id]")
     .evaluateAll((nodes) => nodes.map((node) => ({
@@ -1951,25 +2049,6 @@ async function workspacesLifecycleEvidence(page) {
       list_sessions: await daemonRequestCount(page, { type: "list_sessions" })
     }
   };
-}
-
-function latestWorkspacesUiTree(events) {
-  for (const entry of [...events].reverse()) {
-    if (entry?.kind === "hub_frame" && entry.payload?.kind === "action_result") {
-      const result = entry.payload?.payload?.result;
-      if (result?.package_name === "botster-workspaces" && result?.surface_id === "workspaces") {
-        const replacement = result.plugin_action_result?.replacement;
-        if (replacement) return replacement;
-      }
-    }
-    if (entry?.kind === "daemon_response") {
-      const surface = entry.payload?.plugin_surface;
-      if (surface?.package_name === "botster-workspaces" && surface?.surface_id === "workspaces") {
-        return surface.ui_tree_snapshot?.body ?? surface.body ?? null;
-      }
-    }
-  }
-  return null;
 }
 
 function assertLifecycleRequestCountsUnchanged(actual, renderCount, listCount, stage) {

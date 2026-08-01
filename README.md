@@ -125,9 +125,12 @@ Failures are non-zero and label `never-existing-reference` separately from
 `removed-reference`. Their compact evidence includes the delivered UiNode tree,
 rendered row-root ids/text, canonical session chronology, subscription id,
 render/list request counts, and one identity outcome per expected reference:
-`materialized`, `dropped-empty`, `dropped-collision`, or `not-authored`.
+`materialized`, `authored-not-materialized`, `dropped-empty`,
+`dropped-collision`, or `not-authored`.
 `dropped-empty` and `dropped-collision` identify Web-owned generic renderer
-failures; `not-authored` identifies the package-owned lifecycle gap.
+failures. `authored-not-materialized` identifies a producer-authored branch
+whose filter/branch did not realize, while `not-authored` identifies a missing
+producer branch; both are package-owned lifecycle evidence.
 
 The Web repository remains green while the command is expected to report a
 package-owned `not-authored` failure against botster-workspaces `c78f3bf`, where

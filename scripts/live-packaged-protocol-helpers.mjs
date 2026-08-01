@@ -87,45 +87,81 @@ export function classifyWorkspacesReference({
   referenceId,
   lifecycleClass,
   canonicalRecord,
+  canonicalRecords,
   renderedNodeIds = []
 }) {
+  const records = canonicalRecords ?? (canonicalRecord ? [canonicalRecord] : []);
   const bindings = collectBindLists(uiTree).filter((node) =>
     node.source === "/session" &&
-    node.where?.session_uuid === referenceId &&
-    (lifecycleClass === "unavailable"
-      ? node.where?.lifecycle_class == null && node.empty_template
-      : node.where?.lifecycle_class === lifecycleClass)
+    (node.where?.session_uuid == null || node.where.session_uuid === referenceId) &&
+    (canonicalRecord != null || node.where?.session_uuid === referenceId)
   );
   if (bindings.length === 0) {
     return identityClassification({ referenceId, lifecycleClass, outcome: "not-authored" });
   }
 
-  const binding = bindings[0];
-  const useEmpty = lifecycleClass === "unavailable" && canonicalRecord == null;
-  const template = useEmpty ? binding.empty_template : binding.item_template;
-  const identity = describeTemplateIdentity(template?.id, canonicalRecord);
-  const allRealizedIds = collectBindLists(uiTree)
-    .filter((node) => node.where?.session_uuid == null || node.where.session_uuid === referenceId)
-    .map((node) => describeTemplateIdentity(node.item_template?.id, canonicalRecord).resolvedValue)
-    .filter((value) => typeof value === "string" && value.length > 0);
-  const collision = identity.resolvedValue != null &&
-    allRealizedIds.filter((value) => value === identity.resolvedValue).length > 1;
-  let outcome;
-  if (!identity.resolvedValue) outcome = "dropped-empty";
-  else if (collision) outcome = "dropped-collision";
-  else if (renderedNodeIds.includes(identity.resolvedValue)) outcome = "materialized";
-  else outcome = "dropped-empty";
+  const realizedBindings = bindings.map((binding) => {
+    const matchingRecords = records.filter((record) => recordMatchesWhere(record, binding.where));
+    const candidates = matchingRecords.length > 0
+      ? matchingRecords.map((record) => ({
+          branch: "item",
+          identity: describeTemplateIdentity(binding.item_template?.id, record),
+          record,
+          recordId: entityRecordId(record)
+        }))
+      : binding.empty_template && binding.where?.session_uuid === referenceId
+        ? [{
+            branch: "empty",
+            identity: describeTemplateIdentity(binding.empty_template.id),
+            record: undefined,
+            recordId: referenceId
+          }]
+        : [];
+    const resolvedBoundIds = typeof binding.item_template?.id === "object"
+      ? candidates
+          .filter((candidate) => candidate.branch === "item")
+          .map((candidate) => candidate.identity.resolvedValue)
+          .filter(Boolean)
+      : [];
+    return {
+      binding,
+      candidates,
+      collisionIds: duplicateValues(resolvedBoundIds)
+    };
+  });
+  const referenceCandidates = realizedBindings.flatMap(({ binding, candidates, collisionIds }) =>
+    candidates
+      .filter((candidate) => candidate.recordId === referenceId)
+      .map((candidate) => ({ ...candidate, binding, collisionIds }))
+  );
+  const materialized = referenceCandidates.find((candidate) =>
+    candidate.identity.resolvedValue && renderedNodeIds.includes(candidate.identity.resolvedValue)
+  );
+  const collision = referenceCandidates.find((candidate) =>
+    candidate.identity.resolvedValue && candidate.collisionIds.includes(candidate.identity.resolvedValue)
+  );
+  const unresolved = referenceCandidates.find((candidate) => !candidate.identity.resolvedValue);
+  const selected = materialized ?? collision ?? unresolved ?? referenceCandidates[0];
+  const outcome = materialized
+    ? "materialized"
+    : collision
+      ? "dropped-collision"
+      : unresolved
+        ? "dropped-empty"
+        : "authored-not-materialized";
 
   return identityClassification({
     referenceId,
     lifecycleClass,
     outcome,
-    identity,
-    emptyTemplateIdentity: binding.empty_template
-      ? describeTemplateIdentity(binding.empty_template.id, canonicalRecord)
+    identity: selected?.identity,
+    branch: selected?.branch,
+    whereMatched: referenceCandidates.some((candidate) => candidate.branch === "item"),
+    emptyTemplateIdentity: selected?.binding.empty_template
+      ? describeTemplateIdentity(selected.binding.empty_template.id)
       : undefined,
-    bindingSource: binding.source,
-    where: binding.where
+    bindingSource: selected?.binding.source ?? bindings[0].source,
+    where: selected?.binding.where ?? bindings[0].where
   });
 }
 
@@ -214,6 +250,35 @@ export function reconnectGenerationEvidence(events, previousSubscriptionId) {
   };
 }
 
+export function latestAcceptedWorkspacesUiTree(events) {
+  for (const entry of [...(events ?? [])].reverse()) {
+    if (entry?.kind === "hub_frame" && entry.payload?.kind === "action_result") {
+      const payload = entry.payload?.payload;
+      const result = payload?.result;
+      const pluginActionResult = result?.plugin_action_result;
+      if (
+        payload?.accepted === true &&
+        result?.package_name === "botster-workspaces" &&
+        result?.surface_id === "workspaces" &&
+        pluginActionResult?.state === "accepted" &&
+        pluginActionResult.replacement
+      ) return pluginActionResult.replacement;
+    }
+    if (entry?.kind === "daemon_response") {
+      const surface = entry.payload?.plugin_surface;
+      const snapshot = surface?.ui_tree_snapshot;
+      if (
+        surface?.package_name === "botster-workspaces" &&
+        surface?.surface_id === "workspaces" &&
+        snapshot?.package_name === "botster-workspaces" &&
+        snapshot?.surface_id === "workspaces" &&
+        snapshot?.body
+      ) return snapshot.body;
+    }
+  }
+  return null;
+}
+
 function identityClassification(details) {
   return {
     referenceId: details.referenceId,
@@ -222,10 +287,26 @@ function identityClassification(details) {
     identityKind: details.identity?.kind ?? null,
     identitySource: details.identity?.source ?? null,
     resolvedValue: details.identity?.resolvedValue ?? null,
+    branch: details.branch ?? null,
+    whereMatched: details.whereMatched ?? null,
     emptyTemplateIdentity: details.emptyTemplateIdentity ?? null,
     bindingSource: details.bindingSource ?? null,
     where: details.where ?? null
   };
+}
+
+function recordMatchesWhere(record, where) {
+  return Object.entries(where ?? {}).every(([key, value]) => record?.[key] === value);
+}
+
+function entityRecordId(record) {
+  return record?.session_uuid ?? record?.session_id ?? record?.id;
+}
+
+function duplicateValues(values) {
+  const counts = new Map();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return [...counts.entries()].filter(([, count]) => count > 1).map(([value]) => value);
 }
 
 function describeTemplateIdentity(id, record) {
