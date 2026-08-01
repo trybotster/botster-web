@@ -48,11 +48,140 @@ import {
   workspacesLifecyclePartitionExpectations,
   workspacesLifecycleRegion
 } from "../scripts/live-packaged-protocol-helpers.mjs";
+import {
+  assignmentDigest,
+  assertBinaryProvenanceStable,
+  assertNoRequiredSmokeSkip,
+  assertReconciliationCounts,
+  assertSharedHubSpawnResult,
+  assertTwoGenerationLedger,
+  chooseCreateControl,
+  parseWorkspacesSpawnAssignment,
+  requiredProvenanceField
+} from "../scripts/workspaces-shared-hub-browser-helpers.mjs";
 
 const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
 let nextTestResponseMessageId = 0;
 const uiContractConformanceFixtures = await readUiContractConformanceFixtures();
+
+const sharedHubColdAssignment = parseWorkspacesSpawnAssignment(JSON.stringify({
+  generation: "cold-1",
+  entry_state: "cold",
+  workspace_name: "Cold workspace",
+  cases: [{
+    case_id: "case-a",
+    target_id: "target-a",
+    branch: "branch-a",
+    template_id: "template-a"
+  }]
+}));
+assert.equal(sharedHubColdAssignment.cases[0].expected_lifecycle, "ended");
+assert.equal(assignmentDigest(sharedHubColdAssignment).length, 64);
+assert.throws(() => parseWorkspacesSpawnAssignment(""), /BOTSTER_WORKSPACES_SPAWN_CASES is required/);
+assert.throws(() => parseWorkspacesSpawnAssignment("{"), /must be JSON/);
+assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
+  ...sharedHubColdAssignment,
+  entry_state: "reused"
+})), /requires observe/);
+assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
+  ...sharedHubColdAssignment,
+  cases: [sharedHubColdAssignment.cases[0], sharedHubColdAssignment.cases[0]]
+})), /duplicate case_id/);
+assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
+  ...sharedHubColdAssignment,
+  cases: [{ ...sharedHubColdAssignment.cases[0], expected_lifecycle: "current" }]
+})), /expected_lifecycle must be ended/);
+assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
+  ...sharedHubColdAssignment,
+  cases: [{ ...sharedHubColdAssignment.cases[0], expect_created_branch: "yes" }]
+})), /expect_created_branch must be a boolean/);
+assert.throws(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_SURFACE_SKIP: "1" }), /rejects allow-skip inputs/);
+assert.throws(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_BROWSER_SKIP: "true" }), /rejects allow-skip inputs/);
+assert.doesNotThrow(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_SURFACE_SKIP: "0" }));
+assert.equal(requiredProvenanceField({ protocol_version: 4 }, "protocol_version", "status.compatibility"), 4);
+assert.throws(
+  () => requiredProvenanceField({}, "protocol_version", "status.compatibility"),
+  /omitted provenance field status\.compatibility\.protocol_version/
+);
+const launchedBinaryProvenance = {
+  hub: { path: "/hub", sha256: "a".repeat(64) },
+  session_worker: { path: "/worker", sha256: "b".repeat(64) }
+};
+assert.deepEqual(
+  assertBinaryProvenanceStable(launchedBinaryProvenance, structuredClone(launchedBinaryProvenance)),
+  {
+    hub: { ...launchedBinaryProvenance.hub, stability: "digest_before_launch_matches_completion" },
+    session_worker: {
+      ...launchedBinaryProvenance.session_worker,
+      stability: "digest_before_launch_matches_completion"
+    }
+  }
+);
+assert.throws(
+  () => assertBinaryProvenanceStable(launchedBinaryProvenance, {
+    ...launchedBinaryProvenance,
+    hub: { ...launchedBinaryProvenance.hub, sha256: "c".repeat(64) }
+  }),
+  /hub binary changed while shared-Hub browser proof was running/
+);
+assert.throws(
+  () => assertBinaryProvenanceStable(launchedBinaryProvenance, {
+    ...launchedBinaryProvenance,
+    session_worker: { ...launchedBinaryProvenance.session_worker, sha256: "d".repeat(64) }
+  }),
+  /session_worker binary changed while shared-Hub browser proof was running/
+);
+assert.equal(chooseCreateControl("cold", ["botster-workspaces-empty-create"]), "botster-workspaces-empty-create");
+assert.equal(chooseCreateControl("reused", ["botster-workspaces-new"]), "botster-workspaces-new");
+assert.throws(() => chooseCreateControl("reused", ["botster-workspaces-empty-create"]), /omitted required rendered create control/);
+assert.deepEqual(assertReconciliationCounts(
+  { plugin_surface_render: 1, list_sessions: 0 },
+  { plugin_surface_render: 1, list_sessions: 0 }
+), {
+  before: { plugin_surface_render: 1, list_sessions: 0 },
+  after: { plugin_surface_render: 1, list_sessions: 0 },
+  request_counts_unchanged: true
+});
+assert.throws(() => assertReconciliationCounts(
+  { plugin_surface_render: 1, list_sessions: 0 },
+  { plugin_surface_render: 2, list_sessions: 0 }
+), /changed plugin_surface_render/);
+const coldLedgerSummary = {
+  generation: "cold-1", entry_state: "cold", create_control: "botster-workspaces-empty-create",
+  workspace: { workspace_id: "workspace-a" }, cases: [{
+    session: { session_id: "session-a" }, action_result: { accepted: true },
+    reconciliation: { request_counts_unchanged: true }
+  }],
+  case_count: 1, lifecycle_reconciliation: true, completed: true
+};
+const reusedLedgerSummary = {
+  generation: "reused-2", entry_state: "reused", create_control: "botster-workspaces-new",
+  observed_prior: { workspace_id: "workspace-a", session_id: "session-a" },
+  cases: [{
+    session: { session_id: "session-b" }, action_result: { accepted: true },
+    reconciliation: { request_counts_unchanged: true }
+  }], case_count: 1,
+  lifecycle_reconciliation: true, completed: true
+};
+assert.deepEqual(assertTwoGenerationLedger([coldLedgerSummary, reusedLedgerSummary]), {
+  generations: ["cold-1", "reused-2"], completed: true
+});
+assert.throws(() => assertTwoGenerationLedger([coldLedgerSummary]), /requires two driver generations/);
+const sharedHubResultCase = {
+  case_id: "case-a", target_id: "target-a", branch: "branch-a",
+  expect_created_branch: true, expect_created_worktree: true, expect_reused_worktree: false
+};
+const sharedHubResult = {
+  target_id: "target-a", branch: "branch-a", created_branch: true,
+  created_worktree: true, reused_worktree: false, base_ref: "main", base_commit: "abc123",
+  worktree_id: "managed:target-a:branch-a", worktree_path: "/tmp/worktree"
+};
+assert.doesNotThrow(() => assertSharedHubSpawnResult(sharedHubResultCase, sharedHubResult));
+assert.throws(() => assertSharedHubSpawnResult(
+  sharedHubResultCase,
+  { ...sharedHubResult, reused_worktree: true }
+), /changed reused_worktree/);
 
 assert.deepEqual(
   packageRuntimeNavigation({
@@ -1310,6 +1439,9 @@ assert.match(liveProtocolHarnessScript, /materializePluginContractMatrixFixture/
 assert.match(liveProtocolHarnessScript, /assertTerminalAttachChronology/);
 assert.match(liveProtocolHarnessScript, /event\.type === "attach_state" \? `\$\{event\.type\}:\$\{event\.state\}`/);
 assert.match(liveProtocolHarnessScript, /binaryProvenanceFor/);
+assert.match(liveProtocolHarnessScript, /requiredProvenanceField\(compatibility, "protocol"/);
+assert.match(liveProtocolHarnessScript, /if \(!sharedHubDriverMode\)/);
+assert.match(liveProtocolHarnessScript, /live packaged protocol binary provenance/);
 assert.doesNotMatch(
   liveProtocolHarnessScript,
   /BOTSTER_HUB_SOURCE_DIR \? join\(process\.env\.BOTSTER_HUB_SOURCE_DIR, "fixtures\/plugins\/plugin-contract-matrix"\)/

@@ -64,7 +64,7 @@ This mode creates its own temporary data directory, installs and enables the pac
 
 When `BOTSTER_LIVE_DATA_DIR` is supplied directly without seeded mode, the harness owns only its spawned Hub process: it reuses installed enabled packages, records the Web package version and working-directory provenance available through public Hub contracts, compares the served hashed assets with the local `dist` build, never removes packages or sessions, never edits persistence files, and never deletes the caller-owned directory. The Settings proof toggles remote browser access through the real package action and restores the caller's original boolean value before continuing. Current Hub `resolve_app_launch` supports terminal apps only, so Web package reuse is explicitly classified as having no publicly exposed resolved working directory rather than being reported as an exact path match.
 
-Run `npm run smoke:live-packaged-protocol:caller-repeatability` with the same Hub and worker variables to execute the caller-owned path twice against one generated data directory and assert package reuse plus configuration restoration.
+Run `npm run smoke:live-packaged-protocol:caller-repeatability` with the same Hub and worker variables to execute the caller-owned path twice against one generated data directory and assert package reuse plus configuration restoration. When a Workspaces package path is supplied, the second generation also adopts and proves the single workspace retained by the first generation instead of applying a cold empty-state oracle to reused caller state.
 
 The plugin contract checks use the same production WebRTC harness. They prove
 Hub-projected package navigation through a visible sidebar control and route
@@ -141,6 +141,78 @@ semantic region.
 failures. `authored-not-materialized` identifies a producer-authored branch
 whose filter/branch did not realize, while `not-authored` identifies a missing
 producer branch; both are package-owned lifecycle evidence.
+
+### Caller-owned shared-Hub Workspaces driver
+
+The direct integration driver attaches to an already running Hub and an already
+launched `botster-web/web-client`. The caller owns Hub/package/Git lifecycle and
+passes one ordered assignment; the driver owns only real browser interaction and
+structured consumer evidence:
+
+```bash
+BOTSTER_LIVE_DATA_DIR=/path/to/running-hub-data \
+BOTSTER_WORKSPACES_SPAWN_CASES='{"generation":"web-1","entry_state":"reused","workspace_name":"Web cases","observe":{"workspace_id":"...","workspace_name":"Earlier stage","session_id":"...","lifecycle":"ended"},"cases":[{"case_id":"existing-worktree","target_id":"repo","branch":"feature/shared","template_id":"implement","expected_lifecycle":"ended"}]}' \
+npm run drive:workspaces-shared-hub-browser
+```
+
+The assignment is required and has no discovery defaults. `entry_state` is
+`cold` or `reused`; reused invocations must identify the exact prior workspace
+and session to observe. Every case supplies `case_id`, `target_id`, `branch`, and
+`template_id`, with optional `prompt` and `ticket_id`; `expected_lifecycle`, when
+present, must be `ended`. Test coordinators may also supply
+`expect_created_branch`, `expect_created_worktree`, and
+`expect_reused_worktree` outcomes so named
+managed-Git cases are enforced rather than merely recorded. The repository
+smoke intentionally leaves `prompt` and `ticket_id` unset for one case so the
+renderer-collected empty optional values remain covered by the required gate.
+The driver discovers the structured app row and `local_url`, clicks the rendered
+Apps/Workspaces navigation, reads realized node/action identities, uses Ionic
+input callbacks, and emits one `workspaces-shared-hub-browser-summary` JSON
+record. It never starts or stops Hub, installs or enables packages, discovers a
+sibling checkout, runs Git, hand-authors a `UiActionRequest`, or deletes caller
+state.
+
+Spawn evidence correlates the rendered action and collected form values with
+the daemon request, accepted action result, workspace/session identities,
+Hub-returned target/template/branch/worktree/base facts, canonical lifecycle,
+and before/after `plugin_surface_render` and `list_sessions` counts. Lifecycle
+must reconcile from pushed entity frames while both request counts remain
+unchanged. The summary identifies observable caller-owned Hub protocol/status,
+installed Web and Workspaces package rows, and the served Web asset digest; any
+binary path, worker version, or build commit absent from the installed-app
+contract is explicitly marked unexposed. All `BOTSTER_LIVE_ALLOW_*_SKIP` inputs
+fail closed before Chromium launches.
+
+The repository-owned mandatory proof supplies the parent contract with one
+fresh test fixture, invokes the driver cold and then reused against the same Hub,
+and validates a two-generation completion ledger:
+
+```bash
+BOTSTER_HUB_BIN=/path/to/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
+BOTSTER_WORKSPACES_PACKAGE_PATH=/path/to/botster-workspaces \
+npm run smoke:workspaces-shared-hub-browser
+```
+
+That coordinator alone installs/enables Web and Workspaces once, admits the real
+managed-Git fixture, launches the Web entrypoint, and cleans up. It covers the
+cold empty-state create control, reused toolbar create control, prior-state
+observation, existing managed worktree reuse, existing-branch materialization,
+missing-branch creation, immutable SHA-256 identity measured before launch and
+verified unchanged at completion for the exact supplied Hub and session-worker
+binaries, and exact package/Git provenance. Without build
+receipts, the coordinator marks Hub/Core source commits and binary package
+versions unverified instead of attributing mutable adjacent checkout metadata
+to already-built executables. The downstream
+Workspaces parent replaces this coordinator when it combines the merged Web
+driver with the separately owned TUI sequence.
+
+The rendered workspace-detail Spawn control currently exposes no opaque
+consumer-addressable selector beyond its owner-authored node-id shape, so this
+driver follows the existing browser precedent and locates it by visible label.
+Workspaces follow-up `ticket_1785611385_764864` owns replacing that copy coupling
+with a stable consumer identity; Web deliberately does not reconstruct the
+owner's `botster-workspaces-spawn-<workspace_id>` identifier.
 
 The Web repository remains green while the command is expected to report a
 package-owned `not-authored` failure against botster-workspaces `c78f3bf`, where

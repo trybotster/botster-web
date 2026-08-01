@@ -21,6 +21,10 @@ try {
   const second = await runHarness(dataDir);
   assertRestoredConfiguration(first, "first", false);
   assertRestoredConfiguration(second, "second", true);
+  if (process.env.BOTSTER_WORKSPACES_PACKAGE_PATH || process.env.BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH) {
+    assertWorkspacesGeneration(first, "initial");
+    assertWorkspacesGeneration(second, "initial-retained");
+  }
   if (!second.includes('"install":false') || !second.includes('"enable":false')) {
     throw new Error("second caller-owned run did not reuse the restored enabled package");
   }
@@ -77,6 +81,12 @@ function assertRestoredConfiguration(output, runLabel, expectedValue) {
     throw new Error(
       `${runLabel} caller-owned run did not preserve its original configuration: ${line}`
     );
+  }
+}
+
+function assertWorkspacesGeneration(output, expectedStage) {
+  if (!output.includes(`Workspaces compatibility ${expectedStage} proof passed`)) {
+    throw new Error(`caller-owned run omitted Workspaces ${expectedStage} proof`);
   }
 }
 
