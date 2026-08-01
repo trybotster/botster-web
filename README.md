@@ -101,6 +101,41 @@ reload, and direct-load stages must all render the same package-authored
 list-item title and `0 sessions` meta slots. Assertions use structured
 requests/results rather than toast timing.
 
+The opt-in Workspaces lifecycle acceptance uses the same production browser,
+Hub, plugin worker, route, renderer, entity store, and rendered action path:
+
+```bash
+BOTSTER_HUB_BIN=/path/to/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
+BOTSTER_WORKSPACES_PACKAGE_PATH=/path/to/botster-workspaces \
+npm run smoke:workspaces-lifecycle
+```
+
+This mode also requires a fresh harness-owned data directory. It creates a
+workspace through rendered Ionic controls, seeds canonical UUID sessions only
+through public daemon requests, adds every reference through the owner-authored
+Add-session form, and then proves current-to-ended reconciliation, retained
+never-existing and removed references, and a fresh authoritative reconnect
+without `list_sessions` or an extra surface render. Row controls are resolved by
+containment and their rendered semantic action; the runner accepts a producer-
+authored literal direct template-root id or the contract-admitted bound root id,
+but never requires bound descendant ids.
+
+Failures are non-zero and label `never-existing-reference` separately from
+`removed-reference`. Their compact evidence includes the delivered UiNode tree,
+rendered row-root ids/text, canonical session chronology, subscription id,
+render/list request counts, and one identity outcome per expected reference:
+`materialized`, `dropped-empty`, `dropped-collision`, or `not-authored`.
+`dropped-empty` and `dropped-collision` identify Web-owned generic renderer
+failures; `not-authored` identifies the package-owned lifecycle gap.
+
+The Web repository remains green while the command is expected to report a
+package-owned `not-authored` failure against botster-workspaces `c78f3bf`, where
+lifecycle grouping is still deferred. After this runner merges,
+`ticket_1785296184_677408` must run this identical command against its real
+package checkout and obtain exit 0. The current producer red is prerequisite
+evidence, not a skipped or weakened Web test.
+
 The broader contract-matrix smoke separately covers rejected form submissions,
 draft retention, and presentation operations. Deterministic tests cover
 nested/empty `bind_list`, toolbar order/overflow intent, and entity

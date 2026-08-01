@@ -30,11 +30,16 @@ import { decodeHubConnection, HubConnectionError } from "../scripts/hubConnectio
 import {
   assertDurableStateOwnership,
   assertPackageReused,
+  assertWorkspacesLifecycleStateOwnership,
   assertWorkspacesStateOwnership,
+  classifyWorkspacesReference,
+  convergeEntityFamily,
   durableSeedSessionIdsForDiagnosticsLimit,
+  formatWorkspacesLifecycleFailure,
   harnessEventMatches,
   htmlAssetUrls,
-  packageEnsureDecision
+  packageEnsureDecision,
+  reconnectGenerationEvidence
 } from "../scripts/live-packaged-protocol-helpers.mjs";
 
 const hostForTests = "127.0.0.1";
@@ -100,6 +105,137 @@ assert.throws(
     }),
   /requires a fresh harness-owned data directory/
 );
+assert.doesNotThrow(() =>
+  assertWorkspacesLifecycleStateOwnership({
+    lifecycleMode: true,
+    durableStateMode: false,
+    suppliedDataDir: undefined
+  })
+);
+assert.throws(
+  () => assertWorkspacesLifecycleStateOwnership({
+    lifecycleMode: true,
+    durableStateMode: false,
+    suppliedDataDir: "/caller/data"
+  }),
+  /mutates canonical sessions.*fresh harness-owned data directory/
+);
+const lifecycleEntityEvents = [
+  { kind: "hub_frame", payload: { kind: "entity_snapshot", payload: { family: "session", records: [{ id: "session-a", lifecycle_class: "current" }] } } },
+  { kind: "hub_frame", payload: { kind: "entity_patch", payload: { key: { family: "session", id: "session-a" }, record: { lifecycle_class: "ended" } } } },
+  { kind: "hub_frame", payload: { kind: "entity_upsert", payload: { key: { family: "session", id: "session-b" }, record: { lifecycle_class: "current" } } } },
+  { kind: "hub_frame", payload: { kind: "entity_remove", payload: { key: { family: "session", id: "session-b" } } } }
+];
+assert.deepEqual(convergeEntityFamily(lifecycleEntityEvents, "session").records, [
+  { id: "session-a", lifecycle_class: "ended" }
+]);
+const literalLifecycleTree = {
+  type: "section",
+  children: [
+    {
+      $kind: "bind_list",
+      source: "/session",
+      where: { session_uuid: "session-a", lifecycle_class: "ended" },
+      item_template: { type: "list_item", id: "workspace-session-a-ended" }
+    },
+    {
+      $kind: "bind_list",
+      source: "/session",
+      where: { session_uuid: "session-missing" },
+      item_template: { type: "text", id: "workspace-session-missing-present" },
+      empty_template: { type: "list_item", id: "workspace-session-missing-unavailable" }
+    }
+  ]
+};
+assert.equal(classifyWorkspacesReference({
+  uiTree: literalLifecycleTree,
+  referenceId: "session-a",
+  lifecycleClass: "ended",
+  canonicalRecord: { session_uuid: "session-a", lifecycle_class: "ended" },
+  renderedNodeIds: ["workspace-session-a-ended"]
+}).outcome, "materialized");
+assert.deepEqual(classifyWorkspacesReference({
+  uiTree: literalLifecycleTree,
+  referenceId: "session-missing",
+  lifecycleClass: "unavailable",
+  canonicalRecord: undefined,
+  renderedNodeIds: ["workspace-session-missing-unavailable"]
+}), {
+  referenceId: "session-missing",
+  lifecycleClass: "unavailable",
+  outcome: "materialized",
+  identityKind: "literal",
+  identitySource: "workspace-session-missing-unavailable",
+  resolvedValue: "workspace-session-missing-unavailable",
+  emptyTemplateIdentity: {
+    kind: "literal",
+    source: "workspace-session-missing-unavailable",
+    resolvedValue: "workspace-session-missing-unavailable"
+  },
+  bindingSource: "/session",
+  where: { session_uuid: "session-missing" }
+});
+assert.equal(classifyWorkspacesReference({
+  uiTree: { $kind: "bind_list", source: "/session", where: { session_uuid: "session-empty", lifecycle_class: "current" }, item_template: { id: { $bind: "@/session_uuid" }, type: "list_item" } },
+  referenceId: "session-empty",
+  lifecycleClass: "current",
+  canonicalRecord: {},
+  renderedNodeIds: []
+}).outcome, "dropped-empty");
+const collisionTree = {
+  children: ["current", "ended"].map((lifecycleClass) => ({
+    $kind: "bind_list",
+    source: "/session",
+    where: { session_uuid: "session-collision", lifecycle_class: lifecycleClass },
+    item_template: { id: "duplicate-row", type: "list_item" }
+  }))
+};
+assert.equal(classifyWorkspacesReference({
+  uiTree: collisionTree,
+  referenceId: "session-collision",
+  lifecycleClass: "current",
+  canonicalRecord: { session_uuid: "session-collision", lifecycle_class: "current" },
+  renderedNodeIds: ["duplicate-row"]
+}).outcome, "dropped-collision");
+assert.equal(classifyWorkspacesReference({
+  uiTree: {},
+  referenceId: "session-not-authored",
+  lifecycleClass: "current"
+}).outcome, "not-authored");
+const lifecycleFailure = formatWorkspacesLifecycleFailure({
+  stage: "never-existing-reference",
+  oracle: "unavailable",
+  classifications: [{ outcome: "not-authored" }],
+  uiTree: literalLifecycleTree,
+  renderedRows: [],
+  canonicalRecords: [],
+  frameChronology: [],
+  subscriptionId: "subscription-2",
+  requestCounts: { plugin_surface_render: 1, list_sessions: 0 }
+});
+assert.match(lifecycleFailure, /stage=never-existing-reference oracle=unavailable/);
+assert.match(lifecycleFailure, /not-authored/);
+assert.match(lifecycleFailure, /delivered UiNode tree=/);
+assert.deepEqual(reconnectGenerationEvidence([
+  { kind: "daemon_request", payload: { type: "subscribe_entities", entity_type: "session", subscription_id: "subscription-1" } },
+  { kind: "hub_frame", payload: { kind: "entity_snapshot", payload: { family: "session", records: [] } } },
+  { kind: "daemon_request", payload: { type: "subscribe_entities", entity_type: "session", subscription_id: "subscription-2" } },
+  { kind: "hub_frame", payload: { kind: "entity_snapshot", payload: { family: "session", records: [] } } }
+]), {
+  previousSubscriptionId: "subscription-1",
+  subscriptionId: "subscription-2",
+  fresh: true,
+  authoritativeSnapshot: true
+});
+assert.deepEqual(reconnectGenerationEvidence([
+  { kind: "daemon_request", payload: { type: "subscribe_entities", entity_type: "session", subscription_id: "subscription-2" } },
+  { kind: "hub_frame", payload: { kind: "entity_snapshot", payload: { family: "session", records: [] } } }
+], "subscription-1"), {
+  previousSubscriptionId: "subscription-1",
+  subscriptionId: "subscription-2",
+  fresh: true,
+  authoritativeSnapshot: true
+});
 const durableSeedIds = durableSeedSessionIdsForDiagnosticsLimit(4);
 assert.equal(durableSeedIds.length, 5);
 assert.equal(durableSeedIds.length > 4, true);
@@ -924,6 +1060,13 @@ assert.equal(
   packageJson.scripts["smoke:live-packaged-protocol:caller-repeatability"],
   "npm run build && node scripts/live-caller-owned-repeatability.mjs"
 );
+assert.equal(
+  packageJson.scripts["smoke:workspaces-lifecycle"],
+  "npm run build && BOTSTER_LIVE_WORKSPACES_LIFECYCLE=1 node scripts/live-packaged-protocol-harness.mjs"
+);
+assert.match(liveProtocolHarnessScript, /exerciseWorkspacesLifecycle/);
+assert.match(liveProtocolHarnessScript, /never-existing-reference/);
+assert.match(liveProtocolHarnessScript, /removed-reference/);
 assert.equal(packageManifest.kind, "plugin");
 assert.equal(packageManifest.botster, ">=0.1.0");
 assert.deepEqual(packageManifest.source, { type: "path", path: "." });
