@@ -30,11 +30,21 @@ import { decodeHubConnection, HubConnectionError } from "../scripts/hubConnectio
 import {
   assertDurableStateOwnership,
   assertPackageReused,
+  assertWorkspacesLifecycleStateOwnership,
   assertWorkspacesStateOwnership,
+  classifyWorkspacesReference,
+  convergeEntityFamily,
   durableSeedSessionIdsForDiagnosticsLimit,
+  formatWorkspacesLifecycleFailure,
   harnessEventMatches,
   htmlAssetUrls,
-  packageEnsureDecision
+  latestAcceptedWorkspacesUiTree,
+  packageEnsureDecision,
+  reconnectGenerationEvidence,
+  workspacesLifecycleAbsenceResult,
+  workspacesLifecycleDomResult,
+  workspacesLifecycleMaterializationResult,
+  workspacesLifecycleRegion
 } from "../scripts/live-packaged-protocol-helpers.mjs";
 
 const hostForTests = "127.0.0.1";
@@ -100,6 +110,314 @@ assert.throws(
     }),
   /requires a fresh harness-owned data directory/
 );
+assert.doesNotThrow(() =>
+  assertWorkspacesLifecycleStateOwnership({
+    lifecycleMode: true,
+    durableStateMode: false,
+    suppliedDataDir: undefined
+  })
+);
+assert.throws(
+  () => assertWorkspacesLifecycleStateOwnership({
+    lifecycleMode: true,
+    durableStateMode: false,
+    suppliedDataDir: "/caller/data"
+  }),
+  /mutates canonical sessions.*fresh harness-owned data directory/
+);
+const lifecycleEntityEvents = [
+  { kind: "hub_frame", payload: { kind: "entity_snapshot", payload: { family: "session", records: [{ id: "session-a", lifecycle_class: "current" }] } } },
+  { kind: "hub_frame", payload: { kind: "entity_patch", payload: { key: { family: "session", id: "session-a" }, record: { lifecycle_class: "ended" } } } },
+  { kind: "hub_frame", payload: { kind: "entity_upsert", payload: { key: { family: "session", id: "session-b" }, record: { lifecycle_class: "current" } } } },
+  { kind: "hub_frame", payload: { kind: "entity_remove", payload: { key: { family: "session", id: "session-b" } } } }
+];
+assert.deepEqual(convergeEntityFamily(lifecycleEntityEvents, "session").records, [
+  { id: "session-a", lifecycle_class: "ended" }
+]);
+const literalLifecycleTree = {
+  type: "section",
+  children: [
+    {
+      $kind: "bind_list",
+      source: "/session",
+      where: { session_uuid: "session-a", lifecycle_class: "ended" },
+      item_template: { type: "list_item", id: "workspace-session-a-ended" }
+    },
+    {
+      $kind: "bind_list",
+      source: "/session",
+      where: { session_uuid: "session-missing" },
+      item_template: { type: "text", id: "workspace-session-missing-present" },
+      empty_template: { type: "list_item", id: "workspace-session-missing-unavailable" }
+    }
+  ]
+};
+assert.equal(classifyWorkspacesReference({
+  uiTree: literalLifecycleTree,
+  referenceId: "session-a",
+  lifecycleClass: "ended",
+  canonicalRecord: { session_uuid: "session-a", lifecycle_class: "ended" },
+  renderedNodeIds: ["workspace-session-a-ended"]
+}).outcome, "materialized");
+assert.deepEqual(classifyWorkspacesReference({
+  uiTree: literalLifecycleTree,
+  referenceId: "session-missing",
+  lifecycleClass: "unavailable",
+  canonicalRecord: undefined,
+  renderedNodeIds: ["workspace-session-missing-unavailable"]
+}), {
+  referenceId: "session-missing",
+  lifecycleClass: "unavailable",
+  outcome: "materialized",
+  identityKind: "literal",
+  identitySource: "workspace-session-missing-unavailable",
+  resolvedValue: "workspace-session-missing-unavailable",
+  branch: "empty",
+  whereMatched: false,
+  emptyTemplateIdentity: {
+    kind: "literal",
+    source: "workspace-session-missing-unavailable",
+    resolvedValue: "workspace-session-missing-unavailable"
+  },
+  bindingSource: "/session",
+  where: { session_uuid: "session-missing" }
+});
+assert.equal(classifyWorkspacesReference({
+  uiTree: { $kind: "bind_list", source: "/session", where: { session_uuid: "session-empty", lifecycle_class: "current" }, item_template: { id: { $bind: "@/missing_identity" }, type: "list_item" } },
+  referenceId: "session-empty",
+  lifecycleClass: "current",
+  canonicalRecord: { session_uuid: "session-empty", lifecycle_class: "current" },
+  renderedNodeIds: []
+}).outcome, "dropped-empty");
+const collisionTree = {
+  $kind: "bind_list",
+  source: "/session",
+  item_template: { id: { $bind: "@/shared_identity" }, type: "list_item" }
+};
+assert.equal(classifyWorkspacesReference({
+  uiTree: collisionTree,
+  referenceId: "session-collision",
+  lifecycleClass: "current",
+  canonicalRecord: { session_uuid: "session-collision", lifecycle_class: "current", shared_identity: "duplicate-row" },
+  canonicalRecords: [
+    { session_uuid: "session-collision", lifecycle_class: "current", shared_identity: "duplicate-row" },
+    { session_uuid: "session-other", lifecycle_class: "current", shared_identity: "duplicate-row" }
+  ],
+  renderedNodeIds: []
+}).outcome, "dropped-collision");
+const mutuallyExclusiveBoundTree = {
+  children: ["current", "ended"].map((lifecycleClass) => ({
+    $kind: "bind_list",
+    source: "/session",
+    where: { session_uuid: "session-bound", lifecycle_class: lifecycleClass },
+    item_template: { id: { $bind: "@/session_uuid" }, type: "list_item" }
+  }))
+};
+assert.equal(classifyWorkspacesReference({
+  uiTree: mutuallyExclusiveBoundTree,
+  referenceId: "session-bound",
+  lifecycleClass: "current",
+  canonicalRecord: { session_uuid: "session-bound", lifecycle_class: "current" },
+  renderedNodeIds: ["session-bound"]
+}).outcome, "materialized");
+assert.equal(classifyWorkspacesReference({
+  uiTree: {
+    $kind: "bind_list",
+    source: "/session",
+    where: { session_uuid: "session-authored", lifecycle_class: "ended" },
+    item_template: { id: "session-authored-ended", type: "list_item" }
+  },
+  referenceId: "session-authored",
+  lifecycleClass: "ended",
+  canonicalRecord: { session_uuid: "session-authored", lifecycle_class: "current" },
+  renderedNodeIds: []
+}).outcome, "authored-not-materialized");
+assert.equal(classifyWorkspacesReference({
+  uiTree: {},
+  referenceId: "session-not-authored",
+  lifecycleClass: "current"
+}).outcome, "not-authored");
+const endedRegion = workspacesLifecycleRegion([
+  { id: "row", text: "Friendly session label" },
+  { id: "ended-region", text: "Ended Friendly session label" }
+], "ended");
+assert.deepEqual(endedRegion, {
+  id: "ended-region",
+  text: "Ended Friendly session label",
+  lifecycleClasses: ["ended"]
+});
+assert.deepEqual(workspacesLifecycleDomResult({
+  visible: true,
+  text: "Friendly session label",
+  region: endedRegion,
+  actions: [],
+  branch: "empty"
+}), { valid: true, reason: null });
+assert.deepEqual(workspacesLifecycleDomResult({
+  visible: true,
+  text: "Friendly session label",
+  region: endedRegion,
+  actions: [],
+  branch: "item"
+}), { valid: false, reason: "no-contained-action" });
+assert.deepEqual(workspacesLifecycleDomResult({
+  visible: true,
+  text: "Friendly session label",
+  region: null,
+  actions: [{ actionId: "open" }],
+  branch: "item"
+}), { valid: false, reason: "no-semantic-region" });
+assert.equal(workspacesLifecycleDomResult({
+  visible: false,
+  text: "Friendly session label",
+  region: endedRegion,
+  actions: [{ actionId: "open" }],
+  branch: "item"
+}).reason, "not-visible");
+assert.equal(workspacesLifecycleDomResult({
+  visible: true,
+  text: "",
+  region: endedRegion,
+  actions: [{ actionId: "open" }],
+  branch: "item"
+}).reason, "empty-text");
+assert.equal(workspacesLifecycleDomResult({
+  count: 0,
+  visible: false,
+  text: "",
+  region: null,
+  actions: [],
+  branch: "item"
+}).reason, "row-count");
+assert.deepEqual(workspacesLifecycleMaterializationResult(
+  { outcome: "materialized", resolvedValue: "ended-row" },
+  { valid: false, reason: "no-semantic-region" }
+), {
+  outcome: "materialized-not-legible",
+  identityOutcome: "materialized",
+  resolvedValue: "ended-row",
+  dom: { valid: false, reason: "no-semantic-region" }
+});
+assert.deepEqual(workspacesLifecycleAbsenceResult({
+  currentResolvedValue: "shared-row",
+  priorResolvedValue: "shared-row",
+  renderedNodeIds: ["shared-row"],
+  regions: [{ id: "shared-row", region: null }]
+}), {
+  valid: true,
+  reason: null,
+  currentResolvedValue: "shared-row",
+  priorResolvedValue: "shared-row",
+  priorOnlyId: null,
+  priorOnlyRendered: false,
+  regions: [{ id: "shared-row", region: null }]
+});
+assert.equal(workspacesLifecycleAbsenceResult({
+  currentResolvedValue: "ended-row",
+  priorResolvedValue: "current-row",
+  renderedNodeIds: ["ended-row", "current-row"],
+  regions: [{ id: "ended-row", region: null }]
+}).reason, "prior-row-still-rendered");
+assert.equal(workspacesLifecycleAbsenceResult({
+  currentResolvedValue: "ended-row",
+  priorResolvedValue: "current-row",
+  renderedNodeIds: ["ended-row"],
+  regions: [{ id: "ended-row", region: endedRegion }]
+}).reason, "still-in-semantic-region");
+const lifecycleFailure = formatWorkspacesLifecycleFailure({
+  stage: "never-existing-reference",
+  oracle: "unavailable",
+  classifications: [{ outcome: "not-authored" }],
+  uiTree: literalLifecycleTree,
+  renderedRows: [],
+  canonicalRecords: [],
+  frameChronology: [],
+  subscriptionId: "subscription-2",
+  requestCounts: { plugin_surface_render: 1, list_sessions: 0 }
+});
+assert.match(lifecycleFailure, /stage=never-existing-reference oracle=unavailable/);
+assert.match(lifecycleFailure, /not-authored/);
+assert.match(lifecycleFailure, /delivered UiNode tree=/);
+assert.deepEqual(reconnectGenerationEvidence([
+  { kind: "daemon_request", payload: { type: "subscribe_entities", entity_type: "session", subscription_id: "subscription-1" } },
+  { kind: "hub_frame", payload: { kind: "entity_snapshot", payload: { family: "session", records: [] } } },
+  { kind: "daemon_request", payload: { type: "subscribe_entities", entity_type: "session", subscription_id: "subscription-2" } },
+  { kind: "hub_frame", payload: { kind: "entity_snapshot", payload: { family: "session", records: [] } } }
+]), {
+  previousSubscriptionId: "subscription-1",
+  subscriptionId: "subscription-2",
+  fresh: true,
+  authoritativeSnapshot: true
+});
+assert.deepEqual(reconnectGenerationEvidence([
+  { kind: "daemon_request", payload: { type: "subscribe_entities", entity_type: "session", subscription_id: "subscription-2" } },
+  { kind: "hub_frame", payload: { kind: "entity_snapshot", payload: { family: "session", records: [] } } }
+], "subscription-1"), {
+  previousSubscriptionId: "subscription-1",
+  subscriptionId: "subscription-2",
+  fresh: true,
+  authoritativeSnapshot: true
+});
+const acceptedWorkspacesTree = { type: "panel", id: "accepted-workspaces-tree" };
+const rejectedWorkspacesTree = { type: "panel", id: "rejected-workspaces-tree" };
+assert.equal(latestAcceptedWorkspacesUiTree([
+  {
+    kind: "daemon_response",
+    payload: {
+      plugin_surface: {
+        package_name: "botster-workspaces",
+        surface_id: "workspaces",
+        body: { type: "panel", id: "unvalidated-raw-body" }
+      }
+    }
+  },
+  {
+    kind: "hub_frame",
+    payload: {
+      kind: "action_result",
+      payload: {
+        accepted: false,
+        result: {
+          package_name: "botster-workspaces",
+          surface_id: "workspaces",
+          plugin_action_result: { state: "rejected", replacement: rejectedWorkspacesTree }
+        }
+      }
+    }
+  }
+]), null);
+assert.equal(latestAcceptedWorkspacesUiTree([
+  {
+    kind: "daemon_response",
+    payload: {
+      plugin_surface: {
+        package_name: "botster-workspaces",
+        surface_id: "workspaces",
+        ui_tree_snapshot: {
+          package_name: "botster-workspaces",
+          surface_id: "workspaces",
+          body: acceptedWorkspacesTree
+        }
+      }
+    }
+  }
+]), acceptedWorkspacesTree);
+assert.equal(latestAcceptedWorkspacesUiTree([
+  {
+    kind: "hub_frame",
+    payload: {
+      kind: "action_result",
+      payload: {
+        accepted: true,
+        result: {
+          package_name: "botster-workspaces",
+          surface_id: "workspaces",
+          plugin_action_result: { state: "accepted", replacement: acceptedWorkspacesTree }
+        }
+      }
+    }
+  }
+]), acceptedWorkspacesTree);
 const durableSeedIds = durableSeedSessionIdsForDiagnosticsLimit(4);
 assert.equal(durableSeedIds.length, 5);
 assert.equal(durableSeedIds.length > 4, true);
@@ -924,6 +1242,13 @@ assert.equal(
   packageJson.scripts["smoke:live-packaged-protocol:caller-repeatability"],
   "npm run build && node scripts/live-caller-owned-repeatability.mjs"
 );
+assert.equal(
+  packageJson.scripts["smoke:workspaces-lifecycle"],
+  "npm run build && BOTSTER_LIVE_WORKSPACES_LIFECYCLE=1 node scripts/live-packaged-protocol-harness.mjs"
+);
+assert.match(liveProtocolHarnessScript, /exerciseWorkspacesLifecycle/);
+assert.match(liveProtocolHarnessScript, /never-existing-reference/);
+assert.match(liveProtocolHarnessScript, /removed-reference/);
 assert.equal(packageManifest.kind, "plugin");
 assert.equal(packageManifest.botster, ">=0.1.0");
 assert.deepEqual(packageManifest.source, { type: "path", path: "." });

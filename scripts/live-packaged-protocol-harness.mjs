@@ -5,16 +5,27 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { chromium } from "playwright";
 import { createServer as createViteServer } from "vite";
 import {
   assertDurableStateOwnership,
   assertPackageReused,
+  assertWorkspacesLifecycleStateOwnership,
   assertWorkspacesStateOwnership,
+  classifyWorkspacesReference,
+  convergeEntityFamily,
   durableSeedSessionIdsForDiagnosticsLimit,
+  formatWorkspacesLifecycleFailure,
   harnessEventMatches,
   htmlAssetUrls,
-  packageEnsureDecision
+  latestAcceptedWorkspacesUiTree,
+  packageEnsureDecision,
+  reconnectGenerationEvidence,
+  workspacesLifecycleAbsenceResult,
+  workspacesLifecycleDomResult,
+  workspacesLifecycleMaterializationResult,
+  workspacesLifecycleRegion
 } from "./live-packaged-protocol-helpers.mjs";
 
 const protocol = "botster-hub-daemon-v1";
@@ -32,6 +43,7 @@ const workspacesPackagePath = resolveOptionalPackagePath(
   "botster-workspaces"
 );
 const requireWorkspacesMode = process.env.BOTSTER_LIVE_REQUIRE_WORKSPACES === "1";
+const workspacesLifecycleMode = process.env.BOTSTER_LIVE_WORKSPACES_LIFECYCLE === "1";
 const contractMatrixMode = process.env.BOTSTER_LIVE_CONTRACT_MATRIX === "1";
 const contractMatrixPackageName = "botster.plugin-contract-matrix";
 const contractMatrixSeedEndpoint = "https://example.invalid/plugin-contract-matrix/acceptance";
@@ -55,14 +67,19 @@ if (!process.env.BOTSTER_HUB_BIN) {
   );
 }
 
-if (requireWorkspacesMode && !workspacesPackagePath) {
+if ((requireWorkspacesMode || workspacesLifecycleMode) && !workspacesPackagePath) {
   throw new Error(
-    "Workspaces compatibility mode requires BOTSTER_WORKSPACES_PACKAGE_PATH or BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH."
+    "Workspaces compatibility and lifecycle modes require BOTSTER_WORKSPACES_PACKAGE_PATH or BOTSTER_LIVE_WORKSPACES_PACKAGE_PATH."
   );
 }
 
 assertWorkspacesStateOwnership({
   requireWorkspacesMode,
+  durableStateMode,
+  suppliedDataDir
+});
+assertWorkspacesLifecycleStateOwnership({
+  lifecycleMode: workspacesLifecycleMode,
   durableStateMode,
   suppliedDataDir
 });
@@ -173,6 +190,9 @@ try {
   }
   if (workspacesPackagePath) {
     await openFirstPartyUiAppSurface(page, "webrtc");
+    if (workspacesLifecycleMode) {
+      await exerciseWorkspacesLifecycle(page);
+    }
   }
   if (process.env.BOTSTER_LIVE_SURFACE_ONLY === "1") {
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
@@ -313,9 +333,11 @@ try {
     : undefined;
   let diagnosticMessage = error.message;
   if (hubStdout || hubStderr) {
-    diagnosticMessage += `\nhub stdout:\n${hubStdout}\nhub stderr:\n${hubStderr}`;
+    if (!error.compactLifecycleEvidence) {
+      diagnosticMessage += `\nhub stdout:\n${hubStdout}\nhub stderr:\n${hubStderr}`;
+    }
   }
-  if (harnessState) {
+  if (harnessState && !error.compactLifecycleEvidence) {
     const terminalStreamEvents = harnessState.events?.filter((entry) => entry.kind.startsWith("terminal_stream_")) ?? [];
     if (terminalStreamEvents.length > 0) {
       diagnosticMessage += `\nterminal stream events:\n${JSON.stringify(terminalStreamEvents, null, 2)}`;
@@ -581,7 +603,9 @@ async function openFirstPartyUiAppSurface(page, mode) {
   );
   await assertSelectedAppSurfaceRendered(page, target);
   if (target.packageName && target.surfaceId) {
-    await assertPluginSurfaceRouteReloadAndDirectLoad(page, target);
+    if (!workspacesLifecycleMode) {
+      await assertPluginSurfaceRouteReloadAndDirectLoad(page, target);
+    }
   }
 }
 
@@ -1542,12 +1566,13 @@ async function waitForWorkspacesPluginSurfaceRequest(
           request?.node_id !== expected.nodeId ||
           request?.kind !== expected.kind
         ) return false;
-        if (
-          expected.values !== undefined &&
-          JSON.stringify(request.values) !== JSON.stringify(expected.values)
-        ) return false;
-        return expected.payload === undefined ||
-          JSON.stringify(request.payload) === JSON.stringify(expected.payload);
+        const stableJson = (value) => JSON.stringify(value, (_key, nested) =>
+          nested && typeof nested === "object" && !Array.isArray(nested)
+            ? Object.fromEntries(Object.entries(nested).sort(([left], [right]) => left.localeCompare(right)))
+            : nested
+        );
+        if (expected.values !== undefined && stableJson(request.values) !== stableJson(expected.values)) return false;
+        return expected.payload === undefined || stableJson(request.payload) === stableJson(expected.payload);
       }),
     { actionId, nodeId, kind, values, payload, sinceIndex },
     { timeout: 15_000 }
@@ -1559,7 +1584,8 @@ async function waitForWorkspacesPluginSurfaceRequest(
         .map((entry) => entry.payload),
       sinceIndex
     );
-    throw new Error(`${label} not observed; events=${JSON.stringify(observed, null, 2)}: ${error.message}`);
+    const message = `${label} not observed; events=${JSON.stringify(observed, null, 2)}: ${error.message}`;
+    throw workspacesLifecycleMode ? lifecycleOracleError(message) : new Error(message);
   });
 }
 
@@ -1636,6 +1662,448 @@ async function assertWorkspacesCompatibilityRow(page, state, stage) {
       `Workspaces ${stage} row slot text mismatch; title=${JSON.stringify(titleText)} meta=${JSON.stringify(metaText)}`
     );
   }
+}
+
+async function exerciseWorkspacesLifecycle(page) {
+  if (!workspacesCompatibilityState) {
+    throw new Error("Workspaces lifecycle mode requires the production create/route proof first");
+  }
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  const scenario = {
+    transition: randomUUID(),
+    stableEnded: randomUUID(),
+    removed: randomUUID(),
+    neverExisting: randomUUID()
+  };
+
+  for (const sessionId of [scenario.transition, scenario.stableEnded, scenario.removed]) {
+    const response = await sendDaemonRequest(socketPath, {
+      type: "spawn",
+      session_id: sessionId,
+      command: "sleep 300"
+    });
+    if (response.error) {
+      throw new Error(`Workspaces lifecycle seed spawn failed for ${sessionId}: ${JSON.stringify(response.error)}`);
+    }
+    await waitForHarnessEvent(page, {
+      kind: "hub_frame",
+      family: "session",
+      id: sessionId,
+      lifecycle_class: "current"
+    }, `Workspaces lifecycle current seed ${sessionId}`);
+  }
+  for (const sessionId of [scenario.stableEnded, scenario.removed]) {
+    const response = await sendDaemonRequest(socketPath, {
+      type: "shutdown_session",
+      session_id: sessionId
+    });
+    if (response.error) {
+      throw new Error(`Workspaces lifecycle seed shutdown failed for ${sessionId}: ${JSON.stringify(response.error)}`);
+    }
+    await waitForHarnessEvent(page, {
+      kind: "hub_frame",
+      family: "session",
+      id: sessionId,
+      lifecycle_class: "ended"
+    }, `Workspaces lifecycle ended seed ${sessionId}`);
+  }
+
+  await selectWorkspacesLifecycleWorkspace(page, workspacesCompatibilityState);
+  for (const sessionId of [
+    scenario.transition,
+    scenario.stableEnded,
+    scenario.removed,
+    scenario.neverExisting
+  ]) {
+    await addWorkspacesLifecycleReference(page, workspacesCompatibilityState, sessionId);
+  }
+
+  const initial = await assertWorkspacesLifecycleOracles(page, {
+    stage: "initial-owner-surface",
+    expectations: [
+      { oracle: "current-reference", referenceId: scenario.transition, lifecycleClass: "current" },
+      { oracle: "ended-reference", referenceId: scenario.stableEnded, lifecycleClass: "ended" },
+      { oracle: "ended-reference-before-remove", referenceId: scenario.removed, lifecycleClass: "ended" },
+      { oracle: "never-existing-reference", referenceId: scenario.neverExisting, lifecycleClass: "unavailable" }
+    ]
+  });
+  const renderCountBeforeTransition = initial.requestCounts.plugin_surface_render;
+  const listCountBeforeTransition = initial.requestCounts.list_sessions;
+
+  const transitionResponse = await sendDaemonRequest(socketPath, {
+    type: "shutdown_session",
+    session_id: scenario.transition
+  });
+  if (transitionResponse.error) {
+    throw new Error(`Workspaces lifecycle transition shutdown failed: ${JSON.stringify(transitionResponse.error)}`);
+  }
+  await waitForHarnessEvent(page, {
+    kind: "hub_frame",
+    family: "session",
+    id: scenario.transition,
+    lifecycle_class: "ended"
+  }, "Workspaces lifecycle current-to-ended entity transition");
+  const transitioned = await assertWorkspacesLifecycleOracles(page, {
+    stage: "current-to-ended-without-refresh",
+    expectations: [
+      { oracle: "transitioned-ended-reference", referenceId: scenario.transition, lifecycleClass: "ended" },
+      { oracle: "stable-ended-reference", referenceId: scenario.stableEnded, lifecycleClass: "ended" },
+      { oracle: "never-existing-reference", referenceId: scenario.neverExisting, lifecycleClass: "unavailable" }
+    ],
+    absentExpectations: [
+      { oracle: "departed-current-reference", referenceId: scenario.transition, lifecycleClass: "current" }
+    ],
+    priorEvidence: initial
+  });
+  assertLifecycleRequestCountsUnchanged(
+    transitioned.requestCounts,
+    renderCountBeforeTransition,
+    listCountBeforeTransition,
+    "current-to-ended"
+  );
+
+  const removeResponse = await sendDaemonRequest(socketPath, {
+    type: "remove_session",
+    session_id: scenario.removed
+  });
+  if (removeResponse.error) {
+    throw new Error(`Workspaces lifecycle canonical remove failed: ${JSON.stringify(removeResponse.error)}`);
+  }
+  await waitForHarnessEvent(page, {
+    kind: "hub_frame",
+    frameKind: "entity_remove",
+    family: "session",
+    id: scenario.removed
+  }, "Workspaces lifecycle canonical entity removal");
+  const removed = await assertWorkspacesLifecycleOracles(page, {
+    stage: "removed-reference",
+    expectations: [
+      { oracle: "removed-reference", referenceId: scenario.removed, lifecycleClass: "unavailable" },
+      { oracle: "never-existing-reference", referenceId: scenario.neverExisting, lifecycleClass: "unavailable" }
+    ],
+    absentExpectations: [
+      { oracle: "departed-ended-reference-after-remove", referenceId: scenario.removed, lifecycleClass: "ended" }
+    ],
+    priorEvidence: initial
+  });
+  assertLifecycleRequestCountsUnchanged(
+    removed.requestCounts,
+    renderCountBeforeTransition,
+    listCountBeforeTransition,
+    "entity-remove"
+  );
+
+  const previousGrantId = await latestLocalWebrtcGrantId(page);
+  const previousSubscriptionId = await latestSessionEntitySubscriptionId(page);
+  await reloadSamePackageUrlAndAssertWebrtc(page, "workspaces-lifecycle", previousGrantId, previousSubscriptionId);
+  await assertSelectedAppSurfaceRendered(page, {
+    packageName: "botster-workspaces",
+    surfaceId: "workspaces"
+  });
+  await selectWorkspacesLifecycleWorkspace(page, workspacesCompatibilityState);
+  const reconnected = await assertWorkspacesLifecycleOracles(page, {
+    stage: "reconnect-authoritative-history",
+    expectations: [
+      { oracle: "transitioned-ended-reference", referenceId: scenario.transition, lifecycleClass: "ended" },
+      { oracle: "stable-ended-reference", referenceId: scenario.stableEnded, lifecycleClass: "ended" },
+      { oracle: "never-existing-reference", referenceId: scenario.neverExisting, lifecycleClass: "unavailable" },
+      { oracle: "removed-reference", referenceId: scenario.removed, lifecycleClass: "unavailable" }
+    ],
+    absentExpectations: [
+      { oracle: "departed-ended-reference-after-reconnect", referenceId: scenario.removed, lifecycleClass: "ended" }
+    ],
+    priorEvidence: initial
+  });
+  const reconnect = reconnectGenerationEvidence(reconnected.events, previousSubscriptionId);
+  if (!reconnect.fresh || !reconnect.authoritativeSnapshot) {
+    throw lifecycleOracleError(formatWorkspacesLifecycleFailure({
+      ...reconnected,
+      stage: "reconnect-generation",
+      oracle: "fresh-subscription-authoritative-snapshot",
+      classifications: reconnected.classifications,
+      requestCounts: { ...reconnected.requestCounts, reconnect }
+    }));
+  }
+  assertStableLifecycleIdentity(initial, reconnected, scenario.stableEnded, "ended");
+  assertStableLifecycleIdentity(initial, reconnected, scenario.neverExisting, "unavailable");
+  assertStableLifecycleIdentity(removed, reconnected, scenario.removed, "unavailable");
+  console.log(`Workspaces lifecycle acceptance passed ${JSON.stringify({ scenario, reconnect })}`);
+}
+
+async function selectWorkspacesLifecycleWorkspace(page, state) {
+  const row = page.getByTestId("selected-app-surface")
+    .locator(`[data-ui-node-id='botster-workspaces-row-${state.workspaceId}']`);
+  await row.waitFor({ timeout: 15_000 });
+  const openButton = row.locator("ion-button[data-action-id]");
+  await openButton.waitFor({ timeout: 15_000 });
+  const actionId = await openButton.getAttribute("data-action-id");
+  const sinceIndex = await harnessEventCount(page);
+  await openButton.click();
+  await waitForWorkspacesPluginSurfaceRequest(page, {
+    actionId,
+    nodeId: `botster-workspaces-row-${state.workspaceId}`,
+    kind: "submit",
+    payload: { selected_workspace: state.workspaceId },
+    sinceIndex,
+    label: "Workspaces rendered workspace selection request"
+  });
+  await waitForWorkspacesActionResult(page, {
+    actionId,
+    nodeId: `botster-workspaces-row-${state.workspaceId}`,
+    presentation: { kind: "set", key: "selected-workspace", value: state.workspaceId },
+    sinceIndex,
+    label: "Workspaces accepted workspace selection"
+  });
+  await page.getByTestId("selected-app-surface")
+    .getByRole("button", { name: "Add existing session", exact: true })
+    .waitFor({ timeout: 15_000 });
+}
+
+async function addWorkspacesLifecycleReference(page, state, sessionId) {
+  const surface = page.getByTestId("selected-app-surface");
+  const openButton = surface
+    .locator("ion-button[data-action-id='botster_workspaces.open']")
+    .filter({ hasText: "Add existing session" });
+  const openActionId = await openButton.getAttribute("data-action-id");
+  const openNodeId = await openButton.getAttribute("data-ui-node-id");
+  const openEventCount = await harnessEventCount(page);
+  await openButton.click();
+  await waitForWorkspacesPluginSurfaceRequest(page, {
+    actionId: openActionId,
+    nodeId: openNodeId,
+    kind: "submit",
+    sinceIndex: openEventCount,
+    label: `Workspaces Add-session presentation request for ${sessionId}`
+  });
+  await waitForWorkspacesActionResult(page, {
+    actionId: openActionId,
+    nodeId: openNodeId,
+    presentation: { kind: "set", key: "workspace-dialog", value: `add:${state.workspaceId}` },
+    sinceIndex: openEventCount,
+    label: `Workspaces accepted Add-session dialog for ${sessionId}`
+  });
+
+  const form = page.locator(`form[data-ui-node-id='botster-workspaces-add-form-${state.workspaceId}']`);
+  await form.waitFor({ timeout: 15_000 });
+  const input = form.locator("[data-ui-node-id='botster-workspaces-add-session-id'] input");
+  await input.fill(sessionId);
+  const submit = form.locator(":scope > ion-button[data-action-id='botster_workspaces.add_session']");
+  const eventCount = await harnessEventCount(page);
+  await submit.click();
+  await waitForWorkspacesPluginSurfaceRequest(page, {
+    actionId: "botster_workspaces.add_session",
+    nodeId: await form.getAttribute("data-ui-node-id"),
+    kind: "submit",
+    values: { workspace_id: state.workspaceId, session_id: sessionId },
+    payload: { workspace_id: state.workspaceId },
+    sinceIndex: eventCount,
+    label: `Workspaces renderer-collected Add-session form values for ${sessionId}`
+  });
+  await waitForWorkspacesActionResult(page, {
+    actionId: "botster_workspaces.add_session",
+    nodeId: await form.getAttribute("data-ui-node-id"),
+    presentation: { kind: "clear", key: "workspace-dialog" },
+    replacementRootId: "botster-workspaces-app",
+    sinceIndex: eventCount,
+    label: `Workspaces accepted Add-session action for ${sessionId}`
+  });
+}
+
+async function assertWorkspacesLifecycleOracles(page, {
+  stage,
+  expectations,
+  absentExpectations = [],
+  priorEvidence
+}) {
+  const evidence = await workspacesLifecycleEvidence(page);
+  const recordsById = new Map(evidence.canonicalRecords.map((record) => [
+    record.session_uuid ?? record.session_id ?? record.id,
+    record
+  ]));
+  const classifications = expectations.map((expectation) => ({
+    oracle: expectation.oracle,
+    ...classifyWorkspacesReference({
+      uiTree: evidence.uiTree,
+      referenceId: expectation.referenceId,
+      lifecycleClass: expectation.lifecycleClass,
+      canonicalRecord: recordsById.get(expectation.referenceId),
+      canonicalRecords: evidence.canonicalRecords,
+      renderedNodeIds: evidence.renderedRows.map((row) => row.id)
+    })
+  }));
+  for (let index = 0; index < classifications.length; index += 1) {
+    const classification = classifications[index];
+    if (classification.outcome === "materialized") {
+      const dom = await workspacesLifecycleDomEvidence(page, classification);
+      classifications[index] = workspacesLifecycleMaterializationResult(classification, dom);
+    }
+  }
+  const negativeClassifications = [];
+  for (const expectation of absentExpectations) {
+    const current = classifyWorkspacesReference({
+      uiTree: evidence.uiTree,
+      referenceId: expectation.referenceId,
+      lifecycleClass: expectation.lifecycleClass,
+      canonicalRecord: recordsById.get(expectation.referenceId),
+      canonicalRecords: evidence.canonicalRecords,
+      renderedNodeIds: evidence.renderedRows.map((row) => row.id)
+    });
+    const prior = priorEvidence?.classifications.find((classification) =>
+      classification.referenceId === expectation.referenceId &&
+      classification.lifecycleClass === expectation.lifecycleClass
+    );
+    const candidateIds = [...new Set([current.resolvedValue, prior?.resolvedValue].filter(Boolean))];
+    const regions = [];
+    for (const id of candidateIds) {
+      if (!evidence.renderedRows.some((row) => row.id === id)) continue;
+      const details = await workspacesLifecycleNodeDetails(page, id);
+      regions.push({
+        id,
+        region: workspacesLifecycleRegion(details.ancestors, expectation.lifecycleClass)
+      });
+    }
+    const absence = workspacesLifecycleAbsenceResult({
+      currentResolvedValue: current.resolvedValue,
+      priorResolvedValue: prior?.resolvedValue,
+      renderedNodeIds: evidence.renderedRows.map((row) => row.id),
+      regions
+    });
+    negativeClassifications.push({
+      ...expectation,
+      outcome: absence.valid ? "absent" : "unexpected-materialized",
+      identity: current,
+      ...absence
+    });
+  }
+  const unresolvedIds = evidence.renderedRows.filter((row) => row.id.includes("$bind") || row.id.includes("@/"));
+  const duplicateIds = duplicateValues(evidence.renderedRows.map((row) => row.id));
+  const identityCollisions = duplicateValues(classifications.map((entry) => entry.resolvedValue));
+  const failed = classifications.find((classification) =>
+    classification.outcome !== "materialized" || classification.dom?.valid !== true
+  );
+  const negativeFailure = negativeClassifications.find((classification) => !classification.valid);
+  if (failed || negativeFailure || unresolvedIds.length > 0 || duplicateIds.length > 0 || identityCollisions.length > 0) {
+    throw lifecycleOracleError(formatWorkspacesLifecycleFailure({
+      ...evidence,
+      stage,
+      oracle: failed?.oracle ?? negativeFailure?.oracle ?? "unique-stable-literal-identity",
+      classifications: [...classifications, ...negativeClassifications],
+      renderedRows: evidence.renderedRows,
+      requestCounts: {
+        ...evidence.requestCounts,
+        unresolved_ids: unresolvedIds,
+        duplicate_ids: duplicateIds,
+        identity_collisions: identityCollisions
+      }
+    }));
+  }
+  return { ...evidence, stage, classifications };
+}
+
+async function workspacesLifecycleDomEvidence(page, classification) {
+  const details = await workspacesLifecycleNodeDetails(page, classification.resolvedValue);
+  const region = workspacesLifecycleRegion(details.ancestors, classification.lifecycleClass);
+  const result = workspacesLifecycleDomResult({
+    ...details,
+    region,
+    branch: classification.branch
+  });
+  return {
+    ...details,
+    region,
+    ...result
+  };
+}
+
+async function workspacesLifecycleNodeDetails(page, nodeId) {
+  const surface = page.getByTestId("selected-app-surface");
+  const row = surface.locator(`[data-ui-node-id='${nodeId}']`);
+  const count = await row.count();
+  if (count !== 1) return { count, visible: false, text: "", actions: [], ancestors: [] };
+  const visible = await row.isVisible();
+  const details = await row.evaluate((node) => {
+    const surfaceRoot = node.closest("[data-testid='selected-app-surface']");
+    const ancestors = [];
+    for (let candidate = node; candidate && candidate !== surfaceRoot; candidate = candidate.parentElement) {
+      ancestors.push({
+        id: candidate.getAttribute("data-ui-node-id"),
+        text: (candidate.textContent ?? "").trim().replace(/\s+/g, " ")
+      });
+    }
+    return {
+      text: (node.textContent ?? "").trim().replace(/\s+/g, " "),
+      actions: [...node.querySelectorAll("[data-action-id]")].map((action) => ({
+        actionId: action.getAttribute("data-action-id"),
+        nodeId: action.getAttribute("data-ui-node-id"),
+        label: (action.textContent ?? "").trim().replace(/\s+/g, " ")
+      })),
+      ancestors
+    };
+  });
+  return { count, visible, ...details };
+}
+
+async function workspacesLifecycleEvidence(page) {
+  const events = await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []);
+  const { records, chronology } = convergeEntityFamily(events, "session");
+  const uiTree = latestAcceptedWorkspacesUiTree(events);
+  const renderedRows = await page.getByTestId("selected-app-surface")
+    .locator("[data-ui-node-id]")
+    .evaluateAll((nodes) => nodes.map((node) => ({
+      id: node.getAttribute("data-ui-node-id") ?? "",
+      actionId: node.getAttribute("data-action-id"),
+      text: (node.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 240)
+    })));
+  return {
+    events,
+    uiTree,
+    renderedRows,
+    canonicalRecords: records,
+    frameChronology: chronology,
+    subscriptionId: await latestSessionEntitySubscriptionId(page),
+    requestCounts: {
+      plugin_surface_render: await daemonRequestCount(page, { type: "plugin_surface_render" }),
+      list_sessions: await daemonRequestCount(page, { type: "list_sessions" })
+    }
+  };
+}
+
+function assertLifecycleRequestCountsUnchanged(actual, renderCount, listCount, stage) {
+  if (actual.plugin_surface_render !== renderCount || actual.list_sessions !== listCount) {
+    throw new Error(
+      `Workspaces ${stage} used a refresh path: expected plugin_surface_render=${renderCount} list_sessions=${listCount}; ` +
+      `observed=${JSON.stringify(actual)}`
+    );
+  }
+}
+
+function assertStableLifecycleIdentity(before, after, referenceId, lifecycleClass) {
+  const previous = before.classifications.find((entry) =>
+    entry.referenceId === referenceId && entry.lifecycleClass === lifecycleClass
+  );
+  const current = after.classifications.find((entry) =>
+    entry.referenceId === referenceId && entry.lifecycleClass === lifecycleClass
+  );
+  if (!previous?.resolvedValue || previous.resolvedValue !== current?.resolvedValue) {
+    throw new Error(
+      `Workspaces lifecycle identity changed across reconnect for ${referenceId}/${lifecycleClass}: ` +
+      `${JSON.stringify({ previous, current })}`
+    );
+  }
+}
+
+function duplicateValues(values) {
+  const counts = new Map();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return [...counts.entries()]
+    .filter(([value, count]) => value && count > 1)
+    .map(([value]) => value);
+}
+
+function lifecycleOracleError(message) {
+  const error = new Error(message);
+  error.compactLifecycleEvidence = true;
+  return error;
 }
 
 function assertRequiredWorkspacesProof() {

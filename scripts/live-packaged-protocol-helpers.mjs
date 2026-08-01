@@ -37,6 +37,382 @@ export function assertWorkspacesStateOwnership({
   }
 }
 
+export function assertWorkspacesLifecycleStateOwnership({
+  lifecycleMode,
+  durableStateMode,
+  suppliedDataDir
+}) {
+  if (lifecycleMode && (suppliedDataDir !== undefined || durableStateMode)) {
+    throw new Error(
+      "Workspaces lifecycle mode mutates canonical sessions and plugin state and requires a fresh harness-owned data directory; " +
+        "unset BOTSTER_LIVE_DATA_DIR and BOTSTER_LIVE_DURABLE_STATE."
+    );
+  }
+}
+
+export function convergeEntityFamily(events, family) {
+  const records = new Map();
+  const chronology = [];
+  for (const entry of events ?? []) {
+    if (entry?.kind !== "hub_frame") continue;
+    const frame = entry.payload ?? {};
+    if (!["entity_snapshot", "entity_upsert", "entity_patch", "entity_remove"].includes(frame.kind)) continue;
+    const payload = frame.payload ?? {};
+    const frameFamily = payload.family ?? payload.key?.family;
+    if (frameFamily !== family) continue;
+    chronology.push({ kind: frame.kind, payload });
+    if (frame.kind === "entity_snapshot") {
+      records.clear();
+      for (const record of payload.records ?? []) {
+        const id = record?.id ?? record?.session_uuid ?? record?.session_id;
+        if (typeof id === "string") records.set(id, { ...record, id });
+      }
+      continue;
+    }
+    const id = payload.key?.id ?? payload.record?.id ?? payload.record?.session_uuid ?? payload.record?.session_id;
+    if (typeof id !== "string") continue;
+    if (frame.kind === "entity_remove") {
+      records.delete(id);
+    } else if (frame.kind === "entity_patch") {
+      records.set(id, { ...(records.get(id) ?? { id }), ...(payload.record ?? payload.patch ?? {}) });
+    } else {
+      records.set(id, { ...(payload.record ?? {}), id });
+    }
+  }
+  return { records: [...records.values()], chronology };
+}
+
+export function classifyWorkspacesReference({
+  uiTree,
+  referenceId,
+  lifecycleClass,
+  canonicalRecord,
+  canonicalRecords,
+  renderedNodeIds = []
+}) {
+  const records = canonicalRecords ?? (canonicalRecord ? [canonicalRecord] : []);
+  const bindings = collectBindLists(uiTree).filter((node) =>
+    node.source === "/session" &&
+    (node.where?.session_uuid == null || node.where.session_uuid === referenceId) &&
+    (canonicalRecord != null || node.where?.session_uuid === referenceId)
+  );
+  if (bindings.length === 0) {
+    return identityClassification({ referenceId, lifecycleClass, outcome: "not-authored" });
+  }
+
+  const realizedBindings = bindings.map((binding) => {
+    const matchingRecords = records.filter((record) => recordMatchesWhere(record, binding.where));
+    const candidates = matchingRecords.length > 0
+      ? matchingRecords.map((record) => ({
+          branch: "item",
+          identity: describeTemplateIdentity(binding.item_template?.id, record),
+          record,
+          recordId: entityRecordId(record)
+        }))
+      : binding.empty_template && binding.where?.session_uuid === referenceId
+        ? [{
+            branch: "empty",
+            identity: describeTemplateIdentity(binding.empty_template.id),
+            record: undefined,
+            recordId: referenceId
+          }]
+        : [];
+    const resolvedBoundIds = typeof binding.item_template?.id === "object"
+      ? candidates
+          .filter((candidate) => candidate.branch === "item")
+          .map((candidate) => candidate.identity.resolvedValue)
+          .filter(Boolean)
+      : [];
+    return {
+      binding,
+      candidates,
+      collisionIds: duplicateValues(resolvedBoundIds)
+    };
+  });
+  const referenceCandidates = realizedBindings.flatMap(({ binding, candidates, collisionIds }) =>
+    candidates
+      .filter((candidate) => candidate.recordId === referenceId)
+      .map((candidate) => ({ ...candidate, binding, collisionIds }))
+  );
+  const materialized = referenceCandidates.find((candidate) =>
+    candidate.identity.resolvedValue && renderedNodeIds.includes(candidate.identity.resolvedValue)
+  );
+  const collision = referenceCandidates.find((candidate) =>
+    candidate.identity.resolvedValue && candidate.collisionIds.includes(candidate.identity.resolvedValue)
+  );
+  const unresolved = referenceCandidates.find((candidate) => !candidate.identity.resolvedValue);
+  const selected = materialized ?? collision ?? unresolved ?? referenceCandidates[0];
+  const outcome = materialized
+    ? "materialized"
+    : collision
+      ? "dropped-collision"
+      : unresolved
+        ? "dropped-empty"
+        : "authored-not-materialized";
+
+  return identityClassification({
+    referenceId,
+    lifecycleClass,
+    outcome,
+    identity: selected?.identity,
+    branch: selected?.branch,
+    whereMatched: referenceCandidates.some((candidate) => candidate.branch === "item"),
+    emptyTemplateIdentity: selected?.binding.empty_template
+      ? describeTemplateIdentity(selected.binding.empty_template.id)
+      : undefined,
+    bindingSource: selected?.binding.source ?? bindings[0].source,
+    where: selected?.binding.where ?? bindings[0].where
+  });
+}
+
+const workspacesLifecycleRegionPatterns = {
+  current: /\bcurrent\b/i,
+  ended: /\b(ended|history|historical)\b/i,
+  unavailable: /\b(unavailable|unknown|uncertain|missing|deleted)\b/i
+};
+
+export function workspacesLifecycleRegion(ancestors, lifecycleClass) {
+  for (const ancestor of ancestors ?? []) {
+    const text = ancestor.text ?? "";
+    const lifecycleClasses = Object.entries(workspacesLifecycleRegionPatterns)
+      .filter(([, pattern]) => pattern.test(text))
+      .map(([name]) => name);
+    if (lifecycleClasses.length === 1 && lifecycleClasses[0] === lifecycleClass) {
+      return { ...ancestor, text: text.slice(0, 320), lifecycleClasses };
+    }
+  }
+  return null;
+}
+
+export function workspacesLifecycleDomResult({ count = 1, visible, text, region, actions, branch }) {
+  const reason = count !== 1
+    ? "row-count"
+    : visible !== true
+      ? "not-visible"
+      : (text ?? "").length === 0
+        ? "empty-text"
+        : region == null
+          ? "no-semantic-region"
+          : branch === "item" && (actions ?? []).length === 0
+            ? "no-contained-action"
+            : null;
+  return { valid: reason == null, reason };
+}
+
+export function workspacesLifecycleMaterializationResult(classification, dom) {
+  return dom.valid
+    ? { ...classification, dom }
+    : {
+        ...classification,
+        identityOutcome: classification.outcome,
+        outcome: "materialized-not-legible",
+        dom
+      };
+}
+
+export function workspacesLifecycleAbsenceResult({
+  currentResolvedValue,
+  priorResolvedValue,
+  renderedNodeIds,
+  regions
+}) {
+  const unexpectedRegions = (regions ?? []).filter((entry) => entry.region != null);
+  const priorOnlyId = priorResolvedValue && priorResolvedValue !== currentResolvedValue
+    ? priorResolvedValue
+    : null;
+  const priorOnlyRendered = priorOnlyId != null && (renderedNodeIds ?? []).includes(priorOnlyId);
+  const reason = unexpectedRegions.length > 0
+    ? "still-in-semantic-region"
+    : priorOnlyRendered
+      ? "prior-row-still-rendered"
+      : null;
+  return {
+    valid: reason == null,
+    reason,
+    currentResolvedValue: currentResolvedValue ?? null,
+    priorResolvedValue: priorResolvedValue ?? null,
+    priorOnlyId,
+    priorOnlyRendered,
+    regions: regions ?? []
+  };
+}
+
+export function formatWorkspacesLifecycleFailure({
+  stage,
+  oracle,
+  classifications,
+  uiTree,
+  renderedRows,
+  canonicalRecords,
+  frameChronology,
+  subscriptionId,
+  requestCounts
+}) {
+  return [
+    `Workspaces lifecycle oracle failed: stage=${stage} oracle=${oracle}`,
+    `identity classifications=${JSON.stringify(classifications)}`,
+    `rendered rows=${JSON.stringify(compactReferenceRows(renderedRows, classifications))}`,
+    `canonical session records=${JSON.stringify(canonicalRecords)}`,
+    `session frame chronology=${JSON.stringify(frameChronology)}`,
+    `latest subscription id=${JSON.stringify(subscriptionId)}`,
+    `request counts=${JSON.stringify(requestCounts)}`,
+    `delivered UiNode tree=${JSON.stringify(compactUiTree(uiTree, classifications))}`
+  ].join("\n");
+}
+
+function compactReferenceRows(renderedRows, classifications) {
+  const referenceIds = (classifications ?? []).map((entry) => entry.referenceId).filter(Boolean);
+  return (renderedRows ?? []).filter((row) =>
+    referenceIds.some((referenceId) => row.id?.includes(referenceId) || row.text?.includes(referenceId))
+  );
+}
+
+function compactUiTree(uiTree, classifications) {
+  const nodes = [];
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    if (value.type || value.$kind) {
+      nodes.push({
+        kind: value.$kind ?? value.type,
+        id: value.id ?? null,
+        source: value.source ?? null,
+        where: value.where ?? null,
+        itemTemplateId: value.item_template?.id ?? null,
+        emptyTemplateId: value.empty_template?.id ?? null
+      });
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(uiTree);
+  const referenceIds = (classifications ?? []).map((entry) => entry.referenceId).filter(Boolean);
+  return {
+    nodeCount: nodes.length,
+    root: nodes[0] ?? null,
+    bindLists: nodes.filter((node) => node.kind === "bind_list"),
+    referenceNodes: nodes.filter((node) =>
+      referenceIds.some((referenceId) => typeof node.id === "string" && node.id.includes(referenceId))
+    )
+  };
+}
+
+export function reconnectGenerationEvidence(events, previousSubscriptionId) {
+  const subscriptions = (events ?? [])
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => entry?.kind === "daemon_request" && entry.payload?.type === "subscribe_entities" && entry.payload?.entity_type === "session")
+    .map(({ entry, index }) => ({ index, subscriptionId: entry.payload?.subscription_id }))
+    .filter((entry) => typeof entry.subscriptionId === "string");
+  const latest = subscriptions.at(-1);
+  const previous = typeof previousSubscriptionId === "string"
+    ? { subscriptionId: previousSubscriptionId }
+    : subscriptions.at(-2);
+  const snapshotAfterLatest = latest != null && (events ?? []).slice(latest.index + 1).some((entry) =>
+    entry?.kind === "hub_frame" &&
+    entry.payload?.kind === "entity_snapshot" &&
+    (entry.payload?.payload?.family ?? entry.payload?.payload?.key?.family) === "session"
+  );
+  return {
+    previousSubscriptionId: previous?.subscriptionId ?? null,
+    subscriptionId: latest?.subscriptionId ?? null,
+    fresh: Boolean(previous && latest && previous.subscriptionId !== latest.subscriptionId),
+    authoritativeSnapshot: snapshotAfterLatest
+  };
+}
+
+export function latestAcceptedWorkspacesUiTree(events) {
+  for (const entry of [...(events ?? [])].reverse()) {
+    if (entry?.kind === "hub_frame" && entry.payload?.kind === "action_result") {
+      const payload = entry.payload?.payload;
+      const result = payload?.result;
+      const pluginActionResult = result?.plugin_action_result;
+      if (
+        payload?.accepted === true &&
+        result?.package_name === "botster-workspaces" &&
+        result?.surface_id === "workspaces" &&
+        pluginActionResult?.state === "accepted" &&
+        pluginActionResult.replacement
+      ) return pluginActionResult.replacement;
+    }
+    if (entry?.kind === "daemon_response") {
+      const surface = entry.payload?.plugin_surface;
+      const snapshot = surface?.ui_tree_snapshot;
+      if (
+        surface?.package_name === "botster-workspaces" &&
+        surface?.surface_id === "workspaces" &&
+        snapshot?.package_name === "botster-workspaces" &&
+        snapshot?.surface_id === "workspaces" &&
+        snapshot?.body
+      ) return snapshot.body;
+    }
+  }
+  return null;
+}
+
+function identityClassification(details) {
+  return {
+    referenceId: details.referenceId,
+    lifecycleClass: details.lifecycleClass,
+    outcome: details.outcome,
+    identityKind: details.identity?.kind ?? null,
+    identitySource: details.identity?.source ?? null,
+    resolvedValue: details.identity?.resolvedValue ?? null,
+    branch: details.branch ?? null,
+    whereMatched: details.whereMatched ?? null,
+    emptyTemplateIdentity: details.emptyTemplateIdentity ?? null,
+    bindingSource: details.bindingSource ?? null,
+    where: details.where ?? null
+  };
+}
+
+function recordMatchesWhere(record, where) {
+  return Object.entries(where ?? {}).every(([key, value]) => record?.[key] === value);
+}
+
+function entityRecordId(record) {
+  return record?.session_uuid ?? record?.session_id ?? record?.id;
+}
+
+function duplicateValues(values) {
+  const counts = new Map();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return [...counts.entries()].filter(([, count]) => count > 1).map(([value]) => value);
+}
+
+function describeTemplateIdentity(id, record) {
+  if (typeof id === "string") {
+    return { kind: "literal", source: id, resolvedValue: id };
+  }
+  const source = id?.$bind;
+  if (typeof source !== "string") {
+    return { kind: "bound", source: source ?? null, resolvedValue: null };
+  }
+  const key = source.startsWith("@/") ? source.slice(2) : null;
+  const value = key ? record?.[key] : undefined;
+  return {
+    kind: "bound",
+    source,
+    resolvedValue: typeof value === "string" && value.length > 0 ? value : null
+  };
+}
+
+function collectBindLists(root) {
+  const found = [];
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    if (value.$kind === "bind_list") found.push(value);
+    Object.values(value).forEach(visit);
+  };
+  visit(root);
+  return found;
+}
+
 export function durableSeedSessionIdsForDiagnosticsLimit(limit) {
   if (!Number.isInteger(limit) || limit < 0) {
     throw new Error("Diagnostics entity record limit must be a non-negative integer");
