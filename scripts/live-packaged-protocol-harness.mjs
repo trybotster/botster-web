@@ -21,7 +21,11 @@ import {
   htmlAssetUrls,
   latestAcceptedWorkspacesUiTree,
   packageEnsureDecision,
-  reconnectGenerationEvidence
+  reconnectGenerationEvidence,
+  workspacesLifecycleAbsenceResult,
+  workspacesLifecycleDomResult,
+  workspacesLifecycleMaterializationResult,
+  workspacesLifecycleRegion
 } from "./live-packaged-protocol-helpers.mjs";
 
 const protocol = "botster-hub-daemon-v1";
@@ -1748,7 +1752,8 @@ async function exerciseWorkspacesLifecycle(page) {
     ],
     absentExpectations: [
       { oracle: "departed-current-reference", referenceId: scenario.transition, lifecycleClass: "current" }
-    ]
+    ],
+    priorEvidence: initial
   });
   assertLifecycleRequestCountsUnchanged(
     transitioned.requestCounts,
@@ -1778,7 +1783,8 @@ async function exerciseWorkspacesLifecycle(page) {
     ],
     absentExpectations: [
       { oracle: "departed-ended-reference-after-remove", referenceId: scenario.removed, lifecycleClass: "ended" }
-    ]
+    ],
+    priorEvidence: initial
   });
   assertLifecycleRequestCountsUnchanged(
     removed.requestCounts,
@@ -1805,7 +1811,8 @@ async function exerciseWorkspacesLifecycle(page) {
     ],
     absentExpectations: [
       { oracle: "departed-ended-reference-after-reconnect", referenceId: scenario.removed, lifecycleClass: "ended" }
-    ]
+    ],
+    priorEvidence: initial
   });
   const reconnect = reconnectGenerationEvidence(reconnected.events, previousSubscriptionId);
   if (!reconnect.fresh || !reconnect.authoritativeSnapshot) {
@@ -1902,7 +1909,12 @@ async function addWorkspacesLifecycleReference(page, state, sessionId) {
   });
 }
 
-async function assertWorkspacesLifecycleOracles(page, { stage, expectations, absentExpectations = [] }) {
+async function assertWorkspacesLifecycleOracles(page, {
+  stage,
+  expectations,
+  absentExpectations = [],
+  priorEvidence
+}) {
   const evidence = await workspacesLifecycleEvidence(page);
   const recordsById = new Map(evidence.canonicalRecords.map((record) => [
     record.session_uuid ?? record.session_id ?? record.id,
@@ -1919,21 +1931,49 @@ async function assertWorkspacesLifecycleOracles(page, { stage, expectations, abs
       renderedNodeIds: evidence.renderedRows.map((row) => row.id)
     })
   }));
-  for (const classification of classifications) {
+  for (let index = 0; index < classifications.length; index += 1) {
+    const classification = classifications[index];
     if (classification.outcome === "materialized") {
-      classification.dom = await workspacesLifecycleDomEvidence(page, classification);
+      const dom = await workspacesLifecycleDomEvidence(page, classification);
+      classifications[index] = workspacesLifecycleMaterializationResult(classification, dom);
     }
   }
   const negativeClassifications = [];
   for (const expectation of absentExpectations) {
-    const regions = await workspacesLifecycleRegionsForReference(
-      page,
-      expectation.referenceId,
-      expectation.lifecycleClass
+    const current = classifyWorkspacesReference({
+      uiTree: evidence.uiTree,
+      referenceId: expectation.referenceId,
+      lifecycleClass: expectation.lifecycleClass,
+      canonicalRecord: recordsById.get(expectation.referenceId),
+      canonicalRecords: evidence.canonicalRecords,
+      renderedNodeIds: evidence.renderedRows.map((row) => row.id)
+    });
+    const prior = priorEvidence?.classifications.find((classification) =>
+      classification.referenceId === expectation.referenceId &&
+      classification.lifecycleClass === expectation.lifecycleClass
     );
-    if (regions.length > 0) {
-      negativeClassifications.push({ ...expectation, outcome: "unexpected-materialized", regions });
+    const candidateIds = [...new Set([current.resolvedValue, prior?.resolvedValue].filter(Boolean))];
+    const regions = [];
+    for (const id of candidateIds) {
+      if (!evidence.renderedRows.some((row) => row.id === id)) continue;
+      const details = await workspacesLifecycleNodeDetails(page, id);
+      regions.push({
+        id,
+        region: workspacesLifecycleRegion(details.ancestors, expectation.lifecycleClass)
+      });
     }
+    const absence = workspacesLifecycleAbsenceResult({
+      currentResolvedValue: current.resolvedValue,
+      priorResolvedValue: prior?.resolvedValue,
+      renderedNodeIds: evidence.renderedRows.map((row) => row.id),
+      regions
+    });
+    negativeClassifications.push({
+      ...expectation,
+      outcome: absence.valid ? "absent" : "unexpected-materialized",
+      identity: current,
+      ...absence
+    });
   }
   const unresolvedIds = evidence.renderedRows.filter((row) => row.id.includes("$bind") || row.id.includes("@/"));
   const duplicateIds = duplicateValues(evidence.renderedRows.map((row) => row.id));
@@ -1941,7 +1981,7 @@ async function assertWorkspacesLifecycleOracles(page, { stage, expectations, abs
   const failed = classifications.find((classification) =>
     classification.outcome !== "materialized" || classification.dom?.valid !== true
   );
-  const negativeFailure = negativeClassifications[0];
+  const negativeFailure = negativeClassifications.find((classification) => !classification.valid);
   if (failed || negativeFailure || unresolvedIds.length > 0 || duplicateIds.length > 0 || identityCollisions.length > 0) {
     throw lifecycleOracleError(formatWorkspacesLifecycleFailure({
       ...evidence,
@@ -1961,69 +2001,46 @@ async function assertWorkspacesLifecycleOracles(page, { stage, expectations, abs
 }
 
 async function workspacesLifecycleDomEvidence(page, classification) {
-  const surface = page.getByTestId("selected-app-surface");
-  const row = surface.locator(`[data-ui-node-id='${classification.resolvedValue}']`);
-  const count = await row.count();
-  if (count !== 1) return { valid: false, reason: "row-count", count };
-  const visible = await row.isVisible();
-  const details = await row.evaluate((node, expectedClass) => {
-    const patterns = {
-      current: /\bcurrent\b/i,
-      ended: /\b(ended|history|historical)\b/i,
-      unavailable: /\b(unavailable|unknown|uncertain|missing|deleted)\b/i
-    };
-    const surfaceRoot = node.closest("[data-testid='selected-app-surface']");
-    let region = null;
-    for (let candidate = node; candidate && candidate !== surfaceRoot; candidate = candidate.parentElement) {
-      const text = (candidate.textContent ?? "").trim().replace(/\s+/g, " ");
-      const lifecycleClasses = Object.entries(patterns)
-        .filter(([, pattern]) => pattern.test(text))
-        .map(([name]) => name);
-      if (lifecycleClasses.length === 1 && lifecycleClasses[0] === expectedClass) {
-        region = {
-          id: candidate.getAttribute("data-ui-node-id"),
-          text: text.slice(0, 320),
-          lifecycleClasses
-        };
-        break;
-      }
-    }
-    const text = (node.textContent ?? "").trim().replace(/\s+/g, " ");
-    const actions = [...node.querySelectorAll("[data-action-id]")].map((action) => ({
-      actionId: action.getAttribute("data-action-id"),
-      nodeId: action.getAttribute("data-ui-node-id"),
-      label: (action.textContent ?? "").trim().replace(/\s+/g, " ")
-    }));
-    return { text, region, actions };
-  }, classification.lifecycleClass);
+  const details = await workspacesLifecycleNodeDetails(page, classification.resolvedValue);
+  const region = workspacesLifecycleRegion(details.ancestors, classification.lifecycleClass);
+  const result = workspacesLifecycleDomResult({
+    ...details,
+    region,
+    branch: classification.branch
+  });
   return {
     ...details,
-    visible,
-    valid: visible && details.text.length > 0 && details.region != null && details.actions.length > 0
+    region,
+    ...result
   };
 }
 
-async function workspacesLifecycleRegionsForReference(page, referenceId, lifecycleClass) {
-  return page.getByTestId("selected-app-surface").locator("[data-ui-node-id]").evaluateAll(
-    (nodes, expected) => {
-      const patterns = {
-        current: /\bcurrent\b/i,
-        ended: /\b(ended|history|historical)\b/i,
-        unavailable: /\b(unavailable|unknown|uncertain|missing|deleted)\b/i
-      };
-      return nodes.flatMap((node) => {
-        const text = (node.textContent ?? "").trim().replace(/\s+/g, " ");
-        if (!text.includes(expected.referenceId)) return [];
-        const lifecycleClasses = Object.entries(patterns)
-          .filter(([, pattern]) => pattern.test(text))
-          .map(([name]) => name);
-        return lifecycleClasses.length === 1 && lifecycleClasses[0] === expected.lifecycleClass
-          ? [{ id: node.getAttribute("data-ui-node-id"), text: text.slice(0, 320) }]
-          : [];
+async function workspacesLifecycleNodeDetails(page, nodeId) {
+  const surface = page.getByTestId("selected-app-surface");
+  const row = surface.locator(`[data-ui-node-id='${nodeId}']`);
+  const count = await row.count();
+  if (count !== 1) return { count, visible: false, text: "", actions: [], ancestors: [] };
+  const visible = await row.isVisible();
+  const details = await row.evaluate((node) => {
+    const surfaceRoot = node.closest("[data-testid='selected-app-surface']");
+    const ancestors = [];
+    for (let candidate = node; candidate && candidate !== surfaceRoot; candidate = candidate.parentElement) {
+      ancestors.push({
+        id: candidate.getAttribute("data-ui-node-id"),
+        text: (candidate.textContent ?? "").trim().replace(/\s+/g, " ")
       });
-    },
-    { referenceId, lifecycleClass }
-  );
+    }
+    return {
+      text: (node.textContent ?? "").trim().replace(/\s+/g, " "),
+      actions: [...node.querySelectorAll("[data-action-id]")].map((action) => ({
+        actionId: action.getAttribute("data-action-id"),
+        nodeId: action.getAttribute("data-ui-node-id"),
+        label: (action.textContent ?? "").trim().replace(/\s+/g, " ")
+      })),
+      ancestors
+    };
+  });
+  return { count, visible, ...details };
 }
 
 async function workspacesLifecycleEvidence(page) {

@@ -125,8 +125,13 @@ Failures are non-zero and label `never-existing-reference` separately from
 `removed-reference`. Their compact evidence includes the delivered UiNode tree,
 rendered row-root ids/text, canonical session chronology, subscription id,
 render/list request counts, and one identity outcome per expected reference:
-`materialized`, `authored-not-materialized`, `dropped-empty`,
-`dropped-collision`, or `not-authored`.
+`materialized`, `materialized-not-legible`, `authored-not-materialized`,
+`dropped-empty`, `dropped-collision`, or `not-authored`.
+`materialized-not-legible` names the exact DOM reason (`not-visible`,
+`empty-text`, `no-semantic-region`, `no-contained-action`, or `row-count`);
+contained actions are required for realized item rows, while unavailable
+`empty_template` placeholders need only be visible, non-empty, and in their
+semantic region.
 `dropped-empty` and `dropped-collision` identify Web-owned generic renderer
 failures. `authored-not-materialized` identifies a producer-authored branch
 whose filter/branch did not realize, while `not-authored` identifies a missing

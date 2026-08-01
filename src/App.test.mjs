@@ -40,7 +40,11 @@ import {
   htmlAssetUrls,
   latestAcceptedWorkspacesUiTree,
   packageEnsureDecision,
-  reconnectGenerationEvidence
+  reconnectGenerationEvidence,
+  workspacesLifecycleAbsenceResult,
+  workspacesLifecycleDomResult,
+  workspacesLifecycleMaterializationResult,
+  workspacesLifecycleRegion
 } from "../scripts/live-packaged-protocol-helpers.mjs";
 
 const hostForTests = "127.0.0.1";
@@ -233,6 +237,93 @@ assert.equal(classifyWorkspacesReference({
   referenceId: "session-not-authored",
   lifecycleClass: "current"
 }).outcome, "not-authored");
+const endedRegion = workspacesLifecycleRegion([
+  { id: "row", text: "Friendly session label" },
+  { id: "ended-region", text: "Ended Friendly session label" }
+], "ended");
+assert.deepEqual(endedRegion, {
+  id: "ended-region",
+  text: "Ended Friendly session label",
+  lifecycleClasses: ["ended"]
+});
+assert.deepEqual(workspacesLifecycleDomResult({
+  visible: true,
+  text: "Friendly session label",
+  region: endedRegion,
+  actions: [],
+  branch: "empty"
+}), { valid: true, reason: null });
+assert.deepEqual(workspacesLifecycleDomResult({
+  visible: true,
+  text: "Friendly session label",
+  region: endedRegion,
+  actions: [],
+  branch: "item"
+}), { valid: false, reason: "no-contained-action" });
+assert.deepEqual(workspacesLifecycleDomResult({
+  visible: true,
+  text: "Friendly session label",
+  region: null,
+  actions: [{ actionId: "open" }],
+  branch: "item"
+}), { valid: false, reason: "no-semantic-region" });
+assert.equal(workspacesLifecycleDomResult({
+  visible: false,
+  text: "Friendly session label",
+  region: endedRegion,
+  actions: [{ actionId: "open" }],
+  branch: "item"
+}).reason, "not-visible");
+assert.equal(workspacesLifecycleDomResult({
+  visible: true,
+  text: "",
+  region: endedRegion,
+  actions: [{ actionId: "open" }],
+  branch: "item"
+}).reason, "empty-text");
+assert.equal(workspacesLifecycleDomResult({
+  count: 0,
+  visible: false,
+  text: "",
+  region: null,
+  actions: [],
+  branch: "item"
+}).reason, "row-count");
+assert.deepEqual(workspacesLifecycleMaterializationResult(
+  { outcome: "materialized", resolvedValue: "ended-row" },
+  { valid: false, reason: "no-semantic-region" }
+), {
+  outcome: "materialized-not-legible",
+  identityOutcome: "materialized",
+  resolvedValue: "ended-row",
+  dom: { valid: false, reason: "no-semantic-region" }
+});
+assert.deepEqual(workspacesLifecycleAbsenceResult({
+  currentResolvedValue: "shared-row",
+  priorResolvedValue: "shared-row",
+  renderedNodeIds: ["shared-row"],
+  regions: [{ id: "shared-row", region: null }]
+}), {
+  valid: true,
+  reason: null,
+  currentResolvedValue: "shared-row",
+  priorResolvedValue: "shared-row",
+  priorOnlyId: null,
+  priorOnlyRendered: false,
+  regions: [{ id: "shared-row", region: null }]
+});
+assert.equal(workspacesLifecycleAbsenceResult({
+  currentResolvedValue: "ended-row",
+  priorResolvedValue: "current-row",
+  renderedNodeIds: ["ended-row", "current-row"],
+  regions: [{ id: "ended-row", region: null }]
+}).reason, "prior-row-still-rendered");
+assert.equal(workspacesLifecycleAbsenceResult({
+  currentResolvedValue: "ended-row",
+  priorResolvedValue: "current-row",
+  renderedNodeIds: ["ended-row"],
+  regions: [{ id: "ended-row", region: endedRegion }]
+}).reason, "still-in-semantic-region");
 const lifecycleFailure = formatWorkspacesLifecycleFailure({
   stage: "never-existing-reference",
   oracle: "unavailable",

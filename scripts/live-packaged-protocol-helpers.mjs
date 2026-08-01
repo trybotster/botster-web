@@ -165,6 +165,78 @@ export function classifyWorkspacesReference({
   });
 }
 
+const workspacesLifecycleRegionPatterns = {
+  current: /\bcurrent\b/i,
+  ended: /\b(ended|history|historical)\b/i,
+  unavailable: /\b(unavailable|unknown|uncertain|missing|deleted)\b/i
+};
+
+export function workspacesLifecycleRegion(ancestors, lifecycleClass) {
+  for (const ancestor of ancestors ?? []) {
+    const text = ancestor.text ?? "";
+    const lifecycleClasses = Object.entries(workspacesLifecycleRegionPatterns)
+      .filter(([, pattern]) => pattern.test(text))
+      .map(([name]) => name);
+    if (lifecycleClasses.length === 1 && lifecycleClasses[0] === lifecycleClass) {
+      return { ...ancestor, text: text.slice(0, 320), lifecycleClasses };
+    }
+  }
+  return null;
+}
+
+export function workspacesLifecycleDomResult({ count = 1, visible, text, region, actions, branch }) {
+  const reason = count !== 1
+    ? "row-count"
+    : visible !== true
+      ? "not-visible"
+      : (text ?? "").length === 0
+        ? "empty-text"
+        : region == null
+          ? "no-semantic-region"
+          : branch === "item" && (actions ?? []).length === 0
+            ? "no-contained-action"
+            : null;
+  return { valid: reason == null, reason };
+}
+
+export function workspacesLifecycleMaterializationResult(classification, dom) {
+  return dom.valid
+    ? { ...classification, dom }
+    : {
+        ...classification,
+        identityOutcome: classification.outcome,
+        outcome: "materialized-not-legible",
+        dom
+      };
+}
+
+export function workspacesLifecycleAbsenceResult({
+  currentResolvedValue,
+  priorResolvedValue,
+  renderedNodeIds,
+  regions
+}) {
+  const unexpectedRegions = (regions ?? []).filter((entry) => entry.region != null);
+  const priorOnlyId = priorResolvedValue && priorResolvedValue !== currentResolvedValue
+    ? priorResolvedValue
+    : null;
+  const priorOnlyRendered = priorOnlyId != null && (renderedNodeIds ?? []).includes(priorOnlyId);
+  const reason = unexpectedRegions.length > 0
+    ? "still-in-semantic-region"
+    : priorOnlyRendered
+      ? "prior-row-still-rendered"
+      : null;
+  return {
+    valid: reason == null,
+    reason,
+    currentResolvedValue: currentResolvedValue ?? null,
+    priorResolvedValue: priorResolvedValue ?? null,
+    priorOnlyId,
+    priorOnlyRendered,
+    regions: regions ?? []
+  };
+}
+
 export function formatWorkspacesLifecycleFailure({
   stage,
   oracle,
