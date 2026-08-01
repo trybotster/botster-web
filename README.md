@@ -207,19 +207,19 @@ to already-built executables. The downstream
 Workspaces parent replaces this coordinator when it combines the merged Web
 driver with the separately owned TUI sequence.
 
-The rendered workspace-detail Spawn control currently exposes no opaque
-consumer-addressable selector beyond its owner-authored node-id shape, so this
-driver follows the existing browser precedent and locates it by visible label.
-Workspaces follow-up `ticket_1785611385_764864` owns replacing that copy coupling
-with a stable consumer identity; Web deliberately does not reconstruct the
-owner's `botster-workspaces-spawn-<workspace_id>` identifier.
+The rendered workspace-detail Spawn control is selected by the semantic action
+identity `botster_workspaces.open_spawn` delivered by Workspaces
+`ticket_1785611316_167898` at `737ec81`. The driver requires one exact semantic
+match, reads the realized opaque node/action identity from that production DOM
+element, and correlates the normal Ionic callback through the Hub request and
+accepted result. It does not parse visible copy, reconstruct the owner-authored
+dynamic node id, or fall back to generic `botster_workspaces.open` plus dialog
+payload discrimination.
 
-The Web repository remains green while the command is expected to report a
-package-owned `not-authored` failure against botster-workspaces `c78f3bf`, where
-lifecycle grouping is still deferred. After this runner merges,
-`ticket_1785296184_677408` must run this identical command against its real
-package checkout and obtain exit 0. The current producer red is prerequisite
-evidence, not a skipped or weakened Web test.
+The command must exit 0 against the delivered Workspaces checkout and emit a
+two-generation structured ledger whose per-case `spawn_opener` records carry
+the same semantic action and opaque node identity through DOM, request, and
+accepted result evidence while preserving the producer-authored payload.
 
 The broader contract-matrix smoke separately covers rejected form submissions,
 draft retention, and presentation operations. Deterministic tests cover

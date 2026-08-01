@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 
+export const WORKSPACES_SPAWN_OPENER_ACTION_ID = "botster_workspaces.open_spawn";
+export const WORKSPACES_SPAWN_OPENER_SELECTOR =
+  `ion-button[data-action-id='${WORKSPACES_SPAWN_OPENER_ACTION_ID}']`;
+
 const allowSkipPattern = /^BOTSTER_LIVE_ALLOW_.*_SKIP$/;
 export function assertNoRequiredSmokeSkip(environment = process.env) {
   const rejected = Object.entries(environment)
@@ -175,6 +179,35 @@ export function assertTwoGenerationLedger(summaries) {
       entry.action_result?.accepted !== true || entry.reconciliation?.request_counts_unchanged !== true
     )) {
       throw new Error(`shared-Hub generation ${summary.generation} contains unaccepted or unreconciled case evidence`);
+    }
+    for (const entry of summary.cases) {
+      const opener = entry.spawn_opener;
+      const actionIds = [opener?.dom?.action_id, opener?.request?.action_id, opener?.result?.action_id];
+      if (actionIds.some((actionId) => actionId !== WORKSPACES_SPAWN_OPENER_ACTION_ID)) {
+        throw new Error(
+          `shared-Hub case ${entry.case_id} omitted consistent open_spawn evidence: ${JSON.stringify(actionIds)}`
+        );
+      }
+      const nodeIds = [opener?.dom?.node_id, opener?.request?.node_id, opener?.result?.node_id];
+      if (nodeIds.some((nodeId) => typeof nodeId !== "string" || nodeId.length === 0) ||
+          nodeIds.some((nodeId) => nodeId !== nodeIds[0])) {
+        throw new Error(
+          `shared-Hub case ${entry.case_id} did not preserve opaque opener node identity: ${JSON.stringify(nodeIds)}`
+        );
+      }
+      const expectedPayload = {
+        selected_workspace: entry.workspace?.workspace_id,
+        dialog: `spawn-target:${entry.workspace?.workspace_id}`
+      };
+      if (stableJson(opener?.request?.payload) !== stableJson(expectedPayload)) {
+        throw new Error(
+          `shared-Hub case ${entry.case_id} did not preserve the producer-authored opener payload`
+        );
+      }
+      if (opener?.result?.accepted !== true || opener?.result?.state !== "accepted" ||
+          typeof opener?.result?.request_id !== "string" || opener.result.request_id.length === 0) {
+        throw new Error(`shared-Hub case ${entry.case_id} omitted its accepted opener result`);
+      }
     }
   }
   return { generations: summaries.map((summary) => summary.generation), completed: true };
