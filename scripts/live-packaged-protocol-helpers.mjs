@@ -165,23 +165,47 @@ export function classifyWorkspacesReference({
   });
 }
 
-const workspacesLifecycleRegionPatterns = {
-  current: /\bcurrent\b/i,
-  ended: /\b(ended|history|historical)\b/i,
-  unavailable: /\b(unavailable|unknown|uncertain|missing|deleted)\b/i
-};
+const workspacesLifecycleRegionPattern = /-sessions-(current|ended|unavailable)-/g;
 
 export function workspacesLifecycleRegion(ancestors, lifecycleClass) {
   for (const ancestor of ancestors ?? []) {
-    const text = ancestor.text ?? "";
-    const lifecycleClasses = Object.entries(workspacesLifecycleRegionPatterns)
-      .filter(([, pattern]) => pattern.test(text))
-      .map(([name]) => name);
+    const lifecycleClasses = [...(ancestor.id ?? "").matchAll(workspacesLifecycleRegionPattern)]
+      .map((match) => match[1]);
     if (lifecycleClasses.length === 1 && lifecycleClasses[0] === lifecycleClass) {
-      return { ...ancestor, text: text.slice(0, 320), lifecycleClasses };
+      return { ...ancestor, text: (ancestor.text ?? "").slice(0, 320), lifecycleClasses };
     }
   }
   return null;
+}
+
+export function workspacesLifecyclePartitionExpectations(partition) {
+  const lifecycleClasses = ["current", "ended", "unavailable"];
+  const assignments = new Map();
+  const expectations = [];
+  for (const lifecycleClass of lifecycleClasses) {
+    for (const referenceId of partition[lifecycleClass] ?? []) {
+      if (assignments.has(referenceId)) {
+        throw new Error(
+          `Workspaces lifecycle reference ${referenceId} belongs to both ` +
+          `${assignments.get(referenceId)} and ${lifecycleClass}`
+        );
+      }
+      assignments.set(referenceId, lifecycleClass);
+      expectations.push({
+        referenceId,
+        lifecycleClass
+      });
+    }
+  }
+  const absentExpectations = [...assignments].flatMap(([referenceId, expectedClass]) =>
+    lifecycleClasses
+      .filter((lifecycleClass) => lifecycleClass !== expectedClass)
+      .map((lifecycleClass) => ({
+        referenceId,
+        lifecycleClass
+      }))
+  );
+  return { expectations, absentExpectations };
 }
 
 export function workspacesLifecycleDomResult({ count = 1, visible, text, region, actions, branch }) {

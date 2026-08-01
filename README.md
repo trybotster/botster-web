@@ -113,16 +113,21 @@ npm run smoke:workspaces-lifecycle
 
 This mode also requires a fresh harness-owned data directory. It creates a
 workspace through rendered Ionic controls, seeds canonical UUID sessions only
-through public daemon requests, adds every reference through the owner-authored
-Add-session form, and then proves current-to-ended reconciliation, retained
-never-existing and removed references, and a fresh authoritative reconnect
-without `list_sessions` or an extra surface render. Row controls are resolved by
-containment and their rendered semantic action; the runner accepts a producer-
-authored literal direct template-root id or the contract-admitted bound root id,
-but never requires bound descendant ids.
+through public daemon requests, and adds sixteen references through the owner-
+authored Add-session form: four current-to-ended transitions, four stable-ended
+references, four ended-to-removed references, and four never-existing
+references. Exact ID membership is checked at the initial, transitioned,
+removed, and authoritative-reconnect stages without `list_sessions` or an extra
+surface render. Lifecycle regions are classified from the authored
+`-sessions-(current|ended|unavailable)-` section identity, never from visible
+heading or row text. Row controls are resolved by containment and their rendered
+semantic action; the runner accepts a producer-authored literal direct template-
+root id or the contract-admitted bound root id, but never requires bound
+descendant ids.
 
-Failures are non-zero and label `never-existing-reference` separately from
-`removed-reference`. Their compact evidence includes the delivered UiNode tree,
+Failures are non-zero and retain the cohort plus expected lifecycle class in
+each oracle name, distinguishing never-existing references from removed ones.
+Their compact evidence includes the delivered UiNode tree,
 rendered row-root ids/text, canonical session chronology, subscription id,
 render/list request counts, and one identity outcome per expected reference:
 `materialized`, `materialized-not-legible`, `authored-not-materialized`,

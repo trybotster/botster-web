@@ -26,6 +26,7 @@ import {
   workspacesLifecycleAbsenceResult,
   workspacesLifecycleDomResult,
   workspacesLifecycleMaterializationResult,
+  workspacesLifecyclePartitionExpectations,
   workspacesLifecycleRegion
 } from "./live-packaged-protocol-helpers.mjs";
 
@@ -1720,13 +1721,45 @@ async function exerciseWorkspacesLifecycle(page) {
   }
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
   const scenario = {
-    transition: randomUUID(),
-    stableEnded: randomUUID(),
-    removed: randomUUID(),
-    neverExisting: randomUUID()
+    transitions: Array.from({ length: 4 }, () => randomUUID()),
+    stableEnded: Array.from({ length: 4 }, () => randomUUID()),
+    removals: Array.from({ length: 4 }, () => randomUUID()),
+    neverExisting: Array.from({ length: 4 }, () => randomUUID())
+  };
+  const allReferences = Object.values(scenario).flat();
+  const cohortByReference = new Map(Object.entries(scenario).flatMap(([cohort, referenceIds]) =>
+    referenceIds.map((referenceId) => [referenceId, cohort])
+  ));
+  const stageExpectations = (partition) => {
+    const result = workspacesLifecyclePartitionExpectations(partition);
+    return {
+      expectations: result.expectations.map((expectation) => ({
+        ...expectation,
+        oracle: `${cohortByReference.get(expectation.referenceId)}-${expectation.lifecycleClass}-reference`
+      })),
+      absentExpectations: result.absentExpectations.map((expectation) => ({
+        ...expectation,
+        oracle: `${cohortByReference.get(expectation.referenceId)}-not-${expectation.lifecycleClass}-reference`
+      }))
+    };
+  };
+  const initialPartition = {
+    current: scenario.transitions,
+    ended: [...scenario.stableEnded, ...scenario.removals],
+    unavailable: scenario.neverExisting
+  };
+  const transitionedPartition = {
+    current: [],
+    ended: [...scenario.transitions, ...scenario.stableEnded, ...scenario.removals],
+    unavailable: scenario.neverExisting
+  };
+  const removedPartition = {
+    current: [],
+    ended: [...scenario.transitions, ...scenario.stableEnded],
+    unavailable: [...scenario.removals, ...scenario.neverExisting]
   };
 
-  for (const sessionId of [scenario.transition, scenario.stableEnded, scenario.removed]) {
+  for (const sessionId of [...scenario.transitions, ...scenario.stableEnded, ...scenario.removals]) {
     const response = await sendDaemonRequest(socketPath, {
       type: "spawn",
       session_id: sessionId,
@@ -1742,7 +1775,7 @@ async function exerciseWorkspacesLifecycle(page) {
       lifecycle_class: "current"
     }, `Workspaces lifecycle current seed ${sessionId}`);
   }
-  for (const sessionId of [scenario.stableEnded, scenario.removed]) {
+  for (const sessionId of [...scenario.stableEnded, ...scenario.removals]) {
     const response = await sendDaemonRequest(socketPath, {
       type: "shutdown_session",
       session_id: sessionId
@@ -1759,50 +1792,37 @@ async function exerciseWorkspacesLifecycle(page) {
   }
 
   await selectWorkspacesLifecycleWorkspace(page, workspacesCompatibilityState);
-  for (const sessionId of [
-    scenario.transition,
-    scenario.stableEnded,
-    scenario.removed,
-    scenario.neverExisting
-  ]) {
+  for (const sessionId of allReferences) {
     await addWorkspacesLifecycleReference(page, workspacesCompatibilityState, sessionId);
   }
 
   const initial = await assertWorkspacesLifecycleOracles(page, {
     stage: "initial-owner-surface",
-    expectations: [
-      { oracle: "current-reference", referenceId: scenario.transition, lifecycleClass: "current" },
-      { oracle: "ended-reference", referenceId: scenario.stableEnded, lifecycleClass: "ended" },
-      { oracle: "ended-reference-before-remove", referenceId: scenario.removed, lifecycleClass: "ended" },
-      { oracle: "never-existing-reference", referenceId: scenario.neverExisting, lifecycleClass: "unavailable" }
-    ]
+    ...stageExpectations(initialPartition)
   });
   const renderCountBeforeTransition = initial.requestCounts.plugin_surface_render;
   const listCountBeforeTransition = initial.requestCounts.list_sessions;
 
-  const transitionResponse = await sendDaemonRequest(socketPath, {
-    type: "shutdown_session",
-    session_id: scenario.transition
-  });
-  if (transitionResponse.error) {
-    throw new Error(`Workspaces lifecycle transition shutdown failed: ${JSON.stringify(transitionResponse.error)}`);
+  for (const sessionId of scenario.transitions) {
+    const transitionResponse = await sendDaemonRequest(socketPath, {
+      type: "shutdown_session",
+      session_id: sessionId
+    });
+    if (transitionResponse.error) {
+      throw new Error(
+        `Workspaces lifecycle transition shutdown failed for ${sessionId}: ${JSON.stringify(transitionResponse.error)}`
+      );
+    }
+    await waitForHarnessEvent(page, {
+      kind: "hub_frame",
+      family: "session",
+      id: sessionId,
+      lifecycle_class: "ended"
+    }, `Workspaces lifecycle current-to-ended entity transition ${sessionId}`);
   }
-  await waitForHarnessEvent(page, {
-    kind: "hub_frame",
-    family: "session",
-    id: scenario.transition,
-    lifecycle_class: "ended"
-  }, "Workspaces lifecycle current-to-ended entity transition");
   const transitioned = await assertWorkspacesLifecycleOracles(page, {
     stage: "current-to-ended-without-refresh",
-    expectations: [
-      { oracle: "transitioned-ended-reference", referenceId: scenario.transition, lifecycleClass: "ended" },
-      { oracle: "stable-ended-reference", referenceId: scenario.stableEnded, lifecycleClass: "ended" },
-      { oracle: "never-existing-reference", referenceId: scenario.neverExisting, lifecycleClass: "unavailable" }
-    ],
-    absentExpectations: [
-      { oracle: "departed-current-reference", referenceId: scenario.transition, lifecycleClass: "current" }
-    ],
+    ...stageExpectations(transitionedPartition),
     priorEvidence: initial
   });
   assertLifecycleRequestCountsUnchanged(
@@ -1812,29 +1832,27 @@ async function exerciseWorkspacesLifecycle(page) {
     "current-to-ended"
   );
 
-  const removeResponse = await sendDaemonRequest(socketPath, {
-    type: "remove_session",
-    session_id: scenario.removed
-  });
-  if (removeResponse.error) {
-    throw new Error(`Workspaces lifecycle canonical remove failed: ${JSON.stringify(removeResponse.error)}`);
+  for (const sessionId of scenario.removals) {
+    const removeResponse = await sendDaemonRequest(socketPath, {
+      type: "remove_session",
+      session_id: sessionId
+    });
+    if (removeResponse.error) {
+      throw new Error(
+        `Workspaces lifecycle canonical remove failed for ${sessionId}: ${JSON.stringify(removeResponse.error)}`
+      );
+    }
+    await waitForHarnessEvent(page, {
+      kind: "hub_frame",
+      frameKind: "entity_remove",
+      family: "session",
+      id: sessionId
+    }, `Workspaces lifecycle canonical entity removal ${sessionId}`);
   }
-  await waitForHarnessEvent(page, {
-    kind: "hub_frame",
-    frameKind: "entity_remove",
-    family: "session",
-    id: scenario.removed
-  }, "Workspaces lifecycle canonical entity removal");
   const removed = await assertWorkspacesLifecycleOracles(page, {
     stage: "removed-reference",
-    expectations: [
-      { oracle: "removed-reference", referenceId: scenario.removed, lifecycleClass: "unavailable" },
-      { oracle: "never-existing-reference", referenceId: scenario.neverExisting, lifecycleClass: "unavailable" }
-    ],
-    absentExpectations: [
-      { oracle: "departed-ended-reference-after-remove", referenceId: scenario.removed, lifecycleClass: "ended" }
-    ],
-    priorEvidence: initial
+    ...stageExpectations(removedPartition),
+    priorEvidence: transitioned
   });
   assertLifecycleRequestCountsUnchanged(
     removed.requestCounts,
@@ -1876,7 +1894,7 @@ async function exerciseWorkspacesLifecycle(page) {
     page,
     workspacesCompatibilityState,
     "lifecycle reconnect",
-    Object.keys(scenario).length
+    allReferences.length
   );
   const reconnectedRenderCount = await daemonRequestCount(page, renderCriteria);
   if (reconnectedRenderCount !== 1) {
@@ -1888,16 +1906,8 @@ async function exerciseWorkspacesLifecycle(page) {
   await selectWorkspacesLifecycleWorkspace(page, workspacesCompatibilityState);
   const reconnected = await assertWorkspacesLifecycleOracles(page, {
     stage: "reconnect-authoritative-history",
-    expectations: [
-      { oracle: "transitioned-ended-reference", referenceId: scenario.transition, lifecycleClass: "ended" },
-      { oracle: "stable-ended-reference", referenceId: scenario.stableEnded, lifecycleClass: "ended" },
-      { oracle: "never-existing-reference", referenceId: scenario.neverExisting, lifecycleClass: "unavailable" },
-      { oracle: "removed-reference", referenceId: scenario.removed, lifecycleClass: "unavailable" }
-    ],
-    absentExpectations: [
-      { oracle: "departed-ended-reference-after-reconnect", referenceId: scenario.removed, lifecycleClass: "ended" }
-    ],
-    priorEvidence: initial
+    ...stageExpectations(removedPartition),
+    priorEvidence: [initial, removed]
   });
   const reconnectEvidence = reconnectGenerationEvidence(reconnected.events, previousSubscriptionId);
   if (!reconnectEvidence.fresh || !reconnectEvidence.authoritativeSnapshot) {
@@ -1909,10 +1919,29 @@ async function exerciseWorkspacesLifecycle(page) {
       requestCounts: { ...reconnected.requestCounts, reconnect: reconnectEvidence }
     }));
   }
-  assertStableLifecycleIdentity(initial, reconnected, scenario.stableEnded, "ended");
-  assertStableLifecycleIdentity(initial, reconnected, scenario.neverExisting, "unavailable");
-  assertStableLifecycleIdentity(removed, reconnected, scenario.removed, "unavailable");
-  console.log(`Workspaces lifecycle acceptance passed ${JSON.stringify({ scenario, reconnect, reconnectEvidence })}`);
+  for (const sessionId of scenario.transitions) {
+    assertStableLifecycleIdentity(transitioned, reconnected, sessionId, "ended");
+  }
+  for (const sessionId of scenario.stableEnded) {
+    assertStableLifecycleIdentity(initial, reconnected, sessionId, "ended");
+  }
+  for (const sessionId of scenario.removals) {
+    assertStableLifecycleIdentity(removed, reconnected, sessionId, "unavailable");
+  }
+  for (const sessionId of scenario.neverExisting) {
+    assertStableLifecycleIdentity(initial, reconnected, sessionId, "unavailable");
+  }
+  console.log(`Workspaces lifecycle acceptance passed ${JSON.stringify({
+    scenario,
+    partitions: {
+      initial: observedWorkspacesLifecyclePartition(initial.classifications),
+      transitioned: observedWorkspacesLifecyclePartition(transitioned.classifications),
+      removed: observedWorkspacesLifecyclePartition(removed.classifications),
+      reconnected: observedWorkspacesLifecyclePartition(reconnected.classifications)
+    },
+    reconnect,
+    reconnectEvidence
+  })}`);
 }
 
 async function selectWorkspacesLifecycleWorkspace(page, state) {
@@ -2033,10 +2062,13 @@ async function assertWorkspacesLifecycleOracles(page, {
       canonicalRecords: evidence.canonicalRecords,
       renderedNodeIds: evidence.renderedRows.map((row) => row.id)
     });
-    const prior = priorEvidence?.classifications.find((classification) =>
-      classification.referenceId === expectation.referenceId &&
-      classification.lifecycleClass === expectation.lifecycleClass
-    );
+    const prior = (Array.isArray(priorEvidence) ? priorEvidence : [priorEvidence])
+      .filter(Boolean)
+      .flatMap((entry) => entry.classifications)
+      .find((classification) =>
+        classification.referenceId === expectation.referenceId &&
+        classification.lifecycleClass === expectation.lifecycleClass
+      );
     const candidateIds = [...new Set([current.resolvedValue, prior?.resolvedValue].filter(Boolean))];
     const regions = [];
     for (const id of candidateIds) {
@@ -2175,6 +2207,15 @@ function assertStableLifecycleIdentity(before, after, referenceId, lifecycleClas
       `${JSON.stringify({ previous, current })}`
     );
   }
+}
+
+function observedWorkspacesLifecyclePartition(classifications) {
+  return Object.fromEntries(["current", "ended", "unavailable"].map((lifecycleClass) => [
+    lifecycleClass,
+    classifications
+      .filter((entry) => entry.lifecycleClass === lifecycleClass)
+      .map((entry) => entry.referenceId)
+  ]));
 }
 
 function duplicateValues(values) {

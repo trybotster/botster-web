@@ -45,6 +45,7 @@ import {
   workspacesLifecycleAbsenceResult,
   workspacesLifecycleDomResult,
   workspacesLifecycleMaterializationResult,
+  workspacesLifecyclePartitionExpectations,
   workspacesLifecycleRegion
 } from "../scripts/live-packaged-protocol-helpers.mjs";
 
@@ -276,14 +277,73 @@ assert.equal(classifyWorkspacesReference({
   lifecycleClass: "current"
 }).outcome, "not-authored");
 const endedRegion = workspacesLifecycleRegion([
-  { id: "row", text: "Friendly session label" },
-  { id: "ended-region", text: "Ended Friendly session label" }
+  { id: "row", text: "Unavailable current historical session label" },
+  { id: "botster-workspaces-sessions-ended-workspace-a", text: "Anything at all" }
 ], "ended");
 assert.deepEqual(endedRegion, {
-  id: "ended-region",
-  text: "Ended Friendly session label",
+  id: "botster-workspaces-sessions-ended-workspace-a",
+  text: "Anything at all",
   lifecycleClasses: ["ended"]
 });
+assert.equal(workspacesLifecycleRegion([
+  { id: "botster-workspaces-sessions-current-workspace-a", text: "Ended" }
+], "ended"), null);
+assert.equal(workspacesLifecycleRegion([
+  { id: "ended-region", text: "Ended" }
+], "ended"), null);
+assert.equal(workspacesLifecycleRegion([
+  { id: "botster-workspaces-session-ended-workspace-a", text: "Ended" }
+], "ended"), null);
+assert.equal(workspacesLifecycleRegion([
+  {
+    id: "botster-workspaces-sessions-current-workspace-a-sessions-ended-workspace-a",
+    text: "Ended"
+  }
+], "ended"), null);
+const lifecyclePartition = workspacesLifecyclePartitionExpectations({
+  current: ["transition-1", "transition-2", "transition-3", "transition-4"],
+  ended: [
+    "stable-1", "stable-2", "stable-3", "stable-4",
+    "remove-1", "remove-2", "remove-3", "remove-4"
+  ],
+  unavailable: ["missing-1", "missing-2", "missing-3", "missing-4"]
+});
+assert.equal(lifecyclePartition.expectations.length, 16);
+assert.equal(lifecyclePartition.absentExpectations.length, 32);
+assert.equal(Object.hasOwn(lifecyclePartition.expectations[0], "oracle"), false);
+assert.equal(Object.hasOwn(lifecyclePartition.absentExpectations[0], "oracle"), false);
+assert.deepEqual(
+  lifecyclePartition.expectations.filter((entry) => entry.lifecycleClass === "current").map((entry) => entry.referenceId),
+  ["transition-1", "transition-2", "transition-3", "transition-4"]
+);
+assert.throws(() => workspacesLifecyclePartitionExpectations({
+  current: ["duplicate"],
+  ended: ["duplicate"]
+}), /belongs to both current and ended/);
+const endedWithUnavailablePresentStack = {
+  children: [
+    {
+      $kind: "bind_list",
+      source: "/session",
+      where: { session_uuid: "session-co-located", lifecycle_class: "ended" },
+      item_template: { type: "list_item", id: "session-co-located-ended" }
+    },
+    {
+      $kind: "bind_list",
+      source: "/session",
+      where: { session_uuid: "session-co-located" },
+      item_template: { type: "stack", id: "session-co-located-present" },
+      empty_template: { type: "list_item", id: "session-co-located-absent" }
+    }
+  ]
+};
+assert.equal(classifyWorkspacesReference({
+  uiTree: endedWithUnavailablePresentStack,
+  referenceId: "session-co-located",
+  lifecycleClass: "ended",
+  canonicalRecord: { session_uuid: "session-co-located", lifecycle_class: "ended" },
+  renderedNodeIds: ["session-co-located-ended", "session-co-located-present"]
+}).resolvedValue, "session-co-located-ended");
 assert.deepEqual(workspacesLifecycleDomResult({
   visible: true,
   text: "Friendly session label",
@@ -1290,8 +1350,29 @@ assert.equal(
   "npm run build && BOTSTER_LIVE_WORKSPACES_LIFECYCLE=1 node scripts/live-packaged-protocol-harness.mjs"
 );
 assert.match(liveProtocolHarnessScript, /exerciseWorkspacesLifecycle/);
-assert.match(liveProtocolHarnessScript, /never-existing-reference/);
-assert.match(liveProtocolHarnessScript, /removed-reference/);
+assert.match(liveProtocolHarnessScript, /transitions: Array\.from\(\{ length: 4 \}/);
+assert.match(liveProtocolHarnessScript, /stableEnded: Array\.from\(\{ length: 4 \}/);
+assert.match(liveProtocolHarnessScript, /removals: Array\.from\(\{ length: 4 \}/);
+assert.match(liveProtocolHarnessScript, /neverExisting: Array\.from\(\{ length: 4 \}/);
+assert.match(liveProtocolHarnessScript, /stageExpectations\(removedPartition\)/);
+assert.match(liveProtocolHarnessScript, /observedWorkspacesLifecyclePartition\(reconnected\.classifications\)/);
+assert.match(liveProtocolHarnessScript, /priorEvidence: \[initial, removed\]/);
+assert.match(
+  liveProtocolHarnessScript,
+  /assertStableLifecycleIdentity\(transitioned, reconnected, sessionId, "ended"\)/
+);
+assert.match(
+  liveProtocolHarnessScript,
+  /assertStableLifecycleIdentity\(initial, reconnected, sessionId, "ended"\)/
+);
+assert.match(
+  liveProtocolHarnessScript,
+  /assertStableLifecycleIdentity\(removed, reconnected, sessionId, "unavailable"\)/
+);
+assert.match(
+  liveProtocolHarnessScript,
+  /assertStableLifecycleIdentity\(initial, reconnected, sessionId, "unavailable"\)/
+);
 assert.equal(packageManifest.kind, "plugin");
 assert.equal(packageManifest.botster, ">=0.1.0");
 assert.deepEqual(packageManifest.source, { type: "path", path: "." });
