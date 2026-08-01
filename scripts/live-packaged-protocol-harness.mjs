@@ -35,7 +35,8 @@ import {
   assertReconciliationCounts,
   assertSharedHubSpawnResult,
   chooseCreateControl,
-  parseWorkspacesSpawnAssignment
+  parseWorkspacesSpawnAssignment,
+  requiredProvenanceField
 } from "./workspaces-shared-hub-browser-helpers.mjs";
 
 const protocol = "botster-hub-daemon-v1";
@@ -139,8 +140,13 @@ try {
   binaryProvenance = sharedHubDriverMode
     ? { hub: { path: null, source: "caller-owned" }, session_worker: { path: null, source: "caller-owned" } }
     : await loadBinaryProvenance();
+  if (!sharedHubDriverMode) {
+    console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
+  }
   appUrl = await startWebrtcPackageRuntime();
-  console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
+  if (sharedHubDriverMode) {
+    console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
+  }
 
   browser = await chromium.launch({
     args: ["--disable-features=WebRtcHideLocalIpsWithMdns", "--force-webrtc-ip-handling-policy=default_public_and_private_interfaces"]
@@ -3689,11 +3695,11 @@ function callerOwnedRuntimeProvenance(status, packages, servedHtml) {
     hub: {
       source: "caller-owned",
       path: null,
-      protocol: compatibility.protocol,
-      protocol_version: compatibility.protocol_version,
-      conformance_fixture_revision: compatibility.conformance_fixture_revision,
-      schema_version: daemonStatus.schema_version,
-      host_id: daemonStatus.host_id
+      protocol: requiredProvenanceField(compatibility, "protocol", "status.compatibility"),
+      protocol_version: requiredProvenanceField(compatibility, "protocol_version", "status.compatibility"),
+      conformance_fixture_revision: requiredProvenanceField(compatibility, "conformance_fixture_revision", "status.compatibility"),
+      schema_version: requiredProvenanceField(daemonStatus, "schema_version", "status"),
+      host_id: requiredProvenanceField(daemonStatus, "host_id", "status")
     },
     session_worker: {
       source: "caller-owned",

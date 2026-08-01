@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { existsSync, readFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   assertNoRequiredSmokeSkip,
   assertTwoGenerationLedger
@@ -23,6 +24,7 @@ const dataDir = join(fixtureRoot, "hub");
 const repository = join(fixtureRoot, "repo");
 const socketPath = join(dataDir, "botster-hub.sock");
 let hub;
+let launchedBinaryProvenance;
 
 try {
   await mkdir(dataDir);
@@ -36,6 +38,10 @@ try {
   ]);
   await proveSkipRejection(dataDir, coldAssignment);
 
+  launchedBinaryProvenance = {
+    hub: await binaryProvenance(hubBinary),
+    session_worker: await binaryProvenance(sessionWorkerBinary)
+  };
   hub = spawn(hubBinary, [
     "start", "--data-dir", dataDir, "--session-worker-bin", sessionWorkerBinary
   ], { cwd: packageRoot, stdio: ["ignore", "pipe", "pipe"] });
@@ -77,7 +83,7 @@ try {
       expect_created_branch: true,
       expect_created_worktree: true,
       expect_reused_worktree: false
-    })
+    }, { include_optional_values: false })
   ], {
     workspace_id: cold.workspace.workspace_id,
     workspace_name: cold.workspace.workspace_name,
@@ -120,17 +126,20 @@ function assignment(generation, entryState, workspaceName, cases, observe) {
   };
 }
 
-function spawnCase(caseId, branch, expectedHubResult) {
-  return {
+function spawnCase(caseId, branch, expectedHubResult, { include_optional_values = true } = {}) {
+  const value = {
     case_id: caseId,
     target_id: "shared-git",
     branch,
     template_id: "shared-browser",
-    prompt: `shared-Hub browser ${caseId}`,
-    ticket_id: caseId,
     expected_lifecycle: "ended",
     ...expectedHubResult
   };
+  if (include_optional_values) {
+    value.prompt = `shared-Hub browser ${caseId}`;
+    value.ticket_id = caseId;
+  }
+  return value;
 }
 
 async function createManagedGitFixture(repository) {
@@ -258,9 +267,24 @@ async function readSocketLine(socket) {
 
 async function loadProvenance() {
   const workspacesManifest = JSON.parse(readFileSync(join(workspacesPackagePath, "botster-package.json"), "utf8"));
+  const finalBinaryProvenance = {
+    hub: await binaryProvenance(hubBinary),
+    session_worker: await binaryProvenance(sessionWorkerBinary)
+  };
+  for (const name of ["hub", "session_worker"]) {
+    if (launchedBinaryProvenance?.[name]?.sha256 !== finalBinaryProvenance[name].sha256) {
+      throw new Error(`${name} binary changed while shared-Hub browser proof was running`);
+    }
+  }
   return {
-    hub: binaryProvenance(hubBinary),
-    session_worker: binaryProvenance(sessionWorkerBinary),
+    hub: {
+      ...launchedBinaryProvenance.hub,
+      stability: "digest_before_launch_matches_completion"
+    },
+    session_worker: {
+      ...launchedBinaryProvenance.session_worker,
+      stability: "digest_before_launch_matches_completion"
+    },
     workspaces: {
       path: workspacesPackagePath,
       manifest_version: workspacesManifest.version,
@@ -274,14 +298,21 @@ async function loadProvenance() {
   };
 }
 
-function binaryProvenance(path) {
-  const manifestPath = resolve(dirname(path), "../..", "Cargo.toml");
-  const manifest = existsSync(manifestPath) ? readFileSync(manifestPath, "utf8") : "";
+async function binaryProvenance(path) {
   return {
     path,
-    package_version: manifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? null,
-    package_version_source: manifest ? manifestPath : null
+    sha256: await fileSha256(path),
+    source_commit: null,
+    source_commit_disposition: "not_verified_without_build_receipt",
+    package_version: null,
+    package_version_disposition: "not_verified_without_build_receipt"
   };
+}
+
+async function fileSha256(path) {
+  const digest = createHash("sha256");
+  for await (const chunk of createReadStream(path)) digest.update(chunk);
+  return digest.digest("hex");
 }
 
 function requiredPath(name) {

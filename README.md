@@ -162,7 +162,9 @@ and session to observe. Every case supplies `case_id`, `target_id`, `branch`, an
 present, must be `ended`. Test coordinators may also supply
 `expect_created_branch`, `expect_created_worktree`, and
 `expect_reused_worktree` outcomes so named
-managed-Git cases are enforced rather than merely recorded.
+managed-Git cases are enforced rather than merely recorded. The repository
+smoke intentionally leaves `prompt` and `ticket_id` unset for one case so the
+renderer-collected empty optional values remain covered by the required gate.
 The driver discovers the structured app row and `local_url`, clicks the rendered
 Apps/Workspaces navigation, reads realized node/action identities, uses Ionic
 input callbacks, and emits one `workspaces-shared-hub-browser-summary` JSON
@@ -196,7 +198,12 @@ That coordinator alone installs/enables Web and Workspaces once, admits the real
 managed-Git fixture, launches the Web entrypoint, and cleans up. It covers the
 cold empty-state create control, reused toolbar create control, prior-state
 observation, existing managed worktree reuse, existing-branch materialization,
-missing-branch creation, and exact binary/package/Git provenance. The downstream
+missing-branch creation, immutable SHA-256 identity measured before launch and
+verified unchanged at completion for the exact supplied Hub and session-worker
+binaries, and exact package/Git provenance. Without build
+receipts, the coordinator marks Hub/Core source commits and binary package
+versions unverified instead of attributing mutable adjacent checkout metadata
+to already-built executables. The downstream
 Workspaces parent replaces this coordinator when it combines the merged Web
 driver with the separately owned TUI sequence.
 

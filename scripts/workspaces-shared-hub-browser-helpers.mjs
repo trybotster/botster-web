@@ -11,6 +11,14 @@ export function assertNoRequiredSmokeSkip(environment = process.env) {
   }
 }
 
+export function requiredProvenanceField(record, field, label) {
+  const value = record?.[field];
+  if (value === undefined || value === null || value === "") {
+    throw new Error(`caller-owned Hub omitted provenance field ${label}.${field}`);
+  }
+  return value;
+}
+
 export function parseWorkspacesSpawnAssignment(serialized) {
   if (typeof serialized !== "string" || serialized.trim() === "") {
     throw new Error("BOTSTER_WORKSPACES_SPAWN_CASES is required");
