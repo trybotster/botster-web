@@ -52,6 +52,7 @@ import {
   assignmentDigest,
   assertNoRequiredSmokeSkip,
   assertReconciliationCounts,
+  assertSharedHubSpawnResult,
   assertTwoGenerationLedger,
   chooseCreateControl,
   parseWorkspacesSpawnAssignment
@@ -85,6 +86,14 @@ assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
   ...sharedHubColdAssignment,
   cases: [sharedHubColdAssignment.cases[0], sharedHubColdAssignment.cases[0]]
 })), /duplicate case_id/);
+assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
+  ...sharedHubColdAssignment,
+  cases: [{ ...sharedHubColdAssignment.cases[0], expected_lifecycle: "current" }]
+})), /expected_lifecycle must be ended/);
+assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
+  ...sharedHubColdAssignment,
+  cases: [{ ...sharedHubColdAssignment.cases[0], expect_created_branch: "yes" }]
+})), /expect_created_branch must be a boolean/);
 assert.throws(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_SURFACE_SKIP: "1" }), /rejects allow-skip inputs/);
 assert.throws(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_BROWSER_SKIP: "true" }), /rejects allow-skip inputs/);
 assert.doesNotThrow(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_SURFACE_SKIP: "0" }));
@@ -94,26 +103,50 @@ assert.throws(() => chooseCreateControl("reused", ["botster-workspaces-empty-cre
 assert.deepEqual(assertReconciliationCounts(
   { plugin_surface_render: 1, list_sessions: 0 },
   { plugin_surface_render: 1, list_sessions: 0 }
-), { plugin_surface_render: 1, list_sessions: 0 });
+), {
+  before: { plugin_surface_render: 1, list_sessions: 0 },
+  after: { plugin_surface_render: 1, list_sessions: 0 },
+  request_counts_unchanged: true
+});
 assert.throws(() => assertReconciliationCounts(
   { plugin_surface_render: 1, list_sessions: 0 },
   { plugin_surface_render: 2, list_sessions: 0 }
 ), /changed plugin_surface_render/);
 const coldLedgerSummary = {
   generation: "cold-1", entry_state: "cold", create_control: "botster-workspaces-empty-create",
-  workspace: { workspace_id: "workspace-a" }, cases: [{ session: { session_id: "session-a" } }],
+  workspace: { workspace_id: "workspace-a" }, cases: [{
+    session: { session_id: "session-a" }, action_result: { accepted: true },
+    reconciliation: { request_counts_unchanged: true }
+  }],
   case_count: 1, lifecycle_reconciliation: true, completed: true
 };
 const reusedLedgerSummary = {
   generation: "reused-2", entry_state: "reused", create_control: "botster-workspaces-new",
   observed_prior: { workspace_id: "workspace-a", session_id: "session-a" },
-  cases: [{ session: { session_id: "session-b" } }], case_count: 1,
+  cases: [{
+    session: { session_id: "session-b" }, action_result: { accepted: true },
+    reconciliation: { request_counts_unchanged: true }
+  }], case_count: 1,
   lifecycle_reconciliation: true, completed: true
 };
 assert.deepEqual(assertTwoGenerationLedger([coldLedgerSummary, reusedLedgerSummary]), {
   generations: ["cold-1", "reused-2"], completed: true
 });
 assert.throws(() => assertTwoGenerationLedger([coldLedgerSummary]), /requires two driver generations/);
+const sharedHubResultCase = {
+  case_id: "case-a", target_id: "target-a", branch: "branch-a",
+  expect_created_branch: true, expect_created_worktree: true, expect_reused_worktree: false
+};
+const sharedHubResult = {
+  target_id: "target-a", branch: "branch-a", created_branch: true,
+  created_worktree: true, reused_worktree: false, base_ref: "main", base_commit: "abc123",
+  worktree_id: "managed:target-a:branch-a", worktree_path: "/tmp/worktree"
+};
+assert.doesNotThrow(() => assertSharedHubSpawnResult(sharedHubResultCase, sharedHubResult));
+assert.throws(() => assertSharedHubSpawnResult(
+  sharedHubResultCase,
+  { ...sharedHubResult, reused_worktree: true }
+), /changed reused_worktree/);
 
 assert.deepEqual(
   packageRuntimeNavigation({

@@ -28,7 +28,11 @@ try {
   await mkdir(dataDir);
   await createManagedGitFixture(repository);
   const coldAssignment = assignment("cold-1", "cold", "Shared Hub cold", [
-    spawnCase("missing-then-reuse", "shared-reuse")
+    spawnCase("missing-then-reuse", "shared-reuse", {
+      expect_created_branch: true,
+      expect_created_worktree: true,
+      expect_reused_worktree: false
+    })
   ]);
   await proveSkipRejection(dataDir, coldAssignment);
 
@@ -59,9 +63,21 @@ try {
   const cold = await runDriver(coldAssignment);
   const retained = cold.cases[0];
   const reusedAssignment = assignment("reused-2", "reused", "Shared Hub reused", [
-    spawnCase("existing-managed-worktree", "shared-reuse"),
-    spawnCase("existing-branch-new-worktree", "existing-branch"),
-    spawnCase("missing-branch-create", "shared-missing")
+    spawnCase("existing-managed-worktree", "shared-reuse", {
+      expect_created_branch: false,
+      expect_created_worktree: false,
+      expect_reused_worktree: true
+    }),
+    spawnCase("existing-branch-new-worktree", "existing-branch", {
+      expect_created_branch: false,
+      expect_created_worktree: true,
+      expect_reused_worktree: false
+    }),
+    spawnCase("missing-branch-create", "shared-missing", {
+      expect_created_branch: true,
+      expect_created_worktree: true,
+      expect_reused_worktree: false
+    })
   ], {
     workspace_id: cold.workspace.workspace_id,
     workspace_name: cold.workspace.workspace_name,
@@ -104,7 +120,7 @@ function assignment(generation, entryState, workspaceName, cases, observe) {
   };
 }
 
-function spawnCase(caseId, branch) {
+function spawnCase(caseId, branch, expectedHubResult) {
   return {
     case_id: caseId,
     target_id: "shared-git",
@@ -112,7 +128,8 @@ function spawnCase(caseId, branch) {
     template_id: "shared-browser",
     prompt: `shared-Hub browser ${caseId}`,
     ticket_id: caseId,
-    expected_lifecycle: "ended"
+    expected_lifecycle: "ended",
+    ...expectedHubResult
   };
 }
 

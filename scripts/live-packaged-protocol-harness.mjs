@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chromium } from "playwright";
 import { createServer as createViteServer } from "vite";
 import {
@@ -33,6 +33,7 @@ import {
   assignmentDigest,
   assertNoRequiredSmokeSkip,
   assertReconciliationCounts,
+  assertSharedHubSpawnResult,
   chooseCreateControl,
   parseWorkspacesSpawnAssignment
 } from "./workspaces-shared-hub-browser-helpers.mjs";
@@ -138,8 +139,8 @@ try {
   binaryProvenance = sharedHubDriverMode
     ? { hub: { path: null, source: "caller-owned" }, session_worker: { path: null, source: "caller-owned" } }
     : await loadBinaryProvenance();
-  console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
   appUrl = await startWebrtcPackageRuntime();
+  console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
 
   browser = await chromium.launch({
     args: ["--disable-features=WebRtcHideLocalIpsWithMdns", "--force-webrtc-ip-handling-policy=default_public_and_private_interfaces"]
@@ -196,6 +197,7 @@ try {
     await browser.close();
     browser = undefined;
     console.log(`workspaces-shared-hub-browser-summary ${JSON.stringify(summary)}`);
+    await flushWritable(process.stdout);
     process.exit(0);
   }
   await openAppsView(page);
@@ -1582,7 +1584,9 @@ async function exerciseSharedHubWorkspaces(page, assignment) {
     cases,
     case_count: assignment.cases.length,
     request_counts: { before: baselineCounts, after: finalCounts },
-    lifecycle_reconciliation: cases.every((entry) => entry.reconciliation.request_counts_unchanged),
+    lifecycle_reconciliation: cases.every((entry) =>
+      entry.reconciliation.request_counts_unchanged && entry.session.lifecycle === "ended"
+    ),
     binary_provenance: binaryProvenance,
     app_url: appUrl,
     completed: true
@@ -1719,6 +1723,7 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
     actionId: targetActionId,
     nodeId: targetNodeId,
     kind: "submit",
+    values: { workspace_id: workspace.workspace_id, target_id: spawnCase.target_id },
     sinceIndex: targetSince,
     label: `${spawnCase.case_id} target-first form request`
   });
@@ -1746,6 +1751,14 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
     actionId,
     nodeId,
     kind: "submit",
+    values: {
+      target_id: spawnCase.target_id,
+      workspace_id: workspace.workspace_id,
+      branch: spawnCase.branch,
+      template_id: spawnCase.template_id,
+      prompt: spawnCase.prompt ?? "",
+      ticket_id: spawnCase.ticket_id ?? ""
+    },
     sinceIndex,
     label: `${spawnCase.case_id} renderer-collected Spawn request`
   });
@@ -1765,20 +1778,20 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
   if (typeof sessionId !== "string" || !hubResult || hubResult.session_id !== sessionId) {
     throw new Error(`${spawnCase.case_id} Spawn result omitted correlated Hub/session identity: ${JSON.stringify(result)}`);
   }
+  assertSharedHubSpawnResult(spawnCase, hubResult);
   await waitForExactSessionLifecycle(page, sessionId, "current");
   const currentRendered = await waitForRenderedSessionLifecycle(page, sessionId, "current");
-  const terminalRecord = spawnCase.expected_lifecycle === "current"
-    ? await waitForExactSessionLifecycle(page, sessionId, "current")
-    : await waitForExactSessionLifecycle(page, sessionId, "ended");
-  const terminalRendered = await waitForRenderedSessionLifecycle(page, sessionId, spawnCase.expected_lifecycle);
+  const terminalRecord = await waitForExactSessionLifecycle(page, sessionId, "ended");
+  const terminalRendered = await waitForRenderedSessionLifecycle(page, sessionId, "ended");
   const finalCounts = await sharedHubRequestCounts(page);
-  assertReconciliationCounts(baselineCounts, finalCounts);
+  const reconciliation = assertReconciliationCounts(baselineCounts, finalCounts);
+  const accepted = result.accepted === true && result.plugin_action_result?.state === "accepted";
   return {
     case_id: spawnCase.case_id,
     rendered: { package_name: "botster-workspaces", surface_id: "workspaces", node_id: nodeId, action_id: actionId },
     submitted_values: request.request?.values,
     action_request: { request_id: result.request_id, node_id: request.request?.node_id, action_id: request.request?.action_id },
-    action_result: { accepted: true, request_id: result.request_id, state: result.plugin_action_result?.state },
+    action_result: { accepted, request_id: result.request_id, state: result.plugin_action_result?.state },
     workspace: { workspace_id: workspace.workspace_id, rendered_row_node_id: workspace.rendered_row_node_id },
     session: {
       session_id: sessionId,
@@ -1788,7 +1801,7 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
       terminal_region_id: terminalRendered.region_id
     },
     hub_result: hubResult,
-    reconciliation: { before: baselineCounts, after: finalCounts, request_counts_unchanged: true }
+    reconciliation
   };
 }
 
@@ -1877,13 +1890,33 @@ async function waitForRenderedSessionLifecycle(page, sessionId, lifecycleClass) 
   await exactText.waitFor({ timeout: 30_000 });
   await page.waitForFunction(({ sessionId, lifecycleClass }) => {
     const nodes = [...globalThis.document.querySelectorAll("[data-testid='selected-app-surface'] [data-ui-node-id]")];
-    return nodes.some((node) => node.textContent?.trim() === sessionId &&
-      node.closest(`[data-ui-node-id*='-sessions-${lifecycleClass}-']`));
+    return nodes.some((node) => {
+      if (node.textContent?.trim() !== sessionId) return false;
+      for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
+        const classes = [...(ancestor.getAttribute("data-ui-node-id") ?? "")
+          .matchAll(/-sessions-(current|ended|unavailable)-/g)]
+          .map((match) => match[1]);
+        if (classes.length === 1 && classes[0] === lifecycleClass) return true;
+      }
+      return false;
+    });
   }, { sessionId, lifecycleClass }, { timeout: 30_000 });
-  return exactText.evaluate((node, lifecycleClass) => ({
-    node_id: node.closest("[data-ui-node-id]")?.getAttribute("data-ui-node-id") ?? null,
-    region_id: node.closest(`[data-ui-node-id*='-sessions-${lifecycleClass}-']`)?.getAttribute("data-ui-node-id") ?? null
-  }), lifecycleClass);
+  const rendered = await exactText.evaluate((node) => {
+    const ancestors = [];
+    for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
+      const id = ancestor.getAttribute("data-ui-node-id");
+      if (id) ancestors.push({ id, text: ancestor.textContent ?? "" });
+    }
+    return {
+      node_id: node.closest("[data-ui-node-id]")?.getAttribute("data-ui-node-id") ?? null,
+      ancestors
+    };
+  });
+  const region = workspacesLifecycleRegion(rendered.ancestors, lifecycleClass);
+  if (!region) {
+    throw new Error(`session ${sessionId} did not resolve to one ${lifecycleClass} lifecycle region`);
+  }
+  return { node_id: rendered.node_id, region_id: region.id };
 }
 
 async function sharedHubRequestCounts(page) {
@@ -3586,9 +3619,11 @@ async function startWebrtcPackageRuntime() {
     if (status.error) {
       throw new Error(`shared-Hub browser driver could not handshake with caller-owned Hub: ${JSON.stringify(status)}`);
     }
+    const packages = await listPackages(socketPath);
     const url = await waitForPackageAppUrl(socketPath);
     await waitForHttpOk(new URL("/health", url).toString());
-    await waitForHtmlShell(url);
+    const servedHtml = await waitForHtmlShell(url);
+    binaryProvenance = callerOwnedRuntimeProvenance(status, packages, servedHtml);
     return url;
   }
   if (!process.env.BOTSTER_HUB_BIN) {
@@ -3633,6 +3668,48 @@ async function startWebrtcPackageRuntime() {
     recordServedWebBuildProvenance(servedHtml, reusedWebPackageProvenance);
   }
   return url;
+}
+
+function callerOwnedRuntimeProvenance(status, packages, servedHtml) {
+  const daemonStatus = status.status ?? {};
+  const compatibility = daemonStatus.compatibility ?? {};
+  const packageEvidence = (packageName) => {
+    const record = packages.find((candidate) => candidate.package_name === packageName);
+    if (!record) throw new Error(`caller-owned Hub omitted installed package ${packageName}`);
+    return {
+      package_name: record.package_name,
+      version: record.version,
+      source_kind: record.source_kind,
+      classification: record.classification,
+      state: record.state
+    };
+  };
+  const servedAssetUrls = htmlAssetUrls(servedHtml);
+  return {
+    hub: {
+      source: "caller-owned",
+      path: null,
+      protocol: compatibility.protocol,
+      protocol_version: compatibility.protocol_version,
+      conformance_fixture_revision: compatibility.conformance_fixture_revision,
+      schema_version: daemonStatus.schema_version,
+      host_id: daemonStatus.host_id
+    },
+    session_worker: {
+      source: "caller-owned",
+      path: null,
+      version: null,
+      disposition: "not_exposed_by_daemon_status"
+    },
+    workspaces: packageEvidence("botster-workspaces"),
+    web: {
+      ...packageEvidence("botster-web"),
+      build_commit: null,
+      build_commit_disposition: "not_exposed_by_installed_app_contract",
+      served_asset_urls: servedAssetUrls,
+      served_asset_digest: createHash("sha256").update(JSON.stringify(servedAssetUrls)).digest("hex")
+    }
+  };
 }
 
 async function ensurePackageEnabled(packageName, packagePath) {
@@ -4037,4 +4114,8 @@ function browserFailureSummary({ consoleEvents, pageErrors, responseErrors }) {
     return `live packaged protocol harness failed:\n${failures.join("\n")}`;
   }
   return undefined;
+}
+
+function flushWritable(stream) {
+  return new Promise((resolve) => stream.write("", resolve));
 }

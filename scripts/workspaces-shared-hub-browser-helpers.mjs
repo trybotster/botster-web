@@ -1,8 +1,6 @@
 import { createHash } from "node:crypto";
 
 const allowSkipPattern = /^BOTSTER_LIVE_ALLOW_.*_SKIP$/;
-const lifecycleStates = new Set(["current", "ended"]);
-
 export function assertNoRequiredSmokeSkip(environment = process.env) {
   const rejected = Object.entries(environment)
     .filter(([name, value]) => allowSkipPattern.test(name) && value != null && value !== "0" && value !== "")
@@ -45,10 +43,13 @@ export function parseWorkspacesSpawnAssignment(serialized) {
       template_id: requiredString(candidate?.template_id, `${path}.template_id`),
       prompt: optionalString(candidate?.prompt, `${path}.prompt`),
       ticket_id: optionalString(candidate?.ticket_id, `${path}.ticket_id`),
-      expected_lifecycle: candidate?.expected_lifecycle ?? "ended"
+      expected_lifecycle: candidate?.expected_lifecycle ?? "ended",
+      expect_created_branch: optionalBoolean(candidate?.expect_created_branch, `${path}.expect_created_branch`),
+      expect_created_worktree: optionalBoolean(candidate?.expect_created_worktree, `${path}.expect_created_worktree`),
+      expect_reused_worktree: optionalBoolean(candidate?.expect_reused_worktree, `${path}.expect_reused_worktree`)
     };
-    if (!lifecycleStates.has(normalized.expected_lifecycle)) {
-      throw new Error(`${path}.expected_lifecycle must be current or ended`);
+    if (normalized.expected_lifecycle !== "ended") {
+      throw new Error(`${path}.expected_lifecycle must be ended`);
     }
     if (caseIds.has(normalized.case_id)) throw new Error(`duplicate case_id ${normalized.case_id}`);
     caseIds.add(normalized.case_id);
@@ -80,12 +81,50 @@ export function chooseCreateControl(entryState, renderedNodeIds) {
 }
 
 export function assertReconciliationCounts(before, after) {
+  const evidence = reconciliationEvidence(before, after);
   for (const key of ["plugin_surface_render", "list_sessions"]) {
     if (before?.[key] !== after?.[key]) {
       throw new Error(`shared-Hub reconciliation changed ${key}: before=${before?.[key]} after=${after?.[key]}`);
     }
   }
-  return { plugin_surface_render: after.plugin_surface_render, list_sessions: after.list_sessions };
+  return evidence;
+}
+
+export function reconciliationEvidence(before, after) {
+  return {
+    before,
+    after,
+    request_counts_unchanged: ["plugin_surface_render", "list_sessions"]
+      .every((key) => before?.[key] === after?.[key])
+  };
+}
+
+export function assertSharedHubSpawnResult(spawnCase, hubResult) {
+  for (const [field, expected] of Object.entries({
+    target_id: spawnCase.target_id,
+    branch: spawnCase.branch
+  })) {
+    if (hubResult?.[field] !== expected) {
+      throw new Error(`${spawnCase.case_id} Hub result changed ${field}: expected=${expected} actual=${hubResult?.[field]}`);
+    }
+  }
+  for (const [assignmentField, resultField] of [
+    ["expect_created_branch", "created_branch"],
+    ["expect_created_worktree", "created_worktree"],
+    ["expect_reused_worktree", "reused_worktree"]
+  ]) {
+    const expected = spawnCase[assignmentField];
+    if (expected !== undefined && hubResult?.[resultField] !== expected) {
+      throw new Error(
+        `${spawnCase.case_id} Hub result changed ${resultField}: expected=${expected} actual=${hubResult?.[resultField]}`
+      );
+    }
+  }
+  for (const field of ["base_ref", "base_commit", "worktree_id", "worktree_path"]) {
+    if (typeof hubResult?.[field] !== "string" || hubResult[field].length === 0) {
+      throw new Error(`${spawnCase.case_id} Hub result omitted ${field}: ${JSON.stringify(hubResult)}`);
+    }
+  }
 }
 
 export function assertTwoGenerationLedger(summaries) {
@@ -110,6 +149,11 @@ export function assertTwoGenerationLedger(summaries) {
     if (summary.case_count !== summary.cases?.length || summary.case_count < 1) {
       throw new Error(`shared-Hub generation ${summary.generation} omitted assigned case evidence`);
     }
+    if (summary.cases.some((entry) =>
+      entry.action_result?.accepted !== true || entry.reconciliation?.request_counts_unchanged !== true
+    )) {
+      throw new Error(`shared-Hub generation ${summary.generation} contains unaccepted or unreconciled case evidence`);
+    }
   }
   return { generations: summaries.map((summary) => summary.generation), completed: true };
 }
@@ -122,6 +166,12 @@ function requiredString(value, path) {
 function optionalString(value, path) {
   if (value == null) return undefined;
   return requiredString(value, path);
+}
+
+function optionalBoolean(value, path) {
+  if (value == null) return undefined;
+  if (typeof value !== "boolean") throw new Error(`${path} must be a boolean`);
+  return value;
 }
 
 function stableJson(value) {
