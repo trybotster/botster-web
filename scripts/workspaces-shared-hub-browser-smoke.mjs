@@ -7,6 +7,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  assertBinaryProvenanceStable,
   assertNoRequiredSmokeSkip,
   assertTwoGenerationLedger
 } from "./workspaces-shared-hub-browser-helpers.mjs";
@@ -271,20 +272,12 @@ async function loadProvenance() {
     hub: await binaryProvenance(hubBinary),
     session_worker: await binaryProvenance(sessionWorkerBinary)
   };
-  for (const name of ["hub", "session_worker"]) {
-    if (launchedBinaryProvenance?.[name]?.sha256 !== finalBinaryProvenance[name].sha256) {
-      throw new Error(`${name} binary changed while shared-Hub browser proof was running`);
-    }
-  }
+  const stableBinaryProvenance = assertBinaryProvenanceStable(
+    launchedBinaryProvenance,
+    finalBinaryProvenance
+  );
   return {
-    hub: {
-      ...launchedBinaryProvenance.hub,
-      stability: "digest_before_launch_matches_completion"
-    },
-    session_worker: {
-      ...launchedBinaryProvenance.session_worker,
-      stability: "digest_before_launch_matches_completion"
-    },
+    ...stableBinaryProvenance,
     workspaces: {
       path: workspacesPackagePath,
       manifest_version: workspacesManifest.version,

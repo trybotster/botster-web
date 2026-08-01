@@ -19,6 +19,20 @@ export function requiredProvenanceField(record, field, label) {
   return value;
 }
 
+export function assertBinaryProvenanceStable(launched, completed) {
+  return Object.fromEntries(["hub", "session_worker"].map((name) => {
+    const before = requiredBinaryDigest(launched?.[name], `${name} launch`);
+    const after = requiredBinaryDigest(completed?.[name], `${name} completion`);
+    if (before.sha256 !== after.sha256) {
+      throw new Error(`${name} binary changed while shared-Hub browser proof was running`);
+    }
+    return [name, {
+      ...before,
+      stability: "digest_before_launch_matches_completion"
+    }];
+  }));
+}
+
 export function parseWorkspacesSpawnAssignment(serialized) {
   if (typeof serialized !== "string" || serialized.trim() === "") {
     throw new Error("BOTSTER_WORKSPACES_SPAWN_CASES is required");
@@ -180,6 +194,16 @@ function optionalBoolean(value, path) {
   if (value == null) return undefined;
   if (typeof value !== "boolean") throw new Error(`${path} must be a boolean`);
   return value;
+}
+
+function requiredBinaryDigest(record, label) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    throw new Error(`${label} provenance must be an object`);
+  }
+  if (typeof record.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(record.sha256)) {
+    throw new Error(`${label} provenance requires a SHA-256 digest`);
+  }
+  return record;
 }
 
 function stableJson(value) {

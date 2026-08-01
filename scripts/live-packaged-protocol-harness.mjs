@@ -1483,7 +1483,7 @@ async function assertSelectedAppSurfaceRendered(page, target) {
       await assertNoUnsupportedWorkspacesNodes(page);
       return;
     }
-    const stage = workspacesCompatibilityProofCount === 0
+    let stage = workspacesCompatibilityProofCount === 0
       ? "initial"
       : workspacesCompatibilityProofCount === 1
         ? "reload"
@@ -1496,12 +1496,21 @@ async function assertSelectedAppSurfaceRendered(page, target) {
     await assertNoUnsupportedWorkspacesNodes(page);
 
     if (stage === "initial") {
-      await assertWorkspacesNodeIds(page, [
-        "botster-workspaces-new",
-        "botster-workspaces-empty",
-        "botster-workspaces-empty-create"
-      ], "initial cold start");
-      workspacesCompatibilityState = await createWorkspacesCompatibilityWorkspace(page);
+      const retainedState = ownsWebrtcDataDir
+        ? null
+        : await readRetainedWorkspacesCompatibilityWorkspace(page);
+      if (retainedState) {
+        stage = "initial-retained";
+        workspacesCompatibilityState = retainedState;
+        await assertWorkspacesCompatibilityRow(page, retainedState, stage);
+      } else {
+        await assertWorkspacesNodeIds(page, [
+          "botster-workspaces-new",
+          "botster-workspaces-empty",
+          "botster-workspaces-empty-create"
+        ], "initial cold start");
+        workspacesCompatibilityState = await createWorkspacesCompatibilityWorkspace(page);
+      }
     } else {
       if (!workspacesCompatibilityState) {
         throw new Error(`Workspaces ${stage} proof has no persisted workspace identity`);
@@ -2010,6 +2019,33 @@ async function createWorkspacesCompatibilityWorkspace(page) {
   const state = { workspaceId, workspaceName };
   await assertWorkspacesCompatibilityRow(page, state, "initial replacement");
   return state;
+}
+
+async function readRetainedWorkspacesCompatibilityWorkspace(page) {
+  const surface = page.getByTestId("selected-app-surface");
+  const rows = surface.locator(
+    "ion-item.uinode-list-item[data-ui-node-id^='botster-workspaces-row-']"
+  );
+  const rowCount = await rows.count();
+  if (rowCount === 0) return null;
+  if (rowCount !== 1) {
+    throw new Error(`caller-owned Workspaces proof expected one retained workspace; count=${rowCount}`);
+  }
+  const row = rows.first();
+  const rowNodeId = await row.getAttribute("data-ui-node-id");
+  const workspaceId = rowNodeId?.slice("botster-workspaces-row-".length);
+  if (!workspaceId || rowNodeId !== `botster-workspaces-row-${workspaceId}`) {
+    throw new Error(`caller-owned Workspaces proof found invalid retained row ${JSON.stringify(rowNodeId)}`);
+  }
+  const titles = row.locator("[data-ui-node-id^='botster-workspaces-row-title-']");
+  if (await titles.count() !== 1) {
+    throw new Error(`caller-owned Workspaces retained row ${workspaceId} omitted one title slot`);
+  }
+  const workspaceName = (await titles.first().innerText()).trim();
+  if (!workspaceName) {
+    throw new Error(`caller-owned Workspaces retained row ${workspaceId} had an empty title`);
+  }
+  return { workspaceId, workspaceName };
 }
 
 async function waitForWorkspacesPluginSurfaceRequest(

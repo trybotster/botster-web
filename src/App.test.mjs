@@ -50,6 +50,7 @@ import {
 } from "../scripts/live-packaged-protocol-helpers.mjs";
 import {
   assignmentDigest,
+  assertBinaryProvenanceStable,
   assertNoRequiredSmokeSkip,
   assertReconciliationCounts,
   assertSharedHubSpawnResult,
@@ -102,6 +103,34 @@ assert.equal(requiredProvenanceField({ protocol_version: 4 }, "protocol_version"
 assert.throws(
   () => requiredProvenanceField({}, "protocol_version", "status.compatibility"),
   /omitted provenance field status\.compatibility\.protocol_version/
+);
+const launchedBinaryProvenance = {
+  hub: { path: "/hub", sha256: "a".repeat(64) },
+  session_worker: { path: "/worker", sha256: "b".repeat(64) }
+};
+assert.deepEqual(
+  assertBinaryProvenanceStable(launchedBinaryProvenance, structuredClone(launchedBinaryProvenance)),
+  {
+    hub: { ...launchedBinaryProvenance.hub, stability: "digest_before_launch_matches_completion" },
+    session_worker: {
+      ...launchedBinaryProvenance.session_worker,
+      stability: "digest_before_launch_matches_completion"
+    }
+  }
+);
+assert.throws(
+  () => assertBinaryProvenanceStable(launchedBinaryProvenance, {
+    ...launchedBinaryProvenance,
+    hub: { ...launchedBinaryProvenance.hub, sha256: "c".repeat(64) }
+  }),
+  /hub binary changed while shared-Hub browser proof was running/
+);
+assert.throws(
+  () => assertBinaryProvenanceStable(launchedBinaryProvenance, {
+    ...launchedBinaryProvenance,
+    session_worker: { ...launchedBinaryProvenance.session_worker, sha256: "d".repeat(64) }
+  }),
+  /session_worker binary changed while shared-Hub browser proof was running/
 );
 assert.equal(chooseCreateControl("cold", ["botster-workspaces-empty-create"]), "botster-workspaces-empty-create");
 assert.equal(chooseCreateControl("reused", ["botster-workspaces-new"]), "botster-workspaces-new");
@@ -728,7 +757,6 @@ const [
   localPackageServerScript,
   browserRuntimeSmokeScript,
   liveProtocolHarnessScript,
-  sharedHubBrowserSmokeScript,
   architecture,
   readme,
   uiContractDeclarations,
@@ -766,7 +794,6 @@ const [
   readFile(new URL("../scripts/local-package-server.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/browser-runtime-smoke.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-packaged-protocol-harness.mjs", import.meta.url), "utf8"),
-  readFile(new URL("../scripts/workspaces-shared-hub-browser-smoke.mjs", import.meta.url), "utf8"),
   readFile(new URL("../docs/architecture.md", import.meta.url), "utf8"),
   readFile(new URL("../README.md", import.meta.url), "utf8"),
   readFile(new URL("../node_modules/@trybotster/ui-contract/index.d.ts", import.meta.url), "utf8"),
@@ -1413,12 +1440,8 @@ assert.match(liveProtocolHarnessScript, /assertTerminalAttachChronology/);
 assert.match(liveProtocolHarnessScript, /event\.type === "attach_state" \? `\$\{event\.type\}:\$\{event\.state\}`/);
 assert.match(liveProtocolHarnessScript, /binaryProvenanceFor/);
 assert.match(liveProtocolHarnessScript, /requiredProvenanceField\(compatibility, "protocol"/);
-assert.match(liveProtocolHarnessScript, /if \(!sharedHubDriverMode\) \{\s*console\.log\(`live packaged protocol binary provenance/);
-assert.match(sharedHubBrowserSmokeScript, /createReadStream\(path\)/);
-assert.match(sharedHubBrowserSmokeScript, /sha256: await fileSha256\(path\)/);
-assert.match(sharedHubBrowserSmokeScript, /binary changed while shared-Hub browser proof was running/);
-assert.match(sharedHubBrowserSmokeScript, /source_commit_disposition: "not_verified_without_build_receipt"/);
-assert.match(sharedHubBrowserSmokeScript, /"missing-branch-create"[\s\S]*include_optional_values: false/);
+assert.match(liveProtocolHarnessScript, /if \(!sharedHubDriverMode\)/);
+assert.match(liveProtocolHarnessScript, /live packaged protocol binary provenance/);
 assert.doesNotMatch(
   liveProtocolHarnessScript,
   /BOTSTER_HUB_SOURCE_DIR \? join\(process\.env\.BOTSTER_HUB_SOURCE_DIR, "fixtures\/plugins\/plugin-contract-matrix"\)/
