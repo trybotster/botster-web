@@ -20,6 +20,7 @@ import {
   harnessEventMatches,
   htmlAssetUrls,
   latestAcceptedWorkspacesUiTree,
+  packageRuntimeNavigation,
   packageEnsureDecision,
   reconnectGenerationEvidence,
   workspacesLifecycleAbsenceResult,
@@ -218,9 +219,12 @@ try {
   let previousGrantId = await latestLocalWebrtcGrantId(page);
   let previousEntitySubscriptionId = await latestSessionEntitySubscriptionId(page);
   for (const cycle of [1, 2]) {
-    const reconnect = await reloadSamePackageUrlAndAssertWebrtc(
+    const reconnect = await navigatePackageRuntimeAndAssertWebrtc(
       page,
-      cycle,
+      {
+        label: `cycle ${cycle}`,
+        mode: cycle === 1 ? "reload-current-route" : "revisit-package-root"
+      },
       previousGrantId,
       previousEntitySubscriptionId
     );
@@ -468,63 +472,72 @@ async function revisitPackageRuntime(page) {
   await page.goto(appUrl, { waitUntil: "domcontentloaded" });
 }
 
-async function reloadSamePackageUrlAndAssertWebrtc(page, cycle, previousGrantId, previousEntitySubscriptionId) {
-  const expectedUrl = appUrl;
+async function navigatePackageRuntimeAndAssertWebrtc(
+  page,
+  { inspectDiagnostics = true, label, mode },
+  previousGrantId,
+  previousEntitySubscriptionId
+) {
   const beforeUrl = page.url();
-  if (new URL(beforeUrl).origin !== new URL(expectedUrl).origin) {
-    throw new Error(`same-URL reload cycle ${cycle} started on unexpected origin: page=${beforeUrl} app=${expectedUrl}`);
-  }
+  const navigation = packageRuntimeNavigation({ appUrl, currentUrl: beforeUrl, mode });
 
-  if (cycle === 1) {
+  if (navigation.action === "reload") {
     await refreshPackageRuntime(page);
   } else {
-    await revisitPackageRuntime(page);
+    await page.goto(navigation.expectedUrl, { waitUntil: "domcontentloaded" });
   }
 
   const afterUrl = page.url();
-  if (new URL(afterUrl).origin !== new URL(expectedUrl).origin) {
-    throw new Error(`same-URL reload cycle ${cycle} changed package origin: before=${beforeUrl} after=${afterUrl} app=${expectedUrl}`);
+  if (afterUrl !== navigation.expectedUrl) {
+    throw new Error(
+      `package runtime navigation ${label} changed exact URL: ` +
+      `mode=${mode} expected=${navigation.expectedUrl} before=${beforeUrl} after=${afterUrl} app=${appUrl}`
+    );
   }
 
-  await openDiagnosticsView(page);
-  await waitForTransportLabel(page);
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "local_webrtc_signal" }, `reload ${cycle} local_webrtc_signal request`);
-  await waitForHarnessEvent(page, { kind: "webrtc_data_channel", state: "open" }, `reload ${cycle} data channel open`);
-  await waitForHarnessEvent(page, { kind: "webrtc_lifecycle", type: "data-channel-open" }, `reload ${cycle} lifecycle data-channel-open`);
-  await waitForHarnessEvent(page, { kind: "webrtc_lifecycle", type: "encrypted-stream-ready" }, `reload ${cycle} encrypted stream ready`);
-  await assertNoGrantSecretLeak(page, cycle);
+  if (inspectDiagnostics) {
+    await openDiagnosticsView(page);
+    await waitForTransportLabel(page);
+  }
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "local_webrtc_signal" }, `${label} local_webrtc_signal request`);
+  await waitForHarnessEvent(page, { kind: "webrtc_data_channel", state: "open" }, `${label} data channel open`);
+  await waitForHarnessEvent(page, { kind: "webrtc_lifecycle", type: "data-channel-open" }, `${label} lifecycle data-channel-open`);
+  await waitForHarnessEvent(page, { kind: "webrtc_lifecycle", type: "encrypted-stream-ready" }, `${label} encrypted stream ready`);
+  await assertNoGrantSecretLeak(page, label);
 
   const grantId = await latestLocalWebrtcGrantId(page);
   if (!grantId) {
-    throw new Error(`same-URL reload cycle ${cycle} did not expose a redacted local WebRTC grant_id`);
+    throw new Error(`package runtime navigation ${label} did not expose a redacted local WebRTC grant_id`);
   }
   if (previousGrantId && grantId === previousGrantId) {
-    throw new Error(`same-URL reload cycle ${cycle} reused local WebRTC grant_id ${grantId}`);
+    throw new Error(`package runtime navigation ${label} reused local WebRTC grant_id ${grantId}`);
   }
 
-  await page.getByText("WebRTC DataChannel open").waitFor({ timeout: 15_000 });
-  await page.getByText("Encrypted client stream ready").waitFor({ timeout: 15_000 });
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, `reload ${cycle} status request`);
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, `reload ${cycle} list_packages request`);
+  if (inspectDiagnostics) {
+    await page.getByText("WebRTC DataChannel open").waitFor({ timeout: 15_000 });
+    await page.getByText("Encrypted client stream ready").waitFor({ timeout: 15_000 });
+  }
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, `${label} status request`);
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, `${label} list_packages request`);
   await waitForHarnessEvent(
     page,
     { kind: "daemon_request", type: "subscribe_entities", entity_type: "session" },
-    `reload ${cycle} session entity subscription`
+    `${label} session entity subscription`
   );
   await waitForHarnessEvent(
     page,
     { kind: "hub_frame", family: "session" },
-    `reload ${cycle} authoritative session snapshot`
+    `${label} authoritative session snapshot`
   );
   const subscriptionId = await latestSessionEntitySubscriptionId(page);
   if (!subscriptionId) {
-    throw new Error(`same-URL reload cycle ${cycle} did not create a session entity subscription`);
+    throw new Error(`package runtime navigation ${label} did not create a session entity subscription`);
   }
   if (previousEntitySubscriptionId && subscriptionId === previousEntitySubscriptionId) {
-    throw new Error(`same-URL reload cycle ${cycle} reused session subscription_id ${subscriptionId}`);
+    throw new Error(`package runtime navigation ${label} reused session subscription_id ${subscriptionId}`);
   }
   await assertNoLegacySessionHydration(page);
-  return { grantId, subscriptionId };
+  return { grantId, subscriptionId, beforeUrl, afterUrl, navigationMode: mode };
 }
 
 async function callTerminalControl(page, method, ...args) {
@@ -617,6 +630,7 @@ async function exercisePluginContractMatrix(page) {
   const previousEventCount = await harnessEventCount(page);
   await openContractAppFromApps(page);
   await assertContractSurfaceRoute(page, "contract.app", "plugin_surface_render", previousEventCount);
+  await assertContractSurfaceRouteReconnect(page, "contract.app", "plugin_surface_render");
   await assertContractSurfaceRouteReloadAndDirectLoad(page, "contract.app", "plugin_surface_render");
 
   await navigateToContractSurface(page, "contract.empty");
@@ -893,6 +907,40 @@ async function assertContractSurfaceRouteReloadAndDirectLoad(page, surfaceId, vi
 
   await page.goto(routeUrl, { waitUntil: "domcontentloaded" });
   await assertContractSurfaceRoute(page, surfaceId, visibleText);
+}
+
+async function assertContractSurfaceRouteReconnect(page, surfaceId, visibleText) {
+  const criteria = {
+    type: "plugin_surface_render",
+    package_name: contractMatrixPackageName,
+    surface_id: surfaceId
+  };
+  const expectedUrl = page.url();
+  const previousGrantId = await latestLocalWebrtcGrantId(page);
+  const previousSubscriptionId = await latestSessionEntitySubscriptionId(page);
+  const priorGenerationRenderCount = await daemonRequestCount(page, criteria);
+
+  const reconnect = await navigatePackageRuntimeAndAssertWebrtc(
+    page,
+    {
+      inspectDiagnostics: false,
+      label: `${surfaceId} selected route reconnect`,
+      mode: "reload-current-route"
+    },
+    previousGrantId,
+    previousSubscriptionId
+  );
+  if (reconnect.beforeUrl !== expectedUrl || reconnect.afterUrl !== expectedUrl) {
+    throw new Error(`selected contract route changed across reconnect: ${JSON.stringify({ expectedUrl, reconnect })}`);
+  }
+  await assertContractSurfaceRoute(page, surfaceId, visibleText);
+  const renderCount = await daemonRequestCount(page, criteria);
+  if (renderCount !== 1) {
+    throw new Error(
+      `${surfaceId} reconnect expected exactly one new plugin_surface_render: ` +
+      `${JSON.stringify({ priorGenerationRenderCount, renderCount, reconnect })}`
+    );
+  }
 }
 
 async function assertSelectedSurfaceNotLoading(page, surfaceId) {
@@ -1643,7 +1691,7 @@ async function waitForWorkspacesActionResult(
   });
 }
 
-async function assertWorkspacesCompatibilityRow(page, state, stage) {
+async function assertWorkspacesCompatibilityRow(page, state, stage, expectedSessionCount = 0) {
   const expectedNodeIds = [
     `botster-workspaces-row-${state.workspaceId}`,
     `botster-workspaces-row-title-${state.workspaceId}`,
@@ -1657,9 +1705,11 @@ async function assertWorkspacesCompatibilityRow(page, state, stage) {
   const metaText = await surface
     .locator(`[data-ui-node-id='botster-workspaces-row-count-${state.workspaceId}']`)
     .innerText();
-  if (titleText.trim() !== state.workspaceName || metaText.trim() !== "0 sessions") {
+  const expectedMeta = `${expectedSessionCount} sessions`;
+  if (titleText.trim() !== state.workspaceName || metaText.trim() !== expectedMeta) {
     throw new Error(
-      `Workspaces ${stage} row slot text mismatch; title=${JSON.stringify(titleText)} meta=${JSON.stringify(metaText)}`
+      `Workspaces ${stage} row slot text mismatch; title=${JSON.stringify(titleText)} ` +
+      `meta=${JSON.stringify(metaText)} expected_meta=${JSON.stringify(expectedMeta)}`
     );
   }
 }
@@ -1795,11 +1845,46 @@ async function exerciseWorkspacesLifecycle(page) {
 
   const previousGrantId = await latestLocalWebrtcGrantId(page);
   const previousSubscriptionId = await latestSessionEntitySubscriptionId(page);
-  await reloadSamePackageUrlAndAssertWebrtc(page, "workspaces-lifecycle", previousGrantId, previousSubscriptionId);
-  await assertSelectedAppSurfaceRendered(page, {
-    packageName: "botster-workspaces",
-    surfaceId: "workspaces"
-  });
+  const selectedRouteUrl = page.url();
+  const renderCriteria = {
+    type: "plugin_surface_render",
+    package_name: "botster-workspaces",
+    surface_id: "workspaces"
+  };
+  const priorGenerationRenderCount = await daemonRequestCount(page, renderCriteria);
+  const reconnect = await navigatePackageRuntimeAndAssertWebrtc(
+    page,
+    {
+      inspectDiagnostics: false,
+      label: "workspaces lifecycle selected route reconnect",
+      mode: "reload-current-route"
+    },
+    previousGrantId,
+    previousSubscriptionId
+  );
+  if (reconnect.beforeUrl !== selectedRouteUrl || reconnect.afterUrl !== selectedRouteUrl) {
+    throw new Error(`Workspaces selected route changed across reconnect: ${JSON.stringify({ selectedRouteUrl, reconnect })}`);
+  }
+  await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
+  await assertWorkspacesNodeIds(page, [
+    "botster-workspaces-app",
+    "botster-workspaces-toolbar",
+    "botster-workspaces-list"
+  ], "lifecycle reconnect");
+  await assertNoUnsupportedWorkspacesNodes(page);
+  await assertWorkspacesCompatibilityRow(
+    page,
+    workspacesCompatibilityState,
+    "lifecycle reconnect",
+    Object.keys(scenario).length
+  );
+  const reconnectedRenderCount = await daemonRequestCount(page, renderCriteria);
+  if (reconnectedRenderCount !== 1) {
+    throw new Error(
+      `Workspaces reconnect expected exactly one new selected surface pull: ` +
+      `${JSON.stringify({ priorGenerationRenderCount, reconnectedRenderCount, reconnect })}`
+    );
+  }
   await selectWorkspacesLifecycleWorkspace(page, workspacesCompatibilityState);
   const reconnected = await assertWorkspacesLifecycleOracles(page, {
     stage: "reconnect-authoritative-history",
@@ -1814,20 +1899,20 @@ async function exerciseWorkspacesLifecycle(page) {
     ],
     priorEvidence: initial
   });
-  const reconnect = reconnectGenerationEvidence(reconnected.events, previousSubscriptionId);
-  if (!reconnect.fresh || !reconnect.authoritativeSnapshot) {
+  const reconnectEvidence = reconnectGenerationEvidence(reconnected.events, previousSubscriptionId);
+  if (!reconnectEvidence.fresh || !reconnectEvidence.authoritativeSnapshot) {
     throw lifecycleOracleError(formatWorkspacesLifecycleFailure({
       ...reconnected,
       stage: "reconnect-generation",
       oracle: "fresh-subscription-authoritative-snapshot",
       classifications: reconnected.classifications,
-      requestCounts: { ...reconnected.requestCounts, reconnect }
+      requestCounts: { ...reconnected.requestCounts, reconnect: reconnectEvidence }
     }));
   }
   assertStableLifecycleIdentity(initial, reconnected, scenario.stableEnded, "ended");
   assertStableLifecycleIdentity(initial, reconnected, scenario.neverExisting, "unavailable");
   assertStableLifecycleIdentity(removed, reconnected, scenario.removed, "unavailable");
-  console.log(`Workspaces lifecycle acceptance passed ${JSON.stringify({ scenario, reconnect })}`);
+  console.log(`Workspaces lifecycle acceptance passed ${JSON.stringify({ scenario, reconnect, reconnectEvidence })}`);
 }
 
 async function selectWorkspacesLifecycleWorkspace(page, state) {
@@ -2994,6 +3079,8 @@ async function daemonRequestCount(page, criteria) {
         const payload = entry.payload ?? {};
         if (expectedCriteria.type && payload.type !== expectedCriteria.type) return false;
         if (expectedCriteria.data && payload.data !== expectedCriteria.data) return false;
+        if (expectedCriteria.package_name && payload.package_name !== expectedCriteria.package_name) return false;
+        if (expectedCriteria.surface_id && payload.surface_id !== expectedCriteria.surface_id) return false;
         return true;
       }).length,
     { expectedCriteria: criteria }
