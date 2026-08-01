@@ -81,6 +81,14 @@ assert.throws(
   }),
   /unexpected origin/
 );
+assert.throws(
+  () => packageRuntimeNavigation({
+    appUrl: "http://127.0.0.1:4200/",
+    currentUrl: "http://127.0.0.1:4200/packages/botster.plugin/surfaces/main",
+    mode: "workspaces-lifecycle"
+  }),
+  /unsupported package runtime navigation mode/
+);
 
 assert.deepEqual(packageEnsureDecision([], "botster-web"), {
   install: true,

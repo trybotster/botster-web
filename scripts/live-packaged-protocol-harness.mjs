@@ -918,7 +918,7 @@ async function assertContractSurfaceRouteReconnect(page, surfaceId, visibleText)
   const expectedUrl = page.url();
   const previousGrantId = await latestLocalWebrtcGrantId(page);
   const previousSubscriptionId = await latestSessionEntitySubscriptionId(page);
-  const previousRenderCount = await daemonRequestCount(page, criteria);
+  const priorGenerationRenderCount = await daemonRequestCount(page, criteria);
 
   const reconnect = await navigatePackageRuntimeAndAssertWebrtc(
     page,
@@ -938,7 +938,7 @@ async function assertContractSurfaceRouteReconnect(page, surfaceId, visibleText)
   if (renderCount !== 1) {
     throw new Error(
       `${surfaceId} reconnect expected exactly one new plugin_surface_render: ` +
-      `${JSON.stringify({ previousRenderCount, renderCount, reconnect })}`
+      `${JSON.stringify({ priorGenerationRenderCount, renderCount, reconnect })}`
     );
   }
 }
@@ -1691,7 +1691,7 @@ async function waitForWorkspacesActionResult(
   });
 }
 
-async function assertWorkspacesCompatibilityRow(page, state, stage) {
+async function assertWorkspacesCompatibilityRow(page, state, stage, expectedSessionCount = 0) {
   const expectedNodeIds = [
     `botster-workspaces-row-${state.workspaceId}`,
     `botster-workspaces-row-title-${state.workspaceId}`,
@@ -1705,9 +1705,11 @@ async function assertWorkspacesCompatibilityRow(page, state, stage) {
   const metaText = await surface
     .locator(`[data-ui-node-id='botster-workspaces-row-count-${state.workspaceId}']`)
     .innerText();
-  if (titleText.trim() !== state.workspaceName || metaText.trim() !== "0 sessions") {
+  const expectedMeta = `${expectedSessionCount} sessions`;
+  if (titleText.trim() !== state.workspaceName || metaText.trim() !== expectedMeta) {
     throw new Error(
-      `Workspaces ${stage} row slot text mismatch; title=${JSON.stringify(titleText)} meta=${JSON.stringify(metaText)}`
+      `Workspaces ${stage} row slot text mismatch; title=${JSON.stringify(titleText)} ` +
+      `meta=${JSON.stringify(metaText)} expected_meta=${JSON.stringify(expectedMeta)}`
     );
   }
 }
@@ -1849,7 +1851,7 @@ async function exerciseWorkspacesLifecycle(page) {
     package_name: "botster-workspaces",
     surface_id: "workspaces"
   };
-  const previousRenderCount = await daemonRequestCount(page, renderCriteria);
+  const priorGenerationRenderCount = await daemonRequestCount(page, renderCriteria);
   const reconnect = await navigatePackageRuntimeAndAssertWebrtc(
     page,
     {
@@ -1870,11 +1872,17 @@ async function exerciseWorkspacesLifecycle(page) {
     "botster-workspaces-list"
   ], "lifecycle reconnect");
   await assertNoUnsupportedWorkspacesNodes(page);
+  await assertWorkspacesCompatibilityRow(
+    page,
+    workspacesCompatibilityState,
+    "lifecycle reconnect",
+    Object.keys(scenario).length
+  );
   const reconnectedRenderCount = await daemonRequestCount(page, renderCriteria);
   if (reconnectedRenderCount !== 1) {
     throw new Error(
       `Workspaces reconnect expected exactly one new selected surface pull: ` +
-      `${JSON.stringify({ previousRenderCount, reconnectedRenderCount, reconnect })}`
+      `${JSON.stringify({ priorGenerationRenderCount, reconnectedRenderCount, reconnect })}`
     );
   }
   await selectWorkspacesLifecycleWorkspace(page, workspacesCompatibilityState);
@@ -3072,7 +3080,7 @@ async function daemonRequestCount(page, criteria) {
         if (expectedCriteria.type && payload.type !== expectedCriteria.type) return false;
         if (expectedCriteria.data && payload.data !== expectedCriteria.data) return false;
         if (expectedCriteria.package_name && payload.package_name !== expectedCriteria.package_name) return false;
-        if (expectedCriteria.surface_id && (payload.surface_id ?? payload.request?.surface_id) !== expectedCriteria.surface_id) return false;
+        if (expectedCriteria.surface_id && payload.surface_id !== expectedCriteria.surface_id) return false;
         return true;
       }).length,
     { expectedCriteria: criteria }
