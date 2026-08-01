@@ -310,6 +310,8 @@ const lifecyclePartition = workspacesLifecyclePartitionExpectations({
 });
 assert.equal(lifecyclePartition.expectations.length, 16);
 assert.equal(lifecyclePartition.absentExpectations.length, 32);
+assert.equal(Object.hasOwn(lifecyclePartition.expectations[0], "oracle"), false);
+assert.equal(Object.hasOwn(lifecyclePartition.absentExpectations[0], "oracle"), false);
 assert.deepEqual(
   lifecyclePartition.expectations.filter((entry) => entry.lifecycleClass === "current").map((entry) => entry.referenceId),
   ["transition-1", "transition-2", "transition-3", "transition-4"]
@@ -1354,6 +1356,23 @@ assert.match(liveProtocolHarnessScript, /removals: Array\.from\(\{ length: 4 \}/
 assert.match(liveProtocolHarnessScript, /neverExisting: Array\.from\(\{ length: 4 \}/);
 assert.match(liveProtocolHarnessScript, /stageExpectations\(removedPartition\)/);
 assert.match(liveProtocolHarnessScript, /observedWorkspacesLifecyclePartition\(reconnected\.classifications\)/);
+assert.match(liveProtocolHarnessScript, /priorEvidence: \[initial, removed\]/);
+assert.match(
+  liveProtocolHarnessScript,
+  /assertStableLifecycleIdentity\(transitioned, reconnected, sessionId, "ended"\)/
+);
+assert.match(
+  liveProtocolHarnessScript,
+  /assertStableLifecycleIdentity\(initial, reconnected, sessionId, "ended"\)/
+);
+assert.match(
+  liveProtocolHarnessScript,
+  /assertStableLifecycleIdentity\(removed, reconnected, sessionId, "unavailable"\)/
+);
+assert.match(
+  liveProtocolHarnessScript,
+  /assertStableLifecycleIdentity\(initial, reconnected, sessionId, "unavailable"\)/
+);
 assert.equal(packageManifest.kind, "plugin");
 assert.equal(packageManifest.botster, ">=0.1.0");
 assert.deepEqual(packageManifest.source, { type: "path", path: "." });

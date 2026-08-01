@@ -192,7 +192,6 @@ export function workspacesLifecyclePartitionExpectations(partition) {
       }
       assignments.set(referenceId, lifecycleClass);
       expectations.push({
-        oracle: `${lifecycleClass}-reference`,
         referenceId,
         lifecycleClass
       });
@@ -202,7 +201,6 @@ export function workspacesLifecyclePartitionExpectations(partition) {
     lifecycleClasses
       .filter((lifecycleClass) => lifecycleClass !== expectedClass)
       .map((lifecycleClass) => ({
-        oracle: `not-${lifecycleClass}-reference`,
         referenceId,
         lifecycleClass
       }))

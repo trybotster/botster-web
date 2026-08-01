@@ -1907,7 +1907,7 @@ async function exerciseWorkspacesLifecycle(page) {
   const reconnected = await assertWorkspacesLifecycleOracles(page, {
     stage: "reconnect-authoritative-history",
     ...stageExpectations(removedPartition),
-    priorEvidence: removed
+    priorEvidence: [initial, removed]
   });
   const reconnectEvidence = reconnectGenerationEvidence(reconnected.events, previousSubscriptionId);
   if (!reconnectEvidence.fresh || !reconnectEvidence.authoritativeSnapshot) {
@@ -1919,11 +1919,17 @@ async function exerciseWorkspacesLifecycle(page) {
       requestCounts: { ...reconnected.requestCounts, reconnect: reconnectEvidence }
     }));
   }
-  for (const sessionId of [...scenario.transitions, ...scenario.stableEnded]) {
-    assertStableLifecycleIdentity(removed, reconnected, sessionId, "ended");
+  for (const sessionId of scenario.transitions) {
+    assertStableLifecycleIdentity(transitioned, reconnected, sessionId, "ended");
   }
-  for (const sessionId of [...scenario.removals, ...scenario.neverExisting]) {
+  for (const sessionId of scenario.stableEnded) {
+    assertStableLifecycleIdentity(initial, reconnected, sessionId, "ended");
+  }
+  for (const sessionId of scenario.removals) {
     assertStableLifecycleIdentity(removed, reconnected, sessionId, "unavailable");
+  }
+  for (const sessionId of scenario.neverExisting) {
+    assertStableLifecycleIdentity(initial, reconnected, sessionId, "unavailable");
   }
   console.log(`Workspaces lifecycle acceptance passed ${JSON.stringify({
     scenario,
@@ -2056,10 +2062,13 @@ async function assertWorkspacesLifecycleOracles(page, {
       canonicalRecords: evidence.canonicalRecords,
       renderedNodeIds: evidence.renderedRows.map((row) => row.id)
     });
-    const prior = priorEvidence?.classifications.find((classification) =>
-      classification.referenceId === expectation.referenceId &&
-      classification.lifecycleClass === expectation.lifecycleClass
-    );
+    const prior = (Array.isArray(priorEvidence) ? priorEvidence : [priorEvidence])
+      .filter(Boolean)
+      .flatMap((entry) => entry.classifications)
+      .find((classification) =>
+        classification.referenceId === expectation.referenceId &&
+        classification.lifecycleClass === expectation.lifecycleClass
+      );
     const candidateIds = [...new Set([current.resolvedValue, prior?.resolvedValue].filter(Boolean))];
     const regions = [];
     for (const id of candidateIds) {
