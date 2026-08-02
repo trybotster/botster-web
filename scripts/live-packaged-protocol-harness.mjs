@@ -878,9 +878,10 @@ async function assertContractSessionRows(page, expectedRows) {
           `contract.sessions rendered action mismatch for ${control.node_id}: ${JSON.stringify({ actionId, control })}`
         );
       }
-      if ((await renderedControl.innerText()).trim() !== control.label) {
+      const renderedLabel = (await renderedControl.textContent())?.trim() ?? "";
+      if (renderedLabel !== control.label) {
         throw new Error(
-          `contract.sessions rendered label mismatch for ${control.node_id}: ${JSON.stringify({ expected: control.label, actual: await renderedControl.innerText() })}`
+          `contract.sessions rendered label mismatch for ${control.node_id}: ${JSON.stringify({ expected: control.label, actual: renderedLabel })}`
         );
       }
     }
@@ -895,8 +896,9 @@ async function activateContractSessionControl(page, expectedControl, activation)
   const sinceIndex = await harnessEventCount(page);
 
   if (activation === "keyboard") {
-    await control.focus();
-    await page.keyboard.press("Enter");
+    const keyboardTarget = control.locator("button").first();
+    await keyboardTarget.focus();
+    await keyboardTarget.press("Enter");
   } else {
     await control.click();
   }

@@ -1475,8 +1475,13 @@ export const ionicUiNodeRendererRegistry: UiNodeRendererRegistry = {
     const realizationIssues: IdentityIssue[] = [];
     const root = realizedNodeIdentity(snapshot.root, undefined, { issues: realizationIssues });
     if (realizationIssues[0]) return identityDiagnostic(snapshot, realizationIssues[0]);
+    // Every unresolved root currently reports an issue above; preserve the same fail-closed vocabulary if that invariant changes.
     if (!root) {
-      return <div className="uinode-fallback" data-unsupported-identity="unresolved" role="note">Unsupported node identity</div>;
+      return identityDiagnostic(snapshot, {
+        kind: "invalid-descendant-identity",
+        value: "<unresolved>",
+        locations: ["root"]
+      });
     }
 
     const collision = realizedIdentityIssue(root, entities, options);

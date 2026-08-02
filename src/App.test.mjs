@@ -7010,6 +7010,13 @@ try {
   assert.match(misplacedDescendantProof.markup, /data-ui-identity-diagnostic="invalid-descendant-identity"/);
   assert.deepEqual(misplacedDescendantProof.actions, []);
 
+  for (const rootId of [{ $bind: "@/whatever" }, { nonsense: 1 }]) {
+    const unresolvedRootProof = renderIdentityCase({ id: rootId, type: "stack", props: { direction: "vertical" } });
+    assert.match(unresolvedRootProof.markup, /data-ui-identity-diagnostic="invalid-descendant-identity"/);
+    assert.doesNotMatch(unresolvedRootProof.markup, /data-unsupported-identity=/);
+    assert.deepEqual(unresolvedRootProof.actions, []);
+  }
+
   const nestedEmptyDescendantProof = renderIdentityCase(
     boundIdentityTemplate([{
       $kind: "bind_list",
