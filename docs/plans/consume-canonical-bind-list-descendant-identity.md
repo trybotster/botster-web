@@ -58,6 +58,15 @@
   path in `src/App.tsx`, deterministic coverage in `src/App.test.mjs`, the live
   `contract.sessions` path in `scripts/live-packaged-protocol-harness.mjs`, and
   the protocol drift check.
+- Current renderer behavior is narrower than the ticket's required realized-tree
+  validator, but it is not absent: `resolveChild` currently detects duplicate
+  direct bound row-root identities with `identityCounts` and silently drops every
+  colliding row while leaving the rest of the surface interactive
+  (`IonicUiNodeRenderer.tsx:316-327`). The current shared negative loop in
+  `App.test.mjs:6891-6907` locks that behavior together with missing/blank root
+  handling by still collecting the valid sibling action. The new whole-render
+  collision policy must deliberately supersede only the duplicate-row part of
+  this behavior.
 - Baseline commands are executable on the declared base: `npm test` passed and
   `npm run typecheck` passed before planning changes.
 - No other open ticket in project `project_1785192644_645154` targets
@@ -109,7 +118,10 @@
    `realizeBindListDescendantId` runtime helper and pass its literal result onward.
    Nested BindLists establish their own row-root context. Static/literal ids stay
    byte-for-byte unchanged; descendant full-ID `$bind`, misplaced keyed forms,
-   blank/unresolved roots or keys, and unresolved identity sentinels fail closed.
+   blank/unresolved descendant keys, and unresolved descendant identity sentinels
+   fail the surface closed. Preserve the existing direct-root behavior for a
+   missing, non-string, or blank `$bind` result: omit that unresolved row without
+   fabricating identity, while valid sibling rows remain interactive.
    Do not add an encoder, parse the returned id, synthesize/index ids, normalize
    Unicode, or retain a 0.2 compatibility branch.
 
@@ -122,6 +134,15 @@
    - after row filtering/expansion and conditional evaluation, every literal
      node id is unique among nodes that actually coexist in that render.
 
+   Cold-remove the existing `boundIdentity`/`identityCounts` duplicate-row drop
+   filter from `resolveChild`; do not preserve it as an earlier cleanup pass or
+   compatibility path. The prepass must receive the unfiltered set of all
+   successfully realized row roots so duplicate direct row ids become an
+   observable whole-render collision and cannot disappear before diagnostics.
+   Missing/blank/unresolved row roots remain omitted before the collision set
+   because they never become literal renderer identity; duplicate literal row
+   roots do become members and invalidate the surface.
+
    The final collision set includes roots, static siblings, direct row roots,
    generated descendants, literal descendants, nested list expansions, and
    every slot. `when`/`hidden` and presentation alternatives that cannot coexist
@@ -132,13 +153,19 @@
    `UiActionRequest.node_id` until the prepass succeeds.
 
 4. **Fail closed with actionable, bounded diagnostics.** A malformed authored
-   key/context and a duplicate realized id are separate diagnostic kinds. Render
-   one surface-level fallback instead of a partially interactive ambiguous tree,
-   publish no action callbacks, and identify the surface, offending key or exact
-   realized id, and the two bounded structural locations/row identities that
-   conflict. Do not dump entity records, action payloads, broad trees, or secrets,
-   and do not repair either identity. Preserve the existing unsupported primitive,
-   capability, and unresolved-root behavior outside this identity boundary.
+   descendant key/context and a duplicate realized id are separate diagnostic
+   kinds. Render one surface-level fallback instead of a partially interactive
+   ambiguous tree, publish no action callbacks, and identify the surface,
+   offending key or exact realized id, and the two bounded structural
+   locations/row identities that conflict. This whole-surface policy includes
+   duplicate direct row roots and intentionally replaces their current silent
+   drop-plus-partial-interactivity behavior. It does not change the existing
+   per-row omission of a direct root whose `$bind` is missing, non-string, or
+   blank; those rows never realize an identity, and valid siblings continue to
+   render and collect actions. Do not dump entity records, action payloads, broad
+   trees, or secrets, and do not repair either identity. Preserve the existing
+   unsupported primitive, capability, and unresolved-root behavior outside this
+   collision boundary.
 
 5. **Adapt deterministic production-renderer proof.** Update the canonical
    fixture assertions in `src/App.test.mjs` (and the fixture adapter only if the
@@ -165,6 +192,14 @@
    serialized fixture inspection are supporting guards only. Demonstrate the new
    regression assertions go red when helper-based descendant realization or the
    collision prepass is narrowly ablated, then restore green.
+
+   Split the currently shared `App.test.mjs:6891-6907` negative loop. Preserve
+   its existing missing and blank direct-root cases, including the assertion that
+   the valid `sess-valid` sibling still renders and contributes one action. Move
+   the duplicate `sess-duplicate` rows into a separate expectation for the new
+   surface-level realized-collision diagnostic and zero collected actions. This
+   assertion change is an intentional cold replacement of the narrow duplicate
+   drop policy, not incidental test cleanup.
 
 6. **Extend the real Web/Hub transport proof.** In
    `scripts/live-packaged-protocol-harness.mjs`, keep using the published
@@ -208,8 +243,10 @@
   interpolation, hashing, delimiter joining, normalization, row index, synthetic
   fallback, collision repair, or alternate identity source.
 - No descendant complete-ID `$bind`, action request/result grammar change,
-  direct-root rewrite, compatibility alias, dual old/new code path, feature flag,
-  or optional configuration.
+  rewrite of the direct-root `$bind` realization semantics, compatibility alias,
+  dual old/new code path, feature flag, or optional configuration. Removing the
+  superseded duplicate-row `identityCounts` drop filter is required collision
+  migration work and is not a rewrite of how a valid direct root resolves.
 - No daemon protocol/feature/revision policy, package admission, producer fixture,
   Lua action policy, entity schema, or Hub publication change.
 - No broad UiNode renderer refactor, new primitive, custom Ionic component,
@@ -254,6 +291,9 @@
   tree is not partially interactive, and diagnostics expose only bounded
   identity/location facts. Plan Review should challenge this before approval if
   a different consumer policy is required.
+- This policy cold-replaces the current duplicate-bound-row silent drop filter.
+  Missing/blank direct row roots retain their current per-row omission behavior;
+  the plan does not reclassify an unresolved identity as a realized collision.
 - Ionic's native Button activation should route both pointer click and keyboard
   activation through the existing `onClick` callback. The live smoke must prove
   this rather than assuming browser semantics.
@@ -278,7 +318,9 @@
 - `src/botster/__fixtures__/uiNodeConformance.ts` — expected fixture-shape-only
   adaptation, if required; canonical bytes remain imported from the package.
 - `src/App.test.mjs` — metadata revision, golden vectors, production renderer,
-  collision, action/request/result, and reconciliation/reconnect proof.
+  collision, action/request/result, and reconciliation/reconnect proof; split the
+  existing lines 6891-6907 so missing/blank roots retain partial interactivity
+  while duplicate realized row roots switch to fail-closed diagnostics.
 - `scripts/live-packaged-protocol-harness.mjs` — real rendered click/keyboard and
   structured request/result/reconnect proof.
 - `scripts/check-daemon-protocol-drift.mjs` and
@@ -304,6 +346,9 @@ documentation made stale by those changes.
   recursive calls.
 - **First duplicate remains interactive:** validate before render; fail the whole
   surface and collect zero actions instead of discovering the second id late.
+- **Superseded drop filter hides collisions:** remove the existing bound-row
+  `identityCounts` filter cold-turkey and ablate the new prepass to prove duplicate
+  row roots no longer disappear silently.
 - **Authored-key and final-id rules get conflated:** keep separate diagnostic
   kinds and tests for template-global duplicate keys versus render-scoped final
   collisions.
