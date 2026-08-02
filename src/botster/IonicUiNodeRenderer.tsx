@@ -23,6 +23,7 @@ import {
   IonTitle,
   IonToolbar
 } from "@ionic/react";
+import { realizeBindListDescendantId } from "@trybotster/ui-contract";
 import { Fragment, useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 
 import { defaultUiCapabilitySet } from "./capabilities";
@@ -41,7 +42,17 @@ import type {
   UiTreeSnapshot
 } from "./uiNodes";
 
-type RowContext = Record<string, unknown>;
+const boundRowIdentity = Symbol("bound-row-identity");
+
+type RowContext = Record<string, unknown> & { [boundRowIdentity]?: string };
+
+type ResolvedChild = { node: RealizedUiNode; row?: RowContext; location: string };
+
+type IdentityIssue = {
+  kind: "duplicate-descendant-key" | "invalid-descendant-identity" | "duplicate-realized-identity";
+  value: string;
+  locations: string[];
+};
 
 const supportedPrimitives = new Set([
   "badge",
@@ -253,12 +264,44 @@ function resolvedProps(
   return resolvedValue(node.props ?? {}, store, options, row) as Record<string, unknown>;
 }
 
-function realizedNodeIdentity(node: UiNode, row?: RowContext): RealizedUiNode | undefined {
+function realizedNodeIdentity(
+  node: UiNode,
+  row?: RowContext,
+  {
+    allowRowBinding = false,
+    issues,
+    location = "root"
+  }: { allowRowBinding?: boolean; issues?: IdentityIssue[]; location?: string } = {}
+): RealizedUiNode | undefined {
   if (node.id === undefined || typeof node.id === "string") {
     return node as RealizedUiNode;
   }
 
-  const binding = readRecord(node.id).$bind;
+  const authoredIdentity = readRecord(node.id);
+  if (authoredIdentity.$kind === "bind_list_descendant_id") {
+    const key = authoredIdentity.key;
+    const rowIdentity = row?.[boundRowIdentity];
+    if (typeof key !== "string" || key.trim().length === 0) {
+      issues?.push({ kind: "invalid-descendant-identity", value: typeof key === "string" ? key : "<non-string>", locations: [location] });
+      return undefined;
+    }
+    if (!rowIdentity) {
+      issues?.push({ kind: "invalid-descendant-identity", value: key, locations: [location] });
+      return undefined;
+    }
+
+    return { ...node, id: realizeBindListDescendantId(rowIdentity, key) } as RealizedUiNode;
+  }
+
+  const binding = authoredIdentity.$bind;
+  if (!allowRowBinding) {
+    issues?.push({
+      kind: "invalid-descendant-identity",
+      value: typeof binding === "string" ? binding : "<non-string>",
+      locations: [location]
+    });
+    return undefined;
+  }
   const resolved = typeof binding === "string" && binding.startsWith("@/") && row
     ? readPath(row, binding.slice(2))
     : undefined;
@@ -277,7 +320,7 @@ function renderChildren(
   form?: FormRenderState
 ): ReactNode {
   return children.flatMap((child, index) =>
-    resolveChild(child, store, options, row).map(({ node, row: childRow }, childIndex) => (
+    resolveChild(child, store, options, row, undefined, `child[${index}]`).map(({ node, row: childRow }, childIndex) => (
       <Fragment key={`${node.id ?? node.type}-${index}-${childIndex}`}>
         {renderNode(node, store, options, childRow, form)}
       </Fragment>
@@ -300,51 +343,262 @@ function resolveChild(
   child: UiChild,
   store: EntityFrameStore,
   options: UiNodeRenderOptions,
-  row?: RowContext
-): Array<{ node: RealizedUiNode; row?: RowContext }> {
+  row?: RowContext,
+  issues?: IdentityIssue[],
+  location = "child"
+): ResolvedChild[] {
   if (isUiNode(child)) {
-    const node = realizedNodeIdentity(child, row);
-    return node ? [{ node, row }] : [];
+    const node = realizedNodeIdentity(child, row, { issues, location });
+    return node ? [{ node, row, location }] : [];
   }
 
   if (child.$kind === "bind_list") {
     const rows = entityRows(store, child.source, child.where, row);
     if (rows.length === 0) {
-      const node = child.empty_template ? realizedNodeIdentity(child.empty_template, row) : undefined;
-      return node ? [{ node, row }] : [];
+      const emptyLocation = `${location}.empty_template`;
+      const node = child.empty_template
+        ? realizedNodeIdentity(child.empty_template, row, { issues, location: emptyLocation })
+        : undefined;
+      return node ? [{ node, row, location: emptyLocation }] : [];
     }
-    const boundIdentity = typeof child.item_template.id === "object";
-    const resolvedRows = rows.flatMap((record) => {
-      const node = realizedNodeIdentity(child.item_template, record);
-      return node ? [{ node, row: record }] : [];
-    });
-    if (!boundIdentity) return resolvedRows;
+    return rows.flatMap((record, index) => {
+      const rowLocation = `${location}.item_template[row=${readString(record.id, `${index}`)}]`;
+      const node = realizedNodeIdentity(child.item_template, record, {
+        allowRowBinding: true,
+        issues,
+        location: rowLocation
+      });
+      if (!node) return [];
 
-    const identityCounts = new Map<string, number>();
-    for (const { node } of resolvedRows) {
-      if (node.id) identityCounts.set(node.id, (identityCounts.get(node.id) ?? 0) + 1);
-    }
-    return resolvedRows.filter(({ node }) => !node.id || identityCounts.get(node.id) === 1);
+      const childRow = typeof child.item_template.id === "object" && "$bind" in readRecord(child.item_template.id) && node.id
+        ? Object.assign({}, record, { [boundRowIdentity]: node.id })
+        : record;
+      return [{ node, row: childRow, location: rowLocation }];
+    });
   }
 
   if (child.$kind === "bind_if") {
-    const node = pathValue(child.path, store, options, row) ? realizedNodeIdentity(child.node, row) : undefined;
-    return node ? [{ node, row }] : [];
+    const node = pathValue(child.path, store, options, row)
+      ? realizedNodeIdentity(child.node, row, { issues, location: `${location}.node` })
+      : undefined;
+    return node ? [{ node, row, location: `${location}.node` }] : [];
   }
 
   if (child.$kind === "presentation_if") {
     const node = presentationMatches(child.predicate, options.presentation ?? {})
-      ? realizedNodeIdentity(child.node, row)
+      ? realizedNodeIdentity(child.node, row, { issues, location: `${location}.node` })
       : undefined;
-    return node ? [{ node, row }] : [];
+    return node ? [{ node, row, location: `${location}.node` }] : [];
   }
 
   const matches =
     (!child.condition.width || child.condition.width === "regular") &&
     (!child.condition.pointer || child.condition.pointer === "fine");
   const visible = child.$kind === "hidden" ? !matches : matches;
-  const node = visible ? realizedNodeIdentity(child.node, row) : undefined;
-  return node ? [{ node, row }] : [];
+  const node = visible ? realizedNodeIdentity(child.node, row, { issues, location: `${location}.node` }) : undefined;
+  return node ? [{ node, row, location: `${location}.node` }] : [];
+}
+
+function authoredIdentityIssues(root: UiNode): IdentityIssue[] {
+  const issues: IdentityIssue[] = [];
+
+  const validateTemplate = (template: UiNode, templateLocation: string) => {
+    const keys = new Map<string, string[]>();
+
+    const visitNode = (node: UiNode, location: string, templateRoot = false) => {
+      const identity = readRecord(node.id);
+      if (identity.$kind === "bind_list_descendant_id") {
+        const key = identity.key;
+        if (typeof key !== "string" || key.trim().length === 0) {
+          issues.push({
+            kind: "invalid-descendant-identity",
+            value: typeof key === "string" ? key : "<non-string>",
+            locations: [location]
+          });
+        } else {
+          keys.set(key, [...(keys.get(key) ?? []), location]);
+        }
+        if (templateRoot) {
+          issues.push({ kind: "invalid-descendant-identity", value: String(key), locations: [location] });
+        }
+      } else if (!templateRoot && typeof identity.$bind === "string") {
+        issues.push({ kind: "invalid-descendant-identity", value: identity.$bind, locations: [location] });
+      }
+
+      const visitChild = (child: UiChild, childLocation: string) => {
+        if (isUiNode(child)) {
+          visitNode(child, childLocation);
+        } else if (child.$kind === "bind_list") {
+          if (child.empty_template) findTemplates(child.empty_template, `${childLocation}.empty_template`);
+          validateTemplate(child.item_template, `${childLocation}.item_template`);
+        } else {
+          visitNode(child.node, `${childLocation}.node`);
+        }
+      };
+
+      (node.children ?? []).forEach((child, index) => visitChild(child, `${location}.children[${index}]`));
+      for (const [slot, children] of Object.entries(node.slots ?? {})) {
+        children.forEach((child, index) => visitChild(child, `${location}.slots.${slot}[${index}]`));
+      }
+    };
+
+    visitNode(template, templateLocation, true);
+    for (const [key, locations] of keys) {
+      if (locations.length > 1) {
+        issues.push({ kind: "duplicate-descendant-key", value: key, locations: locations.slice(0, 2) });
+      }
+    }
+  };
+
+  const findTemplates = (node: UiNode, location: string) => {
+    const identity = readRecord(node.id);
+    if (identity.$kind === "bind_list_descendant_id") {
+      issues.push({
+        kind: "invalid-descendant-identity",
+        value: typeof identity.key === "string" ? identity.key : "<non-string>",
+        locations: [location]
+      });
+    }
+
+    const visitChild = (child: UiChild, childLocation: string) => {
+      if (isUiNode(child)) {
+        findTemplates(child, childLocation);
+      } else if (child.$kind === "bind_list") {
+        validateTemplate(child.item_template, `${childLocation}.item_template`);
+        if (child.empty_template) findTemplates(child.empty_template, `${childLocation}.empty_template`);
+      } else {
+        findTemplates(child.node, `${childLocation}.node`);
+      }
+    };
+
+    (node.children ?? []).forEach((child, index) => visitChild(child, `${location}.children[${index}]`));
+    for (const [slot, children] of Object.entries(node.slots ?? {})) {
+      children.forEach((child, index) => visitChild(child, `${location}.slots.${slot}[${index}]`));
+    }
+  };
+
+  findTemplates(root, "root");
+  return issues;
+}
+
+function realizedIdentityIssue(
+  root: RealizedUiNode,
+  store: EntityFrameStore,
+  options: UiNodeRenderOptions
+): IdentityIssue | undefined {
+  const issues: IdentityIssue[] = [];
+  const identities = new Map<string, string[]>();
+
+  const visitChildren = (children: UiChild[], row: RowContext | undefined, location: string) => {
+    children.forEach((child, index) => {
+      for (const resolved of resolveChild(child, store, options, row, issues, `${location}[${index}]`)) {
+        visitNode(resolved.node, resolved.row, resolved.location);
+      }
+    });
+  };
+
+  const visitNode = (node: RealizedUiNode, row: RowContext | undefined, location: string) => {
+    if (node.id) identities.set(node.id, [...(identities.get(node.id) ?? []), location]);
+    if (missingCapabilities(node, options).length > 0 || !supportedPrimitives.has(node.type)) return;
+
+    const props = resolvedProps(node, store, options, row);
+    switch (node.type) {
+      case "stack":
+      case "form_section":
+      case "inline":
+      case "metric_grid":
+      case "form":
+        visitChildren(readChildren(node), row, `${location}.children`);
+        break;
+      case "section":
+      case "panel": {
+        visitChildren(readSlot(node, "header"), row, `${location}.slots.header`);
+        visitChildren(readSlot(node, "toolbar"), row, `${location}.slots.toolbar`);
+        visitChildren(readSlot(node, "body"), row, `${location}.slots.body`);
+        visitChildren(readChildren(node), row, `${location}.children`);
+        if (!hasSlot(node, "body") && readChildren(node).length === 0) {
+          visitChildren(readSlot(node, "empty"), row, `${location}.slots.empty`);
+        }
+        visitChildren(readSlot(node, "footer"), row, `${location}.slots.footer`);
+        visitChildren(readSlot(node, "actions"), row, `${location}.slots.actions`);
+        break;
+      }
+      case "toolbar":
+        for (const slot of ["commands", "filters", "search", "actions"]) {
+          visitChildren(readSlot(node, slot), row, `${location}.slots.${slot}`);
+        }
+        visitChildren(readChildren(node), row, `${location}.children`);
+        break;
+      case "empty_state":
+        visitChildren(readSlot(node, "actions"), row, `${location}.slots.actions`);
+        break;
+      case "list": {
+        const rows = readRecords(props.items);
+        if (rows.length > 0) {
+          rows.forEach((item, index) => visitChildren(readSlot(node, "item"), item, `${location}.slots.item[row=${readString(item.id, `${index}`)}]`));
+        } else if (readChildren(node).length > 0) {
+          visitChildren(readChildren(node), row, `${location}.children`);
+        } else {
+          visitChildren(readSlot(node, "empty"), row, `${location}.slots.empty`);
+        }
+        break;
+      }
+      case "list_item":
+        for (const slot of ["title", "subtitle", "meta", "actions"]) {
+          visitChildren(readSlot(node, slot), row, `${location}.slots.${slot}`);
+        }
+        visitChildren(readChildren(node), row, `${location}.children`);
+        break;
+      case "select":
+        visitChildren(readSlot(node, "options"), row, `${location}.slots.options`);
+        break;
+      case "dialog":
+        visitChildren(readSlot(node, "body"), row, `${location}.slots.body`);
+        visitChildren(readChildren(node), row, `${location}.children`);
+        break;
+      case "table": {
+        if (readRecords(props.rows).length === 0) {
+          const emptyState = uiNodeFromRecord(props.empty_state);
+          const realizedEmptyState = emptyState
+            ? realizedNodeIdentity(emptyState, row, { issues, location: `${location}.props.empty_state` })
+            : undefined;
+          if (realizedEmptyState) visitNode(realizedEmptyState, row, `${location}.props.empty_state`);
+        }
+        break;
+      }
+    }
+  };
+
+  visitNode(root, undefined, "root");
+  if (issues.length > 0) return issues[0];
+
+  for (const [identity, locations] of identities) {
+    if (locations.length > 1) {
+      return { kind: "duplicate-realized-identity", value: identity, locations: locations.slice(0, 2) };
+    }
+  }
+  return undefined;
+}
+
+function identityDiagnostic(snapshot: UiTreeSnapshot, issue: IdentityIssue): ReactNode {
+  const locations = issue.locations.map((location) => location.slice(0, 180)).join(" and ");
+  const value = issue.value.trim().length > 0 ? issue.value : "<blank>";
+  const label = issue.kind === "duplicate-descendant-key"
+    ? "Duplicate BindList descendant key"
+    : issue.kind === "duplicate-realized-identity"
+      ? "Duplicate realized node identity"
+      : "Invalid BindList descendant identity";
+
+  return (
+    <div
+      className="uinode-fallback uinode-identity-diagnostic"
+      data-ui-identity-diagnostic={issue.kind}
+      data-ui-surface={snapshot.surface}
+      role="alert"
+    >
+      {label} on {snapshot.surface}: {value} at {locations}
+    </div>
+  );
 }
 
 function renderSlotRegion(
@@ -1215,10 +1469,23 @@ function renderNode(
 
 export const ionicUiNodeRendererRegistry: UiNodeRendererRegistry = {
   render(snapshot: UiTreeSnapshot, entities: EntityFrameStore, options: UiNodeRenderOptions = {}) {
-    const root = realizedNodeIdentity(snapshot.root);
-    return root
-      ? renderNode(root, entities, options)
-      : <div className="uinode-fallback" data-unsupported-identity="unresolved" role="note">Unsupported node identity</div>;
+    const authoredIssue = authoredIdentityIssues(snapshot.root)[0];
+    if (authoredIssue) return identityDiagnostic(snapshot, authoredIssue);
+
+    const realizationIssues: IdentityIssue[] = [];
+    const root = realizedNodeIdentity(snapshot.root, undefined, { issues: realizationIssues });
+    if (realizationIssues[0]) return identityDiagnostic(snapshot, realizationIssues[0]);
+    // Every unresolved root currently reports an issue above; preserve the same fail-closed vocabulary if that invariant changes.
+    if (!root) {
+      return identityDiagnostic(snapshot, {
+        kind: "invalid-descendant-identity",
+        value: "<unresolved>",
+        locations: ["root"]
+      });
+    }
+
+    const collision = realizedIdentityIssue(root, entities, options);
+    return collision ? identityDiagnostic(snapshot, collision) : renderNode(root, entities, options);
   },
   supports(primitive: string) {
     return supportedPrimitives.has(primitive);

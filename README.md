@@ -8,7 +8,8 @@
 - Installed package runtime requires a hub-issued local WebRTC bootstrap grant.
 - Encrypted daemon requests, responses, terminal traffic, and pushed session entity frames travel over the ordered WebRTC data channel.
 - Session state materializes in canonical entity family `session`, beginning with an authoritative subscription snapshot and continuing through ordered pushed deltas. The client does not poll or call `list_sessions`.
-- `@trybotster/ui-contract` is the sole `UiNode`, action request/result, package-surface descriptor, supported-operation, and manifest-navigation vocabulary source. Hub owns package admission and projects sanitized package/navigation rows; the generated daemon declarations and shared conformance fixtures come from the pinned `@trybotster/hub-test-support` release.
+- `@trybotster/ui-contract@0.3.1` is the sole `UiNode`, action request/result, package-surface descriptor, supported-operation, and manifest-navigation vocabulary source. Hub owns package admission and projects sanitized package/navigation rows; the generated daemon declarations and revision-27 shared conformance fixtures come from `@trybotster/hub-test-support@0.1.20`.
+- A `bind_list` first resolves its direct row-root `$bind`, then realizes each keyed descendant through the UI-contract runtime helper. The resulting literal identity is the single value used for React keys, `data-ui-node-id`, collected action state, requests, and correlated results. Invalid descendant identity or a collision among nodes that coexist in one render replaces the whole surface with a bounded diagnostic and publishes no actions; a missing or blank direct row root still omits only that unresolved row.
 - Plugin form drafts travel in canonical `UiActionRequest.values`; optional action metadata remains in `payload`. Accepted correlated results may replace the owning subtree and mutate Hub/package/surface-scoped presentation state, while rejected results retain the tree, dialog, values, and actionable errors.
 - After binding, the loopback package server requests an origin-bound initial WebRTC grant from Hub and injects it into each HTML load. It handles later bootstrap refresh and signaling at `/request`; it is not a daemon control or terminal-data fallback.
 - Restty is the terminal renderer. It receives terminal data through `TerminalViewHost` and the WebRTC-backed data-plane adapter.
@@ -70,7 +71,11 @@ The plugin contract checks use the same production WebRTC harness. They prove
 Hub-projected package navigation through a visible sidebar control and route
 click, then exercise package list/detail, launch/render, canonical `/session`
 bindings with reconnect hydration, and structured action results through the
-production transport and React components:
+production transport and React components. The `contract.sessions` proof reads
+the published row/control identities and action ids from the rendered Ionic DOM,
+uses mouse and keyboard activation on different row/control pairs, requires one
+exact `plugin_surface_action` per activation, and correlates each accepted result
+before repeating identity checks under a fresh subscription generation:
 
 ```bash
 BOTSTER_HUB_BIN=/path/to/botster-hub \
@@ -222,9 +227,11 @@ the same semantic action and opaque node identity through DOM, request, and
 accepted result evidence while preserving the producer-authored payload.
 
 The broader contract-matrix smoke separately covers rejected form submissions,
-draft retention, and presentation operations. Deterministic tests cover
+draft retention, and presentation operations. Deterministic tests cover every
+published UTF-8 identity vector, multiple rows with Spawn/Rename/Remove controls,
+authored-key and realized-id diagnostics, mutually exclusive branches,
 nested/empty `bind_list`, toolbar order/overflow intent, and entity
-snapshot/upsert/patch/remove convergence.
+snapshot/upsert/patch/remove/reconnect convergence.
 
 ## Local package server
 

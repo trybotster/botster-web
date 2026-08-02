@@ -47,6 +47,23 @@ renderer without translation into a second browser vocabulary. `bind_list`
 reads the generic entity store, including nested row context, while
 `presentation_if` reads the scoped local presentation projection.
 
+Bind-list identity has one materialization order. The direct item-template root
+retains its item-relative `$bind`; after that root becomes a nonblank literal,
+`bind_list_descendant_id` children call the runtime helper exported by
+`@trybotster/ui-contract@0.3.1`. The generated declarations and revision-27
+shared conformance fixtures come from `@trybotster/hub-test-support@0.1.20`.
+Nested bind lists establish a new nearest-row context. Web never encodes,
+parses, normalizes, indexes, or repairs those identities.
+
+Before React rendering or action collection, the renderer checks authored
+descendant keys across each complete item template and checks literal ids across
+the nodes that actually coexist after binding and conditional evaluation.
+Mutually exclusive alternatives may reuse a final literal id; coexisting roots,
+rows, descendants, static nodes, and slots may not. A malformed descendant or
+collision produces one bounded surface diagnostic and zero action callbacks.
+Direct rows whose root `$bind` is missing, non-string, or blank remain omitted
+individually because they never enter the realized identity set.
+
 Every rendered plugin action crosses the daemon boundary as
 `{ package_name, request }`. Form controls place drafts in `request.values`;
 `request.payload` retains only the authored non-form metadata. Rejected,

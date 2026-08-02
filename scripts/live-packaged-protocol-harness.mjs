@@ -730,6 +730,10 @@ async function assertContractMatrixPackageLoaded(page) {
 async function exerciseContractSessionBindings(page) {
   if (!webrtcDataDir) throw new Error("contract.sessions proof requires a WebRTC hub data directory");
 
+  const { readSessionPluginBindingConformanceFixture } = await loadHubTestSupport();
+  const publishedBindingFixture = readSessionPluginBindingConformanceFixture();
+  const expectedRows = publishedBindingFixture.row_expected.initial;
+
   const references = [
     "session-transition",
     "session-stable-current",
@@ -779,6 +783,9 @@ async function exerciseContractSessionBindings(page) {
   );
   await dispatchContractSessionsSurface(page, references);
   await assertContractSessionBindingText(page);
+  await assertContractSessionRows(page, expectedRows);
+  await activateContractSessionControl(page, expectedRows[0].controls[0], "click");
+  await activateContractSessionControl(page, expectedRows[1].controls[1], "keyboard");
 
   const previousSubscriptionId = await latestSessionEntitySubscriptionId(page);
   await page.reload({ waitUntil: "domcontentloaded" });
@@ -802,6 +809,8 @@ async function exerciseContractSessionBindings(page) {
   );
   await dispatchContractSessionsSurface(page, references);
   await assertContractSessionBindingText(page);
+  await assertContractSessionRows(page, expectedRows);
+  await activateContractSessionControl(page, expectedRows[0].controls[1], "keyboard");
 }
 
 async function dispatchContractSessionsSurface(page, references) {
@@ -853,6 +862,92 @@ async function assertContractSessionBindingText(page) {
   if (unavailableCount !== 1) {
     throw new Error(`contract.sessions expected one absent reference, observed ${unavailableCount}`);
   }
+}
+
+async function assertContractSessionRows(page, expectedRows) {
+  const surface = page.getByTestId("selected-app-surface");
+  for (const row of expectedRows) {
+    const renderedRow = surface.locator(`[data-ui-node-id='${row.node_id}']`);
+    await renderedRow.waitFor({ timeout: 45_000 });
+    for (const control of row.controls) {
+      const renderedControl = renderedRow.locator(`[data-ui-node-id='${control.node_id}']`);
+      await renderedControl.waitFor({ timeout: 45_000 });
+      const actionId = await renderedControl.getAttribute("data-action-id");
+      if (actionId !== "contract.action") {
+        throw new Error(
+          `contract.sessions rendered action mismatch for ${control.node_id}: ${JSON.stringify({ actionId, control })}`
+        );
+      }
+      const renderedLabel = (await renderedControl.textContent())?.trim() ?? "";
+      if (renderedLabel !== control.label) {
+        throw new Error(
+          `contract.sessions rendered label mismatch for ${control.node_id}: ${JSON.stringify({ expected: control.label, actual: renderedLabel })}`
+        );
+      }
+    }
+  }
+}
+
+async function activateContractSessionControl(page, expectedControl, activation) {
+  const surface = page.getByTestId("selected-app-surface");
+  const control = surface.locator(`[data-ui-node-id='${expectedControl.node_id}']`);
+  const actionId = await control.getAttribute("data-action-id");
+  const nodeId = await control.getAttribute("data-ui-node-id");
+  const sinceIndex = await harnessEventCount(page);
+
+  if (activation === "keyboard") {
+    const keyboardTarget = control.locator("button").first();
+    await keyboardTarget.focus();
+    await keyboardTarget.press("Enter");
+  } else {
+    await control.click();
+  }
+
+  await page.waitForFunction(
+    ({ sinceIndex, packageName, actionId, nodeId, actionPayload }) => {
+      const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex);
+      const requests = events.filter((entry) => {
+        const request = entry.payload?.request;
+        return entry.kind === "daemon_request" &&
+          entry.payload?.type === "plugin_surface_action" &&
+          entry.payload?.package_name === packageName &&
+          request?.surface_id === "contract.sessions" &&
+          request?.action_id === actionId &&
+          request?.node_id === nodeId &&
+          JSON.stringify(request?.payload) === JSON.stringify(actionPayload);
+      });
+      const acceptedResult = events.some((entry) => {
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
+        const payload = entry.payload?.payload ?? {};
+        const result = payload.result ?? {};
+        const plugin = result.plugin_action_result ?? {};
+        return payload.accepted === true &&
+          result.package_name === packageName &&
+          result.surface_id === "contract.sessions" &&
+          result.action_id === actionId &&
+          plugin.state === "accepted" &&
+          plugin.action_id === actionId &&
+          plugin.node_id === nodeId &&
+          JSON.stringify(plugin.payload) === JSON.stringify(actionPayload);
+      });
+      return requests.length === 1 && acceptedResult;
+    },
+    {
+      sinceIndex,
+      packageName: contractMatrixPackageName,
+      actionId,
+      nodeId,
+      actionPayload: expectedControl.action_payload
+    },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observed = await page.evaluate((since) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since),
+    sinceIndex);
+    throw new Error(
+      `contract.sessions ${activation} dispatch did not correlate one rendered request/result for ${nodeId}: ${JSON.stringify(observed, null, 2)}: ${error.message}`
+    );
+  });
 }
 
 async function openContractAppFromNavigation(page) {

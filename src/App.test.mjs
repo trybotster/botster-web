@@ -22,6 +22,7 @@ import {
   readUiContractConformanceFixtures,
   verifyPackageAssets
 } from "@trybotster/hub-test-support";
+import { realizeBindListDescendantId } from "@trybotster/ui-contract";
 import ts from "typescript";
 import { createServer } from "vite";
 import { createElement } from "react";
@@ -1353,7 +1354,15 @@ const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name], hubTestSupportMetadata.ui_contract.package_version);
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.protocol_version, 4);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 25);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 27);
+const documentedContractClaims = [
+  `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
+  `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
+  `revision-${hubTestSupportMetadata.conformance_fixture_revision}`
+];
+for (const document of [readme, architecture]) {
+  for (const claim of documentedContractClaims) assert.equal(document.includes(claim), true);
+}
 for (const canonicalType of [
   "PackageSurfaceDescriptor",
   "PackageSurfaceKind",
@@ -6851,19 +6860,25 @@ try {
       .filter(({ action }) => action.id === "contract.action")
       .map(({ action, node }) => ({ nodeId: node.id, payload: action.payload })),
     [
-      { nodeId: "sess-alpha", payload: { operation: "select_session", session_uuid: "sess-alpha" } },
-      { nodeId: "sess-beta", payload: { operation: "select_session", session_uuid: "sess-beta" } }
+      {
+        nodeId: realizeBindListDescendantId("sess-alpha", "select"),
+        payload: { operation: "select_session", session_uuid: "sess-alpha" }
+      },
+      {
+        nodeId: realizeBindListDescendantId("sess-beta", "select"),
+        payload: { operation: "select_session", session_uuid: "sess-beta" }
+      }
     ]
   );
   const boundRowDispatch = collectedActions.find(({ action, node }) =>
-    action.id === "contract.action" && node.id === "sess-alpha"
+    action.id === "contract.action" && node.id === realizeBindListDescendantId("sess-alpha", "select")
   );
   assert.deepEqual(
     pluginSurfaceActionRequest("contract.sessions", boundRowDispatch),
     {
       surface_id: "contract.sessions",
       action_id: "contract.action",
-      node_id: "sess-alpha",
+      node_id: realizeBindListDescendantId("sess-alpha", "select"),
       kind: "submit",
       payload: { operation: "select_session", session_uuid: "sess-alpha" }
     }
@@ -6890,21 +6905,307 @@ try {
   };
   for (const invalidRecords of [
     [{ id: "missing", lifecycle_class: "current" }],
-    [{ id: "blank", session_uuid: " ", lifecycle_class: "current" }],
-    [
-      { id: "duplicate-a", session_uuid: "sess-duplicate", lifecycle_class: "current" },
-      { id: "duplicate-b", session_uuid: "sess-duplicate", lifecycle_class: "current" }
-    ]
+    [{ id: "blank", session_uuid: " ", lifecycle_class: "current" }]
   ]) {
     const { actions, markup: invalidIdentityMarkup } = renderBoundRowIdentity([
       ...invalidRecords,
       { id: "valid", session_uuid: "sess-valid", lifecycle_class: "current" }
     ]);
     assert.match(invalidIdentityMarkup, /data-ui-node-id="sess-valid"/);
-    assert.doesNotMatch(invalidIdentityMarkup, /data-ui-node-id="sess-duplicate"/);
     assert.doesNotMatch(invalidIdentityMarkup, /data-ui-node-id=" "/);
-    assert.deepEqual(actions.map(({ node }) => node.id), ["sess-valid"]);
+    assert.deepEqual(actions.map(({ node }) => node.id), [realizeBindListDescendantId("sess-valid", "select")]);
   }
+  const duplicateRowIdentity = renderBoundRowIdentity([
+    { id: "duplicate-a", session_uuid: "sess-duplicate", lifecycle_class: "current" },
+    { id: "duplicate-b", session_uuid: "sess-duplicate", lifecycle_class: "current" },
+    { id: "valid", session_uuid: "sess-valid", lifecycle_class: "current" }
+  ]);
+  assert.match(duplicateRowIdentity.markup, /data-ui-identity-diagnostic="duplicate-realized-identity"/);
+  assert.match(duplicateRowIdentity.markup, /sess-duplicate/);
+  assert.doesNotMatch(duplicateRowIdentity.markup, /data-ui-node-id="sess-valid"/);
+  assert.deepEqual(duplicateRowIdentity.actions, []);
+
+  const renderIdentityCase = (root, records = []) => {
+    const actions = [];
+    const markup = renderToStaticMarkup(
+      ionicUiNodeRendererRegistry.render(
+        { kind: "ui_tree_snapshot", surface: "identity-validation.test", version: "test", root },
+        createInMemoryEntityFrameStore([
+          { operation: "entity_snapshot", family: "identity.row", records }
+        ]),
+        { collectAction: (dispatch) => actions.push(dispatch) }
+      )
+    );
+    return { actions, markup };
+  };
+  const boundIdentityTemplate = (children) => ({
+    id: "identity-root",
+    type: "stack",
+    children: [{
+      $kind: "bind_list",
+      source: "/identity.row",
+      item_template: { id: { $bind: "@/row_identity" }, type: "inline", children }
+    }]
+  });
+
+  for (const vector of uiContractConformanceFixtures.bind_list_descendant_identity_vectors) {
+    const vectorProof = renderIdentityCase(
+      boundIdentityTemplate([{
+        id: { $kind: "bind_list_descendant_id", key: vector.key },
+        type: "button",
+        props: {
+          label: "Dispatch vector",
+          action: { id: "contract.vector", payload: { row: vector.row, key: vector.key } }
+        }
+      }]),
+      [{ id: `vector-${vector.realized_id}`, row_identity: vector.row }]
+    );
+    assert.equal(vectorProof.markup.includes(`data-ui-node-id="${vector.realized_id}"`), true);
+    assert.deepEqual(
+      vectorProof.actions.map(({ action, node }) => ({ node_id: node.id, payload: action.payload })),
+      [{ node_id: vector.realized_id, payload: { row: vector.row, key: vector.key } }]
+    );
+  }
+
+  const duplicateKeyProof = renderIdentityCase(
+    boundIdentityTemplate([
+      {
+        $kind: "when",
+        condition: { width: "regular" },
+        node: { id: { $kind: "bind_list_descendant_id", key: "shared" }, type: "text", props: { text: "Visible" } }
+      },
+      {
+        $kind: "hidden",
+        condition: { width: "regular" },
+        node: { id: { $kind: "bind_list_descendant_id", key: "shared" }, type: "text", props: { text: "Hidden" } }
+      }
+    ]),
+    [{ id: "duplicate-key", row_identity: "row-duplicate-key", secret: "must-not-leak" }]
+  );
+  assert.match(duplicateKeyProof.markup, /data-ui-identity-diagnostic="duplicate-descendant-key"/);
+  assert.match(duplicateKeyProof.markup, /shared/);
+  assert.doesNotMatch(duplicateKeyProof.markup, /must-not-leak/);
+  assert.deepEqual(duplicateKeyProof.actions, []);
+
+  for (const invalidDescendant of [
+    { id: { $kind: "bind_list_descendant_id", key: " " }, type: "button", props: { label: "Blank", action: { id: "blank" } } },
+    { id: { $bind: "@/row_identity" }, type: "button", props: { label: "Full id bind", action: { id: "full-bind" } } }
+  ]) {
+    const invalidDescendantProof = renderIdentityCase(
+      boundIdentityTemplate([invalidDescendant]),
+      [{ id: "invalid-descendant", row_identity: "row-invalid" }]
+    );
+    assert.match(invalidDescendantProof.markup, /data-ui-identity-diagnostic="invalid-descendant-identity"/);
+    assert.deepEqual(invalidDescendantProof.actions, []);
+  }
+  const misplacedDescendantProof = renderIdentityCase({
+    id: "misplaced-root",
+    type: "stack",
+    children: [{
+      id: { $kind: "bind_list_descendant_id", key: "misplaced" },
+      type: "button",
+      props: { label: "Misplaced", action: { id: "misplaced" } }
+    }]
+  });
+  assert.match(misplacedDescendantProof.markup, /data-ui-identity-diagnostic="invalid-descendant-identity"/);
+  assert.deepEqual(misplacedDescendantProof.actions, []);
+
+  for (const rootId of [{ $bind: "@/whatever" }, { nonsense: 1 }]) {
+    const unresolvedRootProof = renderIdentityCase({ id: rootId, type: "stack", props: { direction: "vertical" } });
+    assert.match(unresolvedRootProof.markup, /data-ui-identity-diagnostic="invalid-descendant-identity"/);
+    assert.doesNotMatch(unresolvedRootProof.markup, /data-unsupported-identity=/);
+    assert.deepEqual(unresolvedRootProof.actions, []);
+  }
+
+  const nestedEmptyDescendantProof = renderIdentityCase(
+    boundIdentityTemplate([{
+      $kind: "bind_list",
+      source: "@/children",
+      item_template: { id: { $bind: "@/id" }, type: "text", props: { text: "Nested item" } },
+      empty_template: {
+        id: { $kind: "bind_list_descendant_id", key: "nested-empty" },
+        type: "text",
+        props: { text: "Must not render" }
+      }
+    }]),
+    [{ id: "nested-empty-row", row_identity: "row-nested-empty", children: [] }]
+  );
+  assert.match(nestedEmptyDescendantProof.markup, /data-ui-identity-diagnostic="invalid-descendant-identity"/);
+  assert.deepEqual(nestedEmptyDescendantProof.actions, []);
+
+  const separateEmptyNamespaceProof = renderIdentityCase(
+    boundIdentityTemplate([
+      { id: { $kind: "bind_list_descendant_id", key: "shared" }, type: "text", props: { text: "Outer descendant" } },
+      {
+        $kind: "bind_list",
+        source: "@/children",
+        item_template: { id: { $bind: "@/id" }, type: "text", props: { text: "Nested item" } },
+        empty_template: { id: "shared", type: "text", props: { text: "Nested empty" } }
+      }
+    ]),
+    [{ id: "separate-empty-row", row_identity: "row-separate-empty", children: [] }]
+  );
+  assert.match(separateEmptyNamespaceProof.markup, /Outer descendant/);
+  assert.match(separateEmptyNamespaceProof.markup, /Nested empty/);
+  assert.doesNotMatch(separateEmptyNamespaceProof.markup, /data-ui-identity-diagnostic=/);
+
+  const listItemBoundIdentityProof = renderIdentityCase({
+    id: "list-bound-id-root",
+    type: "list",
+    props: { items: [{ id: "item-a", label: "Alpha" }] },
+    slots: {
+      item: [{ id: { $bind: "@/id" }, type: "text", props: { text: { $bind: "@/label" } } }]
+    }
+  });
+  assert.match(listItemBoundIdentityProof.markup, /data-ui-identity-diagnostic="invalid-descendant-identity"/);
+  assert.deepEqual(listItemBoundIdentityProof.actions, []);
+
+  const duplicateLiteralProof = renderIdentityCase({
+    id: "literal-root",
+    type: "stack",
+    children: [
+      { id: "repeated", type: "button", props: { label: "One", action: { id: "one" } } },
+      { id: "repeated", type: "button", props: { label: "Two", action: { id: "two" } } }
+    ]
+  });
+  assert.match(duplicateLiteralProof.markup, /data-ui-identity-diagnostic="duplicate-realized-identity"/);
+  assert.deepEqual(duplicateLiteralProof.actions, []);
+
+  const collisionNode = () => ({ id: "rendered-region-collision", type: "text", props: { text: "Collision" } });
+  const renderedRegionCollisionCases = [
+    ...["stack", "form_section", "inline", "metric_grid", "form"].map((type) => [
+      `${type}.children`,
+      { id: "rendered-region-collision", type, children: [collisionNode()] }
+    ]),
+    ...["section", "panel"].flatMap((type) => [
+      ...["header", "toolbar", "body", "footer", "actions"].map((slot) => [
+        `${type}.slots.${slot}`,
+        { id: "rendered-region-collision", type, slots: { [slot]: [collisionNode()] } }
+      ]),
+      [`${type}.children`, { id: "rendered-region-collision", type, children: [collisionNode()] }],
+      [`${type}.slots.empty`, { id: "rendered-region-collision", type, slots: { empty: [collisionNode()] } }]
+    ]),
+    ...["commands", "filters", "search", "actions"].map((slot) => [
+      `toolbar.slots.${slot}`,
+      { id: "rendered-region-collision", type: "toolbar", slots: { [slot]: [collisionNode()] } }
+    ]),
+    ["toolbar.children", { id: "rendered-region-collision", type: "toolbar", children: [collisionNode()] }],
+    ["empty_state.slots.actions", {
+      id: "rendered-region-collision",
+      type: "empty_state",
+      props: { title: "Empty" },
+      slots: { actions: [collisionNode()] }
+    }],
+    ["list.slots.item", {
+      id: "rendered-region-collision",
+      type: "list",
+      props: { items: [{ id: "item-a" }] },
+      slots: { item: [collisionNode()] }
+    }],
+    ["list.children", {
+      id: "rendered-region-collision",
+      type: "list",
+      props: { items: [] },
+      children: [collisionNode()]
+    }],
+    ["list.slots.empty", {
+      id: "rendered-region-collision",
+      type: "list",
+      props: { items: [] },
+      slots: { empty: [collisionNode()] }
+    }],
+    ...["title", "subtitle", "meta", "actions"].map((slot) => [
+      `list_item.slots.${slot}`,
+      { id: "rendered-region-collision", type: "list_item", slots: { [slot]: [collisionNode()] } }
+    ]),
+    ["list_item.children", { id: "rendered-region-collision", type: "list_item", children: [collisionNode()] }],
+    ["select.slots.options", {
+      id: "rendered-region-collision",
+      type: "select",
+      slots: { options: [collisionNode()] }
+    }],
+    ["dialog.slots.body", {
+      id: "rendered-region-collision",
+      type: "dialog",
+      slots: { body: [collisionNode()] }
+    }],
+    ["dialog.children", { id: "rendered-region-collision", type: "dialog", children: [collisionNode()] }],
+    ["table.props.empty_state", {
+      id: "rendered-region-collision",
+      type: "table",
+      props: { columns: [], rows: [], empty_state: collisionNode() }
+    }]
+  ];
+  for (const [region, root] of renderedRegionCollisionCases) {
+    const collisionProof = renderIdentityCase(root);
+    assert.match(
+      collisionProof.markup,
+      /data-ui-identity-diagnostic="duplicate-realized-identity"/,
+      `${region} must remain covered by fail-closed realized identity validation`
+    );
+    assert.deepEqual(collisionProof.actions, []);
+  }
+
+  const generatedCollisionId = realizeBindListDescendantId("row-collision", "control");
+  const generatedStaticCollisionProof = renderIdentityCase({
+    id: "generated-static-root",
+    type: "stack",
+    children: [
+      { id: generatedCollisionId, type: "text", props: { text: "Static" } },
+      {
+        $kind: "bind_list",
+        source: "/identity.row",
+        item_template: {
+          id: { $bind: "@/row_identity" },
+          type: "inline",
+          children: [{
+            id: { $kind: "bind_list_descendant_id", key: "control" },
+            type: "button",
+            props: { label: "Generated", action: { id: "generated" } }
+          }]
+        }
+      }
+    ]
+  }, [{ id: "collision", row_identity: "row-collision" }]);
+  assert.match(generatedStaticCollisionProof.markup, /data-ui-identity-diagnostic="duplicate-realized-identity"/);
+  assert.match(generatedStaticCollisionProof.markup, /botster-ui-descendant-v1/);
+  assert.deepEqual(generatedStaticCollisionProof.actions, []);
+
+  const mutuallyExclusiveProof = renderIdentityCase({
+    id: "conditional-root",
+    type: "stack",
+    children: [
+      {
+        $kind: "when",
+        condition: { width: "regular" },
+        node: { id: "conditional-reuse", type: "text", props: { text: "Selected branch" } }
+      },
+      {
+        $kind: "hidden",
+        condition: { width: "regular" },
+        node: { id: "conditional-reuse", type: "text", props: { text: "Suppressed branch" } }
+      }
+    ]
+  });
+  assert.doesNotMatch(mutuallyExclusiveProof.markup, /data-ui-identity-diagnostic/);
+  assert.match(mutuallyExclusiveProof.markup, /Selected branch/);
+  assert.doesNotMatch(mutuallyExclusiveProof.markup, /Suppressed branch/);
+  assert.equal((mutuallyExclusiveProof.markup.match(/data-ui-node-id="conditional-reuse"/g) ?? []).length, 1);
+
+  const surroundingCollisionProof = renderIdentityCase({
+    id: "surrounding-root",
+    type: "stack",
+    children: [
+      { id: "surrounding-reuse", type: "text", props: { text: "Always" } },
+      {
+        $kind: "when",
+        condition: { width: "regular" },
+        node: { id: "surrounding-reuse", type: "text", props: { text: "Selected" } }
+      }
+    ]
+  });
+  assert.match(surroundingCollisionProof.markup, /data-ui-identity-diagnostic="duplicate-realized-identity"/);
+  assert.deepEqual(surroundingCollisionProof.actions, []);
   assert.equal(ionicUiNodeRendererRegistry.supports("iframe"), true);
   const missingCapabilityMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(
@@ -7104,15 +7405,19 @@ try {
           $kind: "bind_list",
           source: "/project-pipelines.ticket",
           item_template: {
-            id: "ticket-template",
+            id: { $bind: "@/id" },
             type: "section",
             children: [
-              { id: "ticket-template-title", type: "text", props: { text: { $bind: "@/title" } } },
+              {
+                id: { $kind: "bind_list_descendant_id", key: "title" },
+                type: "text",
+                props: { text: { $bind: "@/title" } }
+              },
               {
                 $kind: "bind_list",
                 source: "@/comments",
                 item_template: {
-                  id: "comment-template",
+                  id: { $bind: "@/id" },
                   type: "text",
                   props: { text: { $bind: "@/body" } }
                 },
@@ -7143,7 +7448,11 @@ try {
   bindListStore.apply({
     operation: "entity_upsert",
     key: { family: "project-pipelines.ticket", id: "ticket-gamma" },
-    record: { id: "ticket-gamma", title: "Gamma ticket", comments: [] }
+    record: {
+      id: "ticket-gamma",
+      title: "Gamma ticket",
+      comments: [{ id: "comment-gamma", body: "Nested gamma comment" }]
+    }
   });
   assert.match(renderBindList(), /Gamma ticket/);
   bindListStore.apply({
@@ -7177,8 +7486,32 @@ try {
       entities: sessionBindingStore
     })
   );
-  const renderedBoundRowIds = () => [...renderSessionBindings().matchAll(/data-ui-node-id="(session-[^"]+)"/g)]
-    .map((match) => match[1]);
+  const assertPublishedRowProof = (expectedRows) => {
+    const actions = [];
+    const markup = renderToStaticMarkup(
+      ionicUiNodeRendererRegistry.render(sessionBindingSnapshot, sessionBindingStore, {
+        collectAction: (dispatch) => actions.push(dispatch)
+      })
+    );
+    assert.deepEqual(
+      [...markup.matchAll(/data-ui-node-id="(session-[^"]+)"/g)].map((match) => match[1]),
+      expectedRows.map((row) => row.node_id)
+    );
+    assert.deepEqual(
+      actions.map(({ action, node }) => ({ node_id: node.id, action_payload: action.payload })),
+      expectedRows.flatMap((row) => row.controls.map((control) => ({
+        node_id: control.node_id,
+        action_payload: control.action_payload
+      })))
+    );
+    for (const row of expectedRows) {
+      assert.match(markup, new RegExp(`data-ui-node-id="${row.node_id}"`));
+      for (const control of row.controls) {
+        assert.match(markup, new RegExp(`data-ui-node-id="${control.node_id}"`));
+        assert.match(markup, new RegExp(`data-action-id="contract\\.action"[^>]*>${control.label}<`));
+      }
+    }
+  };
   const renderedSessionBindingMap = () => Object.fromEntries(
     sessionPluginBindingFixture.surface.children
       .filter((child) => child.where?.session_uuid)
@@ -7210,13 +7543,13 @@ try {
 
   applyPublishedSessionFrame(sessionPluginBindingFixture.initial_snapshot);
   const initialSessionBindings = renderSessionBindings();
-  assert.equal((initialSessionBindings.match(/>current</g) ?? []).length, 2);
+  assert.equal((initialSessionBindings.match(/>current</g) ?? []).length, 4);
   assert.equal((initialSessionBindings.match(/>ended</g) ?? []).length, 1);
   assert.equal((initialSessionBindings.match(/>indeterminate</g) ?? []).length, 1);
   assert.equal((initialSessionBindings.match(/Session unavailable/g) ?? []).length, 1);
   assert.doesNotMatch(initialSessionBindings, /data-unsupported-ui-node/);
   assert.deepEqual(renderedSessionBindingMap(), sessionPluginBindingFixture.expected.initial);
-  assert.deepEqual(renderedBoundRowIds(), sessionPluginBindingFixture.row_expected.initial);
+  assertPublishedRowProof(sessionPluginBindingFixture.row_expected.initial);
 
   const canonicalSessionRecord = sessionBindingStore.get("session", "session-transition");
   assert.deepEqual(
@@ -7243,26 +7576,26 @@ try {
     renderedSessionBindingMap(),
     sessionPluginBindingFixture.expected.after_ended_patch
   );
-  assert.deepEqual(renderedBoundRowIds(), sessionPluginBindingFixture.row_expected.after_ended_patch);
+  assertPublishedRowProof(sessionPluginBindingFixture.row_expected.after_ended_patch);
   applyPublishedSessionFrame(sessionPluginBindingFixture.transition_frames[1]);
   assert.deepEqual(
     renderedSessionBindingMap(),
     sessionPluginBindingFixture.expected.after_indeterminate_patch
   );
-  assert.deepEqual(renderedBoundRowIds(), sessionPluginBindingFixture.row_expected.after_indeterminate_patch);
+  assertPublishedRowProof(sessionPluginBindingFixture.row_expected.after_indeterminate_patch);
   applyPublishedSessionFrame(sessionPluginBindingFixture.transition_frames[2]);
   assert.deepEqual(
     renderedSessionBindingMap(),
     sessionPluginBindingFixture.expected.after_remove
   );
-  assert.deepEqual(renderedBoundRowIds(), sessionPluginBindingFixture.row_expected.after_remove);
+  assertPublishedRowProof(sessionPluginBindingFixture.row_expected.after_remove);
 
   applyPublishedSessionFrame(sessionPluginBindingFixture.reconnect_snapshot);
   assert.deepEqual(
     renderedSessionBindingMap(),
     sessionPluginBindingFixture.expected.after_reconnect
   );
-  assert.deepEqual(renderedBoundRowIds(), sessionPluginBindingFixture.row_expected.after_reconnect);
+  assertPublishedRowProof(sessionPluginBindingFixture.row_expected.after_reconnect);
   assert.equal(sessionBindingStore.get("session", "session-transition"), undefined);
   assert.equal(
     Object.hasOwn(sessionBindingStore.get("session", "session-indeterminate"), "lifecycle"),
