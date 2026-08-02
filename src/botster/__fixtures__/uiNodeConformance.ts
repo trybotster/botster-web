@@ -54,7 +54,7 @@ export const uiNodeConformanceSnapshot: UiTreeSnapshot = {
   root: {
     id: "root",
     type: "stack",
-    props: { gap: "md", label: "UiNode renderer conformance" },
+    props: { direction: "vertical", gap: "md", label: "UiNode renderer conformance" },
     children: [
       {
         id: "intro",
@@ -78,11 +78,19 @@ export const uiNodeConformanceSnapshot: UiTreeSnapshot = {
         $kind: "bind_list",
         source: "/project-pipelines.ticket",
         item_template: {
-          id: "ticket-row",
+          id: { $bind: "@/id" },
           type: "inline",
           children: [
-            { id: "ticket-title", type: "text", props: { text: { $bind: "@/title" } } },
-            { id: "ticket-status", type: "badge", props: { text: { $bind: "@/status" } } }
+            {
+              id: { $kind: "bind_list_descendant_id", key: "title" },
+              type: "text",
+              props: { text: { $bind: "@/title" } }
+            },
+            {
+              id: { $kind: "bind_list_descendant_id", key: "status" },
+              type: "text",
+              props: { text: { $bind: "@/status" } }
+            }
           ]
         },
         empty_template: {

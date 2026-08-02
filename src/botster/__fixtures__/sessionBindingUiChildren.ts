@@ -57,6 +57,7 @@ export const sessionBindingVariantSnapshot: UiTreeSnapshot = {
   root: {
     id: "session-binding-child-variants-root",
     type: "stack",
+    props: { direction: "vertical" },
     children
   }
 };
