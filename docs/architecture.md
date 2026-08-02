@@ -50,8 +50,10 @@ reads the generic entity store, including nested row context, while
 Bind-list identity has one materialization order. The direct item-template root
 retains its item-relative `$bind`; after that root becomes a nonblank literal,
 `bind_list_descendant_id` children call the runtime helper exported by
-`@trybotster/ui-contract`. Nested bind lists establish a new nearest-row context.
-Web never encodes, parses, normalizes, indexes, or repairs those identities.
+`@trybotster/ui-contract@0.3.1`. The generated declarations and revision-27
+shared conformance fixtures come from `@trybotster/hub-test-support@0.1.20`.
+Nested bind lists establish a new nearest-row context. Web never encodes,
+parses, normalizes, indexes, or repairs those identities.
 
 Before React rendering or action collection, the renderer checks authored
 descendant keys across each complete item template and checks literal ids across

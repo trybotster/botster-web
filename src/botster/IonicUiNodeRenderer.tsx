@@ -295,6 +295,11 @@ function realizedNodeIdentity(
 
   const binding = authoredIdentity.$bind;
   if (!allowRowBinding) {
+    issues?.push({
+      kind: "invalid-descendant-identity",
+      value: typeof binding === "string" ? binding : "<non-string>",
+      locations: [location]
+    });
     return undefined;
   }
   const resolved = typeof binding === "string" && binding.startsWith("@/") && row
@@ -424,7 +429,7 @@ function authoredIdentityIssues(root: UiNode): IdentityIssue[] {
         if (isUiNode(child)) {
           visitNode(child, childLocation);
         } else if (child.$kind === "bind_list") {
-          if (child.empty_template) visitNode(child.empty_template, `${childLocation}.empty_template`);
+          if (child.empty_template) findTemplates(child.empty_template, `${childLocation}.empty_template`);
           validateTemplate(child.item_template, `${childLocation}.item_template`);
         } else {
           visitNode(child.node, `${childLocation}.node`);

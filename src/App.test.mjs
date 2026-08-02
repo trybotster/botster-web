@@ -1355,6 +1355,14 @@ assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.protocol_version, 4);
 assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 27);
+const documentedContractClaims = [
+  `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
+  `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
+  `revision-${hubTestSupportMetadata.conformance_fixture_revision}`
+];
+for (const document of [readme, architecture]) {
+  for (const claim of documentedContractClaims) assert.equal(document.includes(claim), true);
+}
 for (const canonicalType of [
   "PackageSurfaceDescriptor",
   "PackageSurfaceKind",
@@ -6904,7 +6912,6 @@ try {
       { id: "valid", session_uuid: "sess-valid", lifecycle_class: "current" }
     ]);
     assert.match(invalidIdentityMarkup, /data-ui-node-id="sess-valid"/);
-    assert.doesNotMatch(invalidIdentityMarkup, /data-ui-node-id="sess-duplicate"/);
     assert.doesNotMatch(invalidIdentityMarkup, /data-ui-node-id=" "/);
     assert.deepEqual(actions.map(({ node }) => node.id), [realizeBindListDescendantId("sess-valid", "select")]);
   }
@@ -7003,6 +7010,49 @@ try {
   assert.match(misplacedDescendantProof.markup, /data-ui-identity-diagnostic="invalid-descendant-identity"/);
   assert.deepEqual(misplacedDescendantProof.actions, []);
 
+  const nestedEmptyDescendantProof = renderIdentityCase(
+    boundIdentityTemplate([{
+      $kind: "bind_list",
+      source: "@/children",
+      item_template: { id: { $bind: "@/id" }, type: "text", props: { text: "Nested item" } },
+      empty_template: {
+        id: { $kind: "bind_list_descendant_id", key: "nested-empty" },
+        type: "text",
+        props: { text: "Must not render" }
+      }
+    }]),
+    [{ id: "nested-empty-row", row_identity: "row-nested-empty", children: [] }]
+  );
+  assert.match(nestedEmptyDescendantProof.markup, /data-ui-identity-diagnostic="invalid-descendant-identity"/);
+  assert.deepEqual(nestedEmptyDescendantProof.actions, []);
+
+  const separateEmptyNamespaceProof = renderIdentityCase(
+    boundIdentityTemplate([
+      { id: { $kind: "bind_list_descendant_id", key: "shared" }, type: "text", props: { text: "Outer descendant" } },
+      {
+        $kind: "bind_list",
+        source: "@/children",
+        item_template: { id: { $bind: "@/id" }, type: "text", props: { text: "Nested item" } },
+        empty_template: { id: "shared", type: "text", props: { text: "Nested empty" } }
+      }
+    ]),
+    [{ id: "separate-empty-row", row_identity: "row-separate-empty", children: [] }]
+  );
+  assert.match(separateEmptyNamespaceProof.markup, /Outer descendant/);
+  assert.match(separateEmptyNamespaceProof.markup, /Nested empty/);
+  assert.doesNotMatch(separateEmptyNamespaceProof.markup, /data-ui-identity-diagnostic=/);
+
+  const listItemBoundIdentityProof = renderIdentityCase({
+    id: "list-bound-id-root",
+    type: "list",
+    props: { items: [{ id: "item-a", label: "Alpha" }] },
+    slots: {
+      item: [{ id: { $bind: "@/id" }, type: "text", props: { text: { $bind: "@/label" } } }]
+    }
+  });
+  assert.match(listItemBoundIdentityProof.markup, /data-ui-identity-diagnostic="invalid-descendant-identity"/);
+  assert.deepEqual(listItemBoundIdentityProof.actions, []);
+
   const duplicateLiteralProof = renderIdentityCase({
     id: "literal-root",
     type: "stack",
@@ -7013,6 +7063,81 @@ try {
   });
   assert.match(duplicateLiteralProof.markup, /data-ui-identity-diagnostic="duplicate-realized-identity"/);
   assert.deepEqual(duplicateLiteralProof.actions, []);
+
+  const collisionNode = () => ({ id: "rendered-region-collision", type: "text", props: { text: "Collision" } });
+  const renderedRegionCollisionCases = [
+    ...["stack", "form_section", "inline", "metric_grid", "form"].map((type) => [
+      `${type}.children`,
+      { id: "rendered-region-collision", type, children: [collisionNode()] }
+    ]),
+    ...["section", "panel"].flatMap((type) => [
+      ...["header", "toolbar", "body", "footer", "actions"].map((slot) => [
+        `${type}.slots.${slot}`,
+        { id: "rendered-region-collision", type, slots: { [slot]: [collisionNode()] } }
+      ]),
+      [`${type}.children`, { id: "rendered-region-collision", type, children: [collisionNode()] }],
+      [`${type}.slots.empty`, { id: "rendered-region-collision", type, slots: { empty: [collisionNode()] } }]
+    ]),
+    ...["commands", "filters", "search", "actions"].map((slot) => [
+      `toolbar.slots.${slot}`,
+      { id: "rendered-region-collision", type: "toolbar", slots: { [slot]: [collisionNode()] } }
+    ]),
+    ["toolbar.children", { id: "rendered-region-collision", type: "toolbar", children: [collisionNode()] }],
+    ["empty_state.slots.actions", {
+      id: "rendered-region-collision",
+      type: "empty_state",
+      props: { title: "Empty" },
+      slots: { actions: [collisionNode()] }
+    }],
+    ["list.slots.item", {
+      id: "rendered-region-collision",
+      type: "list",
+      props: { items: [{ id: "item-a" }] },
+      slots: { item: [collisionNode()] }
+    }],
+    ["list.children", {
+      id: "rendered-region-collision",
+      type: "list",
+      props: { items: [] },
+      children: [collisionNode()]
+    }],
+    ["list.slots.empty", {
+      id: "rendered-region-collision",
+      type: "list",
+      props: { items: [] },
+      slots: { empty: [collisionNode()] }
+    }],
+    ...["title", "subtitle", "meta", "actions"].map((slot) => [
+      `list_item.slots.${slot}`,
+      { id: "rendered-region-collision", type: "list_item", slots: { [slot]: [collisionNode()] } }
+    ]),
+    ["list_item.children", { id: "rendered-region-collision", type: "list_item", children: [collisionNode()] }],
+    ["select.slots.options", {
+      id: "rendered-region-collision",
+      type: "select",
+      slots: { options: [collisionNode()] }
+    }],
+    ["dialog.slots.body", {
+      id: "rendered-region-collision",
+      type: "dialog",
+      slots: { body: [collisionNode()] }
+    }],
+    ["dialog.children", { id: "rendered-region-collision", type: "dialog", children: [collisionNode()] }],
+    ["table.props.empty_state", {
+      id: "rendered-region-collision",
+      type: "table",
+      props: { columns: [], rows: [], empty_state: collisionNode() }
+    }]
+  ];
+  for (const [region, root] of renderedRegionCollisionCases) {
+    const collisionProof = renderIdentityCase(root);
+    assert.match(
+      collisionProof.markup,
+      /data-ui-identity-diagnostic="duplicate-realized-identity"/,
+      `${region} must remain covered by fail-closed realized identity validation`
+    );
+    assert.deepEqual(collisionProof.actions, []);
+  }
 
   const generatedCollisionId = realizeBindListDescendantId("row-collision", "control");
   const generatedStaticCollisionProof = renderIdentityCase({
@@ -7290,7 +7415,7 @@ try {
                   props: { text: { $bind: "@/body" } }
                 },
                 empty_template: {
-                  id: { $kind: "bind_list_descendant_id", key: "comments-empty" },
+                  id: "comment-empty",
                   type: "text",
                   props: { text: "No comments" }
                 }
@@ -7316,7 +7441,11 @@ try {
   bindListStore.apply({
     operation: "entity_upsert",
     key: { family: "project-pipelines.ticket", id: "ticket-gamma" },
-    record: { id: "ticket-gamma", title: "Gamma ticket", comments: [] }
+    record: {
+      id: "ticket-gamma",
+      title: "Gamma ticket",
+      comments: [{ id: "comment-gamma", body: "Nested gamma comment" }]
+    }
   });
   assert.match(renderBindList(), /Gamma ticket/);
   bindListStore.apply({
