@@ -895,7 +895,7 @@ assert.match(app, /packageActionFeedback\(result\)/);
 assert.match(app, /setPackageActionToast\(packageFeedback\)/);
 assert.match(app, /package_decision/);
 assert.match(app, /install_plan/);
-assert.match(app, /schemaVersionDiagnosticFromFrame/);
+assert.match(app, /schemaVersionInformationFromFrame/);
 assert.match(app, /operatorErrorDiagnostic/);
 assert.match(app, /hubConnectionDiagnosticFromFrame/);
 assert.match(app, /production\.diagnostic_action_status/);
@@ -1121,8 +1121,8 @@ assert.match(hubTerminalDataPlane, /type: "detach"/);
 assert.match(hubTerminalDataPlane, /attachToAuthoritativeSession/);
 assert.doesNotMatch(hubTerminalDataPlane, /type: "list_sessions"/);
 assert.match(hubTerminalDataPlane, /this\.listeners\.size === 0/);
-assert.match(connectionDiagnostics, /expectedDaemonSchemaVersion = 1/);
-assert.match(connectionDiagnostics, /schemaVersionDiagnosticFromFrame/);
+assert.doesNotMatch(connectionDiagnostics, /expectedDaemonSchemaVersion/);
+assert.match(connectionDiagnostics, /schemaVersionInformationFromFrame/);
 assert.match(connectionDiagnostics, /operatorErrorDiagnostic/);
 assert.match(connectionDiagnostics, /terminalUnavailableDiagnostic/);
 assert.match(connectionDiagnosticsPanel, /data-diagnostic-id/);
@@ -1190,8 +1190,12 @@ assert.doesNotMatch(liveProtocolHarnessScript, /startSessionButton|observeStartS
 assert.match(liveProtocolHarnessScript, /proveExternalSessionLifecycle/);
 assert.match(liveProtocolHarnessScript, /waitForRunningSessionFrame\(page\)/);
 assert.match(liveProtocolHarnessScript, /waitForAutomaticTerminalRestore/);
-assert.match(liveProtocolHarnessScript, /assertMinimumHubCompatibility/);
-assert.match(liveProtocolHarnessScript, /required revision 14 with terminal_readback/);
+assert.match(liveProtocolHarnessScript, /assertCurrentHubCompatibilityAndSchema/);
+assert.match(liveProtocolHarnessScript, /assertCurrentHubSchemaPresentation/);
+assert.match(liveProtocolHarnessScript, /status\?\.schema_version !== 2/);
+assert.match(liveProtocolHarnessScript, /protocolVersion < 4/);
+assert.match(liveProtocolHarnessScript, /revision < 28/);
+assert.match(liveProtocolHarnessScript, /Info \/ server/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalRendererWrite/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalCanvas/);
 assert.match(liveProtocolHarnessScript, /waitForDaemonRequestCount/);
@@ -1354,7 +1358,7 @@ const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name], hubTestSupportMetadata.ui_contract.package_version);
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.protocol_version, 4);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 27);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 28);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
@@ -1891,7 +1895,7 @@ const {
   minimumDaemonProtocolVersion,
   operatorErrorDiagnostic,
   requiredDaemonFeatures,
-  schemaVersionDiagnosticFromFrame,
+  schemaVersionInformationFromFrame,
   streamDisconnectedDiagnostic,
   terminalUnavailableDiagnostic,
   upsertDiagnostic,
@@ -2115,6 +2119,47 @@ assert.equal(sessionLifecycleFixture.fresh_subscription.prior_generation_frames_
 assert.equal(sessionLifecycleFixture.overflow.resync_reason, "subscriber_overflow");
 applySessionLifecycleFrame(sessionLifecycleFixture.overflow.resync_snapshot);
 assert.deepEqual(sessionLifecycleStore.list("session"), []);
+
+const validGenericSession = {
+  session_uuid: "generic-session",
+  registry_state: "active",
+  lifecycle: "running",
+  lifecycle_class: "current",
+  rows: 24,
+  cols: 80,
+  updated_at: 1785880000
+};
+const genericSessionSnapshot = daemonEntityFrame({
+  type: "entity_snapshot",
+  subscription_id: "generic-session-boundary",
+  entity_type: "session",
+  snapshot_seq: 1,
+  items: [null, "not-a-session", { session_uuid: "missing-fields" }, validGenericSession]
+});
+assert.deepEqual(genericSessionSnapshot.payload.records, [{ ...validGenericSession, id: "generic-session" }]);
+assert.deepEqual(daemonEntityFrame({
+  type: "entity_upsert",
+  subscription_id: "generic-session-boundary",
+  entity_type: "session",
+  snapshot_seq: 2,
+  id: "generic-session",
+  entity: validGenericSession
+}).payload.record, { ...validGenericSession, id: "generic-session" });
+assert.equal(daemonEntityFrame({
+  type: "entity_upsert",
+  subscription_id: "generic-session-boundary",
+  entity_type: "session",
+  snapshot_seq: 2,
+  id: "missing-fields",
+  entity: { session_uuid: "missing-fields" }
+}), undefined);
+assert.equal(daemonEntityFrame({
+  type: "entity_snapshot",
+  subscription_id: "package-entities",
+  entity_type: "project-pipelines.ticket",
+  snapshot_seq: 1,
+  items: [{ id: "ticket-1", title: "Preserve generic package records" }]
+}), undefined);
 sessionLifecycleStore.apply({
   operation: "entity_upsert",
   key: { family: "session", id: "post-resync-row" },
@@ -4338,7 +4383,7 @@ const diagnosticRuntime = createBotsterWebClient({
   actionTimeoutMs: 50
 });
 diagnosticRuntime.hub.onFrame((frame) => {
-  const schemaDiagnostic = schemaVersionDiagnosticFromFrame(frame);
+  const schemaDiagnostic = schemaVersionInformationFromFrame(frame);
   if (schemaDiagnostic) runtimeDiagnostics.push(schemaDiagnostic);
   const hubDiagnostic = hubConnectionDiagnosticFromFrame(frame);
   if (hubDiagnostic) runtimeDiagnostics.push(hubDiagnostic);
@@ -4484,7 +4529,7 @@ assert.match(spawnFailureHubDiagnostic.detail, new RegExp(spawnFailureDiagnostic
 assert.match(spawnFailureHubDiagnostic.detail, /Operation: spawn/);
 assert.doesNotMatch(spawnFailureHubDiagnostic.detail, /Capability:/);
 
-const mismatchedSchemaDiagnostic = schemaVersionDiagnosticFromFrame({
+const schemaTwoInformation = schemaVersionInformationFromFrame({
   kind: "entity_snapshot",
   payload: {
     operation: "entity_snapshot",
@@ -4492,10 +4537,14 @@ const mismatchedSchemaDiagnostic = schemaVersionDiagnosticFromFrame({
     records: [{ id: "local-hub", schema_version: 2 }]
   }
 });
-assert.equal(mismatchedSchemaDiagnostic.title, "Daemon schema mismatch");
-assert.match(mismatchedSchemaDiagnostic.detail, /expected schema 1/);
+assert.equal(schemaTwoInformation.title, "Hub durable-state schema");
+assert.equal(schemaTwoInformation.severity, "info");
+assert.equal(schemaTwoInformation.source, "server");
+assert.match(schemaTwoInformation.detail, /durable-state schema version 2/);
+assert.match(schemaTwoInformation.detail, /DaemonStatus\.compatibility/);
+assert.doesNotMatch(schemaTwoInformation.detail, /compatible|mismatch|expected/i);
 
-const matchingSchemaDiagnostic = schemaVersionDiagnosticFromFrame({
+const schemaOneInformation = schemaVersionInformationFromFrame({
   kind: "entity_snapshot",
   payload: {
     operation: "entity_snapshot",
@@ -4503,7 +4552,9 @@ const matchingSchemaDiagnostic = schemaVersionDiagnosticFromFrame({
     records: [{ id: "local-hub", schema_version: 1 }]
   }
 });
-assert.equal(matchingSchemaDiagnostic.title, "Daemon schema compatible");
+assert.equal(schemaOneInformation.title, "Hub durable-state schema");
+assert.equal(schemaOneInformation.severity, "info");
+assert.match(schemaOneInformation.detail, /durable-state schema version 1/);
 
 const descriptorUnavailableDiagnostic = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -4544,6 +4595,28 @@ const protocolMismatchDiagnostic = compatibilityDiagnosticsFromFrame({
 })[0];
 assert.equal(protocolMismatchDiagnostic.title, "Hub protocol mismatch");
 
+const outdatedProtocolVersionDiagnostic = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [
+      {
+        id: "local-hub",
+        schema_version: 2,
+        compatibility: {
+          protocol: "botster-hub-daemon-v1",
+          protocol_version: minimumDaemonProtocolVersion - 1,
+          features: requiredDaemonFeatures,
+          conformance_fixture_revision: minimumConformanceFixtureRevision
+        }
+      }
+    ]
+  }
+})[0];
+assert.equal(outdatedProtocolVersionDiagnostic.title, "Hub protocol version mismatch");
+assert.equal(outdatedProtocolVersionDiagnostic.severity, "danger");
+
 const missingCapabilityDiagnostic = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
   payload: {
@@ -4567,6 +4640,31 @@ assert.equal(missingCapabilityDiagnostic.title, "Hub capability missing");
 assert.match(missingCapabilityDiagnostic.detail, /terminal_streaming/);
 assert.match(missingCapabilityDiagnostic.detail, /terminal_readback/);
 assert.equal(missingCapabilityDiagnostic.id, "hub-compatibility");
+
+for (const missingFeature of requiredDaemonFeatures) {
+  const diagnostic = compatibilityDiagnosticsFromFrame({
+    kind: "entity_snapshot",
+    payload: {
+      operation: "entity_snapshot",
+      family: hubStatusFamily,
+      records: [
+        {
+          id: "local-hub",
+          schema_version: 2,
+          compatibility: {
+            protocol: "botster-hub-daemon-v1",
+            protocol_version: minimumDaemonProtocolVersion,
+            features: requiredDaemonFeatures.filter((feature) => feature !== missingFeature),
+            conformance_fixture_revision: minimumConformanceFixtureRevision
+          }
+        }
+      ]
+    }
+  })[0];
+  assert.equal(diagnostic.title, "Hub capability missing");
+  assert.equal(diagnostic.severity, "danger");
+  assert.match(diagnostic.detail, new RegExp(missingFeature));
+}
 
 const outdatedConformanceDiagnostic = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -8401,7 +8499,7 @@ try {
     createElement(LocalHubFirstScreen, {
       mode: "webrtc",
       statusText: "Connected to local hub over WebRTC",
-      diagnostics: [matchingSchemaDiagnostic, compatibleDescriptorDiagnostic],
+      diagnostics: [schemaTwoInformation, compatibleDescriptorDiagnostic],
       packages: [
         {
           id: "botster-web",
@@ -8420,6 +8518,8 @@ assert.match(healthyFirstScreenMarkup, /Local Botster health/);
 assert.match(healthyFirstScreenMarkup, /Connection, extensions, sessions, and terminal availability/);
 assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
   assert.match(healthyFirstScreenMarkup, /Packages/);
+  assert.match(healthyFirstScreenMarkup, /<h3>Hub<\/h3><ion-badge color="success">Healthy/);
+  assert.doesNotMatch(healthyFirstScreenMarkup, /<h3>Hub<\/h3><ion-badge color="danger">Blocked/);
   assert.match(healthyFirstScreenMarkup, /Loaded/);
   assert.match(healthyFirstScreenMarkup, /Sessions/);
   assert.match(healthyFirstScreenMarkup, /Running/);
@@ -8623,7 +8723,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
     createElement(ConnectionDiagnosticsPanel, {
       diagnostics: [
         hubUnavailableDiagnostic(new Error("connect ECONNREFUSED")),
-        mismatchedSchemaDiagnostic,
+        schemaTwoInformation,
         ...runtimeDiagnostics,
         hubConnectionDiagnosticFromFrame(hubDiagnosticFrames.find((frame) => frame.payload.kind === "compatibility_mismatch")),
         hubConnectionDiagnosticFromFrame(hubDiagnosticFrames.find((frame) => frame.payload.kind === "action_failure")),
@@ -8644,7 +8744,8 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
   );
   assert.match(diagnosticsMarkup, /Connection diagnostics/);
   assert.match(diagnosticsMarkup, /Local hub unavailable/);
-  assert.match(diagnosticsMarkup, /Daemon schema mismatch/);
+  assert.match(diagnosticsMarkup, /Hub durable-state schema/);
+  assert.match(diagnosticsMarkup, /Hub durable-state schema version 2/);
   assert.match(diagnosticsMarkup, /Hub connection established/);
   assert.match(diagnosticsMarkup, /Hub capability unsupported/);
   assert.match(diagnosticsMarkup, /Hub compatibility mismatch/);
@@ -8664,6 +8765,8 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
   assert.match(diagnosticsMarkup, /Blocked \/ signaling/);
   assert.match(diagnosticsMarkup, /Warning \/ action/);
   assert.match(diagnosticsMarkup, /Healthy \/ compatibility/);
+  assert.match(diagnosticsMarkup, /Info \/ server/);
+  assert.doesNotMatch(diagnosticsMarkup, /Daemon schema mismatch|expected schema/);
   assert.ok(
     diagnosticsMarkup.indexOf("Local hub unavailable") < diagnosticsMarkup.indexOf("Hub action failed"),
     "danger diagnostics should render before warning diagnostics"

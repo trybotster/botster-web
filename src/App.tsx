@@ -62,7 +62,7 @@ import {
   hubConnectionDiagnosticFromFrame,
   initialConnectionDiagnostics,
   operatorErrorDiagnostic,
-  schemaVersionDiagnosticFromFrame,
+  schemaVersionInformationFromFrame,
   terminalUnavailableDiagnostic,
   upsertDiagnostic,
   webRtcLifecycleDiagnostic,
@@ -895,7 +895,7 @@ export default function App() {
       if (!cancelled) {
         recordDiagnostic(operatorErrorDiagnostic(frame));
         recordDiagnostic(hubConnectionDiagnosticFromFrame(frame));
-        recordDiagnostic(schemaVersionDiagnosticFromFrame(frame));
+        recordDiagnostic(schemaVersionInformationFromFrame(frame));
         recordDiagnostics(compatibilityDiagnosticsFromFrame(frame));
       }
     });

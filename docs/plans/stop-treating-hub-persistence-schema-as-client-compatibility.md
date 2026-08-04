@@ -46,6 +46,11 @@
   `src/App.test.mjs`, `scripts/check-daemon-protocol-drift.mjs`, and the real
   browser/Hub path in `scripts/live-packaged-protocol-harness.mjs`.
 - Baseline `npm test` and `npm run typecheck` both pass on the declared base.
+- Implement renewed the production-shaped baseline before source edits by
+  building Hub and session-worker from clean `11d73d27` sources into an
+  isolated temporary Cargo target. The unmodified live smoke passed and
+  observed protocol version `4`, conformance revision `28`, and schema `2`;
+  the baseline harness did not yet assert schema presentation.
 
 ## Current runtime path and defect
 
@@ -133,13 +138,16 @@ session-only Web consumer narrowing from zero-run sibling
    `scripts/live-packaged-protocol-harness.mjs` on its normal fresh isolated-Hub
    path. After opening the real compiled Ionic Diagnostics route, read the
    structured status evidence and require protocol `botster-hub-daemon-v1`,
-   protocol version `4`, conformance revision `28`, required features, and
-   `schema_version === 2`. Require the rendered `schema-version` row to be
-   informational and not contain mismatch/Blocked copy. Require the shell to be
-   connected (`Connected` or `Connected with warnings`), not `Needs attention`
-   because of schema. Keep the assertion tied to structured harness events and
-   the rendered production DOM; source presence and fixture-only tests are not
-   acceptance.
+   protocol version at least `4`, conformance revision at least `28`, required
+   features, and `schema_version === 2`. Require the rendered `schema-version`
+   row to be informational and not contain mismatch/Blocked copy. Require the
+   shell to be connected (`Connected` or `Connected with warnings`), not `Needs attention`
+   because of schema, and require the `LocalHubFirstScreen` Hub row to be
+   `Healthy`, not `Blocked`. Keep the assertion tied to structured harness
+   events and the rendered production DOM; source presence and fixture-only
+   tests are not acceptance. The protocol and conformance checks are floors so
+   a later compatible Hub release does not fail this schema-specific smoke; the
+   exact `0.1.21` bytes remain enforced by the drift check.
 
 ## Non-scope and ownership boundaries
 
@@ -180,6 +188,8 @@ session-only Web consumer narrowing from zero-run sibling
 - `src/botster/connectionDiagnostics.ts`
 - `src/botster/hubTransport.ts`
 - `src/App.tsx`
+- `src/botster/LocalHubFirstScreen.tsx` is an affected rendered surface proven
+  through the shared diagnostic input; no source change is expected.
 - `src/App.test.mjs`
 - `scripts/live-packaged-protocol-harness.mjs`
 - `README.md`, `docs/architecture.md`

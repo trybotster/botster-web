@@ -3,7 +3,6 @@ import type { TerminalDataPlaneKind } from "./hubRuntime";
 import type { HubControlFrame } from "./protocol";
 import type { WebrtcDaemonLifecycleEvent } from "./webrtcDaemonClient";
 
-export const expectedDaemonSchemaVersion = 1;
 export const hubStatusFamily = "botster-web.hub_status";
 export const hubCompatibilityDiagnosticId = "hub-compatibility";
 export const expectedDaemonProtocol = "botster-hub-daemon-v1";
@@ -320,28 +319,18 @@ export function operatorErrorDiagnostic(frame: HubControlFrame): ConnectionDiagn
   };
 }
 
-export function schemaVersionDiagnosticFromFrame(frame: HubControlFrame): ConnectionDiagnostic | undefined {
+export function schemaVersionInformationFromFrame(frame: HubControlFrame): ConnectionDiagnostic | undefined {
   const status = hubStatusRecordFromFrame(frame);
   if (!status || typeof status.schema_version !== "number") {
     return undefined;
   }
 
-  if (status.schema_version === expectedDaemonSchemaVersion) {
-    return {
-      id: "schema-version",
-      title: "Daemon schema compatible",
-      detail: `Daemon schema ${status.schema_version} matches botster-web.`,
-      severity: "success",
-      source: "compatibility"
-    };
-  }
-
   return {
     id: "schema-version",
-    title: "Daemon schema mismatch",
-    detail: `Daemon schema ${status.schema_version} does not match botster-web expected schema ${expectedDaemonSchemaVersion}.`,
-    severity: "danger",
-    source: "compatibility"
+    title: "Hub durable-state schema",
+    detail: `Hub durable-state schema version ${status.schema_version}. Client compatibility is reported by DaemonStatus.compatibility.`,
+    severity: "info",
+    source: "server"
   };
 }
 
