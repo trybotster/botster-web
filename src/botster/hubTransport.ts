@@ -318,7 +318,9 @@ export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | u
         operation: "entity_snapshot",
         family: sessionFamily,
         sequence: frame.snapshot_seq,
-        records: frame.items.map(sessionEntityRecord)
+        records: frame.items.flatMap((item) =>
+          isDaemonSessionEntity(item) ? [sessionEntityRecord(item)] : []
+        )
       } satisfies EntityFrame
     };
   }
@@ -335,6 +337,8 @@ export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | u
   }
 
   if (frame.type === "entity_upsert") {
+    if (!isDaemonSessionEntity(frame.entity)) return undefined;
+
     return {
       kind: "entity_upsert",
       payload: {
@@ -384,6 +388,22 @@ function sessionEntityRecord(session: DaemonSessionEntity) {
     ...session,
     id: session.session_uuid
   };
+}
+
+function isDaemonSessionEntity(value: unknown): value is DaemonSessionEntity {
+  if (!isRecord(value)) return false;
+
+  return (
+    typeof value.session_uuid === "string" &&
+    typeof value.registry_state === "string" &&
+    (value.lifecycle === undefined || value.lifecycle === null || typeof value.lifecycle === "string") &&
+    typeof value.lifecycle_class === "string" &&
+    typeof value.rows === "number" &&
+    typeof value.cols === "number" &&
+    typeof value.updated_at === "number" &&
+    (value.exit_code === undefined || value.exit_code === null || typeof value.exit_code === "number") &&
+    (value.failure_reason === undefined || value.failure_reason === null || typeof value.failure_reason === "string")
+  );
 }
 
 function spawnTargetRecord(target: DaemonSpawnTarget) {

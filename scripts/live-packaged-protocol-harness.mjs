@@ -183,7 +183,7 @@ try {
   await page.getByText("Local Botster health").waitFor();
   await waitForTransportLabel(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "status request");
-  await assertMinimumHubCompatibility(page);
+  await assertCurrentHubCompatibilityAndSchema(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
   const originalRemoteAccessValue = await waitForRemoteAccessPackageConfiguration(page);
@@ -198,6 +198,7 @@ try {
     "authoritative session snapshot"
   );
   await assertNoLegacySessionHydration(page);
+  await assertCurrentHubSchemaPresentation(page);
   if (sharedHubDriverMode) {
     const summary = await exerciseSharedHubWorkspaces(page, sharedHubAssignment);
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
@@ -3244,21 +3245,21 @@ async function waitForTransportLabel(page) {
   });
 }
 
-async function assertMinimumHubCompatibility(page) {
-  const compatibility = await page.waitForFunction(
+async function assertCurrentHubCompatibilityAndSchema(page) {
+  const status = await page.waitForFunction(
     () => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       for (let index = events.length - 1; index >= 0; index -= 1) {
         const entry = events[index];
         if (entry.kind === "daemon_response" && entry.payload?.kind === "status") {
-          return entry.payload?.status?.compatibility ?? null;
+          return entry.payload?.status ?? null;
         }
         if (
           entry.kind === "hub_frame" &&
           entry.payload?.kind === "entity_snapshot" &&
           entry.payload?.payload?.family === "botster-web.hub_status"
         ) {
-          return entry.payload.payload.records?.find((record) => record?.id === "local-hub")?.compatibility ?? null;
+          return entry.payload.payload.records?.find((record) => record?.id === "local-hub") ?? null;
         }
       }
       return null;
@@ -3266,16 +3267,70 @@ async function assertMinimumHubCompatibility(page) {
     undefined,
     { timeout: 15_000 }
   ).then((handle) => handle.jsonValue()).catch((error) => {
-    throw new Error(`timed out waiting for hub compatibility descriptor: ${error.message}`);
+    throw new Error(`timed out waiting for structured hub status: ${error.message}`);
   });
 
+  const compatibility = status?.compatibility;
+  const protocol = compatibility?.protocol;
+  const protocolVersion = compatibility?.protocol_version;
   const revision = compatibility?.conformance_fixture_revision;
   const features = Array.isArray(compatibility?.features) ? compatibility.features : [];
-  if (!Number.isInteger(revision) || revision < 14 || !features.includes("terminal_readback")) {
+  const requiredFeatures = [
+    "sessions",
+    "terminal_streaming",
+    "resize",
+    "terminal_readback",
+    "plugin_surface_render",
+    "plugin_surface_action"
+  ];
+  const missingFeatures = requiredFeatures.filter((feature) => !features.includes(feature));
+  if (
+    status?.schema_version !== 2 ||
+    protocol !== "botster-hub-daemon-v1" ||
+    !Number.isInteger(protocolVersion) ||
+    protocolVersion < 4 ||
+    !Number.isInteger(revision) ||
+    revision < 28 ||
+    missingFeatures.length > 0
+  ) {
     throw new Error(
-      `incompatible hub for revision-14 terminal history: observed revision ${String(revision)}, ` +
-      `required revision 14 with terminal_readback`
+      `unexpected current Hub status: schema=${String(status?.schema_version)}, protocol=${String(protocol)}, ` +
+      `protocol_version=${String(protocolVersion)}, conformance_fixture_revision=${String(revision)}, ` +
+      `missing_features=${missingFeatures.join(",") || "none"}`
     );
+  }
+}
+
+async function assertCurrentHubSchemaPresentation(page) {
+  const schemaRow = page.locator('[data-diagnostic-id="schema-version"]');
+  await schemaRow.waitFor();
+  const schemaText = await schemaRow.innerText();
+  if (
+    !schemaText.includes("Hub durable-state schema") ||
+    !schemaText.includes("schema version 2") ||
+    !schemaText.includes("Info / server") ||
+    /Blocked|mismatch|expected schema/i.test(schemaText)
+  ) {
+    throw new Error(`schema diagnostic is not neutral schema-2 context: ${schemaText}`);
+  }
+
+  const healthBadge = page.locator(".toolbar-status ion-badge");
+  await page.waitForFunction(
+    () => ["Connected", "Connected with warnings"].includes(
+      globalThis.document.querySelector(".toolbar-status ion-badge")?.textContent?.trim() ?? ""
+    ),
+    undefined,
+    { timeout: 15_000 }
+  );
+  const healthText = (await healthBadge.innerText()).trim();
+  if (healthText === "Needs attention") {
+    throw new Error("schema 2 incorrectly marked the connected shell as Needs attention");
+  }
+
+  const hubCard = page.getByRole("heading", { name: "Hub", exact: true }).locator("xpath=ancestor::article[1]");
+  const hubCardText = await hubCard.innerText();
+  if (!hubCardText.includes("Healthy") || hubCardText.includes("Blocked")) {
+    throw new Error(`schema 2 incorrectly blocked the Local Hub first-screen row: ${hubCardText}`);
   }
 }
 
