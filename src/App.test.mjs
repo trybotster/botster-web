@@ -76,7 +76,7 @@ const sharedHubColdAssignment = parseWorkspacesSpawnAssignment(JSON.stringify({
     case_id: "case-a",
     target_id: "target-a",
     branch: "branch-a",
-    template_id: "template-a"
+    session_type_id: "target-a/template-a"
   }]
 }));
 assert.equal(sharedHubColdAssignment.cases[0].expected_lifecycle, "ended");
@@ -99,6 +99,25 @@ assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
   ...sharedHubColdAssignment,
   cases: [{ ...sharedHubColdAssignment.cases[0], expect_created_branch: "yes" }]
 })), /expect_created_branch must be a boolean/);
+// Cold cut: the superseded template_id key is rejected, not silently accepted as an
+// alias. Workspaces now names this spawn form field session_type_id, and a driver that
+// still sent template_id would key on a field the installed package never reads.
+assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
+  ...sharedHubColdAssignment,
+  cases: [{
+    case_id: "case-a",
+    target_id: "target-a",
+    branch: "branch-a",
+    template_id: "template-a"
+  }]
+})), /cases\[0\]\.template_id is superseded by cases\[0\]\.session_type_id/);
+// The old key must be rejected on its own merits, not merely because session_type_id is
+// missing. A case carrying both would otherwise validate and silently drop template_id,
+// which is the compatibility tolerance this migration forbids.
+assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
+  ...sharedHubColdAssignment,
+  cases: [{ ...sharedHubColdAssignment.cases[0], template_id: "template-a" }]
+})), /cases\[0\]\.template_id is superseded by cases\[0\]\.session_type_id/);
 assert.throws(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_SURFACE_SKIP: "1" }), /rejects allow-skip inputs/);
 assert.throws(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_BROWSER_SKIP: "true" }), /rejects allow-skip inputs/);
 assert.doesNotThrow(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_SURFACE_SKIP: "0" }));
@@ -1260,7 +1279,17 @@ for (const requiredField of ["id", "label", "role", "interaction", "lifecycle", 
   assert.match(workspacesSharedHubBrowserSmokeScript, new RegExp(`${requiredField}: "`));
 }
 // The Workspaces plugin still owns the assignment vocabulary; that seam is preserved.
-assert.match(workspacesSharedHubBrowserSmokeScript, /template_id: "shared-browser"/);
+// Hub qualifies effective session-type ids as `<source name>/<id>` and a repo source's
+// name is the spawn target id, so the value the driver selects must be the qualified
+// `shared-git/shared-browser` the plugin renders — not the bare authored id.
+assert.match(workspacesSharedHubBrowserSmokeScript, /session_type_id: "shared-git\/shared-browser"/);
+assert.doesNotMatch(workspacesSharedHubBrowserSmokeScript, /template_id/);
+// The qualified value must be observed among the rendered options before injection, and
+// the submit request must be captured by identity rather than admitted by matching the
+// expected values map, or the session_type_id assertion cannot fail against live output.
+assert.match(liveProtocolHarnessScript, /readUiNodeSelectOptionValues/);
+assert.match(liveProtocolHarnessScript, /is not among the /);
+assert.match(liveProtocolHarnessScript, /assertSharedHubSpawnSubmission/);
 
 // Session-type live stage: held subscription, no legacy list hydration, Hub-owned CRUD.
 assert.match(liveProtocolHarnessScript, /exerciseSessionTypes/);

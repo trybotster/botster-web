@@ -62,11 +62,18 @@ export function parseWorkspacesSpawnAssignment(serialized) {
   const caseIds = new Set();
   const cases = assignment.cases.map((candidate, index) => {
     const path = `cases[${index}]`;
+    // Cold cut: reject the superseded key outright rather than ignoring it. Requiring
+    // session_type_id alone would still accept a case carrying both and silently discard
+    // template_id, leaving this caller seam tolerant of a field the installed Workspaces
+    // package no longer reads.
+    if (candidate != null && Object.prototype.hasOwnProperty.call(candidate, "template_id")) {
+      throw new Error(`${path}.template_id is superseded by ${path}.session_type_id`);
+    }
     const normalized = {
       case_id: requiredString(candidate?.case_id, `${path}.case_id`),
       target_id: requiredString(candidate?.target_id, `${path}.target_id`),
       branch: requiredString(candidate?.branch, `${path}.branch`),
-      template_id: requiredString(candidate?.template_id, `${path}.template_id`),
+      session_type_id: requiredString(candidate?.session_type_id, `${path}.session_type_id`),
       prompt: optionalString(candidate?.prompt, `${path}.prompt`),
       ticket_id: optionalString(candidate?.ticket_id, `${path}.ticket_id`),
       expected_lifecycle: candidate?.expected_lifecycle ?? "ended",
@@ -123,6 +130,46 @@ export function reconciliationEvidence(before, after) {
     request_counts_unchanged: ["plugin_surface_render", "list_sessions"]
       .every((key) => before?.[key] === after?.[key])
   };
+}
+
+// Asserts the renderer-collected submit payload on a request captured by rendered
+// action/node identity and sequence position. The captured request must NOT have been
+// admitted by matching these values, or every check below is a selection criterion
+// rather than an assertion.
+export function assertSharedHubSpawnSubmission(spawnCase, workspace, captured) {
+  const request = captured?.request;
+  if (!request) {
+    throw new Error(`${spawnCase.case_id} captured no plugin_surface_action submit request`);
+  }
+  if (typeof request.request_id !== "string" || request.request_id.length === 0) {
+    throw new Error(`${spawnCase.case_id} submit request omitted request_id: ${JSON.stringify(captured)}`);
+  }
+  const expected = {
+    target_id: spawnCase.target_id,
+    workspace_id: workspace.workspace_id,
+    branch: spawnCase.branch,
+    session_type_id: spawnCase.session_type_id,
+    prompt: spawnCase.prompt ?? "",
+    ticket_id: spawnCase.ticket_id ?? ""
+  };
+  const actual = request.values ?? {};
+  for (const [field, value] of Object.entries(expected)) {
+    if (actual[field] !== value) {
+      throw new Error(
+        `${spawnCase.case_id} renderer-collected submit values changed ${field}: ` +
+        `expected=${JSON.stringify(value)} actual=${JSON.stringify(actual[field])}; ` +
+        `values=${JSON.stringify(actual)}`
+      );
+    }
+  }
+  const unexpected = Object.keys(actual).filter((field) => !(field in expected));
+  if (unexpected.length > 0) {
+    throw new Error(
+      `${spawnCase.case_id} renderer-collected submit values carried unexpected fields ` +
+      `${JSON.stringify(unexpected)}; values=${JSON.stringify(actual)}`
+    );
+  }
+  return { request_id: request.request_id, values: actual };
 }
 
 export function assertSharedHubSpawnResult(spawnCase, hubResult) {

@@ -132,7 +132,12 @@ function spawnCase(caseId, branch, expectedHubResult, { include_optional_values 
     case_id: caseId,
     target_id: "shared-git",
     branch,
-    template_id: "shared-browser",
+    // Hub qualifies effective session-type ids as `<source name>/<id>`, and for a repo
+    // source the source name is the spawn target id. The fixture repo is admitted as
+    // spawn target `shared-git` and seeds session type `shared-browser`, so the value
+    // Workspaces renders as the select option is `shared-git/shared-browser`. The bare
+    // authored id is not among the rendered options and cannot spawn.
+    session_type_id: "shared-git/shared-browser",
     expected_lifecycle: "ended",
     ...expectedHubResult
   };
