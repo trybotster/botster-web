@@ -102,7 +102,7 @@ prove the lane end to end against a real Hub carrying the merged Workspaces pack
 
 | Site | Change | Why forced |
 | --- | --- | --- |
-| `scripts/workspaces-shared-hub-browser-helpers.mjs:69` | `template_id` -> `session_type_id` in the `parseWorkspacesSpawnAssignment` normalizer (key and `requiredString` path label) | Named by the ticket; owns the assignment vocabulary every consumer reads |
+| `scripts/workspaces-shared-hub-browser-helpers.mjs:69` | `template_id` -> `session_type_id` in the `parseWorkspacesSpawnAssignment` normalizer (key and `requiredString` path label), **plus** an explicit legacy-key rejection guard | Named by the ticket; owns the assignment vocabulary every consumer reads. The guard was added during Implement — see "Cold-cut gate and negative control" |
 | `scripts/workspaces-shared-hub-browser-smoke.mjs:135` | `template_id: "shared-browser"` -> `session_type_id: "shared-git/shared-browser"` | Named by the ticket; value corrected — see "The value changes too" |
 | `scripts/live-packaged-protocol-harness.mjs:1956` | `spawnCase.template_id` -> `spawnCase.session_type_id`, **and** enumerate rendered options first | Reads the renamed helper field; independence fix |
 | `scripts/live-packaged-protocol-harness.mjs:1972` | assertion key `template_id` -> `session_type_id`, **and** re-key correlation off `values` | **The wire-level break**, plus the tautology fix |
@@ -259,10 +259,10 @@ grep -n 'session_type_id' plugin.lua                            # form field nam
 ## Affected surfaces and files
 
 ```
-scripts/workspaces-shared-hub-browser-helpers.mjs   assignment parser vocabulary
+scripts/workspaces-shared-hub-browser-helpers.mjs   assignment parser vocabulary, legacy-key rejection, submit assertion
 scripts/workspaces-shared-hub-browser-smoke.mjs     spawn-case key and value
 scripts/live-packaged-protocol-harness.mjs          option enumeration, select fill, request correlation
-src/App.test.mjs                                    parser fixture, smoke source pin, negative control
+src/App.test.mjs                                    parser fixture, smoke source pin, negative controls
 README.md                                           BOTSTER_WORKSPACES_SPAWN_CASES schema
 docs/plans/rename-workspaces-browser-driver-spawn-field.md   this plan
 ```
@@ -280,8 +280,10 @@ Unchanged and deliberately so: `scripts/workspaces-shared-hub-browser-driver.mjs
 3. **Worker built from the wrong Core revision.** Colocation under a target directory is
    not provenance. Addressed by the dual-source procedure.
 4. **Stale `node_modules`** silently measuring the wrong protocol contract.
-5. **Partial rename** leaves harness:1956 passing `undefined` into the select. Gate on
-   zero remaining `template_id` outside `docs/plans/`.
+5. **Partial rename** leaves harness:1956 passing `undefined` into the select. Gated by
+   the cold-cut checks below: zero legacy *usage* — no read, normalization, or emission —
+   outside the parser's explicit rejection sentinel and test-only enforcement, backed by
+   the exact-survivor scan.
 6. **Waiving a pre-existing live failure.** Do not. Produce exact output and attribute it
    to the owning ticket, or route back.
 
