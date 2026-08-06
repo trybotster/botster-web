@@ -45,8 +45,8 @@
   wrong — the charter covers **workflow policy**, not only package paths, and
   this run's sequencing turns on cross-run dependency activation. The clauses
   that bind here are
-  [[project pipeline step activation gates open ticket dependencies before side effects]]
-  (the gate now holding `ticket_1785970233_750553`),
+  [[plan review must verify unmerged unregistered ticket dependencies]] (the
+  current planning-stage dependency rule),
   [[plan review must reverify the declared base at review time]] and
   [[plan review must fetch before trusting remote tracking refs in run worktrees]]
   (the stale-base correction below),
@@ -55,6 +55,18 @@
   [[project pipelines mcp create calls can time out after committing]] (the
   vault-checklist create for this run returned a worker timeout after
   committing, and was resolved by an owner-scoped read rather than a retry).
+- **Deliberately not loaded as binding:**
+  [[project pipeline step activation gates open ticket dependencies before side effects]].
+  Revision 2 cited it as a current runtime contract. That was wrong and is
+  corrected here per Plan Review `finding_1786033763_396233`: the note is
+  `type: drift`, `status: superseded`, superseded by
+  [[vault convention notes can document unimplemented behavior as shipped]], and
+  states in its own body that its claims "must not be loaded as a current
+  runtime contract." Citing it was precisely the failure mode that note exists to
+  record — treating a convention-shaped note as implementation proof. I should
+  have checked its frontmatter status when loading it. The current planning-stage
+  rule is [[plan review must verify unmerged unregistered ticket dependencies]],
+  which explicitly does not imply that runtime activation gating exists.
 - Plan destination `docs/plans/` was chosen from mainline prior art in this
   repository (54 existing plans, most recently
   `docs/plans/stop-treating-hub-persistence-schema-as-client-compatibility.md`
@@ -175,10 +187,39 @@ fix. Option (C) would buy a cleaner boundary at the cost of an extra full run
 cycle while blocking both feature runs; option (B) would serialize this smaller
 ticket behind a materially larger one and still leave bucket C unowned.
 
-`ticket_1785970233_750553` has been registered as blocking-dependent on this
-ticket. That run completes Plan and Plan Review, then holds at Implement until
-this PR merges, then rebases onto it. The ~7 mechanical lines in
-`hubTransport.ts` therefore cannot race that run.
+### Dependency edge: shipped evidence, expected hold, and an observed regression
+
+The **durable dependency edge exists** and is the shipped evidence here:
+`dependency_1786032120_366099`, created `1786032120`, with
+`ticket_1785970233_750553` depending on `ticket_1785970234_234515` and
+`depends_on_status: open`. The engine classifies it as blocking — it appears in
+that ticket's `blocking_dependencies` collection, not only in `dependencies`. The
+enforcement mechanism is the Project Pipelines gate merged as `8990969`.
+
+The **intended** sequencing is that `ticket_1785970233_750553` completes Plan and
+Plan Review, then holds before Implement until this PR merges, then rebases onto
+it. Revision 2 stated that hold as an accomplished fact. It was not one, and
+saying so was a factual error corrected per Plan Review
+`finding_1786033763_396233`. **The hold is expected, not observed, and must be
+verified at the actual transition rather than asserted in advance.**
+
+That correction turned out to matter within minutes of being demanded:
+
+> **Observed gate regression, reported `1786033884`.** Checked at plan-revision
+> time, `run_1786031348_611758` is **active at `botster_stack_implement`**
+> (`run_step_1786033830_925772`, started `1786033830`, agent session
+> `sess-1786033833-...`) while this ticket is still open and the blocking edge
+> above has existed since `1786032120` — roughly 28 minutes earlier. So this is
+> not a race on edge creation. Reported immediately to the orchestrator, per its
+> standing instruction in `question_1786031902_463107`. Plan Review's own
+> observation at `1786033763` that the sibling was back at Plan was accurate for
+> that moment; the transition happened about a minute later.
+
+Consequence for Implement: **do not assume the ~7 mechanical bucket-B lines in
+`hubTransport.ts` cannot race the sibling run.** Until the orchestrator confirms
+the sibling is parked, treat `hubTransport.ts` and `App.tsx` as actively
+contended, re-check the sibling's run state immediately before editing them, and
+expect a rebase or conflict resolution rather than a clean landing.
 
 ### Bucket C scope discipline (orchestrator constraint)
 
@@ -374,14 +415,18 @@ no core, no TUI, no MCP surface.
 
 ## Risks
 
-1. **Cross-run merge conflict in `hubTransport.ts` and `App.tsx`.** Largely
-   retired by the orchestrator's decision: `ticket_1785970233_750553` now holds
-   at Implement until this PR merges, then rebases onto it. Residual mitigation:
-   bucket B stays rename-only and this run never enters the session-types
-   section. Watch item flagged by the orchestrator — the dependency gate that
-   enforces this hold merged only an hour before this run as `8990969`, and this
-   is its first production exercise. If the session-types run activates Implement
-   while this ticket is open, that is a gate regression to report immediately.
+1. **Cross-run merge conflict in `hubTransport.ts` and `App.tsx` — ACTIVE, not
+   retired.** Revision 2 called this "largely retired by the dependency hold."
+   That was wrong: the hold was expected, not observed, and the sibling run
+   `run_1786031348_611758` has since been seen **active at Implement**
+   (`run_step_1786033830_925772`, started `1786033830`) while this ticket is open
+   and its blocking edge `dependency_1786032120_366099` has existed since
+   `1786032120`. Reported to the orchestrator at `1786033884` as the gate
+   regression it explicitly asked to be told about. Mitigation is now behavioral,
+   not structural: bucket B stays rename-only, this run never enters the
+   session-types section, and Implement must re-check the sibling's run state
+   immediately before touching `hubTransport.ts` or `App.tsx` and be prepared to
+   rebase rather than assume a clean landing.
 2. **Stale base.** Implementing on `713233f` would recreate a surface that
    already exists on `9753297` and produce a large false diff. Mitigation:
    mandatory rebase, re-verified at Plan Review.
@@ -584,3 +629,21 @@ Structured evidence, not toast text, per the charter: assert on
    future runs plan the bump as a single owned unit.
 4. **Update state is three-valued; offline and error are transport outcomes.**
    Worth a short note so no client invents a fourth `DaemonHubUpdateState`.
+5. **A test harness with no Hub bridge cannot be real-render proof for
+   Hub-sourced state.** From this run's first review cycle: name the harness that
+   can actually reach the state, and resist adding a test-only bridge abstraction
+   to make the wrong harness work.
+6. **Check a vault note's `status` before citing it as binding.** This run cited
+   [[project pipeline step activation gates open ticket dependencies before side effects]]
+   as a current runtime contract when it is `type: drift`, `status: superseded`,
+   and says so in its own body. Ironically that note exists to record exactly
+   this failure. A concrete planning rule — verify frontmatter `status` at load
+   time, not just that the filename resolves — would have prevented it, and
+   filename-resolution checks alone demonstrably do not.
+7. **The dependency gate `8990969` allowed Implement activation with an open
+   blocking dependency.** Observed in this run at `1786033884`:
+   `run_1786031348_611758` active at Implement with edge
+   `dependency_1786032120_366099` open for ~28 minutes prior. The sibling reached
+   Implement via `on_approved_step_id` from Plan Review, which is worth capturing
+   as the likely unguarded transition once the Project Pipelines owner confirms
+   the root cause.
