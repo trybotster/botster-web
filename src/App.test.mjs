@@ -804,6 +804,7 @@ const [
   localPackageServerScript,
   browserRuntimeSmokeScript,
   liveProtocolHarnessScript,
+  workspacesSharedHubBrowserSmokeScript,
   architecture,
   readme,
   uiContractDeclarations,
@@ -841,6 +842,7 @@ const [
   readFile(new URL("../scripts/local-package-server.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/browser-runtime-smoke.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-packaged-protocol-harness.mjs", import.meta.url), "utf8"),
+  readFile(new URL("../scripts/workspaces-shared-hub-browser-smoke.mjs", import.meta.url), "utf8"),
   readFile(new URL("../docs/architecture.md", import.meta.url), "utf8"),
   readFile(new URL("../README.md", import.meta.url), "utf8"),
   readFile(new URL("../node_modules/@trybotster/ui-contract/index.d.ts", import.meta.url), "utf8"),
@@ -1086,6 +1088,29 @@ assert.match(hubTransport, /recordLiveHarnessEvent\("hub_frame"/);
 assert.match(hubTransport, /recordLiveHarnessEvent\("daemon_response", response\)/);
 assert.match(hubTransport, /daemonResponseFrames/);
 assert.doesNotMatch(hubTransport, /ui_tree_snapshot/);
+// Session types are a canonical bare family delivered by a held subscription. No
+// botster-web.* pull family, no list request, and no name-derived title may survive in
+// the production transport. This assertion names the tokens it proves absent, which is
+// why it is scoped to production source rather than the whole repository.
+assert.match(hubTransport, /const sessionTypeFamily = "session_type"/);
+assert.match(hubTransport, /ensureSessionTypeEntitySubscription/);
+assert.match(hubTransport, /bridge\.subscribeEntityFrames\(sessionTypeFamily/);
+assert.doesNotMatch(hubTransport, /botster-web\.session_template|botster-web\.session_type/);
+assert.doesNotMatch(hubTransport, /list_session_templates|list_session_types/);
+assert.doesNotMatch(hubTransport, /humanizeIdentifier|sessionTemplateRecord/);
+assert.doesNotMatch(hubTransport, /"session_templates"/);
+assert.match(hubTransport, /type: "spawn_session_type"/);
+assert.match(hubTransport, /botster\.session_type\.daemon_request/);
+// Assert the CONSTRUCTED requests, not the tokens: an alternation over bare tokens is
+// satisfied by explanatory prose and would stay green with every branch deleted.
+assert.match(hubTransport, /type: "create_session_type"/);
+assert.match(hubTransport, /type: "delete_session_type"/);
+// The edit control is withheld, so no update request can be constructed. The comment naming
+// the token is deliberately not enough to satisfy this.
+assert.doesNotMatch(hubTransport, /type: "update_session_type"/);
+assert.doesNotMatch(hubTransport, /requestType === "update_session_type"/);
+assert.doesNotMatch(app, /botster-web\.session_template|list_session_templates|list_session_types/);
+assert.match(app, /runtimeClient\.entities\.list\("session_type"\)/);
 assert.match(hubTransport, /const packageFamily = "botster-web\.package"/);
 assert.match(hubTransport, /const appFamily = "botster-web\.app"/);
 assert.match(hubTransport, /const packageNavigationFamily = "botster-web\.package_navigation"/);
@@ -1224,6 +1249,26 @@ assert.match(webrtcDaemonClient, /installLiveHarnessTransportControl/);
 assert.match(browserRuntimeSmokeScript, /proveHubGeneralWithoutHub/);
 assert.match(browserRuntimeSmokeScript, /Update check failed/);
 assert.doesNotMatch(browserRuntimeSmokeScript, /check_hub_update/);
+// The shared-Hub fixture must write the file the authoritative Hub actually reads
+// (.botster/session-types.json / session_types) with the fields PackageSessionType
+// requires. The former session-templates.json contributed no session type at all, so the
+// admitted repo exposed nothing for the Workspaces/Web spawn path to select.
+assert.match(workspacesSharedHubBrowserSmokeScript, /"\.botster", "session-types\.json"/);
+assert.match(workspacesSharedHubBrowserSmokeScript, /session_types: \[/);
+assert.doesNotMatch(workspacesSharedHubBrowserSmokeScript, /session-templates\.json|session_templates:/);
+for (const requiredField of ["id", "label", "role", "interaction", "lifecycle", "command"]) {
+  assert.match(workspacesSharedHubBrowserSmokeScript, new RegExp(`${requiredField}: "`));
+}
+// The Workspaces plugin still owns the assignment vocabulary; that seam is preserved.
+assert.match(workspacesSharedHubBrowserSmokeScript, /template_id: "shared-browser"/);
+
+// Session-type live stage: held subscription, no legacy list hydration, Hub-owned CRUD.
+assert.match(liveProtocolHarnessScript, /exerciseSessionTypes/);
+assert.match(liveProtocolHarnessScript, /assertNoSessionTypeListHydration/);
+assert.match(liveProtocolHarnessScript, /entity_type: "session_type"/);
+assert.match(liveProtocolHarnessScript, /type: "create_session_type"/);
+assert.match(liveProtocolHarnessScript, /type: "update_session_type"/);
+assert.match(liveProtocolHarnessScript, /type: "delete_session_type"/);
 assert.match(liveProtocolHarnessScript, /Info \/ server/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalRendererWrite/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalCanvas/);
@@ -1932,6 +1977,7 @@ const { createHubRuntimeConfig, terminalDataPlaneLabel } = requireRuntime("./bot
 const {
   createHubTransport,
   daemonEntityFrame,
+  entitySubscriptionDiagnosticFrame,
   daemonResponseFrames,
 } = requireRuntime("./botster/hubTransport.js");
 const { createHubTerminalDataPlane } = requireRuntime("./botster/hubTerminalDataPlane.js");
@@ -2229,29 +2275,32 @@ assert.equal(daemonEntityFrame({
   snapshot_seq: 1,
   items: [{ id: "ticket-1", title: "Preserve generic package records" }]
 }), undefined);
-// Protocol 6 adds entity_error, which carries no id/patch/snapshot_seq. It must be
-// surfaced as a diagnostic instead of falling through the delta branches.
-const entityErrorFrame = daemonEntityFrame({
+// Protocol 6 adds entity_error, which carries no id/patch/snapshot_seq. It must never fall
+// through the delta branches, and it is BOTH a transport fact and a surface fact: the
+// connection diagnostic reports subscription health for any entity type, while the
+// family-scoped projection lets the owning surface render Hub's code and message verbatim.
+const entityErrorInput = {
   type: "entity_error",
   subscription_id: "session-subscription",
   entity_type: "session",
   code: "entity_subscription_failed",
   message: "Session family could not be projected"
-});
-assert.equal(entityErrorFrame.kind, "connection_diagnostic");
-assert.deepEqual(entityErrorFrame.payload, {
+};
+const entityErrorDiagnostic = entitySubscriptionDiagnosticFrame(entityErrorInput);
+assert.equal(entityErrorDiagnostic.kind, "connection_diagnostic");
+assert.deepEqual(entityErrorDiagnostic.payload, {
   kind: "entity_subscription_failed",
   message: "Entity subscription error for session: Session family could not be projected",
   operation: "subscribe_entities",
   feature: "session"
 });
 assert.equal(
-  hubConnectionDiagnosticFromFrame(entityErrorFrame).detail,
+  hubConnectionDiagnosticFromFrame(entityErrorDiagnostic).detail,
   "Entity subscription error for session: Session family could not be projected Capability: session. Operation: subscribe_entities."
 );
-// Non-session families are surfaced too rather than dropped with the family filter.
+// Non-session families still surface a diagnostic rather than being dropped.
 assert.equal(
-  daemonEntityFrame({
+  entitySubscriptionDiagnosticFrame({
     type: "entity_error",
     subscription_id: "package-entities",
     entity_type: "project-pipelines.ticket",
@@ -2260,6 +2309,25 @@ assert.equal(
   }).kind,
   "connection_diagnostic"
 );
+// Only entity_error produces a diagnostic; ordinary deltas do not.
+assert.equal(
+  entitySubscriptionDiagnosticFrame({
+    type: "entity_remove",
+    subscription_id: "session-subscription",
+    entity_type: "session",
+    snapshot_seq: 4,
+    id: "gone"
+  }),
+  undefined
+);
+// The family-scoped projection carries Hub's code and message verbatim for the owning surface.
+const entityErrorFrame = daemonEntityFrame(entityErrorInput);
+assert.equal(entityErrorFrame.kind, "entity_error");
+assert.deepEqual(entityErrorFrame.payload, {
+  family: "session",
+  code: "entity_subscription_failed",
+  message: "Session family could not be projected"
+});
 sessionLifecycleStore.apply({
   operation: "entity_upsert",
   key: { family: "session", id: "post-resync-row" },
@@ -2536,6 +2604,104 @@ let authoritativeHubUpdate = {
   reason: "Development checkouts are updated with git.",
   action: "git pull"
 };
+// Hub-shaped session_type rows: interactive agent, interactive accessory, service
+// accessory, a read-only package row, an override winner, and an unknown namespaced
+// role/trait. Deliberately no title/subtitle -- Web must render Hub's own label.
+const authoritativeSessionTypeItems = [
+  {
+    session_type_id: "device/codex",
+    source_name: "device",
+    id: "codex",
+    source: "device",
+    editable: true,
+    label: "Codex agent",
+    description: "Interactive coding agent",
+    role: "botster.agent",
+    interaction: "interactive",
+    traits: ["terminal"],
+    lifecycle: "task",
+    command: "codex",
+    args: ["--interactive"],
+    working_directory_policy: "spawn_target",
+    allowed_environment_overrides: ["CODEX_TOKEN"],
+    context_keys: ["prompt"],
+    target_id: "project-main",
+    available: true
+  },
+  {
+    session_type_id: "device/companion",
+    source_name: "device",
+    id: "companion",
+    source: "device",
+    editable: true,
+    label: "Companion shell",
+    role: "botster.accessory",
+    interaction: "interactive",
+    traits: ["terminal", "companion"],
+    lifecycle: "persistent",
+    command: "bash",
+    working_directory_policy: "spawn_target",
+    context_keys: [],
+    target_id: "project-main",
+    available: true
+  },
+  {
+    session_type_id: "device/watcher",
+    source_name: "device",
+    id: "watcher",
+    source: "device",
+    editable: true,
+    label: "Build watcher",
+    role: "botster.accessory",
+    interaction: "service",
+    traits: ["background"],
+    lifecycle: "persistent",
+    command: "watch",
+    working_directory_policy: "spawn_target",
+    context_keys: [],
+    target_id: "project-main",
+    available: false
+  },
+  {
+    session_type_id: "botster/reviewer",
+    source_name: "botster",
+    id: "reviewer",
+    source: "package",
+    editable: false,
+    label: "Packaged reviewer",
+    role: "botster.agent",
+    interaction: "interactive",
+    traits: ["terminal"],
+    lifecycle: "task",
+    command: "review",
+    working_directory_policy: "package_root",
+    context_keys: [],
+    target_id: "project-main",
+    available: true
+  },
+  {
+    session_type_id: "project-main/repo-codex",
+    source_name: "project-main",
+    id: "repo-codex",
+    source: "repo",
+    editable: true,
+    overridden_sources: [
+      { kind: "device", name: "device" },
+      { kind: "package", name: "botster" }
+    ],
+    diagnostics: ["repo definition overrides device and package definitions"],
+    label: "Repo Codex",
+    role: "acme.custom_role",
+    interaction: "interactive",
+    traits: ["acme.custom_trait"],
+    lifecycle: "task",
+    command: "codex",
+    working_directory_policy: "spawn_target",
+    context_keys: ["prompt"],
+    target_id: "project-main",
+    available: true
+  }
+];
 const bridge = {
   async request(request) {
     bridgeRequests.push(request);
@@ -2873,25 +3039,12 @@ const bridge = {
       };
     }
 
-    if (request.type === "list_session_types") {
-      return {
-        kind: "session_types",
-        session_types: [
-          {
-            session_type_id: "project-main:codex",
-            source_name: "botster",
-            id: "codex",
-            source: "built_in",
-            command: "codex",
-            working_directory_policy: "spawn_target",
-            context_keys: ["prompt"],
-            target_id: "project-main",
-            available: true
-          }
-        ],
-        sessions: [],
-        events: []
-      };
+    if (
+      request.type === "create_session_type" ||
+      request.type === "update_session_type" ||
+      request.type === "delete_session_type"
+    ) {
+      return { kind: "session_types", session_types: [], sessions: [], events: [] };
     }
 
     if (request.type === "plugin_surface_render") {
@@ -3057,10 +3210,10 @@ const bridge = {
     queueMicrotask(() => {
       onFrame({
         type: "entity_snapshot",
-        subscription_id: "bridge-session-generation-1",
+        subscription_id: `bridge-${entityType}-generation-1`,
         entity_type: entityType,
         snapshot_seq: 0,
-        items: authoritativeSessionItems
+        items: entityType === "session_type" ? authoritativeSessionTypeItems : authoritativeSessionItems
       });
       resolveReady();
     });
@@ -3665,6 +3818,81 @@ try {
   } finally {
     delete globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
   }
+  // entity_error is terminal for the subscription generation. It carries no snapshot_seq,
+  // so it must not be read as a sequence gap: the client delivers it and stops. Any
+  // resubscribe here would be the loop the session-type surface exists to avoid.
+  const subscriptionErrorChannel = createFakeDataChannel();
+  let nextSubscriptionErrorId = 0;
+  const subscriptionErrorClient = createWebrtcTestClient(
+    [subscriptionErrorChannel],
+    localWebrtcBootstrapFixture,
+    {
+      entitySubscriptionIdGenerator: () => `session-type-subscription-${++nextSubscriptionErrorId}`
+    }
+  );
+  const subscriptionErrorFrames = [];
+  const sessionTypeSubscription = subscriptionErrorClient.subscribeEntityFrames(
+    "session_type",
+    (frame) => subscriptionErrorFrames.push(frame)
+  );
+  await waitForTestCondition(() => subscriptionErrorChannel.sent.length === 1);
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, subscriptionErrorChannel.sent[0]),
+    {
+      type: "subscribe_entities",
+      entity_type: "session_type",
+      subscription_id: "session-type-subscription-1"
+    }
+  );
+  await emitChunkedTestResponse(
+    subscriptionErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_subscribed", events: [], diagnostics: [] },
+    { messageId: "session-type-subscribe-response" }
+  );
+  await emitChunkedTestResponse(
+    subscriptionErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_snapshot",
+      subscription_id: "session-type-subscription-1",
+      entity_type: "session_type",
+      snapshot_seq: 0,
+      items: []
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "session-type-snapshot" }
+  );
+  await sessionTypeSubscription.ready;
+  await emitChunkedTestResponse(
+    subscriptionErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_error",
+      subscription_id: "session-type-subscription-1",
+      entity_type: "session_type",
+      code: "entity_provider_frame_too_large",
+      message: "session_type snapshot exceeded the frame budget"
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "session-type-entity-error" }
+  );
+  await waitForTestCondition(() => subscriptionErrorFrames.length === 2);
+  assert.deepEqual(
+    subscriptionErrorFrames.map((frame) => frame.type),
+    ["entity_snapshot", "entity_error"]
+  );
+  assert.equal(subscriptionErrorFrames[1].code, "entity_provider_frame_too_large");
+  assert.equal(subscriptionErrorFrames[1].message, "session_type snapshot exceeded the frame budget");
+  // Still exactly one outbound frame: the original subscribe. No unsubscribe, no resubscribe.
+  assert.equal(subscriptionErrorChannel.sent.length, 1);
+  sessionTypeSubscription.unsubscribe();
+  await waitForTestCondition(() => subscriptionErrorChannel.sent.length === 2);
+  await emitChunkedTestResponse(
+    subscriptionErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_unsubscribed", events: [], diagnostics: [] },
+    { messageId: "session-type-unsubscribe-response" }
+  );
+  subscriptionErrorClient.disconnect();
 
   assert.deepEqual(localWebrtcResponseChunkLimits, {
     maximumFrameBytesExclusive: 65_536,
@@ -4251,18 +4479,18 @@ await realTransport.send({ kind: "entity_pull", payload: { family: "botster-web.
 await flushMicrotasks();
 await realTransport.send({ kind: "entity_pull", payload: { family: "botster-web.package" } });
 await flushMicrotasks();
-await realTransport.send({ kind: "entity_pull", payload: { family: "botster-web.session_template" } });
+await realTransport.send({ kind: "entity_pull", payload: { family: "session_type" } });
 await flushMicrotasks();
 await realTransport.send({
   kind: "action_request",
   payload: {
-    request_id: "real-spawn-session-template-1",
+    request_id: "real-spawn-session-type-1",
     origin: "ui_node",
     action: {
       id: "botster.spawn_point.spawn_session",
       target: "project-main",
       params: {
-        template_id: "project-main:codex",
+        session_type_id: "device/codex",
         session_id: "spawned-from-point",
         prompt: "Review the current changes"
       }
@@ -4445,7 +4673,12 @@ for (const action of [
 }
 assert.equal(bridgeRequests.some((request) => request.type === "status"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "list_sessions"), false);
-assert.equal(bridgeEntitySubscriptions.length, 1);
+// session and session_type are both canonical held subscriptions, not pull families.
+assert.equal(bridgeEntitySubscriptions.length, 2);
+assert.deepEqual(
+  bridgeEntitySubscriptions.map((subscription) => subscription.entityType).sort(),
+  ["session", "session_type"]
+);
 assert.equal(
   realFrames.some(
     (frame) =>
@@ -4455,13 +4688,65 @@ assert.equal(
   ),
   true
 );
+// The session_type snapshot arrives from the held subscription and carries Hub's own
+// label, provenance, and editability -- no title/subtitle synthesised from the id.
+const realSessionTypeSnapshot = realFrames.find(
+  (frame) => frame.kind === "entity_snapshot" && frame.payload.family === "session_type"
+);
+assert.notEqual(realSessionTypeSnapshot, undefined);
+assert.equal(realSessionTypeSnapshot.payload.records.length, authoritativeSessionTypeItems.length);
+const realDeviceCodex = realSessionTypeSnapshot.payload.records.find((record) => record.id === "device/codex");
+assert.equal(realDeviceCodex.label, "Codex agent");
+assert.equal(realDeviceCodex.title, undefined);
+assert.equal(realDeviceCodex.subtitle, undefined);
+assert.equal(realDeviceCodex.source, "device");
+assert.equal(realDeviceCodex.editable, true);
+const realPackageReviewer = realSessionTypeSnapshot.payload.records.find(
+  (record) => record.id === "botster/reviewer"
+);
+assert.equal(realPackageReviewer.editable, false);
+
+// entity_error is BOTH a transport fact and a surface fact, and the split only works if
+// emitEntityFrame emits both. Asserting the two projector functions in isolation cannot
+// catch a dropped emit() -- this drives one entity_error through the real subscription
+// path and requires both frames out the other side. Deleting either emit() reddens this.
+const sessionTypeSubscription = bridgeEntitySubscriptions.find(
+  (subscription) => subscription.entityType === "session_type"
+);
+const framesBeforeEntityError = realFrames.length;
+sessionTypeSubscription.onFrame({
+  type: "entity_error",
+  subscription_id: "bridge-session_type-generation-1",
+  entity_type: "session_type",
+  code: "entity_provider_frame_too_large",
+  message: "session_type snapshot exceeded the frame budget"
+});
+await flushMicrotasks();
+const framesFromEntityError = realFrames.slice(framesBeforeEntityError);
+const emittedDiagnostic = framesFromEntityError.find((frame) => frame.kind === "connection_diagnostic");
+const emittedSurfaceError = framesFromEntityError.find((frame) => frame.kind === "entity_error");
+assert.notEqual(emittedDiagnostic, undefined);
+assert.notEqual(emittedSurfaceError, undefined);
+assert.equal(emittedDiagnostic.payload.kind, "entity_provider_frame_too_large");
+assert.equal(
+  emittedDiagnostic.payload.message,
+  "Entity subscription error for session_type: session_type snapshot exceeded the frame budget"
+);
+assert.deepEqual(emittedSurfaceError.payload, {
+  family: "session_type",
+  code: "entity_provider_frame_too_large",
+  message: "session_type snapshot exceeded the frame budget"
+});
+// Terminal for the generation: nothing refetches and no list request is provoked.
+assert.equal(bridgeRequests.some((request) => request.type === "list_session_types"), false);
+
 assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "spawn"), false);
 assert.deepEqual(
   bridgeRequests.find((request) => request.type === "spawn_session_type"),
   {
     type: "spawn_session_type",
-    session_type_id: "project-main:codex",
+    session_type_id: "device/codex",
     session_id: "spawned-from-point",
     request: {
       target_id: "project-main",
@@ -4469,6 +4754,9 @@ assert.deepEqual(
     }
   }
 );
+// Cold cut: the legacy list-refresh path must be gone from the production transport.
+assert.equal(bridgeRequests.some((request) => request.type === "list_session_templates"), false);
+assert.equal(bridgeRequests.some((request) => request.type === "list_session_types"), false);
 assert.equal(bridgeRequests.some((request) => /workspace_id/.test(JSON.stringify(request))), false);
 const configSaveRequests = bridgeRequests.filter((request) => request.type === "set_package_configuration");
 assert.equal(configSaveRequests.length, 3);
@@ -4575,8 +4863,13 @@ assert.equal(
   true
 );
 assert.equal(
-  realFrames.some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session_template"),
+  realFrames.some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "session_type"),
   true
+);
+// The Web-owned pull family is gone entirely; no alias, no dual schema.
+assert.equal(
+  realFrames.some((frame) => frame.payload?.family === "botster-web.session_template"),
+  false
 );
 assert.equal(realFrames.some((frame) => frame.kind === "entity_patch"), true);
 assert.equal(realFrames.some((frame) => frame.kind === "action_result"), true);
@@ -5890,6 +6183,7 @@ try {
       HubGeneralSection,
       SessionListItem,
       SessionRouteView,
+      SessionTypeListItem,
       SpawnTargetListItem,
       hubUpdateCheckAction,
       hubUpdateCheckActionId,
@@ -5908,7 +6202,17 @@ try {
       packageSettingsSurfaces,
       renderedPluginSurfaceState,
       rejectedSpawnSessionForm,
-      sessionTemplatesForSpawnTarget,
+      sessionTypesForSpawnTarget,
+      groupSessionTypesBySource,
+      writableSessionTypeSources,
+      sessionTypeMutationSourceFromRecord,
+      sessionTypeManagementSupported,
+      SessionTypesSurfaceNotices,
+      sessionTypeDefinitionFromForm,
+      sessionTypeFormIsStructurallyComplete,
+      sessionTypeMutationSource,
+      entitySubscriptionErrorFromFrame,
+      emptySessionTypeForm,
       spawnSessionAction,
       spawnSessionFormForTarget,
       surfaceLaunchAction,
@@ -6242,27 +6546,32 @@ try {
   assert.match(sessionRouteMarkup, /data-testid="terminal-session-view"/);
   assert.match(sessionRouteMarkup, /data-terminal-session-id="session\/one"/);
 
-  const targetSessionTemplates = [
+  const targetSessionTypes = [
     { id: "codex", target_id: "project-main", available: true },
     { id: "claude", target_id: "project-main", available: false },
     { id: "other", target_id: "another-project", available: true }
   ];
-  assert.deepEqual(sessionTemplatesForSpawnTarget(targetSessionTemplates, "project-main"), [targetSessionTemplates[0]]);
+  // Target-first filtering presents Hub's one-target-per-type eligibility. Ineligible
+  // types stay in the list so the UI can disable them rather than hide them.
+  assert.deepEqual(
+    sessionTypesForSpawnTarget(targetSessionTypes, "project-main"),
+    [targetSessionTypes[0], targetSessionTypes[1]]
+  );
   const preparedSpawnForm = spawnSessionFormForTarget(
     { id: "project-main", label: "Project main" },
-    targetSessionTemplates
+    targetSessionTypes
   );
   assert.deepEqual(preparedSpawnForm, {
     targetId: "project-main",
     targetLabel: "Project main",
-    templateId: "codex",
+    sessionTypeId: "codex",
     prompt: "",
     submitting: false
   });
   assert.equal(spawnSessionFormForTarget(
     { id: "project-main", label: "Project main" },
-    [...targetSessionTemplates, { id: "shell", target_id: "project-main", available: true }]
-  ).templateId, "");
+    [...targetSessionTypes, { id: "shell", target_id: "project-main", available: true }]
+  ).sessionTypeId, "");
   assert.deepEqual(spawnSessionAction(
     { ...preparedSpawnForm, prompt: "  Review the changes  " },
     "spawned-session"
@@ -6271,23 +6580,232 @@ try {
     target: "project-main",
     label: "Start session",
     params: {
-      template_id: "codex",
+      session_type_id: "codex",
       session_id: "spawned-session",
       prompt: "Review the changes"
     }
   });
   assert.deepEqual(rejectedSpawnSessionForm(
     { ...preparedSpawnForm, submitting: true },
-    "Template unavailable"
+    "Session type unavailable"
   ), {
     ...preparedSpawnForm,
     submitting: false,
-    error: "Template unavailable"
+    error: "Session type unavailable"
   });
   assert.equal(rejectedSpawnSessionForm(
     { ...preparedSpawnForm, submitting: true },
     undefined
   ).error, "Botster could not start this session.");
+
+  // Grouping is by Hub's own source token, ordered by name only -- Hub already resolved
+  // precedence, so display order must not imply it.
+  assert.deepEqual(
+    groupSessionTypesBySource([
+      { id: "a", source: "repo" },
+      { id: "b", source: "device" },
+      { id: "c", source: "package" },
+      { id: "d", source: "device" }
+    ]).map((group) => [group.source, group.rows.map((row) => row.id)]),
+    [["device", ["b", "d"]], ["package", ["c"]], ["repo", ["a"]]]
+  );
+
+  // Create availability comes from Hub-projected writable sources, never from a row-only
+  // editable field. Disabled spawn targets are not offered.
+  assert.deepEqual(
+    writableSessionTypeSources([
+      { id: "project-main", target_id: "project-main", label: "Project main", enabled: true },
+      { id: "archived", target_id: "archived", label: "Archived", enabled: false }
+    ]),
+    [
+      { source: "device", targetId: "", label: "This device" },
+      { source: "repo", targetId: "project-main", label: "Project main" }
+    ]
+  );
+
+  assert.deepEqual(
+    sessionTypeMutationSource({ ...emptySessionTypeForm, source: "device" }),
+    { source: "device" }
+  );
+  assert.deepEqual(
+    sessionTypeMutationSource({ ...emptySessionTypeForm, source: "repo", sourceTargetId: "project-main" }),
+    { source: "repo", target_id: "project-main" }
+  );
+
+  // Only structural emptiness gates submit. No token, namespace, uniqueness, or path rule
+  // is re-implemented client-side; Hub owns all of it.
+  const completeSessionTypeForm = {
+    ...emptySessionTypeForm,
+    id: "codex",
+    label: "Codex",
+    role: "acme.unknown_role",
+    interaction: "interactive",
+    lifecycle: "task",
+    command: "codex"
+  };
+  assert.equal(sessionTypeFormIsStructurallyComplete(completeSessionTypeForm), true);
+  assert.equal(sessionTypeFormIsStructurallyComplete({ ...completeSessionTypeForm, command: "  " }), false);
+  assert.equal(
+    sessionTypeFormIsStructurallyComplete({ ...completeSessionTypeForm, source: "repo", sourceTargetId: "" }),
+    false
+  );
+
+  // Permissive ONLY before Hub status arrives. Once a record exists it is authoritative, so a
+  // missing, malformed, or empty feature list all mean unsupported.
+  assert.equal(sessionTypeManagementSupported(undefined), true);
+  assert.equal(sessionTypeManagementSupported({}), false);
+  assert.equal(sessionTypeManagementSupported({ compatibility: {} }), false);
+  assert.equal(sessionTypeManagementSupported({ compatibility: { features: "nonsense" } }), false);
+  assert.equal(sessionTypeManagementSupported({ compatibility: { features: [] } }), false);
+  assert.equal(
+    sessionTypeManagementSupported({ compatibility: { features: ["sessions", "resize"] } }),
+    false
+  );
+  assert.equal(
+    sessionTypeManagementSupported({
+      compatibility: { features: ["sessions", "session_type_entity_subscriptions"] }
+    }),
+    true
+  );
+
+  // RENDERED proof, driven through the predicate itself so the wiring is covered too. Source
+  // regexes could not fail if the wrong branch rendered or the two states overlapped.
+  const unsupportedMarkup = renderToStaticMarkup(
+    createElement(SessionTypesSurfaceNotices, {
+      supported: sessionTypeManagementSupported({ compatibility: { features: [] } }),
+      subscriptionError: undefined,
+      onCreate: () => undefined
+    })
+  );
+  assert.match(unsupportedMarkup, /data-testid="session-types-unsupported"/);
+  assert.match(unsupportedMarkup, /does not provide session_type_entity_subscriptions/);
+  // The create action must be GONE, not merely styled differently.
+  assert.doesNotMatch(unsupportedMarkup, /data-testid="create-session-type"/);
+  assert.doesNotMatch(unsupportedMarkup, /data-testid="session-types-subscription-error"/);
+
+  const supportedMarkup = renderToStaticMarkup(
+    createElement(SessionTypesSurfaceNotices, {
+      supported: sessionTypeManagementSupported({
+        compatibility: { features: ["session_type_entity_subscriptions"] }
+      }),
+      subscriptionError: undefined,
+      onCreate: () => undefined
+    })
+  );
+  assert.match(supportedMarkup, /data-testid="create-session-type"/);
+  assert.doesNotMatch(supportedMarkup, /data-testid="session-types-unsupported"/);
+
+  // The subscription error is a DISTINCT condition: it renders Hub's code and message
+  // verbatim while capability support is unaffected, per acceptance check 15.
+  const subscriptionErrorMarkup = renderToStaticMarkup(
+    createElement(SessionTypesSurfaceNotices, {
+      supported: sessionTypeManagementSupported({
+        compatibility: { features: ["session_type_entity_subscriptions"] }
+      }),
+      subscriptionError: {
+        family: "session_type",
+        code: "entity_provider_frame_too_large",
+        message: "session_type snapshot exceeded the frame budget"
+      },
+      onCreate: () => undefined
+    })
+  );
+  assert.match(subscriptionErrorMarkup, /data-testid="session-types-subscription-error"/);
+  assert.match(subscriptionErrorMarkup, /entity_provider_frame_too_large/);
+  assert.match(subscriptionErrorMarkup, /session_type snapshot exceeded the frame budget/);
+  assert.match(subscriptionErrorMarkup, /data-testid="create-session-type"/);
+  assert.doesNotMatch(subscriptionErrorMarkup, /data-testid="session-types-unsupported"/);
+
+  // Both conditions at once still render as two separate states.
+  const bothMarkup = renderToStaticMarkup(
+    createElement(SessionTypesSurfaceNotices, {
+      supported: sessionTypeManagementSupported({ compatibility: { features: [] } }),
+      subscriptionError: {
+        family: "session_type",
+        code: "entity_provider_frame_too_large",
+        message: "session_type snapshot exceeded the frame budget"
+      },
+      onCreate: () => undefined
+    })
+  );
+  assert.match(bothMarkup, /data-testid="session-types-unsupported"/);
+  assert.match(bothMarkup, /data-testid="session-types-subscription-error"/);
+  assert.doesNotMatch(bothMarkup, /data-testid="create-session-type"/);
+
+  // The surface actually uses the predicate rather than an inline condition.
+  assert.match(app, /sessionTypeManagementSupported\(hubStatus\)/);
+  assert.match(app, /<SessionTypesSurfaceNotices/);
+
+  // Delete addresses the row by Hub's own source, read from the row rather than
+  // reconstructed through a form projection.
+  assert.deepEqual(
+    sessionTypeMutationSourceFromRecord(
+      authoritativeSessionTypeItems.find((item) => item.session_type_id === "project-main/repo-codex")
+    ),
+    { source: "repo", target_id: "project-main" }
+  );
+  assert.deepEqual(
+    sessionTypeMutationSourceFromRecord(
+      authoritativeSessionTypeItems.find((item) => item.session_type_id === "device/codex")
+    ),
+    { source: "device" }
+  );
+
+  // Create authors a complete definition from the form; list fields split on commas or
+  // whitespace and Hub owns every semantic rule beyond that.
+  const createDefinition = sessionTypeDefinitionFromForm({
+    ...completeSessionTypeForm,
+    traits: "terminal, companion",
+    args: "--interactive --json",
+    contextKeys: "prompt"
+  });
+  assert.equal(createDefinition.id, "codex");
+  assert.equal(createDefinition.role, "acme.unknown_role");
+  assert.deepEqual(createDefinition.traits, ["terminal", "companion"]);
+  assert.deepEqual(createDefinition.args, ["--interactive", "--json"]);
+  assert.deepEqual(createDefinition.context, ["prompt"]);
+
+  // The published row cannot reconstruct an authoring definition: Hub exposes
+  // working_directory_policy but not the authored path, and no environment at all. Editing
+  // is therefore withheld until ticket_1786039258_173310 lands a lossless authoring view.
+  const publishedRow = authoritativeSessionTypeItems.find((item) => item.session_type_id === "device/codex");
+  assert.equal(Object.hasOwn(publishedRow, "working_directory_policy"), true);
+  assert.equal(Object.hasOwn(publishedRow, "working_directory"), false);
+  assert.equal(Object.hasOwn(publishedRow, "environment"), false);
+
+  // entity_error is surface-scoped, verbatim, and matched by family.
+  assert.deepEqual(
+    entitySubscriptionErrorFromFrame(
+      {
+        kind: "entity_error",
+        payload: {
+          family: "session_type",
+          code: "entity_provider_frame_too_large",
+          message: "session_type snapshot exceeded the frame budget"
+        }
+      },
+      "session_type"
+    ),
+    {
+      family: "session_type",
+      code: "entity_provider_frame_too_large",
+      message: "session_type snapshot exceeded the frame budget"
+    }
+  );
+  assert.equal(
+    entitySubscriptionErrorFromFrame(
+      { kind: "entity_error", payload: { family: "session", code: "boom", message: "other family" } },
+      "session_type"
+    ),
+    undefined
+  );
+  assert.equal(
+    entitySubscriptionErrorFromFrame(
+      { kind: "entity_snapshot", payload: { family: "session_type" } },
+      "session_type"
+    ),
+    undefined
+  );
 
   function findReactElement(node, predicate) {
     if (Array.isArray(node)) {
@@ -7651,7 +8169,6 @@ try {
         kind: "directory"
       },
       onSpawn: () => undefined,
-      onEdit: () => undefined,
       onDelete: () => undefined
     })
   );
@@ -7661,6 +8178,69 @@ try {
   assert.match(spawnTargetMarkup, /New session/);
   assert.match(spawnTargetMarkup, /Edit/);
   assert.match(spawnTargetMarkup, /Delete/);
+  // Rendered proof: Hub descriptors verbatim, provenance, override chain, diagnostics,
+  // unknown namespaced role/trait rendered literally, and editability gating controls.
+  const deviceAgentMarkup = renderToStaticMarkup(
+    createElement(SessionTypeListItem, {
+      sessionType: { ...authoritativeSessionTypeItems[0], id: "device/codex" },
+      onDelete: () => undefined
+    })
+  );
+  assert.match(deviceAgentMarkup, /Codex agent/);
+  assert.match(deviceAgentMarkup, /botster\.agent · interactive · task/);
+  assert.match(deviceAgentMarkup, /device · device · project-main/);
+  assert.match(deviceAgentMarkup, /Available/);
+  assert.match(deviceAgentMarkup, /Delete/);
+  // Editing is withheld visibly, not silently absent.
+  assert.match(deviceAgentMarkup, /Editing not available yet/);
+  assert.doesNotMatch(deviceAgentMarkup, /Read-only/);
+  // The id is never humanised into a display name.
+  assert.doesNotMatch(deviceAgentMarkup, /Device:codex|Codex<\/h2>/);
+
+  const interactiveAccessoryMarkup = renderToStaticMarkup(
+    createElement(SessionTypeListItem, {
+      sessionType: { ...authoritativeSessionTypeItems[1], id: "device/companion" },
+      onDelete: () => undefined
+    })
+  );
+  assert.match(interactiveAccessoryMarkup, /botster\.accessory · interactive · persistent/);
+  assert.match(interactiveAccessoryMarkup, /terminal, companion/);
+
+  // A service accessory must not present as an agent.
+  const serviceAccessoryMarkup = renderToStaticMarkup(
+    createElement(SessionTypeListItem, {
+      sessionType: { ...authoritativeSessionTypeItems[2], id: "device/watcher" },
+      onDelete: () => undefined
+    })
+  );
+  assert.match(serviceAccessoryMarkup, /botster\.accessory · service · persistent/);
+  assert.match(serviceAccessoryMarkup, /Unavailable/);
+  assert.doesNotMatch(serviceAccessoryMarkup, /botster\.agent/);
+
+  // Package rows are read-only solely because Hub says editable === false.
+  const packageRowMarkup = renderToStaticMarkup(
+    createElement(SessionTypeListItem, {
+      sessionType: { ...authoritativeSessionTypeItems[3], id: "botster/reviewer" },
+      onDelete: () => undefined
+    })
+  );
+  assert.match(packageRowMarkup, /Read-only/);
+  assert.doesNotMatch(packageRowMarkup, />Delete</);
+  // A read-only row is not offered the edit explanation either.
+  assert.doesNotMatch(packageRowMarkup, /Editing not available yet/);
+
+  const overrideRowMarkup = renderToStaticMarkup(
+    createElement(SessionTypeListItem, {
+      sessionType: { ...authoritativeSessionTypeItems[4], id: "project-main/repo-codex" },
+      onDelete: () => undefined
+    })
+  );
+  assert.match(overrideRowMarkup, /Overrides device:device, package:botster/);
+  assert.match(overrideRowMarkup, /repo definition overrides device and package definitions/);
+  // Unknown namespaced role and trait render as their literal tokens.
+  assert.match(overrideRowMarkup, /acme\.custom_role · interactive · task/);
+  assert.match(overrideRowMarkup, /acme\.custom_trait/);
+
   const spawnTargetFrames = daemonResponseFrames({
     kind: "spawn_targets",
     status: null,
@@ -7688,7 +8268,9 @@ try {
   const spawnTargetSnapshot = spawnTargetFrames.find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.spawn_target");
   assert.equal(spawnTargetSnapshot.payload.records[0].id, "project-main");
   assert.equal(spawnTargetSnapshot.payload.records[0].metadata_summary, "owner: platform");
-  const sessionTemplateFrames = daemonResponseFrames({
+  // The response-kind projection is gone: a session_types daemon response no longer
+  // produces any entity frame. Session types arrive only by held subscription.
+  const sessionTypeResponseFrames = daemonResponseFrames({
     kind: "session_types",
     status: null,
     sessions: [],
@@ -7701,22 +8283,74 @@ try {
     cleanup: null,
     coordination: null,
     error: null,
-    session_types: [
-      {
-        session_type_id: "project-main:codex",
-        source_name: "botster",
-        id: "codex_session",
-        source: "built_in",
-        command: "codex",
-        working_directory_policy: "spawn_target",
-        target_id: "project-main",
-        available: true
-      }
-    ]
+    session_types: [authoritativeSessionTypeItems[0]]
   }, 43);
-  const sessionTemplateSnapshot = sessionTemplateFrames.find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session_template");
-  assert.equal(sessionTemplateSnapshot.payload.records[0].id, "project-main:codex");
-  assert.equal(sessionTemplateSnapshot.payload.records[0].title, "Codex session");
+  assert.equal(
+    sessionTypeResponseFrames.some((frame) => frame.kind === "entity_snapshot"),
+    false
+  );
+
+  // The held subscription projects Hub descriptors verbatim under the canonical family.
+  const sessionTypeSnapshotFrame = daemonEntityFrame({
+    type: "entity_snapshot",
+    subscription_id: "unit-session-type-1",
+    entity_type: "session_type",
+    snapshot_seq: 7,
+    items: authoritativeSessionTypeItems
+  });
+  assert.equal(sessionTypeSnapshotFrame.kind, "entity_snapshot");
+  assert.equal(sessionTypeSnapshotFrame.payload.family, "session_type");
+  assert.equal(sessionTypeSnapshotFrame.payload.sequence, 7);
+  const projectedRepoCodex = sessionTypeSnapshotFrame.payload.records.find(
+    (record) => record.id === "project-main/repo-codex"
+  );
+  assert.equal(projectedRepoCodex.label, "Repo Codex");
+  assert.equal(projectedRepoCodex.role, "acme.custom_role");
+  assert.deepEqual(projectedRepoCodex.traits, ["acme.custom_trait"]);
+  assert.deepEqual(projectedRepoCodex.overridden_sources, [
+    { kind: "device", name: "device" },
+    { kind: "package", name: "botster" }
+  ]);
+  assert.deepEqual(projectedRepoCodex.diagnostics, [
+    "repo definition overrides device and package definitions"
+  ]);
+  assert.equal(projectedRepoCodex.title, undefined);
+
+  const sessionTypeUpsertFrame = daemonEntityFrame({
+    type: "entity_upsert",
+    subscription_id: "unit-session-type-1",
+    entity_type: "session_type",
+    snapshot_seq: 8,
+    id: "device/codex",
+    entity: authoritativeSessionTypeItems[0]
+  });
+  assert.equal(sessionTypeUpsertFrame.kind, "entity_upsert");
+  assert.equal(sessionTypeUpsertFrame.payload.key.family, "session_type");
+  assert.equal(sessionTypeUpsertFrame.payload.record.label, "Codex agent");
+
+  const sessionTypeRemoveFrame = daemonEntityFrame({
+    type: "entity_remove",
+    subscription_id: "unit-session-type-1",
+    entity_type: "session_type",
+    snapshot_seq: 9,
+    id: "device/codex"
+  });
+  assert.equal(sessionTypeRemoveFrame.kind, "entity_remove");
+  assert.equal(sessionTypeRemoveFrame.payload.key.family, "session_type");
+
+  const sessionTypeErrorFrame = daemonEntityFrame({
+    type: "entity_error",
+    subscription_id: "unit-session-type-1",
+    entity_type: "session_type",
+    code: "entity_provider_frame_too_large",
+    message: "session_type snapshot exceeded the frame budget"
+  });
+  assert.equal(sessionTypeErrorFrame.kind, "entity_error");
+  assert.deepEqual(sessionTypeErrorFrame.payload, {
+    family: "session_type",
+    code: "entity_provider_frame_too_large",
+    message: "session_type snapshot exceeded the frame budget"
+  });
 
   const collectedActions = [];
   const markup = renderToStaticMarkup(

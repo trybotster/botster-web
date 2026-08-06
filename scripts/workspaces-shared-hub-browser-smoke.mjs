@@ -149,8 +149,20 @@ async function createManagedGitFixture(repository) {
   const script = join(repository, "bin", "shared-browser-session.sh");
   await writeFile(script, "#!/bin/sh\nprintf 'shared-hub-browser:%s\\n' \"$BOTSTER_SESSION_ID\"\nsleep 3\n");
   await chmod(script, 0o755);
-  await writeFile(join(repository, ".botster", "session-templates.json"), JSON.stringify({
-    session_templates: [{ id: "shared-browser", label: "Shared browser", command: "bin/shared-browser-session.sh" }]
+  // Hub reads .botster/session-types.json (REPO_SESSION_TYPES_FILE) and its
+  // PackageSessionType requires role, interaction, and lifecycle. The superseded template
+  // fixture wrote a file the authoritative Hub never reads, so the admitted repo exposed
+  // no `shared-browser` session type at all and this smoke's spawn path was unexercisable.
+  await writeFile(join(repository, ".botster", "session-types.json"), JSON.stringify({
+    session_types: [{
+      id: "shared-browser",
+      label: "Shared browser",
+      role: "botster.agent",
+      interaction: "interactive",
+      traits: ["terminal"],
+      lifecycle: "task",
+      command: "bin/shared-browser-session.sh"
+    }]
   }, null, 2));
   await writeFile(join(repository, "README.md"), "shared-Hub browser fixture\n");
   await runProcess("git", ["init", "--initial-branch", "main", repository]);

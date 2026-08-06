@@ -12,6 +12,7 @@ export type HubControlFrameKind =
   | "entity_upsert"
   | "entity_patch"
   | "entity_remove"
+  | "entity_error"
   | "action_request"
   | "action_result"
   | "operator_error"
@@ -20,6 +21,16 @@ export type HubControlFrameKind =
 export interface HubControlFrame {
   kind: HubControlFrameKind;
   payload: unknown;
+}
+
+/**
+ * Hub-reported failure of a held entity subscription. Terminal for that subscription
+ * generation: the code and message are rendered verbatim and never trigger a refetch.
+ */
+export interface EntitySubscriptionErrorPayload {
+  family: string;
+  code: string;
+  message: string;
 }
 
 export type HubControlFrameHandler = (frame: HubControlFrame) => void;

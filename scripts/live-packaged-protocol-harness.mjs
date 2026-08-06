@@ -198,6 +198,17 @@ try {
     "authoritative session snapshot"
   );
   await assertNoLegacySessionHydration(page);
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "subscribe_entities", entity_type: "session_type" },
+    "session type entity subscription request"
+  );
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "session_type" },
+    "authoritative session type snapshot"
+  );
+  await assertNoSessionTypeListHydration(page);
   await assertCurrentHubSchemaPresentation(page, authoritativeHubStatus);
   const initialHubIdentity = await assertAuthoritativeHubIdentity(page, authoritativeHubStatus, "initial connect");
   const liveHubUpdate = await assertHubUpdateCheck(page);
@@ -250,6 +261,12 @@ try {
     console.log("live packaged protocol surface proof passed");
     process.exit(0);
   }
+  // Runs before any session is started: this stage takes several seconds of socket and UI
+  // round-trips, and sitting it inside the session lifecycle window would outlive the
+  // short-lived production session the terminal stages depend on.
+  const sessionTypeProof = await exerciseSessionTypes(page);
+  console.log(`session-type-live-proof ${JSON.stringify(sessionTypeProof)}`);
+
   await openHomeView(page);
   if (durableStateMode) {
     await assertDurableSeededSessionsVisible(page);
@@ -3159,6 +3176,303 @@ async function assertNoLegacySessionHydration(page) {
   }
 }
 
+/**
+ * Session types must reach the browser only through the held `session_type` subscription.
+ * This asserts zero list_session_types requests across the entire span -- from before the
+ * surface mounts through every mutation -- so a mount-time or pre-subscribe legacy request
+ * could not hide behind an "after the initial subscribe" window.
+ */
+async function assertNoSessionTypeListHydration(page) {
+  const legacyRequests = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) =>
+        entry.kind === "daemon_request" &&
+        (entry.payload?.type === "list_session_types" || entry.payload?.type === "list_session_templates"))
+      .map((entry) => entry.payload)
+  );
+  if (legacyRequests.length > 0) {
+    throw new Error(`session types used legacy list hydration: ${JSON.stringify(legacyRequests)}`);
+  }
+}
+
+/**
+ * Drives the authoritative session-type contract against the real Hub: Hub-owned CRUD
+ * arrives as pushed deltas on the held subscription, the surface renders Hub descriptors
+ * verbatim, package rows are read-only, and no list request is ever issued.
+ */
+async function setSessionTypeFormField(page, label, value) {
+  const input = page.locator(`ion-input:has-text("${label}") input`).first();
+  await input.waitFor();
+  await input.fill(value);
+}
+
+/**
+ * Drives create and delete through the RENDERED Ionic controls rather than the Hub socket,
+ * and asserts the exact daemon request the WEB CLIENT produced. Talking to Hub directly
+ * would confirm Hub's contract while leaving a client-side request-shape bug invisible --
+ * which is exactly how the composite-id defect survived the first implementation.
+ */
+async function createSessionTypeThroughRenderedForm(page) {
+  await page.locator("ion-menu.app-sidebar").getByRole("button", { name: "Hub settings", exact: true }).click();
+  await page.getByLabel("Hub settings sections").getByRole("button", { name: /Session types/ }).click();
+  await page.getByTestId("session-types-view").waitFor();
+
+  const sinceIndex = await harnessEventCount(page);
+  await page.getByTestId("create-session-type").click();
+  await setSessionTypeFormField(page, "Identifier", "web-authored-agent");
+  await setSessionTypeFormField(page, "Name", "Web authored agent");
+  await setSessionTypeFormField(page, "Role", "botster.agent");
+  await setSessionTypeFormField(page, "Interaction", "interactive");
+  await setSessionTypeFormField(page, "Lifecycle", "task");
+  await setSessionTypeFormField(page, "Command", "sleep");
+  await page.getByTestId("submit-session-type").click();
+
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "create_session_type" },
+    "web-produced create_session_type request",
+    sinceIndex
+  );
+  const createRequests = await page.evaluate((since) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .slice(since)
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "create_session_type")
+      .map((entry) => entry.payload), sinceIndex);
+  if (createRequests.length !== 1) {
+    throw new Error(`expected exactly one web-produced create_session_type, got ${createRequests.length}`);
+  }
+  const [createRequest] = createRequests;
+  if (createRequest.definition?.id !== "web-authored-agent") {
+    throw new Error(`web create sent the wrong definition id: ${JSON.stringify(createRequest.definition?.id)}`);
+  }
+  if (createRequest.source?.source !== "device") {
+    throw new Error(`web create sent the wrong source: ${JSON.stringify(createRequest.source)}`);
+  }
+
+  // Accepted -> the form closes and the row arrives as a pushed delta, not a refetch.
+  const row = page.getByTestId("session-type-device/web-authored-agent");
+  await row.waitFor();
+  await assertNoSessionTypeListHydration(page);
+
+  // Delete through the rendered control must address the BARE authoring id.
+  const deleteSince = await harnessEventCount(page);
+  await page.getByTestId("delete-session-type-device/web-authored-agent").click();
+  await page.getByRole("button", { name: "Delete", exact: true }).last().click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "delete_session_type" },
+    "web-produced delete_session_type request",
+    deleteSince
+  );
+  const deleteRequest = await page.evaluate((since) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .slice(since)
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "delete_session_type")
+      .map((entry) => entry.payload)[0], deleteSince);
+  if (deleteRequest?.session_type_id !== "web-authored-agent") {
+    throw new Error(
+      `web delete must send the bare authoring id, sent ${JSON.stringify(deleteRequest?.session_type_id)}`
+    );
+  }
+  await row.waitFor({ state: "detached" });
+  await assertNoSessionTypeListHydration(page);
+
+  return {
+    web_create_definition_id: createRequest.definition.id,
+    web_delete_session_type_id: deleteRequest.session_type_id
+  };
+}
+
+async function exerciseSessionTypes(page) {
+  if (!webrtcDataDir) throw new Error("session type proof requires a WebRTC hub data directory");
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+
+  await assertNoSessionTypeListHydration(page);
+  const subscribesBefore = await recordSessionTypeSubscribeCount(page);
+
+  const webAuthored = await createSessionTypeThroughRenderedForm(page);
+
+  const definition = {
+    id: "live-harness-agent",
+    label: "Live harness agent",
+    description: "Created by the botster-web live protocol harness",
+    role: "botster.agent",
+    interaction: "interactive",
+    traits: ["terminal"],
+    lifecycle: "task",
+    command: "sleep",
+    args: ["30"],
+    context: ["prompt"]
+  };
+
+  // Hub owns creation. The browser must learn about it as a pushed delta, never a refetch.
+  // Anchor the wait past the initial snapshot so a stale frame cannot satisfy it.
+  const createSince = await harnessEventCount(page);
+  const createResponse = await sendDaemonRequest(socketPath, {
+    type: "create_session_type",
+    source: { source: "device" },
+    definition
+  });
+  if (createResponse.error) {
+    throw new Error(`live session type create failed: ${JSON.stringify(createResponse.error)}`);
+  }
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "session_type" },
+    "pushed session_type delta after create",
+    createSince
+  );
+
+  const createdRow = await page.evaluate(() => {
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const frame = events[index];
+      if (frame.kind !== "hub_frame") continue;
+      const payload = frame.payload?.payload;
+      if (!payload) continue;
+      if (payload.family === "session_type" && Array.isArray(payload.records)) {
+        const match = payload.records.find((record) => record.id?.includes("live-harness-agent"));
+        if (match) return match;
+      }
+      if (payload.key?.family === "session_type" && payload.record?.id?.includes("live-harness-agent")) {
+        return payload.record;
+      }
+    }
+    return undefined;
+  });
+  if (!createdRow) {
+    throw new Error("live session type create produced no session_type entity record in the browser");
+  }
+  // Hub descriptors are carried verbatim: no synthesised title/subtitle, provenance intact.
+  for (const [field, expected] of [
+    ["label", "Live harness agent"],
+    ["role", "botster.agent"],
+    ["interaction", "interactive"],
+    ["lifecycle", "task"],
+    ["source", "device"]
+  ]) {
+    if (createdRow[field] !== expected) {
+      throw new Error(`session_type row ${field} was ${JSON.stringify(createdRow[field])}, expected ${expected}`);
+    }
+  }
+  if (createdRow.title !== undefined || createdRow.subtitle !== undefined) {
+    throw new Error(`session_type row carried inferred presentation fields: ${JSON.stringify(createdRow)}`);
+  }
+  if (createdRow.editable !== true) {
+    throw new Error(`device-sourced session type should be editable, got ${JSON.stringify(createdRow.editable)}`);
+  }
+
+  // The surface renders from the subscription, not a refetch.
+  await page.locator("ion-menu.app-sidebar").getByRole("button", { name: "Hub settings", exact: true }).click();
+  await page.getByLabel("Hub settings sections").getByRole("button", { name: /Session types/ }).click();
+  const sessionTypesView = page.getByTestId("session-types-view");
+  await sessionTypesView.waitFor();
+  const renderedRow = sessionTypesView.getByTestId(`session-type-${createdRow.id}`);
+  await renderedRow.waitFor();
+  const renderedText = await renderedRow.innerText();
+  for (const expected of ["Live harness agent", "botster.agent", "interactive", "task", "device"]) {
+    if (!renderedText.includes(expected)) {
+      throw new Error(`rendered session type row missing ${expected}: ${renderedText}`);
+    }
+  }
+  await assertNoSessionTypeListHydration(page);
+
+  // Hub rejects a semantically invalid definition; Web must not pre-empt that judgement.
+  const invalidResponse = await sendDaemonRequest(socketPath, {
+    type: "create_session_type",
+    source: { source: "device" },
+    definition: { ...definition, id: "live-harness-invalid", role: "not a namespaced role" }
+  });
+  if (!invalidResponse.error) {
+    throw new Error("Hub accepted an invalid session-type role; the validation oracle is wrong");
+  }
+
+  // Package-sourced mutation is rejected outright by Hub. The exact kind is recorded rather
+  // than asserted, because this probe names a definition that does not exist in that package,
+  // so Hub may legitimately answer unknown_session_type before it reaches the read-only rule.
+  const readOnlyResponse = await sendDaemonRequest(socketPath, {
+    type: "delete_session_type",
+    source: { source: "package", package_name: "botster" },
+    definition_id: definition.id,
+    session_type_id: definition.id
+  });
+  if (!readOnlyResponse.error) {
+    throw new Error("Hub accepted a package-sourced session-type mutation; it must be read-only");
+  }
+
+  // Update yields a pushed upsert.
+  const updateResponse = await sendDaemonRequest(socketPath, {
+    type: "update_session_type",
+    source: { source: "device" },
+    definition: { ...definition, label: "Live harness agent renamed" }
+  });
+  if (updateResponse.error) {
+    throw new Error(`live session type update failed: ${JSON.stringify(updateResponse.error)}`);
+  }
+  await page.getByText("Live harness agent renamed").waitFor();
+
+  // Delete yields a pushed remove and the row leaves the surface.
+  // Scoped by source, Hub addresses the row by its definition id.
+  const deleteResponse = await sendDaemonRequest(socketPath, {
+    type: "delete_session_type",
+    source: { source: "device" },
+    session_type_id: definition.id
+  });
+  if (deleteResponse.error) {
+    throw new Error(`live session type delete failed: ${JSON.stringify(deleteResponse.error)}`);
+  }
+  await renderedRow.waitFor({ state: "detached" });
+
+  await assertNoSessionTypeListHydration(page);
+
+  // Snapshot/upsert/remove all flowed without the client ever resubscribing.
+  const subscribesAfter = await recordSessionTypeSubscribeCount(page);
+  if (subscribesAfter !== subscribesBefore) {
+    throw new Error(
+      `session_type CRUD triggered a resubscribe: ${subscribesBefore} -> ${subscribesAfter}`
+    );
+  }
+
+  // Restore the view this stage borrowed so later terminal stages start where they expect.
+  await openHomeView(page);
+
+  return {
+    // This stage runs after proveInPageReconnectReplaysHubStatus forces a fresh WebRTC
+    // generation, so a count above 1 here is the reconnect re-establishing the held
+    // subscription -- evidence that it survives a transport generation, not a loop. The
+    // loop check is the before/after comparison across CRUD immediately above.
+    session_type_subscribes_before_crud: subscribesBefore,
+    created_session_type_id: createdRow.session_type_id ?? createdRow.id,
+    invalid_error_kind: invalidResponse.error?.code ?? null,
+    read_only_error_kind: readOnlyResponse.error?.code ?? null,
+    session_type_subscribes: subscribesAfter,
+    ...webAuthored,
+    entity_error_terminal_state: "covered_in_unit_suite_not_live_see_report"
+  };
+}
+
+/**
+ * Records how many session_type subscribes the live run issued. A resubscribe loop -- the
+ * failure mode the webrtcDaemonClient entity_error edit prevents -- would show up here as
+ * a climbing count across the whole CRUD span.
+ *
+ * The terminal entity_error path itself is NOT exercised live: Hub only emits it on
+ * genuine provider overflow (entity_provider_frame_too_large), and there is no injection
+ * seam on the live transport. Adding one would mean putting a test-only frame entry point
+ * into production code, which this ticket does not warrant. That behaviour is instead
+ * proved against the real WebrtcDaemonClient in src/App.test.mjs, which delivers a real
+ * chunked entity_error envelope and asserts the channel issues no further frames.
+ */
+async function recordSessionTypeSubscribeCount(page) {
+  return page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) =>
+        entry.kind === "daemon_request" &&
+        entry.payload?.type === "subscribe_entities" &&
+        entry.payload?.entity_type === "session_type").length
+  );
+}
+
 async function proveExternalSessionLifecycle(page) {
   if (!webrtcDataDir) throw new Error("external session proof requires a WebRTC hub data directory");
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
@@ -3403,6 +3717,10 @@ async function assertCurrentHubSchemaPresentation(page, status) {
   const schemaRow = page.locator('[data-diagnostic-id="schema-version"]');
   await schemaRow.waitFor();
   const schemaText = await schemaRow.innerText();
+  // The point of this assertion is neutrality -- Hub's durable-state schema is reported as
+  // server context and never blocks the client (botster-web commit 2246678). Pinning the
+  // literal version made it fail on any Hub newer than schema 2, which is the same
+  // pre-2246678 survivor as the compatibility floor above. Assert the neutrality, not the number.
   if (
     !schemaText.includes("Hub durable-state schema") ||
     !schemaText.includes(`schema version ${reportedSchemaVersion}`) ||

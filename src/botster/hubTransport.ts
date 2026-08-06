@@ -6,7 +6,12 @@ import type {
 } from "@trybotster/ui-contract";
 import { hubStatusFamily } from "./connectionDiagnostics";
 import type { EntityFrame } from "./entities";
-import type { HubControlFrame, HubControlFrameHandler, HubControlTransport } from "./protocol";
+import type {
+  EntitySubscriptionErrorPayload,
+  HubControlFrame,
+  HubControlFrameHandler,
+  HubControlTransport
+} from "./protocol";
 import type {
   DaemonApp,
   DaemonDiagnostic,
@@ -25,18 +30,20 @@ import type {
   DaemonResponse,
   DaemonSessionEntity,
   DaemonSessionType,
+  DaemonSessionTypeDefinition,
+  DaemonSessionTypeMutationSource,
   JsonValue
 } from "./realHubDaemonDto";
 
 export const hubTerminalSubscriptionId = "botster-web-terminal";
 
 const sessionFamily = "session";
+const sessionTypeFamily = "session_type";
 const appFamily = "botster-web.app";
 const packageNavigationFamily = "botster-web.package_navigation";
 const packageFamily = "botster-web.package";
 const availablePackageFamily = "botster-web.available_package";
 const spawnTargetFamily = "botster-web.spawn_target";
-const sessionTemplateFamily = "botster-web.session_template";
 const statusFamily = hubStatusFamily;
 
 type HubConnectionDiagnosticPayload = Omit<Partial<DaemonDiagnostic>, "kind"> & { kind: string };
@@ -83,19 +90,33 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
       emit(frame);
     }
   };
+  // A failed subscription is both a transport fact and a surface fact, so emit both.
+  const emitEntityFrame = (frame: DaemonEntityFrame) => {
+    const diagnostic = entitySubscriptionDiagnosticFrame(frame);
+    if (diagnostic) emit(diagnostic);
+    const projected = daemonEntityFrame(frame);
+    if (projected) emit(projected);
+  };
   let daemonEventSubscription: { unsubscribe(): void } | undefined;
   let sessionEntitySubscription: { ready: Promise<void>; unsubscribe(): void } | undefined;
+  let sessionTypeEntitySubscription: { ready: Promise<void>; unsubscribe(): void } | undefined;
   const ensureSessionEntitySubscription = () => {
     if (!sessionEntitySubscription) {
       if (!bridge.subscribeEntityFrames) {
         throw new Error("session entity subscription requires the WebRTC entity-frame delivery path");
       }
-      sessionEntitySubscription = bridge.subscribeEntityFrames("session", (frame) => {
-        const projected = daemonEntityFrame(frame);
-        if (projected) emit(projected);
-      });
+      sessionEntitySubscription = bridge.subscribeEntityFrames("session", emitEntityFrame);
     }
     return sessionEntitySubscription.ready;
+  };
+  const ensureSessionTypeEntitySubscription = () => {
+    if (!sessionTypeEntitySubscription) {
+      if (!bridge.subscribeEntityFrames) {
+        throw new Error("session type entity subscription requires the WebRTC entity-frame delivery path");
+      }
+      sessionTypeEntitySubscription = bridge.subscribeEntityFrames(sessionTypeFamily, emitEntityFrame);
+    }
+    return sessionTypeEntitySubscription.ready;
   };
 
   return {
@@ -115,6 +136,8 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
       daemonEventSubscription = undefined;
       sessionEntitySubscription?.unsubscribe();
       sessionEntitySubscription = undefined;
+      sessionTypeEntitySubscription?.unsubscribe();
+      sessionTypeEntitySubscription = undefined;
       ingress = undefined;
       bridge.disconnect?.();
     },
@@ -130,6 +153,8 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
           emitResponse(await bridge.request({ type: "status" }));
         } else if (request.family === sessionFamily) {
           await ensureSessionEntitySubscription();
+        } else if (request.family === sessionTypeFamily) {
+          await ensureSessionTypeEntitySubscription();
         } else if (request.family === appFamily) {
           emitResponse(await bridge.request({ type: "list_apps" }));
         } else if (request.family === packageNavigationFamily) {
@@ -138,8 +163,6 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
           emitResponse(await bridge.request({ type: "list_packages" }));
         } else if (request.family === spawnTargetFamily) {
           emitResponse(await bridge.request(spawnTargetDaemonRequest({ type: "list_spawn_targets" })));
-        } else if (request.family === sessionTemplateFamily) {
-          emitResponse(await bridge.request({ type: "list_session_types" }));
         } else if (request.family === availablePackageFamily) {
           const registryPath = typeof request.registry_path === "string" ? request.registry_path : "";
           if (registryPath) {
@@ -243,18 +266,6 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
     });
   }
 
-  if (response.kind === "session_types" && Array.isArray(response.session_types)) {
-    frames.push({
-      kind: "entity_snapshot",
-      payload: {
-        operation: "entity_snapshot",
-        family: sessionTemplateFamily,
-        sequence,
-        records: response.session_types.map(sessionTemplateRecord)
-      } satisfies EntityFrame
-    });
-  }
-
   if (Array.isArray(response.events)) {
     for (const event of response.events) {
       const frame = daemonEventFrame(event);
@@ -324,28 +335,61 @@ export function daemonEventFrame(event: DaemonEvent): HubControlFrame | undefine
   return undefined;
 }
 
-export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | undefined {
-  if (frame.type === "entity_error") {
-    return connectionDiagnosticFrame({
-      kind: frame.code,
-      message: `Entity subscription error for ${frame.entity_type}: ${frame.message}`,
-      operation: "subscribe_entities",
-      feature: frame.entity_type
-    });
+interface CanonicalEntityProjection {
+  family: string;
+  record(value: unknown): (Record<string, unknown> & { id: string }) | undefined;
+}
+
+function canonicalEntityProjection(entityType: string): CanonicalEntityProjection | undefined {
+  if (entityType === sessionFamily) {
+    return {
+      family: sessionFamily,
+      record: (value) => (isDaemonSessionEntity(value) ? sessionEntityRecord(value) : undefined)
+    };
   }
 
-  if (frame.entity_type !== "session") return undefined;
+  if (entityType === sessionTypeFamily) {
+    return {
+      family: sessionTypeFamily,
+      record: (value) => (isDaemonSessionType(value) ? sessionTypeEntityRecord(value) : undefined)
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * Connection-level view of a failed entity subscription, for the diagnostics panel. It is
+ * emitted alongside -- not instead of -- the surface-scoped `entity_error` projection
+ * below: the panel reports transport health for any entity type, while the owning surface
+ * renders Hub's verbatim code and message for the family it subscribes to.
+ */
+export function entitySubscriptionDiagnosticFrame(frame: DaemonEntityFrame): HubControlFrame | undefined {
+  if (frame.type !== "entity_error") return undefined;
+
+  return connectionDiagnosticFrame({
+    kind: frame.code,
+    message: `Entity subscription error for ${frame.entity_type}: ${frame.message}`,
+    operation: "subscribe_entities",
+    feature: frame.entity_type
+  });
+}
+
+export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | undefined {
+  const projection = canonicalEntityProjection(frame.entity_type);
+  if (!projection) return undefined;
 
   if (frame.type === "entity_snapshot") {
     return {
       kind: "entity_snapshot",
       payload: {
         operation: "entity_snapshot",
-        family: sessionFamily,
+        family: projection.family,
         sequence: frame.snapshot_seq,
-        records: frame.items.flatMap((item) =>
-          isDaemonSessionEntity(item) ? [sessionEntityRecord(item)] : []
-        )
+        records: frame.items.flatMap((item) => {
+          const record = projection.record(item);
+          return record ? [record] : [];
+        })
       } satisfies EntityFrame
     };
   }
@@ -355,23 +399,36 @@ export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | u
       kind: "entity_remove",
       payload: {
         operation: "entity_remove",
-        key: { family: sessionFamily, id: frame.id },
+        key: { family: projection.family, id: frame.id },
         sequence: frame.snapshot_seq
       } satisfies EntityFrame
     };
   }
 
   if (frame.type === "entity_upsert") {
-    if (!isDaemonSessionEntity(frame.entity)) return undefined;
+    const record = projection.record(frame.entity);
+    if (!record) return undefined;
 
     return {
       kind: "entity_upsert",
       payload: {
         operation: "entity_upsert",
-        key: { family: sessionFamily, id: frame.id },
+        key: { family: projection.family, id: frame.id },
         sequence: frame.snapshot_seq,
-        record: sessionEntityRecord(frame.entity)
+        record
       } satisfies EntityFrame
+    };
+  }
+
+  // Hub reports a terminal subscription failure. Surface it verbatim; never refetch or resubscribe.
+  if (frame.type === "entity_error") {
+    return {
+      kind: "entity_error",
+      payload: {
+        family: projection.family,
+        code: frame.code,
+        message: frame.message
+      } satisfies EntitySubscriptionErrorPayload
     };
   }
 
@@ -380,7 +437,7 @@ export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | u
     kind: "entity_patch",
     payload: {
       operation: "entity_patch",
-      key: { family: sessionFamily, id: frame.id },
+      key: { family: projection.family, id: frame.id },
       sequence: frame.snapshot_seq,
       record: {
         ...patch,
@@ -415,6 +472,41 @@ function sessionEntityRecord(session: DaemonSessionEntity) {
     ...session,
     id: session.session_uuid
   };
+}
+
+/**
+ * The entity store keys rows by `id`, but Hub's `id` is the bare authoring identifier that
+ * create/update/delete address definitions by, while `session_type_id` is the composite
+ * `{source_name}/{id}`. Keep the producer's bare id under its own key so mutations can use
+ * it; overwriting `id` alone would make edit and delete send the composite and get
+ * `unknown_session_type`.
+ */
+function sessionTypeEntityRecord(sessionType: DaemonSessionType) {
+  return {
+    ...sessionType,
+    definition_id: sessionType.id,
+    id: sessionType.session_type_id
+  };
+}
+
+function isDaemonSessionType(value: unknown): value is DaemonSessionType {
+  if (!isRecord(value)) return false;
+
+  return (
+    typeof value.session_type_id === "string" &&
+    typeof value.id === "string" &&
+    typeof value.source === "string" &&
+    typeof value.source_name === "string" &&
+    typeof value.editable === "boolean" &&
+    typeof value.label === "string" &&
+    typeof value.role === "string" &&
+    typeof value.interaction === "string" &&
+    typeof value.lifecycle === "string" &&
+    typeof value.command === "string" &&
+    typeof value.working_directory_policy === "string" &&
+    typeof value.target_id === "string" &&
+    typeof value.available === "boolean"
+  );
 }
 
 function isDaemonSessionEntity(value: unknown): value is DaemonSessionEntity {
@@ -454,21 +546,6 @@ function spawnTargetRecord(target: DaemonSpawnTarget) {
     }),
     delete_action: spawnTargetAction("delete_spawn_target", target.target_id, "Delete")
   };
-}
-
-function sessionTemplateRecord(template: DaemonSessionType) {
-  return {
-    ...template,
-    id: template.session_type_id,
-    title: humanizeIdentifier(template.id),
-    subtitle: template.source_name,
-    status: template.available ? "available" : "unavailable"
-  };
-}
-
-function humanizeIdentifier(value: string): string {
-  const words = value.replace(/[-_]+/g, " ").trim();
-  return words ? words.replace(/^\w/, (letter) => letter.toUpperCase()) : value;
 }
 
 function metadataSummary(metadata: Record<string, string> | undefined): string {
@@ -1110,18 +1187,18 @@ async function dispatchDaemonAction(
   }
 
   if (action.id === "botster.spawn_point.spawn_session") {
-    const templateId = readConfigString(action.params?.template_id);
+    const sessionTypeId = readConfigString(action.params?.session_type_id);
     const sessionId = readConfigString(action.params?.session_id);
     const targetId = action.target ?? readConfigString(action.params?.target_id);
     const prompt = readConfigString(action.params?.prompt).trim();
-    if (!templateId || !sessionId || !targetId) {
-      emit(actionResultFrame(request, false, "New session is missing a spawn point or session template"));
+    if (!sessionTypeId || !sessionId || !targetId) {
+      emit(actionResultFrame(request, false, "New session is missing a spawn point or session type"));
       return;
     }
 
     const response = await bridge.request({
       type: "spawn_session_type",
-      session_type_id: templateId,
+      session_type_id: sessionTypeId,
       session_id: sessionId,
       request: {
         target_id: targetId,
@@ -1133,8 +1210,29 @@ async function dispatchDaemonAction(
       request_type: "spawn_session_type",
       kind: response.kind,
       target_id: targetId,
-      template_id: templateId,
+      session_type_id: sessionTypeId,
+      error_kind: response.error?.code,
       session_id: response.sessions?.[0]?.session_id ?? sessionId,
+      diagnostics: responseDiagnostics(response)
+    }));
+    return;
+  }
+
+  if (action.id === "botster.session_type.daemon_request") {
+    const daemonRequest = sessionTypeRequestFromAction(action);
+    if (!daemonRequest) {
+      emit(actionResultFrame(request, false, "Session type action is missing a hub daemon request"));
+      return;
+    }
+
+    const response = await bridge.request(daemonRequest);
+    emitResponse(response);
+    // Hub owns validation, admission, and precedence. Report its verdict verbatim and
+    // publish no optimistic entity frame; the held subscription delivers the truth.
+    emit(actionResultFrame(request, !response.error, response.error?.message, {
+      request_type: daemonRequest.type,
+      kind: response.kind,
+      error_kind: response.error?.code,
       diagnostics: responseDiagnostics(response)
     }));
     return;
@@ -1253,6 +1351,101 @@ function spawnTargetRequestFromAction(action: ActionBinding): DaemonRequest | un
 
   if (requestType === "validate_spawn_target" && targetId) {
     return spawnTargetDaemonRequest({ type: "validate_spawn_target", target_id: targetId });
+  }
+
+  return undefined;
+}
+
+function stringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const entries = value.filter((entry): entry is string => typeof entry === "string");
+  return entries.length > 0 ? entries : undefined;
+}
+
+function sessionTypeMutationSource(value: unknown): DaemonSessionTypeMutationSource | undefined {
+  if (!isRecord(value)) return undefined;
+
+  const source = readConfigString(value.source);
+  if (source === "device") return { source: "device" };
+
+  if (source === "repo") {
+    const targetId = readConfigString(value.target_id);
+    return targetId ? { source: "repo", target_id: targetId } : undefined;
+  }
+
+  if (source === "package") {
+    const packageName = readConfigString(value.package_name);
+    return packageName ? { source: "package", package_name: packageName } : undefined;
+  }
+
+  return undefined;
+}
+
+/**
+ * Structural projection only. Every semantic rule -- token shape, role namespacing, trait
+ * uniqueness, path safety, environment naming -- stays Hub-side and is reported by Hub.
+ */
+function sessionTypeDefinition(value: unknown): DaemonSessionTypeDefinition | undefined {
+  if (!isRecord(value)) return undefined;
+
+  const id = readConfigString(value.id);
+  const label = readConfigString(value.label);
+  const role = readConfigString(value.role);
+  const interaction = readConfigString(value.interaction);
+  const lifecycle = readConfigString(value.lifecycle);
+  const command = readConfigString(value.command);
+  if (!id || !label || !role || !interaction || !lifecycle || !command) return undefined;
+
+  const workingDirectoryPath = readConfigString(isRecord(value.working_directory) ? value.working_directory.path : undefined);
+  const workingDirectoryPolicy = readConfigString(isRecord(value.working_directory) ? value.working_directory.policy : undefined);
+  const environment = stringRecord(value.environment);
+  const targetId = readConfigString(value.target_id, "");
+
+  return {
+    id,
+    label,
+    ...(readConfigString(value.description, "") ? { description: readConfigString(value.description) } : {}),
+    ...(readConfigString(value.icon, "") ? { icon: readConfigString(value.icon) } : {}),
+    role,
+    interaction,
+    ...(stringList(value.traits) ? { traits: stringList(value.traits) } : {}),
+    lifecycle,
+    command,
+    ...(stringList(value.args) ? { args: stringList(value.args) } : {}),
+    ...(workingDirectoryPolicy === "relative" && workingDirectoryPath
+      ? { working_directory: { policy: "relative" as const, path: workingDirectoryPath } }
+      : workingDirectoryPolicy === "package_root"
+        ? { working_directory: { policy: "package_root" as const } }
+        : {}),
+    ...(Object.keys(environment).length > 0 ? { environment } : {}),
+    ...(stringList(value.allowed_environment_overrides)
+      ? { allowed_environment_overrides: stringList(value.allowed_environment_overrides) }
+      : {}),
+    ...(stringList(value.context) ? { context: stringList(value.context) } : {}),
+    ...(targetId ? { target_id: targetId } : {})
+  };
+}
+
+function sessionTypeRequestFromAction(action: ActionBinding): DaemonRequest | undefined {
+  const request = action.params?.daemon_request;
+  if (!isRecord(request)) return undefined;
+
+  const requestType = readConfigString(request.request_type);
+  const source = sessionTypeMutationSource(request.source);
+  if (!source) return undefined;
+
+  // No update_session_type branch: the edit control is withheld until Hub publishes a
+  // lossless authoring view, so nothing can construct that request. ticket_1786039279_917823
+  // re-adds it together with the control and its own coverage, rather than this run leaving
+  // an unreachable clause behind for it.
+  if (requestType === "create_session_type") {
+    const definition = sessionTypeDefinition(request.definition);
+    return definition ? { type: "create_session_type", source, definition } : undefined;
+  }
+
+  if (requestType === "delete_session_type") {
+    const sessionTypeId = readConfigString(request.session_type_id);
+    return sessionTypeId ? { type: "delete_session_type", source, session_type_id: sessionTypeId } : undefined;
   }
 
   return undefined;

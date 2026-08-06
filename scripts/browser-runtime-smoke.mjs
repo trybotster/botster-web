@@ -64,6 +64,7 @@ async function proveHubSettingsOnMobile() {
   await assertHubSettingsHeadingHierarchy(page, settingsNavigation);
   await settingsNavigation.getByRole("button", { name: /Spawn points/ }).click();
   await page.getByTestId("spawn-points-view").waitFor();
+  await assertSessionTypesSurfaceRenders(page, settingsNavigation);
   assertNoPageErrors("mobile Hub settings", pageErrors);
   await page.close();
 }
@@ -129,6 +130,28 @@ async function proveHubGeneralWithoutHub() {
 
   assertNoPageErrors("Hub General without a Hub", pageErrors);
   await page.close();
+}
+
+/**
+ * The migrated Session types surface must actually mount and expose its management
+ * affordance, and must never issue the legacy list request.
+ */
+async function assertSessionTypesSurfaceRenders(page, settingsNavigation) {
+  const daemonRequests = [];
+  page.on("request", (request) => {
+    const body = request.postData();
+    if (body) daemonRequests.push(body);
+  });
+
+  await settingsNavigation.getByRole("button", { name: /Session types/ }).click();
+  const sessionTypesView = page.getByTestId("session-types-view");
+  await sessionTypesView.waitFor();
+  await page.getByRole("heading", { name: "Session types", exact: true }).waitFor();
+
+  const legacyRequest = daemonRequests.find((body) => body.includes("list_session_templates"));
+  if (legacyRequest) {
+    throw new Error(`Session types surface issued the removed legacy list request: ${legacyRequest}`);
+  }
 }
 
 async function proveMissingBootstrapDiagnostic() {

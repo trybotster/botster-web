@@ -74,6 +74,7 @@ import { createHubRuntimeConfig } from "./botster/hubRuntime";
 import { webRtcDaemonLifecycleEventName, type LocalWebrtcBootstrap, type WebrtcDaemonLifecycleEvent } from "./botster/webrtcDaemonClient";
 import type { ActionBinding, ActionDispatchResult } from "./botster/actions";
 import type { EntityFrameStore } from "./botster/entities";
+import type { EntitySubscriptionErrorPayload } from "./botster/protocol";
 import type { TerminalAttachmentStatus, TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import {
   isAttachableSession,
@@ -622,6 +623,92 @@ function spawnTargetActionFeedback(result: { accepted: boolean; reason?: string;
   };
 }
 
+/**
+ * Hub-reported failure of a held entity subscription, scoped to one family. Rendered
+ * verbatim on the owning surface; it never triggers a refetch or a resubscribe.
+ */
+export function entitySubscriptionErrorFromFrame(
+  frame: { kind: string; payload: unknown },
+  family: string
+): EntitySubscriptionErrorPayload | undefined {
+  if (frame.kind !== "entity_error") return undefined;
+  const payload = readRecord(frame.payload);
+  if (readString(payload.family) !== family) return undefined;
+  const code = readString(payload.code);
+  const message = readString(payload.message);
+  if (!code || !message) return undefined;
+  return { family, code, message };
+}
+
+/**
+ * Permissive ONLY before Hub status arrives. Once a status record exists it is authoritative,
+ * so a missing, malformed, or empty feature list all mean unsupported — none of them declare
+ * `session_type_entity_subscriptions`. Treating a loaded record as "still loading" would let
+ * the client infer capability from Hub's silence, which is the inference this surface removes.
+ */
+export function sessionTypeManagementSupported(hubStatus: Record<string, unknown> | undefined): boolean {
+  if (hubStatus === undefined) return true;
+  const features = readRecord(hubStatus.compatibility).features;
+  return Array.isArray(features) && features.includes("session_type_entity_subscriptions");
+}
+
+/**
+ * The capability state and the subscription-error state are independent conditions on the
+ * same surface: one says Hub never offered session types, the other says a live subscription
+ * failed. Extracted so both can be rendered and asserted, rather than proved by source text.
+ */
+export function SessionTypesSurfaceNotices({
+  supported,
+  subscriptionError,
+  onCreate
+}: {
+  supported: boolean;
+  subscriptionError: EntitySubscriptionErrorPayload | undefined;
+  onCreate: () => void;
+}) {
+  return (
+    <>
+      {supported ? (
+        <div className="modal-actions">
+          <IonButton size="small" onClick={onCreate} data-testid="create-session-type">
+            Add session type
+          </IonButton>
+        </div>
+      ) : (
+        <IonNote color="warning" data-testid="session-types-unsupported">
+          This hub does not provide session_type_entity_subscriptions.
+        </IonNote>
+      )}
+      {subscriptionError ? (
+        <IonNote color="danger" data-testid="session-types-subscription-error">
+          {subscriptionError.code}: {subscriptionError.message}
+        </IonNote>
+      ) : null}
+    </>
+  );
+}
+
+export function isEntitySnapshotFrameForFamily(
+  frame: { kind: string; payload: unknown },
+  family: string
+): boolean {
+  if (frame.kind !== "entity_snapshot") return false;
+  return readString(readRecord(frame.payload).family) === family;
+}
+
+export function sessionTypeActionFeedback(result: { accepted: boolean; reason?: string; result?: unknown }): { message: string; color: string } | undefined {
+  const payload = readRecord(result.result);
+  const requestType = readString(payload.request_type);
+  if (!requestType?.includes("session_type")) return undefined;
+
+  return {
+    message: result.accepted
+      ? `${actionLabelFromId(requestType)} accepted`
+      : result.reason ?? `${actionLabelFromId(requestType)} failed`,
+    color: result.accepted ? "success" : "danger"
+  };
+}
+
 function readDiagnosticMessage(value: unknown): string | undefined {
   const record = readRecord(value);
   return readString(record.message);
@@ -649,31 +736,36 @@ interface SpawnTargetFormState {
 export interface SpawnSessionFormState {
   targetId: string;
   targetLabel: string;
-  templateId: string;
+  sessionTypeId: string;
   prompt: string;
   submitting: boolean;
   error?: string;
 }
 
-export function sessionTemplatesForSpawnTarget(
-  templates: Record<string, unknown>[],
+/**
+ * Hub resolves a session type against exactly one spawn target, so filtering by the
+ * Hub-provided target_id presents Hub's own eligibility rather than duplicating it.
+ * Unavailable types are kept and rendered disabled; hiding them would enforce
+ * eligibility invisibly on the client.
+ */
+export function sessionTypesForSpawnTarget(
+  sessionTypes: Record<string, unknown>[],
   targetId: string
 ): Record<string, unknown>[] {
-  return templates.filter((template) => (
-    template.available !== false && stringValue(template.target_id, "") === targetId
-  ));
+  return sessionTypes.filter((sessionType) => stringValue(sessionType.target_id, "") === targetId);
 }
 
 export function spawnSessionFormForTarget(
   target: Record<string, unknown>,
-  templates: Record<string, unknown>[]
+  sessionTypes: Record<string, unknown>[]
 ): SpawnSessionFormState {
   const targetId = stringValue(target.target_id, String(target.id));
-  const availableTemplates = sessionTemplatesForSpawnTarget(templates, targetId);
+  const selectable = sessionTypesForSpawnTarget(sessionTypes, targetId)
+    .filter((sessionType) => sessionType.available !== false);
   return {
     targetId,
     targetLabel: stringValue(target.label, stringValue(target.title, targetId)),
-    templateId: availableTemplates.length === 1 ? String(availableTemplates[0].id) : "",
+    sessionTypeId: selectable.length === 1 ? String(selectable[0].id) : "",
     prompt: "",
     submitting: false
   };
@@ -685,7 +777,7 @@ export function spawnSessionAction(form: SpawnSessionFormState, sessionId: strin
     target: form.targetId,
     label: "Start session",
     params: {
-      template_id: form.templateId,
+      session_type_id: form.sessionTypeId,
       session_id: sessionId,
       prompt: form.prompt.trim()
     }
@@ -701,6 +793,185 @@ export function rejectedSpawnSessionForm(
     submitting: false,
     error: reason ?? "Botster could not start this session."
   };
+}
+
+/**
+ * Create-only. See SessionTypeListItem for why editing is withheld until Hub publishes a
+ * lossless authoring view (ticket_1786039258_173310 / ticket_1786039279_917823).
+ */
+export interface SessionTypeFormState {
+  source: string;
+  sourceTargetId: string;
+  sessionTypeId?: string;
+  id: string;
+  label: string;
+  description: string;
+  icon: string;
+  role: string;
+  interaction: string;
+  traits: string;
+  lifecycle: string;
+  command: string;
+  args: string;
+  workingDirectoryPolicy: string;
+  workingDirectoryPath: string;
+  environment: string;
+  allowedEnvironmentOverrides: string;
+  contextKeys: string;
+  submitting: boolean;
+  error?: string;
+}
+
+export const emptySessionTypeForm: SessionTypeFormState = {
+  source: "device",
+  sourceTargetId: "",
+  id: "",
+  label: "",
+  description: "",
+  icon: "",
+  role: "",
+  interaction: "",
+  traits: "",
+  lifecycle: "",
+  command: "",
+  args: "",
+  workingDirectoryPolicy: "",
+  workingDirectoryPath: "",
+  environment: "",
+  allowedEnvironmentOverrides: "",
+  contextKeys: "",
+  submitting: false
+};
+
+/**
+ * A mutation source for an existing row, read from Hub's own `source` and `target_id`.
+ * Deliberately not a full form projection: the published row cannot reconstruct an
+ * authoring definition, so nothing here may be used to seed an edit.
+ */
+export function sessionTypeMutationSourceFromRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const source = stringValue(record.source, "device");
+  return source === "repo"
+    ? { source: "repo", target_id: stringValue(record.target_id, "") }
+    : { source };
+}
+
+/**
+ * Writable sources are read from Hub-projected state only: the device source plus any
+ * enabled admitted spawn target. Hub still owns admission and every semantic rejection.
+ */
+export function writableSessionTypeSources(
+  spawnTargets: Record<string, unknown>[]
+): { source: string; targetId: string; label: string }[] {
+  return [
+    { source: "device", targetId: "", label: "This device" },
+    ...spawnTargets
+      .filter((target) => target.enabled !== false)
+      .map((target) => {
+        const targetId = stringValue(target.target_id, String(target.id));
+        return {
+          source: "repo",
+          targetId,
+          label: stringValue(target.label, stringValue(target.title, targetId))
+        };
+      })
+  ];
+}
+
+export function sessionTypeMutationSource(form: SessionTypeFormState): Record<string, unknown> {
+  return form.source === "repo"
+    ? { source: "repo", target_id: form.sourceTargetId }
+    : { source: form.source };
+}
+
+export function sessionTypeDefinitionFromForm(form: SessionTypeFormState): Record<string, unknown> {
+  return {
+    id: form.id.trim(),
+    label: form.label.trim(),
+    description: form.description.trim(),
+    icon: form.icon.trim(),
+    role: form.role.trim(),
+    interaction: form.interaction.trim(),
+    traits: parseTokenList(form.traits),
+    lifecycle: form.lifecycle.trim(),
+    command: form.command.trim(),
+    args: parseTokenList(form.args),
+    ...(form.workingDirectoryPolicy.trim()
+      ? {
+          working_directory: {
+            policy: form.workingDirectoryPolicy.trim(),
+            path: form.workingDirectoryPath.trim()
+          }
+        }
+      : {}),
+    environment: parseMetadata(form.environment),
+    allowed_environment_overrides: parseTokenList(form.allowedEnvironmentOverrides),
+    context: parseTokenList(form.contextKeys)
+  };
+}
+
+/**
+ * Renders Hub's own rejection on the owning form. The error kind is carried verbatim when
+ * Hub supplies one; Web never authors a replacement explanation.
+ */
+export function rejectedSessionTypeForm(
+  form: SessionTypeFormState,
+  result: { reason?: string; result?: unknown }
+): SessionTypeFormState {
+  const payload = readRecord(result.result);
+  const errorKind = readString(payload.error_kind);
+  const message = result.reason ?? "Botster could not save this session type.";
+  return {
+    ...form,
+    submitting: false,
+    error: errorKind ? `${errorKind}: ${message}` : message
+  };
+}
+
+/**
+ * Structural emptiness only. Token shape, namespacing, uniqueness, and path rules are
+ * Hub's authority and must not be re-implemented here.
+ */
+export function sessionTypeFormIsStructurallyComplete(form: SessionTypeFormState): boolean {
+  return Boolean(
+    form.id.trim() &&
+    form.label.trim() &&
+    form.role.trim() &&
+    form.interaction.trim() &&
+    form.lifecycle.trim() &&
+    form.command.trim() &&
+    (form.source !== "repo" || form.sourceTargetId.trim())
+  );
+}
+
+/**
+ * Groups by the Hub-provided source token. Sources are sorted by name only -- Hub already
+ * resolved precedence, so display order must not imply it.
+ */
+export function groupSessionTypesBySource(
+  sessionTypes: Record<string, unknown>[]
+): { source: string; rows: Record<string, unknown>[] }[] {
+  const groups = new Map<string, Record<string, unknown>[]>();
+
+  for (const sessionType of sessionTypes) {
+    const source = stringValue(sessionType.source, "");
+    const rows = groups.get(source);
+    if (rows) {
+      rows.push(sessionType);
+    } else {
+      groups.set(source, [sessionType]);
+    }
+  }
+
+  return Array.from(groups.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([source, rows]) => ({ source, rows }));
+}
+
+function parseTokenList(input: string): string[] {
+  return input
+    .split(/[\s,]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
 }
 
 const emptySpawnTargetForm: SpawnTargetFormState = {
@@ -764,6 +1035,94 @@ export function compareSpawnTargetRows(left: Record<string, unknown>, right: Rec
   return leftEnabled - rightEnabled
     || stringValue(left.label, stringValue(left.title, String(left.id))).localeCompare(stringValue(right.label, stringValue(right.title, String(right.id))))
     || String(left.id).localeCompare(String(right.id));
+}
+
+/**
+ * Renders one Hub session-type row. Every visible value is a Hub descriptor rendered
+ * verbatim -- no name humanising, no lookup table, no classification inferred from
+ * command or id. Delete is gated solely on Hub's per-row `editable`.
+ *
+ * Editing is deliberately absent. Hub's published row carries `working_directory_policy`
+ * but not the authored path, and no `environment`, while Hub's update replaces the stored
+ * definition wholesale -- so a client-side edit would silently drop those fields. Rather
+ * than let the affordance look broken or missing for no reason, editable rows say so.
+ * Tracked by ticket_1786039279_917823, which depends on the Hub-side lossless authoring
+ * view in ticket_1786039258_173310.
+ */
+export function SessionTypeListItem({
+  sessionType,
+  onDelete
+}: {
+  sessionType: Record<string, unknown>;
+  onDelete: (sessionType: Record<string, unknown>) => void;
+}) {
+  const sessionTypeId = String(sessionType.id);
+  const label = stringValue(sessionType.label, "");
+  const description = stringValue(sessionType.description, "");
+  const editable = sessionType.editable === true;
+  const available = sessionType.available !== false;
+  const traits = Array.isArray(sessionType.traits) ? sessionType.traits : [];
+  const overriddenSources = Array.isArray(sessionType.overridden_sources) ? sessionType.overridden_sources : [];
+  const diagnostics = Array.isArray(sessionType.diagnostics) ? sessionType.diagnostics : [];
+
+  return (
+    <IonItem className="session-type-item" data-testid={`session-type-${sessionTypeId}`}>
+      <IonLabel>
+        <h2>{label}</h2>
+        {description ? <p>{description}</p> : null}
+        <p data-testid={`session-type-semantics-${sessionTypeId}`}>
+          {stringValue(sessionType.role, "")} · {stringValue(sessionType.interaction, "")} · {stringValue(sessionType.lifecycle, "")}
+        </p>
+        {traits.length > 0 ? (
+          <p data-testid={`session-type-traits-${sessionTypeId}`}>
+            {traits.map((trait) => String(trait)).join(", ")}
+          </p>
+        ) : null}
+        <p data-testid={`session-type-provenance-${sessionTypeId}`}>
+          {stringValue(sessionType.source, "")} · {stringValue(sessionType.source_name, "")} · {stringValue(sessionType.target_id, "")}
+        </p>
+        <p className="session-type-technical-detail">{stringValue(sessionType.command, "")}</p>
+        {overriddenSources.length > 0 ? (
+          <p data-testid={`session-type-overrides-${sessionTypeId}`}>
+            Overrides {overriddenSources
+              .map((entry) => {
+                const source = readRecord(entry);
+                return `${stringValue(source.kind, "")}:${stringValue(source.name, "")}`;
+              })
+              .join(", ")}
+          </p>
+        ) : null}
+        {diagnostics.map((diagnostic, index) => (
+          <p key={index} data-testid={`session-type-diagnostic-${sessionTypeId}`}>
+            {String(diagnostic)}
+          </p>
+        ))}
+      </IonLabel>
+      <IonBadge color={available ? "success" : "medium"} slot="end">
+        {available ? "Available" : "Unavailable"}
+      </IonBadge>
+      {editable ? (
+        <IonButtons slot="end">
+          <IonNote data-testid={`session-type-edit-unavailable-${sessionTypeId}`}>
+            Editing not available yet
+          </IonNote>
+          <IonButton
+            aria-label={`Delete ${label}`}
+            fill="outline"
+            color="danger"
+            onClick={() => onDelete(sessionType)}
+            data-testid={`delete-session-type-${sessionTypeId}`}
+          >
+            Delete
+          </IonButton>
+        </IonButtons>
+      ) : (
+        <IonBadge color="medium" slot="end" data-testid={`session-type-read-only-${sessionTypeId}`}>
+          Read-only
+        </IonBadge>
+      )}
+    </IonItem>
+  );
 }
 
 export function SpawnTargetListItem({
@@ -842,7 +1201,7 @@ type HubEntityLoadKey =
   | "package"
   | "availablePackage"
   | "spawnTarget"
-  | "sessionTemplate"
+  | "sessionType"
   | "session";
 
 /**
@@ -1035,7 +1394,7 @@ export default function App() {
     package: "not_loaded",
     availablePackage: "not_loaded",
     spawnTarget: "not_loaded",
-    sessionTemplate: "not_loaded",
+    sessionType: "not_loaded",
     session: "not_loaded"
   });
   const [activeRoute, setActiveRoute] = useState<AppRoute>(() => appRouteFromLocation());
@@ -1044,6 +1403,9 @@ export default function App() {
   const [addPackageOpen, setAddPackageOpen] = useState(false);
   const [spawnTargetForm, setSpawnTargetForm] = useState<SpawnTargetFormState | undefined>();
   const [spawnSessionForm, setSpawnSessionForm] = useState<SpawnSessionFormState | undefined>();
+  const [sessionTypeForm, setSessionTypeForm] = useState<SessionTypeFormState | undefined>();
+  const [deleteSessionType, setDeleteSessionType] = useState<Record<string, unknown> | undefined>();
+  const [sessionTypeSubscriptionError, setSessionTypeSubscriptionError] = useState<EntitySubscriptionErrorPayload | undefined>();
   const [deleteSpawnTarget, setDeleteSpawnTarget] = useState<Record<string, unknown> | undefined>();
   const [packageActionToast, setPackageActionToast] = useState<{ message: string; color: string } | undefined>();
   const [hubUpdate, setHubUpdate] = useState<HubUpdateOutcome | undefined>();
@@ -1158,6 +1520,14 @@ export default function App() {
         recordDiagnostic(hubConnectionDiagnosticFromFrame(frame));
         recordDiagnostic(schemaVersionInformationFromFrame(frame));
         recordDiagnostics(compatibilityDiagnosticsFromFrame(frame));
+        const subscriptionError = entitySubscriptionErrorFromFrame(frame, "session_type");
+        if (subscriptionError) {
+          setSessionTypeSubscriptionError(subscriptionError);
+        } else if (isEntitySnapshotFrameForFamily(frame, "session_type")) {
+          // A fresh authoritative baseline ends the failed generation. The error is terminal
+          // for its own generation only -- it must not outlive a successful resubscribe.
+          setSessionTypeSubscriptionError(undefined);
+        }
       }
     });
 
@@ -1192,7 +1562,7 @@ export default function App() {
       .then(() => pullProductionEntity("package", { family: "botster-web.package" }))
       .then(() => pullProductionEntity("availablePackage", { family: "botster-web.available_package" }))
       .then(() => pullProductionEntity("spawnTarget", { family: "botster-web.spawn_target" }))
-      .then(() => pullProductionEntity("sessionTemplate", { family: "botster-web.session_template" }))
+      .then(() => pullProductionEntity("sessionType", { family: "session_type" }))
       .then(() => pullProductionEntity("session", { family: "session" }))
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -1249,6 +1619,10 @@ export default function App() {
         if (spawnTargetFeedback) {
           setPackageActionToast(spawnTargetFeedback);
         }
+        const sessionTypeFeedback = sessionTypeActionFeedback(result);
+        if (sessionTypeFeedback) {
+          setPackageActionToast(sessionTypeFeedback);
+        }
         if (action.id === "botster.package.configuration.save") {
           void runtimeClient.entities.pull({ family: "botster-web.package" });
         }
@@ -1257,7 +1631,6 @@ export default function App() {
         }
         if (action.id === "botster.spawn_target.daemon_request") {
           void runtimeClient.entities.pull({ family: "botster-web.spawn_target" });
-          void runtimeClient.entities.pull({ family: "botster-web.session_template" });
         }
         if (action.id === hubUpdateCheckActionId) {
           setHubUpdate(hubUpdateOutcomeFromResult(result));
@@ -1521,18 +1894,21 @@ export default function App() {
   }, [routePluginSurfaceKey]);
   const availablePackages = runtimeClient.entities.list("botster-web.available_package");
   const spawnTargets = [...runtimeClient.entities.list("botster-web.spawn_target")].sort(compareSpawnTargetRows);
-  const sessionTemplates = runtimeClient.entities.list("botster-web.session_template");
-  const spawnSessionTemplates = spawnSessionForm
-    ? sessionTemplatesForSpawnTarget(sessionTemplates, spawnSessionForm.targetId)
+  const sessionTypes = runtimeClient.entities.list("session_type");
+  const sessionTypeSourceGroups = groupSessionTypesBySource(sessionTypes);
+  const sessionTypeSubscriptionsSupported = sessionTypeManagementSupported(hubStatus);
+  const sessionTypeWritableSources = writableSessionTypeSources(spawnTargets);
+  const spawnSessionTypes = spawnSessionForm
+    ? sessionTypesForSpawnTarget(sessionTypes, spawnSessionForm.targetId)
     : [];
   const openSpawnSession = useCallback((target: Record<string, unknown>) => {
     setSpawnSessionForm(spawnSessionFormForTarget(
       target,
-      runtimeClient.entities.list("botster-web.session_template")
+      runtimeClient.entities.list("session_type")
     ));
   }, [runtimeClient]);
   const submitSpawnSession = useCallback(() => {
-    if (!spawnSessionForm || !spawnSessionForm.templateId || spawnSessionForm.submitting) return;
+    if (!spawnSessionForm || !spawnSessionForm.sessionTypeId || spawnSessionForm.submitting) return;
     const sessionId = crypto.randomUUID();
     const action = spawnSessionAction(spawnSessionForm, sessionId);
 
@@ -1557,6 +1933,66 @@ export default function App() {
       ) : current);
     });
   }, [navigateToView, recordDiagnostic, runtimeClient, spawnSessionForm, updateLocalState]);
+  const openCreateSessionType = useCallback(() => {
+    setSessionTypeForm(emptySessionTypeForm);
+  }, []);
+  const submitSessionTypeForm = useCallback(() => {
+    if (!sessionTypeForm || !sessionTypeFormIsStructurallyComplete(sessionTypeForm)) return;
+    if (sessionTypeForm.submitting) return;
+
+    const action: ActionBinding = {
+      id: "botster.session_type.daemon_request",
+      target: sessionTypeForm.sessionTypeId,
+      label: "Create session type",
+      params: {
+        daemon_request: {
+          request_type: "create_session_type",
+          source: sessionTypeMutationSource(sessionTypeForm),
+          definition: sessionTypeDefinitionFromForm(sessionTypeForm)
+        }
+      }
+    };
+
+    // The form owns the verdict: it stays open and keeps the draft until Hub accepts, so a
+    // rejection renders Hub's kind and message here rather than discarding the user's work.
+    setSessionTypeForm((current) => current ? { ...current, submitting: true, error: undefined } : current);
+    void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
+      recordDiagnostic(actionFailureDiagnostic(action, result));
+      if (!result.accepted) {
+        setSessionTypeForm((current) => current ? rejectedSessionTypeForm(current, result) : current);
+        return;
+      }
+
+      setSessionTypeForm(undefined);
+      setPackageActionToast(sessionTypeActionFeedback(result) ?? { message: "Session type saved", color: "success" });
+    }).catch((error: unknown) => {
+      setSessionTypeForm((current) => current ? {
+        ...current,
+        submitting: false,
+        error: error instanceof Error ? error.message : "Botster could not save this session type."
+      } : current);
+    });
+  }, [recordDiagnostic, runtimeClient, sessionTypeForm]);
+  const confirmDeleteSessionType = useCallback(() => {
+    if (!deleteSessionType) return;
+    // Hub deletes by the bare authoring id within the row's source, not the composite id.
+    const definitionId = stringValue(deleteSessionType.definition_id, "");
+    if (!definitionId) return;
+
+    dispatchAction({
+      id: "botster.session_type.daemon_request",
+      target: stringValue(deleteSessionType.session_type_id, String(deleteSessionType.id)),
+      label: "Delete session type",
+      params: {
+        daemon_request: {
+          request_type: "delete_session_type",
+          source: sessionTypeMutationSourceFromRecord(deleteSessionType),
+          session_type_id: definitionId
+        }
+      }
+    });
+    setDeleteSessionType(undefined);
+  }, [deleteSessionType, dispatchAction]);
   const installedPackageRows = useMemo(() => [...packages].sort(compareInstalledPackageRows), [packages]);
   const installedAppPackageRows = useMemo(
     () => installedPackageRows.filter((app) => packageAppSurfaces(app).length > 0),
@@ -2100,28 +2536,37 @@ export default function App() {
                         <h2 id="session-types-heading">Session types</h2>
                         <p className="page-description">Available ways to start a session at each spawn point.</p>
                       </div>
-                      <IonBadge color="medium">{sessionTemplates.length}</IonBadge>
+                      <IonBadge color="medium">{sessionTypes.length}</IonBadge>
                     </div>
-                    {entityLoadStatus.sessionTemplate === "error" ? (
+                    <SessionTypesSurfaceNotices
+                      supported={sessionTypeSubscriptionsSupported}
+                      subscriptionError={sessionTypeSubscriptionError}
+                      onCreate={openCreateSessionType}
+                    />
+                    {entityLoadStatus.sessionType === "error" ? (
                       <IonNote color="danger">Session types could not be loaded from Botster.</IonNote>
-                    ) : sessionTemplates.length > 0 ? (
-                      <IonList lines="full" aria-label="Session types">
-                        {sessionTemplates.map((template) => {
-                          const targetId = stringValue(template.target_id, "");
-                          const target = spawnTargets.find((spawnTarget) => stringValue(spawnTarget.target_id, String(spawnTarget.id)) === targetId);
-                          return (
-                            <IonItem key={String(template.id)} disabled={template.available === false}>
-                              <IonLabel>
-                                <h2>{stringValue(template.title, String(template.id))}</h2>
-                                <p>{target ? stringValue(target.label, String(target.id)) : targetId || "Any spawn point"}</p>
-                              </IonLabel>
-                              <IonBadge slot="end" color={template.available === false ? "medium" : "success"}>
-                                {template.available === false ? "Unavailable" : "Available"}
-                              </IonBadge>
-                            </IonItem>
-                          );
-                        })}
-                      </IonList>
+                    ) : sessionTypes.length > 0 ? (
+                      <>
+                        {sessionTypeSubscriptionError ? (
+                          <p className="entity-empty" data-testid="session-types-stale">
+                            Showing the last session types Botster sent.
+                          </p>
+                        ) : null}
+                        {sessionTypeSourceGroups.map((group) => (
+                          <div key={group.source} data-testid={`session-type-group-${group.source}`}>
+                            <h3>{group.source}</h3>
+                            <IonList lines="full" aria-label={`${group.source} session types`}>
+                              {group.rows.map((sessionType) => (
+                                <SessionTypeListItem
+                                  key={String(sessionType.id)}
+                                  sessionType={sessionType}
+                                  onDelete={setDeleteSessionType}
+                                />
+                              ))}
+                            </IonList>
+                          </div>
+                        ))}
+                      </>
                     ) : (
                       <p className="entity-empty">No session types are available yet.</p>
                     )}
@@ -2416,11 +2861,11 @@ export default function App() {
                       <h2>{spawnSessionForm.targetLabel}</h2>
                       <p>Choose how this session should start. Botster will use the spawn point's folder and policy.</p>
                     </div>
-                    {entityLoadStatus.sessionTemplate === "error" ? (
+                    {entityLoadStatus.sessionType === "error" ? (
                       <IonNote color="danger">Session types could not be loaded from Botster.</IonNote>
-                    ) : spawnSessionTemplates.length === 0 ? (
+                    ) : spawnSessionTypes.length === 0 ? (
                       <IonNote color="medium">
-                        {entityLoadStatus.sessionTemplate === "loaded"
+                        {entityLoadStatus.sessionType === "loaded"
                           ? "No session types are available for this spawn point."
                           : "Loading session types…"}
                       </IonNote>
@@ -2430,18 +2875,22 @@ export default function App() {
                           <IonSelect
                             label="Session type"
                             labelPlacement="stacked"
-                            value={spawnSessionForm.templateId}
+                            value={spawnSessionForm.sessionTypeId}
                             placeholder="Choose a session type"
                             disabled={spawnSessionForm.submitting}
                             onIonChange={(event) => setSpawnSessionForm((current) => current ? {
                               ...current,
-                              templateId: String(event.detail.value ?? ""),
+                              sessionTypeId: String(event.detail.value ?? ""),
                               error: undefined
                             } : current)}
                           >
-                            {spawnSessionTemplates.map((template) => (
-                              <IonSelectOption key={String(template.id)} value={String(template.id)}>
-                                {stringValue(template.title, String(template.id))}
+                            {spawnSessionTypes.map((sessionType) => (
+                              <IonSelectOption
+                                key={String(sessionType.id)}
+                                value={String(sessionType.id)}
+                                disabled={sessionType.available === false}
+                              >
+                                {stringValue(sessionType.label, "")}
                               </IonSelectOption>
                             ))}
                           </IonSelect>
@@ -2467,7 +2916,7 @@ export default function App() {
                     {spawnSessionForm.error ? <IonNote color="danger">{spawnSessionForm.error}</IonNote> : null}
                     <div className="modal-actions">
                       <IonButton
-                        disabled={!spawnSessionForm.templateId || spawnSessionForm.submitting}
+                        disabled={!spawnSessionForm.sessionTypeId || spawnSessionForm.submitting}
                         onClick={submitSpawnSession}
                       >
                         <IonIcon icon={playOutline} slot="start" aria-hidden="true" />
@@ -2478,6 +2927,202 @@ export default function App() {
                 ) : null}
               </IonContent>
             </IonModal>
+            <IonModal isOpen={Boolean(sessionTypeForm)} onDidDismiss={() => setSessionTypeForm(undefined)}>
+              <IonHeader>
+                <IonToolbar>
+                  <IonTitle>Add session type</IonTitle>
+                  <IonButtons slot="end">
+                    <IonButton disabled={sessionTypeForm?.submitting} onClick={() => setSessionTypeForm(undefined)}>
+                      Close
+                    </IonButton>
+                  </IonButtons>
+                </IonToolbar>
+              </IonHeader>
+              <IonContent className="ion-padding">
+                {sessionTypeForm ? (
+                  <div className="session-type-form">
+                    <IonList lines="full" aria-label="Session type form">
+                      <IonItem>
+                        <IonSelect
+                          label="Where it lives"
+                          labelPlacement="stacked"
+                          value={sessionTypeForm.source === "repo" ? `repo:${sessionTypeForm.sourceTargetId}` : sessionTypeForm.source}
+                          data-testid="session-type-source"
+                          onIonChange={(event) => {
+                            const selected = String(event.detail.value ?? "device");
+                            setSessionTypeForm((current) => current ? {
+                              ...current,
+                              source: selected.startsWith("repo:") ? "repo" : selected,
+                              sourceTargetId: selected.startsWith("repo:") ? selected.slice("repo:".length) : ""
+                            } : current);
+                          }}
+                        >
+                          {sessionTypeWritableSources.map((source) => (
+                            <IonSelectOption
+                              key={`${source.source}:${source.targetId}`}
+                              value={source.source === "repo" ? `repo:${source.targetId}` : source.source}
+                            >
+                              {source.label}
+                            </IonSelectOption>
+                          ))}
+                        </IonSelect>
+                      </IonItem>
+                      <IonItem>
+                        <IonInput
+                          label="Identifier"
+                          labelPlacement="stacked"
+                          value={sessionTypeForm.id}
+                          placeholder="my-agent"
+                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, id: String(event.detail.value ?? "") } : current)}
+                        />
+                      </IonItem>
+                      <IonItem>
+                        <IonInput
+                          label="Name"
+                          labelPlacement="stacked"
+                          value={sessionTypeForm.label}
+                          placeholder="My agent"
+                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, label: String(event.detail.value ?? "") } : current)}
+                        />
+                      </IonItem>
+                      <IonItem>
+                        <IonInput
+                          label="Description"
+                          labelPlacement="stacked"
+                          value={sessionTypeForm.description}
+                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, description: String(event.detail.value ?? "") } : current)}
+                        />
+                      </IonItem>
+                      <IonItem>
+                        <IonInput
+                          label="Role"
+                          labelPlacement="stacked"
+                          value={sessionTypeForm.role}
+                          placeholder="botster.agent"
+                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, role: String(event.detail.value ?? "") } : current)}
+                        />
+                      </IonItem>
+                      <IonItem>
+                        <IonInput
+                          label="Interaction"
+                          labelPlacement="stacked"
+                          value={sessionTypeForm.interaction}
+                          placeholder="interactive"
+                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, interaction: String(event.detail.value ?? "") } : current)}
+                        />
+                      </IonItem>
+                      <IonItem>
+                        <IonInput
+                          label="Lifecycle"
+                          labelPlacement="stacked"
+                          value={sessionTypeForm.lifecycle}
+                          placeholder="task"
+                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, lifecycle: String(event.detail.value ?? "") } : current)}
+                        />
+                      </IonItem>
+                      <IonItem>
+                        <IonInput
+                          label="Traits"
+                          labelPlacement="stacked"
+                          value={sessionTypeForm.traits}
+                          placeholder="terminal, companion"
+                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, traits: String(event.detail.value ?? "") } : current)}
+                        />
+                      </IonItem>
+                      <IonItem>
+                        <IonInput
+                          label="Command"
+                          labelPlacement="stacked"
+                          value={sessionTypeForm.command}
+                          placeholder="claude"
+                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, command: String(event.detail.value ?? "") } : current)}
+                        />
+                      </IonItem>
+                      <IonItem>
+                        <IonInput
+                          label="Arguments"
+                          labelPlacement="stacked"
+                          value={sessionTypeForm.args}
+                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, args: String(event.detail.value ?? "") } : current)}
+                        />
+                      </IonItem>
+                    </IonList>
+                    <details className="advanced-session-type-options">
+                      <summary>Advanced options</summary>
+                      <IonList lines="full" aria-label="Advanced session type options">
+                        <IonItem>
+                          <IonInput
+                            label="Working directory policy"
+                            labelPlacement="stacked"
+                            value={sessionTypeForm.workingDirectoryPolicy}
+                            placeholder="package_root"
+                            onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, workingDirectoryPolicy: String(event.detail.value ?? "") } : current)}
+                          />
+                        </IonItem>
+                        <IonItem>
+                          <IonInput
+                            label="Working directory path"
+                            labelPlacement="stacked"
+                            value={sessionTypeForm.workingDirectoryPath}
+                            onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, workingDirectoryPath: String(event.detail.value ?? "") } : current)}
+                          />
+                        </IonItem>
+                        <IonItem>
+                          <IonTextarea
+                            label="Environment"
+                            labelPlacement="stacked"
+                            value={sessionTypeForm.environment}
+                            autoGrow
+                            placeholder={"KEY=value"}
+                            onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, environment: String(event.detail.value ?? "") } : current)}
+                          />
+                        </IonItem>
+                        <IonItem>
+                          <IonInput
+                            label="Allowed environment overrides"
+                            labelPlacement="stacked"
+                            value={sessionTypeForm.allowedEnvironmentOverrides}
+                            onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, allowedEnvironmentOverrides: String(event.detail.value ?? "") } : current)}
+                          />
+                        </IonItem>
+                        <IonItem>
+                          <IonInput
+                            label="Context keys"
+                            labelPlacement="stacked"
+                            value={sessionTypeForm.contextKeys}
+                            onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, contextKeys: String(event.detail.value ?? "") } : current)}
+                          />
+                        </IonItem>
+                      </IonList>
+                    </details>
+                    {sessionTypeForm.error ? (
+                      <IonNote color="danger" data-testid="session-type-form-error">{sessionTypeForm.error}</IonNote>
+                    ) : null}
+                    <div className="modal-actions">
+                      <IonButton
+                        disabled={!sessionTypeFormIsStructurallyComplete(sessionTypeForm) || sessionTypeForm.submitting}
+                        onClick={submitSessionTypeForm}
+                        data-testid="submit-session-type"
+                      >
+                        {sessionTypeForm.submitting
+                          ? "Saving…"
+                          : "Create"}
+                      </IonButton>
+                    </div>
+                  </div>
+                ) : null}
+              </IonContent>
+            </IonModal>
+            <IonAlert
+              isOpen={Boolean(deleteSessionType)}
+              header="Delete session type"
+              message={`Delete ${stringValue(deleteSessionType?.label, "")}?`}
+              onDidDismiss={() => setDeleteSessionType(undefined)}
+              buttons={[
+                { text: "Cancel", role: "cancel" },
+                { text: "Delete", role: "destructive", handler: confirmDeleteSessionType }
+              ]}
+            />
             <IonModal isOpen={Boolean(spawnTargetForm)} onDidDismiss={() => setSpawnTargetForm(undefined)}>
                 <IonHeader>
                   <IonToolbar>
