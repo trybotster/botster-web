@@ -173,12 +173,20 @@ I applied the 0.1.24 artifact to a throwaway worktree at `origin/main` and ran
 | B | `ticket_1785970233_750553` | 6 | `hubTransport.ts` 27, 142, 246 (×2), 253, 1100 — `DaemonSessionTemplate`→`DaemonSessionType`, `list_session_templates`→`list_session_types`, `session_templates`→`session_types`, `spawn_session_template`→`spawn_session_type` |
 | C | **Neither ticket** | 7 | `hubTransport.ts` 369-378, `webrtcDaemonClient.ts` 850, 855 — protocol 6 adds `DaemonEntityFrame` variant `entity_error { subscription_id, entity_type, code, message }`, which has no `id`/`patch`/`snapshot_seq` and breaks existing union narrowing |
 
-**Resolved: option (A).** Orchestrator answered `question_1786031902_463107`
-with an explicit decision. This run owns the bump and lands it in one PR: the
-support pin, the byte-exact re-vendor, bucket A, bucket C, bucket B as a purely
-mechanical rename, and the documentation coordinate lines. It does not touch the
-session-types UI, CRUD, provenance model, entity family, or the `session-types`
-settings section — all of that stays with `ticket_1785970233_750553`.
+> ⚠️ **Everything from here to the end of this section is HISTORICAL.** Option
+> (A) assigned the bump to this run; that assignment was later superseded when
+> the sibling landed the bump itself. See "The A/B/C bucket partition is
+> SUPERSEDED" below for what is actually in force. This record is kept because
+> the analysis is what made the collision decidable, not because it still
+> assigns work.
+
+**Resolved at the time: option (A).** Orchestrator answered
+`question_1786031902_463107` with an explicit decision. This run owns the bump
+and lands it in one PR: the support pin, the byte-exact re-vendor, bucket A,
+bucket C, bucket B as a purely mechanical rename, and the documentation
+coordinate lines. It does not touch the session-types UI, CRUD, provenance model,
+entity family, or the `session-types` settings section — all of that stays with
+`ticket_1785970233_750553`.
 
 Rationale recorded by the orchestrator: the bump is not incidental to this
 ticket, it *is* its subject matter — `hub_version` leaving
@@ -220,75 +228,127 @@ The underlying observation reported at `1786033884` was factually accurate and
 well-evidenced; the interpretation placed on it was not. Nothing downstream of
 this plan should carry forward any expectation that a gate "should have held".
 
-### Bucket C scope discipline (orchestrator constraint)
+### The A/B/C bucket partition is SUPERSEDED — the bump is the sibling's to land
 
-Fix bucket C at the **type level only**. Make the `DaemonEntityFrame` union
-exhaustive, handle `entity_error` so it cannot crash or fall through silently,
-and surface it through whatever minimal path the existing code already uses for
-transport-level problems. **Do not** design product-facing error UX for entity
-subscriptions — that presentation belongs to the session-types run, which will
-build real user-visible error state on this foundation. Choosing copy,
-iconography, or retry semantics means the change has gone too far.
+The bucket partition above is retained as the record of how the collision was
+analysed, but **it no longer assigns work.** The sibling run
+`run_1786031348_611758` hit a hard block — its entire ticket consumes protocol-6
+types that do not exist at the old coordinate, so every one of its acceptance
+checks was unreachable — and under Jason's concurrent-execution decision it
+landed the bump itself rather than idle indefinitely behind a run that at the
+time had only plan commits and no pushed branch.
 
-### Ownership partition under accepted concurrency (orchestrator constraint)
+**The rule that replaces buckets:** anything *mechanically forced* by the bump,
+whose correct value is read off the artifact's `metadata.json`, belongs to
+whoever is unblocking on it — there is exactly one right answer, both runs would
+produce it identically, and no divergent state is possible. Anything requiring
+**judgement about Hub identity or maintenance semantics is this run's.**
 
-Concurrency does not repartition ownership. The sibling now building on the same
-files **does not** make these renames theirs, and does not license this run to
-expand into their surface.
+**Landed by the sibling — do not redo, revert, re-vendor, or re-apply:**
 
-**This run owns and lands:**
-
-| Item | Detail |
+| Item | Was |
 | --- | --- |
-| Support pin | `@trybotster/hub-test-support` `0.1.21` → `0.1.24` |
-| Generated protocol | byte-exact re-vendor of `src/botster/generated/daemon-protocol.ts` |
-| Test constants | protocol `4` → `6`, conformance `28` → `31` (`src/App.test.mjs:1373-1374`) |
-| Bucket A | `hub_version` removal |
-| Bucket B | mechanical, zero-behaviour-change rename — **unblock-only** |
-| Bucket C | `entity_error` union narrowing, `hubTransport.ts` 369-378 and `webrtcDaemonClient.ts` 850/855 — **type level only** |
-| Compatibility rename | `DaemonCompatibilityRequirement.minimum_protocol_version` → `protocol_version` |
-| Docs | `README.md` and `docs/architecture.md` coordinate lines |
+| `package.json` / `package-lock.json` | `0.1.21` → `0.1.24` |
+| `src/botster/generated/daemon-protocol.ts` | byte-copied via `readDaemonProtocolTypescript()`; drift check passes at sha256 `c5cc9413` |
+| `src/botster/__fixtures__/generatedDaemonProtocol.ts:279` | `hub_version` line deleted (was bucket A) |
+| `src/botster/webrtcDaemonClient.ts` | `entity_error` handled before the delta path |
+| `src/botster/hubTransport.ts` | session-type renames and the `entity_error` projection (was buckets B and C) |
+| `src/App.test.mjs:1373-1374` | `4` → `6`, `28` → `31` |
+| `README.md:11`, `docs/architecture.md:53-54` | `revision-31`, `@trybotster/hub-test-support@0.1.24` |
 
-**The sibling `ticket_1785970233_750553` retains:** session-types UI, CRUD,
-provenance rendering, the `session-types` settings section, and the
-**entity-subscription error UX** built on top of this run's type-level
-`entity_error` handling.
+If any of it is found **wrong**, that is a **finding to raise, not something to
+silently fix.**
 
-**Generated-file authority.** The drift gate demands byte equality on
-`src/botster/generated/daemon-protocol.ts`, so that file in particular will
-conflict if both runs touch it. **This run is the one authorised to vendor it.**
-If the sibling's PR arrives with a hand-edited `daemon-protocol.ts`, that is a
-**finding to raise, not something to merge around.**
+**Correction worth carrying forward: bucket C was never type-level.** The earlier
+instruction to fix `webrtcDaemonClient.ts` with union narrowing was wrong, and
+following it would have shipped a bug that still typechecked.
+`receiveEntityFrame` returns early for `entity_snapshot` and falls everything
+else through to the delta path, where `frame.snapshot_seq !== currentSequence + 1`
+evaluates `undefined !== N+1` for an `entity_error` frame and fires
+`resubscribeEntity` with `sequence_gap`. A cast or an `in` guard satisfies `tsc`
+and still ships a resubscribe loop. The type error and the behavioural
+requirement were the same line, and that behaviour belongs to the session-types
+ticket. It is handled there.
 
-**Base rebase.** Both runs must rebase onto `origin/main` `9753297` before
-implementing. Unchanged and still mandatory — both branches were cut at its
-parent `713233f`.
+### Verified state of the prerequisite (checked at revision 5)
+
+Stated precisely, because this plan now depends on it:
+
+- `origin/main` is still `9753297`. **The sibling's work is not merged.**
+- The sibling's branch has three commits, and `git diff --stat 9753297..HEAD`
+  shows they touch **only** `docs/plans/manage-authoritative-hub-session-types.md`.
+- The bump therefore exists **only as uncommitted working-tree modifications** in
+  the sibling's worktree: `package.json`, `package-lock.json`, `src/App.tsx`,
+  `src/App.test.mjs`, `src/botster/generated/daemon-protocol.ts`,
+  `src/botster/__fixtures__/generatedDaemonProtocol.ts`,
+  `src/botster/hubTransport.ts`, `src/botster/protocol.ts`,
+  `src/botster/webrtcDaemonClient.ts`, `README.md`, `docs/architecture.md`.
+- Spot-checked and confirmed correct in that worktree: pin at `0.1.24`, zero
+  `hub_version` occurrences in the fixture, `App.test.mjs:1373-1374` at `6`/`31`,
+  `revision-31` and `@0.1.24` in both documents, and `check_hub_update` present in
+  the vendored protocol.
+
+**Consequence for Implement.** There is nothing to rebase onto yet. Do not begin
+on the assumption that the prerequisite is in the tree — confirm the sibling's
+work is committed and merged first, then rebase onto it. If this run reaches
+Implement while that work is still uncommitted, say so and stop rather than
+re-applying the bump, which would create exactly the divergent state the
+single-owner rule exists to prevent.
+
+### This run's subject, undiminished
+
+Nothing has been taken from this ticket. This run still owns, and these all
+require judgement rather than a value read off metadata:
+
+- Hub **product / build / install identity** rendered from
+  `DaemonStatus.software`, and **never** from an installed package row.
+- **Host identity.**
+- **Compatibility** protocol / version / conformance / features display.
+- **State schema**, kept secondary to user-facing software status.
+- **Check for updates** wired to the Hub self-update check action.
+- Rendering **current, available, unavailable/manual, offline, and error**
+  outcomes using Hub-provided `reason`/`action` metadata.
+- Protocol and schema values already emitted by `DaemonStatus` **never regressing
+  to `unknown` after connect or reconnect**, proven across WebRTC reconnect
+  replay.
+
+Confirmed still present and untouched in the sibling's worktree, so the defect
+this ticket exists to fix is genuinely still this run's to fix: `hubPackage` at
+`App.tsx:1681`, the package-row-derived `Hub version` row at `:2222`, and the
+`check_package_update` binding at `:1682`. Line numbers have shifted from the
+`9753297` values cited earlier in this plan (`1410`/`1951`/`1411`) because of the
+sibling's edits — **anchor on the symbols, not the line numbers.**
+
+`DaemonCompatibilityRequirement.minimum_protocol_version` → `protocol_version`
+remains this run's **only if it needs behavioural handling in this surface.** The
+sibling explicitly disclaimed it and reports typecheck clean without touching it.
 
 ### Deviation reporting (orchestrator constraint)
 
-Buckets B and C are outside this ticket's literal wording. The implementation
-report must record both explicitly under deviations, labelled **unblock-only**,
-with the reason: the byte-equality drift check makes a partial bump impossible,
-and `entity_error` is a protocol-6 consequence owned by neither feature ticket.
-The report must **not** say `deviations_from_plan: None` — a previous run in this
+The buckets are no longer this run's deviations, so the earlier bucket-B/C
+wording does not apply. The standing requirement remains: the implementation
+report must **not** say `deviations_from_plan: None` — a previous run in this
 project shipped that line while silently narrowing a public descriptor, and
-Review caught it.
+Review caught it. Any deviation actually taken must be named with its reason.
 
 ## Scope
 
-1. **Bump the authoritative contract.** `@trybotster/hub-test-support`
-   `0.1.21` → `0.1.24` in `package.json`/`package-lock.json`, and copy the
-   published `daemon-protocol.ts` verbatim into
-   `src/botster/generated/daemon-protocol.ts`. Never hand-edit the generated
-   file — the drift check and
-   [[botster web dto field names must match authoritative rust serde structs]]
-   both forbid it.
-2. **Bucket A — stop deriving Hub identity from a package row.** Remove
-   `hub_version` from the `DaemonPackageCompatibility` fixture at
-   `src/botster/__fixtures__/generatedDaemonProtocol.ts:279`. Delete the
+**Prerequisite, not scope (landed by the sibling):** the support pin, the
+byte-exact `daemon-protocol.ts` re-vendor, the `hub_version` fixture deletion,
+the `entity_error` handling in `webrtcDaemonClient.ts` and `hubTransport.ts`, the
+session-type renames, `App.test.mjs:1373-1374`, and the README/architecture
+coordinate lines. Do not redo any of it. See the superseded-buckets section
+above, including the verification that it is **not yet committed or merged**.
+
+1. **Stop deriving Hub identity from a package row.** Delete the
    `hubPackage`-derived "Hub version" row and the `hubPackage`-derived
-   `hubUpdateAction` from `src/App.tsx`. Cold cut, no fallback to the package
-   row, per [[cold turkey migrations eliminate dual code paths and version suffixes]].
+   `hubUpdateAction` from `src/App.tsx` — currently `hubPackage` at `:1681`,
+   the version row at `:2222`, the `check_package_update` binding at `:1682` in
+   the sibling's tree; **anchor on the symbols, not the line numbers.** Cold cut,
+   no fallback to the package row, per
+   [[cold turkey migrations eliminate dual code paths and version suffixes]].
+   The fixture-level `hub_version` deletion is already done; this is the
+   user-visible half, which is the part this ticket was actually filed for.
 3. **Project software and installation identity into the hub status record.**
    Extend `statusRecord()` in `src/botster/hubTransport.ts` (`9753297` line 384)
    to carry `status.software` and `status.installation` alongside the existing
@@ -326,24 +386,16 @@ Review caught it.
    `reconnectEntitySubscriptions()` re-subscribes Hub entity subscriptions only.
    That is the concrete mechanism by which protocol and schema can regress to
    `unknown`.
-7. **Bucket C — handle the new `entity_error` frame variant.** Narrow the
-   `DaemonEntityFrame` union in `hubTransport.ts` and `webrtcDaemonClient.ts`
-   before touching `id`/`patch`/`snapshot_seq`, and surface `entity_error` as a
-   diagnostic rather than dropping it silently. Minimum correct handling only.
-8. **Bucket B — mechanical rename only** (under assumption A). Rename the six
-   session-template symbols in `hubTransport.ts` to their protocol-6 names with
-   no behavior change.
-9. **Update fixtures, tests, and docs** to match:
-   - `src/App.test.mjs:1373-1374` — `hubTestSupportMetadata.protocol_version`
-     `4` → `6` and `conformance_fixture_revision` `28` → `31`. Line numbers
-     verified against `9753297`.
-   - Add `software` and `installation` to the inline `DaemonStatus` fixtures in
-     `src/App.test.mjs` (line 2454 region and the 4426 region).
-   - `README.md` and `docs/architecture.md` coordinate lines.
-     `src/App.test.mjs:1375-1382` asserts both documents literally contain
-     `@trybotster/hub-test-support@<version>`,
-     `@trybotster/ui-contract@<version>`, and `revision-<n>`, so the docs must
-     move to `0.1.24` and `revision-31` or `npm test` fails.
+7. **Add `software` and `installation` to the inline `DaemonStatus` fixtures** in
+   `src/App.test.mjs` (the `production-host` regions), so the identity rendering
+   above is exercised. The protocol/conformance constants at `:1373-1374` and the
+   README/architecture coordinate lines are **already landed by the sibling** —
+   do not touch them.
+8. **Handle `DaemonCompatibilityRequirement.minimum_protocol_version` →
+   `protocol_version` only if it needs behavioural handling in this surface.**
+   The sibling disclaimed it and reports typecheck clean without touching it, and
+   no Web code constructs a `DaemonCompatibilityRequirement`. If nothing in the
+   General/Maintenance surface reads it, take no action and say so.
 
 **Explicitly unchanged** (orchestrator constraint): the compatibility floor in
 `src/botster/connectionDiagnostics.ts` — `minimumDaemonProtocolVersion` stays
@@ -435,29 +487,32 @@ no core, no TUI, no MCP surface.
 
 | File | Change |
 | --- | --- |
-| `package.json`, `package-lock.json` | hub-test-support `0.1.21` → `0.1.24` |
-| `src/botster/generated/daemon-protocol.ts` | verbatim copy of published artifact |
-| `src/botster/hubTransport.ts` | `statusRecord()` carries `software`/`installation`; `botster.hub.check_update` dispatch branch; `entity_error` narrowing; bucket B rename |
-| `src/botster/webrtcDaemonClient.ts` | `entity_error` narrowing (lines 850, 855) |
+| `src/botster/hubTransport.ts` | `statusRecord()` carries `software`/`installation`; `botster.hub.check_update` dispatch branch. **Not** the renames or `entity_error` — already landed. |
 | `src/App.tsx` | remove `hubPackage` version + `check_package_update` binding; render software/installation/host/protocol/schema; update-outcome rendering; register `hub_status` pull; re-pull on WebRTC reconnect |
-| `src/botster/__fixtures__/generatedDaemonProtocol.ts` | drop `hub_version` (line 279) |
-| `src/App.test.mjs` | `software`/`installation` fixtures; General-section and update-outcome assertions |
+| `src/App.test.mjs` | `software`/`installation` fixtures; General-section and update-outcome assertions. **Not** `:1373-1374` — already landed. |
 | `scripts/browser-runtime-smoke.mjs` | missing-bootstrap/offline General rendering only — no populated identity, no real update action |
 | `scripts/live-packaged-protocol-harness.mjs` | populated-identity and real Check-for-updates DOM proof, protocol/conformance/features and secondary-schema rendering, compatibility and support-diagnostic assertions, reconnect proof; `schema_version !== 2` corrected to the observed `3` |
-| `README.md`, `docs/architecture.md` | pinned coordinate and Maintenance-surface claims |
+| `README.md`, `docs/architecture.md` | **already landed by the sibling** — coordinate lines are at `revision-31` / `@0.1.24`. Touch only if a Maintenance-surface claim needs adding. |
 
 ## Risks
 
-1. **Cross-run merge conflict in `hubTransport.ts`, `App.tsx`, and especially
-   `src/botster/generated/daemon-protocol.ts` — EXPECTED AND ACCEPTED.** Both Web
-   runs are authorised to proceed concurrently, so conflict is a planned outcome
-   rather than a risk to avoid: whoever merges second resolves it. Revisions 2
-   and 3 framed this around a dependency hold and a gate regression; both framings
-   are withdrawn, since no gate exists here and edges are advisory. What remains
-   is ordinary conflict discipline — bucket B stays rename-only, this run never
-   enters the session-types surface, and the generated protocol file is vendored
-   only by this run. A hand-edited `daemon-protocol.ts` arriving from the sibling
-   is a finding to raise, not something to merge around.
+1. **The prerequisite is not yet committed or merged — this is now the top
+   risk.** The bump this plan depends on exists only as uncommitted working-tree
+   modifications in the sibling's worktree (verified: `origin/main` is still
+   `9753297`, and all three sibling commits touch only their plan document). If
+   that work is lost, reverted, or its PR is rejected, this ticket becomes
+   unimplementable, because `DaemonStatus.software`, `DaemonStatus.installation`,
+   and `check_hub_update` do not exist at the old coordinate. Mitigation:
+   Implement must confirm the work is committed and merged before starting, and
+   must **stop and report rather than re-apply the bump** if it is not — re-applying
+   is exactly the divergent state the single-owner rule exists to prevent.
+2. **Cross-run merge conflict in `hubTransport.ts` and `App.tsx` — EXPECTED AND
+   ACCEPTED.** Both runs are authorised to proceed concurrently, so conflict is a
+   planned outcome: whoever merges second resolves it. Earlier revisions framed
+   this around a dependency hold and a gate regression; both framings are
+   withdrawn. What remains is ordinary conflict discipline — this run never
+   enters the session-types surface, and never re-vendors the generated protocol.
+   `src/App.tsx` is the contended file, since both runs edit the settings shell.
 2. **Stale base.** Implementing on `713233f` would recreate a surface that
    already exists on `9753297` and produce a large false diff. Mitigation:
    mandatory rebase, re-verified at Plan Review.
@@ -654,12 +709,21 @@ Structured evidence, not toast text, per the charter: assert on
    `hubTransport.connect()` and is therefore invisible to
    `replayActivePulls()`; `replayActivePulls()` additionally has no production
    caller. That is a reusable Botster SPA reconnect gotcha, not a one-off bug.
-3. **The generated-protocol drift check makes a protocol bump indivisible, and
-   ownership of it must be assigned by instruction.** Byte-comparison means
-   concurrent runs in `botster-web` cannot each take part of a bump. Since
-   ordering here is orchestrator-managed rather than engine-enforced, the bump
-   must be assigned to exactly one run explicitly, and the other told not to
-   hand-edit the generated file.
+3. **Mechanically-forced work belongs to whoever unblocks on it; judgement work
+   belongs to its subject-matter ticket.** The most useful rule to come out of
+   this run, and a better partition than the A/B/C buckets it replaced. If the
+   correct value is read off an artifact's `metadata.json`, both runs would
+   produce it identically and no divergent state is possible, so the blocked run
+   should just land it. If it requires judgement about a domain — here, Hub
+   identity and maintenance semantics — it stays with the ticket that owns that
+   domain. This resolves protocol-bump collisions without serialising runs.
+4. **A type error and a behavioural bug can be the same line, and fixing only the
+   type ships the bug.** `entity_error` in `webrtcDaemonClient.receiveEntityFrame`
+   falls through to the delta path where `frame.snapshot_seq !== currentSequence + 1`
+   evaluates `undefined !== N+1` and fires `resubscribeEntity` with
+   `sequence_gap`. A cast or `in` guard satisfies `tsc` and still ships a
+   resubscribe loop. Worth capturing that "narrow the union" is not automatically
+   a type-level-only change.
 4. **Update state is three-valued; offline and error are transport outcomes.**
    Worth a short note so no client invents a fourth `DaemonHubUpdateState`.
 5. **A test harness with no Hub bridge cannot be real-render proof for
