@@ -187,39 +187,38 @@ fix. Option (C) would buy a cleaner boundary at the cost of an extra full run
 cycle while blocking both feature runs; option (B) would serialize this smaller
 ticket behind a materially larger one and still leave bucket C unowned.
 
-### Dependency edge: shipped evidence, expected hold, and an observed regression
+### Sequencing: concurrent by explicit decision, ordering is orchestrator-managed
 
-The **durable dependency edge exists** and is the shipped evidence here:
-`dependency_1786032120_366099`, created `1786032120`, with
-`ticket_1785970233_750553` depending on `ticket_1785970234_234515` and
-`depends_on_status: open`. The engine classifies it as blocking — it appears in
-that ticket's `blocking_dependencies` collection, not only in `dependencies`. The
-enforcement mechanism is the Project Pipelines gate merged as `8990969`.
+**Both `botster-web` runs proceed concurrently. This is Jason's explicit
+decision, not an accident to be prevented.** Recorded in the authoritative answer
+to `question_1786034136_524714`.
 
-The **intended** sequencing is that `ticket_1785970233_750553` completes Plan and
-Plan Review, then holds before Implement until this PR merges, then rebases onto
-it. Revision 2 stated that hold as an accomplished fact. It was not one, and
-saying so was a factual error corrected per Plan Review
-`finding_1786033763_396233`. **The hold is expected, not observed, and must be
-verified at the actual transition rather than asserted in advance.**
+- `dependency_1786032120_366099` **has been removed**.
+  `ticket_1785970233_750553` no longer depends on this ticket. Do not treat it as
+  a current prerequisite.
+- **Whoever merges second resolves the conflict.** This is accepted up front.
+- Ordering between tickets in this environment is maintained by **orchestrator
+  instruction only**. If a plan needs another ticket to land first, it must say so
+  explicitly and expect a human or the orchestrator to sequence it — never an
+  engine.
 
-That correction turned out to matter within minutes of being demanded:
+**Correction to revisions 2 and 3.** Those revisions described the Project
+Pipelines dependency gate `8990969` as enforcing here, and revision 3 recorded a
+"gate regression" when the sibling activated Implement. That framing was wrong
+and is withdrawn in full:
 
-> **Observed gate regression, reported `1786033884`.** Checked at plan-revision
-> time, `run_1786031348_611758` is **active at `botster_stack_implement`**
-> (`run_step_1786033830_925772`, started `1786033830`, agent session
-> `sess-1786033833-...`) while this ticket is still open and the blocking edge
-> above has existed since `1786032120` — roughly 28 minutes earlier. So this is
-> not a race on edge creation. Reported immediately to the orchestrator, per its
-> standing instruction in `question_1786031902_463107`. Plan Review's own
-> observation at `1786033763` that the sibling was back at Plan was accurate for
-> that moment; the transition happened about a minute later.
+- There is **no dependency gate running in this environment and there never was
+  one**. This Hub executes a legacy plugin; the standalone package from
+  `botster-project-pipelines` PR #15 targets the new Hub, which is not in service,
+  is intentionally not installed here, and is not pending a cutover.
+- Registered dependency edges here are **advisory records, not enforcement** —
+  unconditionally, not "until something is fixed".
+- The sibling activating Implement was therefore **not a regression, not a bug,
+  and not an incident**. It is how this environment has always behaved.
 
-Consequence for Implement: **do not assume the ~7 mechanical bucket-B lines in
-`hubTransport.ts` cannot race the sibling run.** Until the orchestrator confirms
-the sibling is parked, treat `hubTransport.ts` and `App.tsx` as actively
-contended, re-check the sibling's run state immediately before editing them, and
-expect a rebase or conflict resolution rather than a clean landing.
+The underlying observation reported at `1786033884` was factually accurate and
+well-evidenced; the interpretation placed on it was not. Nothing downstream of
+this plan should carry forward any expectation that a gate "should have held".
 
 ### Bucket C scope discipline (orchestrator constraint)
 
@@ -231,11 +230,45 @@ subscriptions — that presentation belongs to the session-types run, which will
 build real user-visible error state on this foundation. Choosing copy,
 iconography, or retry semantics means the change has gone too far.
 
+### Ownership partition under accepted concurrency (orchestrator constraint)
+
+Concurrency does not repartition ownership. The sibling now building on the same
+files **does not** make these renames theirs, and does not license this run to
+expand into their surface.
+
+**This run owns and lands:**
+
+| Item | Detail |
+| --- | --- |
+| Support pin | `@trybotster/hub-test-support` `0.1.21` → `0.1.24` |
+| Generated protocol | byte-exact re-vendor of `src/botster/generated/daemon-protocol.ts` |
+| Test constants | protocol `4` → `6`, conformance `28` → `31` (`src/App.test.mjs:1373-1374`) |
+| Bucket A | `hub_version` removal |
+| Bucket B | mechanical, zero-behaviour-change rename — **unblock-only** |
+| Bucket C | `entity_error` union narrowing, `hubTransport.ts` 369-378 and `webrtcDaemonClient.ts` 850/855 — **type level only** |
+| Compatibility rename | `DaemonCompatibilityRequirement.minimum_protocol_version` → `protocol_version` |
+| Docs | `README.md` and `docs/architecture.md` coordinate lines |
+
+**The sibling `ticket_1785970233_750553` retains:** session-types UI, CRUD,
+provenance rendering, the `session-types` settings section, and the
+**entity-subscription error UX** built on top of this run's type-level
+`entity_error` handling.
+
+**Generated-file authority.** The drift gate demands byte equality on
+`src/botster/generated/daemon-protocol.ts`, so that file in particular will
+conflict if both runs touch it. **This run is the one authorised to vendor it.**
+If the sibling's PR arrives with a hand-edited `daemon-protocol.ts`, that is a
+**finding to raise, not something to merge around.**
+
+**Base rebase.** Both runs must rebase onto `origin/main` `9753297` before
+implementing. Unchanged and still mandatory — both branches were cut at its
+parent `713233f`.
+
 ### Deviation reporting (orchestrator constraint)
 
 Buckets B and C are outside this ticket's literal wording. The implementation
 report must record both explicitly under deviations, labelled **unblock-only**,
-with the reason: the byte-equality drift gate makes a partial bump impossible,
+with the reason: the byte-equality drift check makes a partial bump impossible,
 and `entity_error` is a protocol-6 consequence owned by neither feature ticket.
 The report must **not** say `deviations_from_plan: None` — a previous run in this
 project shipped that line while silently narrowing a public descriptor, and
@@ -415,18 +448,16 @@ no core, no TUI, no MCP surface.
 
 ## Risks
 
-1. **Cross-run merge conflict in `hubTransport.ts` and `App.tsx` — ACTIVE, not
-   retired.** Revision 2 called this "largely retired by the dependency hold."
-   That was wrong: the hold was expected, not observed, and the sibling run
-   `run_1786031348_611758` has since been seen **active at Implement**
-   (`run_step_1786033830_925772`, started `1786033830`) while this ticket is open
-   and its blocking edge `dependency_1786032120_366099` has existed since
-   `1786032120`. Reported to the orchestrator at `1786033884` as the gate
-   regression it explicitly asked to be told about. Mitigation is now behavioral,
-   not structural: bucket B stays rename-only, this run never enters the
-   session-types section, and Implement must re-check the sibling's run state
-   immediately before touching `hubTransport.ts` or `App.tsx` and be prepared to
-   rebase rather than assume a clean landing.
+1. **Cross-run merge conflict in `hubTransport.ts`, `App.tsx`, and especially
+   `src/botster/generated/daemon-protocol.ts` — EXPECTED AND ACCEPTED.** Both Web
+   runs are authorised to proceed concurrently, so conflict is a planned outcome
+   rather than a risk to avoid: whoever merges second resolves it. Revisions 2
+   and 3 framed this around a dependency hold and a gate regression; both framings
+   are withdrawn, since no gate exists here and edges are advisory. What remains
+   is ordinary conflict discipline — bucket B stays rename-only, this run never
+   enters the session-types surface, and the generated protocol file is vendored
+   only by this run. A hand-edited `daemon-protocol.ts` arriving from the sibling
+   is a finding to raise, not something to merge around.
 2. **Stale base.** Implementing on `713233f` would recreate a surface that
    already exists on `9753297` and produce a large false diff. Mitigation:
    mandatory rebase, re-verified at Plan Review.
@@ -623,10 +654,12 @@ Structured evidence, not toast text, per the charter: assert on
    `hubTransport.connect()` and is therefore invisible to
    `replayActivePulls()`; `replayActivePulls()` additionally has no production
    caller. That is a reusable Botster SPA reconnect gotcha, not a one-off bug.
-3. **The generated-protocol drift check makes a protocol bump indivisible.**
-   Byte-comparison means concurrent runs in `botster-web` cannot each take part
-   of a bump. Worth capturing as a Project Pipelines concurrency constraint so
-   future runs plan the bump as a single owned unit.
+3. **The generated-protocol drift check makes a protocol bump indivisible, and
+   ownership of it must be assigned by instruction.** Byte-comparison means
+   concurrent runs in `botster-web` cannot each take part of a bump. Since
+   ordering here is orchestrator-managed rather than engine-enforced, the bump
+   must be assigned to exactly one run explicitly, and the other told not to
+   hand-edit the generated file.
 4. **Update state is three-valued; offline and error are transport outcomes.**
    Worth a short note so no client invents a fourth `DaemonHubUpdateState`.
 5. **A test harness with no Hub bridge cannot be real-render proof for
@@ -640,10 +673,16 @@ Structured evidence, not toast text, per the charter: assert on
    this failure. A concrete planning rule — verify frontmatter `status` at load
    time, not just that the filename resolves — would have prevented it, and
    filename-resolution checks alone demonstrably do not.
-7. **The dependency gate `8990969` allowed Implement activation with an open
-   blocking dependency.** Observed in this run at `1786033884`:
-   `run_1786031348_611758` active at Implement with edge
-   `dependency_1786032120_366099` open for ~28 minutes prior. The sibling reached
-   Implement via `on_approved_step_id` from Plan Review, which is worth capturing
-   as the likely unguarded transition once the Project Pipelines owner confirms
-   the root cause.
+7. **In this environment, Project Pipelines dependency edges are advisory
+   records, not enforcement.** The Hub here runs a legacy plugin; the standalone
+   package that would enforce ordering targets the new Hub, is intentionally not
+   installed, and is not pending a cutover. Ordering between tickets is
+   maintained by orchestrator instruction only. This is the highest-value capture
+   from this run: revisions 2 and 3 of this plan both reasoned as though an
+   engine would sequence the work, and a plan that needs another ticket to land
+   first must instead say so explicitly and expect a human to sequence it.
+8. **Correcting a claim needs the same evidence standard as making one.** This
+   run reported a "gate regression" on accurate observations plus an inherited
+   assumption that the gate was installed. The observation was sound; the
+   inference was not. Worth capturing that an environment-capability assumption
+   should be verified before an incident is declared on top of it.
