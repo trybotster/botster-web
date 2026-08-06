@@ -39,8 +39,22 @@
   [[cold turkey migrations eliminate dual code paths and version suffixes]],
   [[prefer framework and library components over custom solutions]],
   [[vault example paths are not repository placement conventions]].
-- [[project-pipelines-playbook]] deliberately **not** loaded: no Project
-  Pipelines package or plugin path is in scope for this ticket.
+- [[project-pipelines-playbook]] loaded. Corrected after Plan Review
+  `finding_1786033050_924243`: the initial plan excluded it on the grounds that
+  no Project Pipelines package or plugin path is in scope. That reasoning was
+  wrong — the charter covers **workflow policy**, not only package paths, and
+  this run's sequencing turns on cross-run dependency activation. The clauses
+  that bind here are
+  [[project pipeline step activation gates open ticket dependencies before side effects]]
+  (the gate now holding `ticket_1785970233_750553`),
+  [[plan review must reverify the declared base at review time]] and
+  [[plan review must fetch before trusting remote tracking refs in run worktrees]]
+  (the stale-base correction below),
+  [[plan review must check open sibling tickets that own part of the plan scope]]
+  (the same-target scope overlap this plan partitions into buckets), and
+  [[project pipelines mcp create calls can time out after committing]] (the
+  vault-checklist create for this run returned a worker timeout after
+  committing, and was resolved by an owner-scoped read rather than a retry).
 - Plan destination `docs/plans/` was chosen from mainline prior art in this
   repository (54 existing plans, most recently
   `docs/plans/stop-treating-hub-persistence-schema-as-client-compatibility.md`
@@ -127,7 +141,7 @@ failures of the request*, not update states, and must be rendered from the
 rejected action result / operator error path — never synthesized into a fourth
 `DaemonHubUpdateState`.
 
-## Cross-run collision (escalated, answer pending)
+## Cross-run collision (escalated, resolved as option A)
 
 A second run is active in this same repository right now:
 `run_1786031348_611758`, `ticket_1785970233_750553`, "Web: manage authoritative
@@ -305,15 +319,33 @@ surface-local and Hub-sourced.
    verified the cause independently — `origin/main` advanced by one commit
    between the pre-wave fetch and worktree creation, so `713233f` is that
    commit's immediate parent. `9753297` is not one of this project's runs.
-3. **Unknown:** whether the Hub bumps `DaemonStatus.schema_version` past `2`.
-   `scripts/live-packaged-protocol-harness.mjs` currently hard-asserts
-   `status?.schema_version !== 2`. Implement must read the value from the live
-   Hub and update that assertion to the observed value rather than assuming `2`
-   still holds.
-4. **Unknown:** the exact `installation.mode` and `reason`/`action` strings a
-   development checkout returns. These must be observed from the live Hub at
-   `8a60bd5`, not invented. Web renders them verbatim and must not map them to
-   client-authored copy.
+3. **Resolved by Plan Review's live run.** Plan Review executed the live harness
+   against a real Hub and observed the values this plan had listed as unknown:
+
+   | Field | Live value |
+   | --- | --- |
+   | `status.schema_version` | `3` |
+   | `software.product_name` | `Botster Hub` |
+   | `software.version` | `0.1.0` |
+   | `installation.mode` | `development` |
+   | `installation.provenance` | `development_build` |
+
+   Corroborated independently against `botster-hub` source at `8a60bd5`:
+   `crates/botster-hub-client/src/lib.rs:2688-2693` carries `product_id
+   "botster-hub"`, `product_name "Botster Hub"`, `mode "development"`, and
+   `provenance "development_build"`.
+
+   The live schema value is `3`, not `2`. That means
+   `scripts/live-packaged-protocol-harness.mjs`'s hard-coded
+   `status?.schema_version !== 2` assertion **fails today** — Plan Review hit
+   exactly that failure from the current stale Web against a protocol-6 Hub.
+   Implement corrects the assertion to the observed value. These values are
+   recorded as expected observations, not as constants to hard-code into
+   rendering; Web still renders whatever the Hub reports.
+4. **Still unknown, and correctly so:** the exact `reason` and `action` strings
+   returned by `check_hub_update` for a development checkout. Plan Review did not
+   report them. Implement must observe them from the live Hub at `8a60bd5` and
+   render them verbatim — never invented, never remapped to client-authored copy.
 5. **Assumed:** the local `botster-hub` debug binary is rebuilt from `8a60bd5`
    before live proof. The checkout is at `8a60bd5` and a binary exists at
    `target/debug/botster-hub`, but its mtime predates verification, so Implement
@@ -336,8 +368,8 @@ no core, no TUI, no MCP surface.
 | `src/App.tsx` | remove `hubPackage` version + `check_package_update` binding; render software/installation/host/protocol/schema; update-outcome rendering; register `hub_status` pull; re-pull on WebRTC reconnect |
 | `src/botster/__fixtures__/generatedDaemonProtocol.ts` | drop `hub_version` (line 279) |
 | `src/App.test.mjs` | `software`/`installation` fixtures; General-section and update-outcome assertions |
-| `scripts/browser-runtime-smoke.mjs` | real-browser assertions on the General section |
-| `scripts/live-packaged-protocol-harness.mjs` | authoritative identity + update-check + reconnect assertions; schema assertion corrected to observed value |
+| `scripts/browser-runtime-smoke.mjs` | missing-bootstrap/offline General rendering only — no populated identity, no real update action |
+| `scripts/live-packaged-protocol-harness.mjs` | populated-identity and real Check-for-updates DOM proof, protocol/conformance/features and secondary-schema rendering, compatibility and support-diagnostic assertions, reconnect proof; `schema_version !== 2` corrected to the observed `3` |
 | `README.md`, `docs/architecture.md` | pinned coordinate and Maintenance-surface claims |
 
 ## Risks
@@ -366,10 +398,13 @@ no core, no TUI, no MCP surface.
    action result path, and assert in tests that no client-authored state string
    reaches the DTO.
 6. **Fixture-mode blindness.** `smoke:browser-runtime` runs at
-   `/missing-bootstrap` with no Hub, so it can prove only the unavailable and
-   offline rendering. Populated identity requires the live harness. Mitigation:
-   both harnesses are named in acceptance, and neither is treated as sufficient
-   alone.
+   `/missing-bootstrap` with no Hub bridge, so it can prove only the unavailable
+   and offline rendering. Populated identity and the real update action are
+   impossible there. Mitigation: acceptance now **assigns** populated-identity
+   and real-action DOM proof to the live packaged-protocol harness and scopes the
+   browser smoke to missing/offline UI. The earlier plan named both harnesses but
+   assigned the work to the one that cannot perform it; Plan Review caught that
+   as `finding_1786033049_425897`.
 7. **UI-contract coupling.** Verified non-issue for this bump (both sides
    `0.3.1`), but must be re-checked if the support pin moves again.
 
@@ -400,10 +435,52 @@ Component and behavior tests in `src/App.test.mjs`:
   `botster-web.hub_status` projection.
 - `check_hub_update` dispatch produces `current`, `available`, and `unavailable`
   renderings driven by Hub-provided `state`/`reason`/`action`.
-- A rejected `check_hub_update` (transport failure) renders the offline/error
-  path and does **not** produce a `DaemonHubUpdateState` value.
 - Development-checkout and managed-release `installation.mode` fixtures render
   distinct, honest, non-destructive outcomes.
+
+Offline and error are **two distinct production signals** and get two separate
+checks. Corrects Plan Review `finding_1786033049_621190`: the earlier plan
+collapsed them into one "offline/error path" assertion, which cannot prove both
+and cannot catch a fourth state synthesized on only one of them.
+
+- **Offline — transport rejection / disconnected.** `check_hub_update` is
+  dispatched with no reachable Hub (rejected bridge request, or a closed WebRTC
+  transport). Assert the General section renders an offline outcome, that the
+  action result is `accepted: false`, and that **no** `DaemonHubUpdateState`
+  value (`current`/`available`/`unavailable`) appears anywhere in the rendered
+  output or the result payload.
+- **Error — connected, `operator_error` response.** The Hub is connected and
+  answers `check_hub_update` with a `DaemonOperatorError`. Assert the error is
+  rendered through the existing `operatorErrorDiagnostic` path with the Hub's
+  own `code`/`message`, and again that no `DaemonHubUpdateState` value is
+  synthesized. This is a different code path from transport rejection and must
+  not be proven by reusing the offline fixture.
+- `current`, `available`, and `unavailable` assertions stay separate from both of
+  the above and remain strictly Hub-authored.
+
+Stale-client / new-Hub compatibility — required by the ticket, added per Plan
+Review `finding_1786033050_137111`:
+
+- Assert a Hub advertising protocol `6` / conformance `31` is accepted under the
+  deliberately unchanged `minimumDaemonProtocolVersion` `1` /
+  `minimumConformanceFixtureRevision` `14` floor, producing the
+  `Hub compatibility descriptor compatible` success diagnostic and **no**
+  mismatch or `unsupported_feature` diagnostic.
+- Assert the General section still renders authoritative protocol identifier,
+  version, conformance revision, and features in that configuration rather than
+  degrading to `Not reported`.
+
+Support-diagnostic preservation — the ticket requires diagnostics be preserved
+for support, and this change edits both `statusRecord()` and the action-result
+projection, so it must be asserted rather than assumed:
+
+- Assert `statusRecord()` still merges `status.diagnostics` with response
+  diagnostics into the `botster-web.hub_status` record after `software` and
+  `installation` are added.
+- Assert the `check_hub_update` action result carries Hub response diagnostics
+  through to the Support section, matching the existing
+  `botster.spawn_target.daemon_request` branch's `diagnostics:
+  responseDiagnostics(response)` shape.
 
 Reconnect proof — the check the ticket calls out explicitly:
 
@@ -413,14 +490,51 @@ Reconnect proof — the check the ticket calls out explicitly:
 - Assert `botster-web.hub_status` is present in `activePulls` so it is
   replay-eligible, and that the reconnect listener re-pulls it.
 
-Real-render proof (`scripts/browser-runtime-smoke.mjs`) — source regexes and
-snapshots alone are explicitly insufficient under the charter:
+Real-render proof — **reassigned**, correcting Plan Review
+`finding_1786033049_425897`. The earlier plan asked
+`scripts/browser-runtime-smoke.mjs` to render populated identity and click a real
+update action. That harness cannot do either, and the plan's own risk 6 conceded
+as much while still assigning the work there. Verified independently: the smoke
+server serves static `dist` plus a single injected
+`window.__BOTSTER_PACKAGE_RUNTIME__ = true` on `/missing-bootstrap`, with no Hub
+bridge; and `createHubRuntimeConfig` falls back to `unavailableDaemonClient`
+whenever `__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__` is absent. So `hub_status` can
+never populate there and `check_hub_update` can never execute.
 
-- Navigate to `/settings`, open **General**, and assert on rendered DOM text for
-  product, version, build revision, installation mode, provenance, host, and
-  protocol.
-- Click the real **Check for updates** button and assert the rendered outcome.
-- Assert no page errors, reusing the existing `assertNoPageErrors` helper.
+The only in-browser injection seam is `__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__`, which
+drives a **real** WebRTC connection to a **real** Hub. Inventing a controlled
+in-browser bridge fixture would mean adding a new client abstraction purely for
+testing, which this ticket's "smallest surgical change" constraint forbids.
+Therefore the split is:
+
+**`scripts/browser-runtime-smoke.mjs` — scoped to missing-bootstrap / offline UI
+only.** This is genuine value, not a consolation prize: it is the natural home
+for the offline outcome above.
+
+- Navigate to `/settings`, open **General**, and assert the no-Hub state renders
+  honestly (`Not reported` rather than a fabricated version, and no crash).
+- Assert the **Check for updates** control is present and correctly disabled or
+  renders the offline outcome with no Hub reachable.
+- Assert no page errors, reusing the existing `assertNoPageErrors` helper, and
+  keep the existing `assertHubSettingsHeadingHierarchy` coverage intact.
+
+**`scripts/live-packaged-protocol-harness.mjs` — owns all populated-identity and
+real-action DOM proof.** It already drives Chromium against a real installed Hub
+and already records structured evidence via
+`__BOTSTER_LIVE_PROTOCOL_HARNESS__`, so this is where the user path actually
+exists.
+
+- Navigate to `/settings`, open **General**, and assert on **rendered DOM text**:
+  product name, version, build revision when present, installation mode,
+  provenance, release channel and provider when present, host display name and
+  host id.
+- Assert rendered protocol identifier, protocol version, conformance revision,
+  and features as user-path evidence — not only as recorded frames.
+- Assert state schema is rendered **and visibly secondary** to user-facing
+  software status, satisfying the ticket's ordering requirement rather than
+  merely its presence requirement.
+- Click the real **Check for updates** button and assert the rendered outcome
+  against the Hub's actual `state`/`reason`/`action`.
 
 Downstream live proof against a real Hub, required by the charter's live-hub
 conformance gate:
@@ -435,7 +549,8 @@ npm run smoke:live-packaged-protocol
   from).
 - Extend `assertCurrentHubCompatibilityAndSchema` to assert authoritative
   `software`/`installation` facts and correct the hard-coded
-  `schema_version !== 2` assertion to the observed value.
+  `schema_version !== 2` assertion, which Plan Review proved **fails today**
+  against a protocol-6 Hub reporting schema `3`.
 - Reuse the existing `requiredProvenanceField(record, field, label)` helper in
   `scripts/workspaces-shared-hub-browser-helpers.mjs` for those assertions
   rather than writing new ones. It already fails loudly on `undefined`, `null`,
