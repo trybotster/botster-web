@@ -831,6 +831,19 @@ class WebrtcDaemonTransport {
       return;
     }
 
+    if (frame.type === "entity_error") {
+      recordLiveHarnessEvent("webrtc_entity_subscription", {
+        state: "error",
+        entity_type: frame.entity_type,
+        subscription_id: frame.subscription_id,
+        generation,
+        code: frame.code,
+        message: frame.message
+      });
+      subscription.listener(frame);
+      return;
+    }
+
     if (frame.type === "entity_snapshot") {
       subscription.snapshotSeq = frame.snapshot_seq;
       subscription.resolveReady?.();

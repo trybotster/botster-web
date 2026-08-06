@@ -107,6 +107,11 @@ export class InMemoryEntityFrameStore implements EntityFrameStore {
     await this.sendPull(request);
   }
 
+  /**
+   * No production caller. Reconnect hydration is currently wired per family at the
+   * WebRTC lifecycle listener, so do not assume a registered active pull is replayed
+   * after reconnect just because it appears here.
+   */
   async replayActivePulls(): Promise<void> {
     for (const request of this.activePulls.values()) {
       await this.sendPull(request);

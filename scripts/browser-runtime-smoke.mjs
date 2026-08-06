@@ -45,6 +45,7 @@ const browser = await chromium.launch({ headless: true });
 try {
   await proveMissingBootstrapDiagnostic();
   await proveHubSettingsOnMobile();
+  await proveHubGeneralWithoutHub();
   console.log("browser runtime interaction smoke passed");
 } finally {
   await browser.close();
@@ -64,6 +65,69 @@ async function proveHubSettingsOnMobile() {
   await settingsNavigation.getByRole("button", { name: /Spawn points/ }).click();
   await page.getByTestId("spawn-points-view").waitFor();
   assertNoPageErrors("mobile Hub settings", pageErrors);
+  await page.close();
+}
+
+/**
+ * This harness serves static dist plus a single injected __BOTSTER_PACKAGE_RUNTIME__ flag
+ * with no Hub bridge, so createHubRuntimeConfig falls back to unavailableDaemonClient and
+ * botster-web.hub_status can never populate here. That makes it the right home for the
+ * no-Hub and offline rendering of the General section, and the wrong place to prove
+ * populated identity or a real update check — those live in the live packaged-protocol
+ * harness against a real Hub.
+ */
+async function proveHubGeneralWithoutHub() {
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+
+  await page.goto(`${origin}/settings`, { waitUntil: "networkidle" });
+  const general = page.getByTestId("hub-settings-general");
+  await general.waitFor();
+  await page.getByRole("heading", { name: "General", exact: true }).waitFor({ state: "visible" });
+
+  // Honest fallbacks with no Hub reachable: never a fabricated version, and never the
+  // permanently-"unknown" rendering that numeric coercion used to produce.
+  const softwareIdentity = await general.getByTestId("hub-software-identity").innerText();
+  for (const [label, expected] of [["Software", "Not reported"], ["Version", "Not reported"]]) {
+    if (!new RegExp(`${label}\\s*\\n?\\s*${expected}`).test(softwareIdentity)) {
+      throw new Error(`Hub General ${label} did not render "${expected}" with no Hub: ${softwareIdentity}`);
+    }
+  }
+  if (/\bBotster Hub\b|\b\d+\.\d+\.\d+\b/.test(softwareIdentity)) {
+    throw new Error(`Hub General fabricated software identity with no Hub: ${softwareIdentity}`);
+  }
+  const internalState = await general.getByTestId("hub-internal-state").innerText();
+  if (/unknown/i.test(`${softwareIdentity}\n${internalState}`)) {
+    throw new Error(`Hub General still renders "unknown" instead of "Not reported": ${internalState}`);
+  }
+
+  // State schema stays present but secondary to user-facing software status.
+  const ordering = await general.evaluate((section) => {
+    const nodes = Array.from(section.querySelectorAll("[data-testid]"));
+    return nodes.map((node) => node.getAttribute("data-testid"));
+  });
+  if (ordering.indexOf("hub-software-identity") > ordering.indexOf("hub-internal-state")) {
+    throw new Error(`State schema is not secondary to software status: ${ordering.join(", ")}`);
+  }
+  if (!/State schema/.test(internalState)) {
+    throw new Error(`State schema is not rendered at all: ${internalState}`);
+  }
+
+  // Check for updates is present and, with no Hub reachable, renders the offline outcome
+  // from the rejected action result rather than any DaemonHubUpdateState.
+  const updateRegion = general.getByTestId("hub-software-update");
+  await updateRegion.getByRole("button", { name: "Check for updates", exact: true }).click();
+  await general.getByTestId("hub-update-outcome").filter({ hasText: /Update check failed/ }).waitFor();
+  const updateOutcome = await general.getByTestId("hub-update-outcome").innerText();
+  if (await updateRegion.getAttribute("data-hub-update-state") !== null) {
+    throw new Error(`Offline update check synthesized a DaemonHubUpdateState: ${updateOutcome}`);
+  }
+  if (await general.getByTestId("hub-update-action").count() !== 0) {
+    throw new Error("Offline update check rendered a Hub-authored action it never received");
+  }
+
+  assertNoPageErrors("Hub General without a Hub", pageErrors);
   await page.close();
 }
 

@@ -29,6 +29,8 @@ There is no HTTP daemon client, SSE terminal stream, polling, `list_sessions` hy
 
 Terminal data stays outside `HubControlFrame`. The WebRTC client attaches and drains terminal events, while the Hub terminal data plane restores visible `read_screen` text before buffered live output. Snapshot/scrollback payloads remain opaque metadata and are never rendered as terminal text.
 
+Hub identity is a `DaemonStatus` projection on family `botster-web.hub_status`, never a package row. `software`, `installation`, `host_id`, `schema_version`, and `compatibility` all come from the status response, and `check_hub_update` is the only Hub self-update read. The family is registered as an active pull and replayed when the data channel reopens, so protocol, conformance, and schema facts do not regress after reconnect. `DaemonHubUpdate` has exactly three states — `current`, `available`, `unavailable`. Offline and error are rejected-action-result outcomes, never a fourth state.
+
 ## Local package server
 
 `scripts/local-package-server.mjs` reports readiness only after binding. For each HTML load it requests a fresh initial WebRTC grant from Hub using the actual bound origin, validates the returned transport contract, and injects package-runtime/bootstrap metadata. The browser uses the same server to forward only:
@@ -50,8 +52,8 @@ reads the generic entity store, including nested row context, while
 Bind-list identity has one materialization order. The direct item-template root
 retains its item-relative `$bind`; after that root becomes a nonblank literal,
 `bind_list_descendant_id` children call the runtime helper exported by
-`@trybotster/ui-contract@0.3.1`. The generated declarations and revision-28
-shared conformance fixtures come from `@trybotster/hub-test-support@0.1.21`.
+`@trybotster/ui-contract@0.3.1`. The generated declarations and revision-31
+shared conformance fixtures come from `@trybotster/hub-test-support@0.1.24`.
 Nested bind lists establish a new nearest-row context. Web never encodes,
 parses, normalizes, indexes, or repairs those identities.
 

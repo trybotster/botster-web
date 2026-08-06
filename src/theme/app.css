@@ -419,6 +419,17 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* Internal protocol and durable-state facts stay available for support but must not
+   compete with the user-facing software status above them. */
+.hub-metadata-list.hub-metadata-secondary {
+  font-size: 0.875rem;
+}
+
+.hub-metadata-list.hub-metadata-secondary dt {
+  color: var(--app-text-muted-color);
+  font-weight: 500;
+}
+
 .hub-software-update {
   display: flex;
   align-items: center;

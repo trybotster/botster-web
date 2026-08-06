@@ -61,6 +61,7 @@ import {
   compatibilityDiagnosticsFromFrame,
   connectionFailureDiagnostic,
   hubConnectionDiagnosticFromFrame,
+  hubStatusFamily,
   initialConnectionDiagnostics,
   operatorErrorDiagnostic,
   schemaVersionInformationFromFrame,
@@ -71,7 +72,7 @@ import {
 } from "./botster/connectionDiagnostics";
 import { createHubRuntimeConfig } from "./botster/hubRuntime";
 import { webRtcDaemonLifecycleEventName, type LocalWebrtcBootstrap, type WebrtcDaemonLifecycleEvent } from "./botster/webrtcDaemonClient";
-import type { ActionBinding } from "./botster/actions";
+import type { ActionBinding, ActionDispatchResult } from "./botster/actions";
 import type { EntityFrameStore } from "./botster/entities";
 import type { TerminalAttachmentStatus, TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import {
@@ -834,6 +835,149 @@ export function SessionListItem({
   );
 }
 
+type HubEntityLoadKey =
+  | "hubStatus"
+  | "app"
+  | "packageNavigation"
+  | "package"
+  | "availablePackage"
+  | "spawnTarget"
+  | "sessionTemplate"
+  | "session";
+
+/**
+ * Reconnect hydration is listener-driven per family, deliberately.
+ *
+ * `EntityFrameStore.replayActivePulls()` exists but has no production caller anywhere in
+ * `src/`, so registering a family as an active pull makes it replay-ELIGIBLE without
+ * anything replaying it. This function is therefore the sole mechanism keeping hub
+ * identity, protocol, and schema facts from regressing after a WebRTC reconnect — the
+ * `botster-web.hub_status` registration in the connect chain does not cover it. Removing
+ * this listener on the assumption that registered pulls are replayed would silently
+ * reintroduce the regression. See [[botster browser pull requests must retry after webrtc
+ * reconnect]]; widening it to a generic replay of every family is out of this ticket's scope.
+ */
+export function replayHubStatusOnLifecycleEvent(
+  detail: WebrtcDaemonLifecycleEvent,
+  entities: { pull(request: { family: string }): Promise<void> }
+): boolean {
+  if (detail.type !== "data-channel-open") return false;
+  void entities.pull({ family: hubStatusFamily });
+  return true;
+}
+
+export const hubUpdateCheckActionId = "botster.hub.check_update";
+
+export function hubUpdateCheckAction(): ActionBinding {
+  return { id: hubUpdateCheckActionId, label: "Check for updates" };
+}
+
+export interface HubUpdateOutcome {
+  accepted: boolean;
+  update?: Record<string, unknown>;
+  reason?: string;
+}
+
+/**
+ * The update outcome is authored entirely by the accepted action result. A rejected
+ * result (offline transport, or a hub operator error) carries no `hub_update`, so no
+ * DaemonHubUpdateState is ever synthesized on the client.
+ */
+export function hubUpdateOutcomeFromResult(result: ActionDispatchResult): HubUpdateOutcome {
+  const update = readRecord(readRecord(result.result).hub_update);
+  const state = readString(update.state);
+  return {
+    accepted: result.accepted,
+    ...(result.accepted && state ? { update } : {}),
+    ...(readString(result.reason) ? { reason: result.reason } : {})
+  };
+}
+
+export function hubUpdateOutcomeSummary(outcome: HubUpdateOutcome | undefined): string {
+  if (!outcome) return "Check whether a newer Hub version is available.";
+
+  const update = readRecord(outcome.update);
+  const state = readString(update.state);
+  if (!state) {
+    return outcome.reason ? `Update check failed: ${outcome.reason}` : "Update check failed.";
+  }
+
+  const currentVersion = readString(update.current_version);
+  const availableVersion = readString(update.available_version);
+  const headline =
+    state === "available"
+      ? `Update available${availableVersion ? `: ${availableVersion}` : ""}`
+      : state === "current"
+        ? `Up to date${currentVersion ? `: ${currentVersion}` : ""}`
+        : `Updates ${state}`;
+  const reason = readString(update.reason);
+  return reason ? `${headline} — ${reason}` : headline;
+}
+
+export function HubGeneralSection({
+  hubStatus,
+  hubUpdate,
+  onCheckForUpdates
+}: {
+  hubStatus: Record<string, unknown> | undefined;
+  hubUpdate: HubUpdateOutcome | undefined;
+  onCheckForUpdates: () => void;
+}) {
+  const software = readRecord(hubStatus?.software);
+  const installation = readRecord(hubStatus?.installation);
+  const compatibility = readRecord(hubStatus?.compatibility);
+  const buildRevision = readString(software.build_revision);
+  const releaseChannel = readString(installation.release_channel);
+  const provider = readString(installation.provider);
+  const features = arrayOfStrings(compatibility.features);
+  const updateState = readString(readRecord(hubUpdate?.update).state);
+  const updateAction = readString(readRecord(hubUpdate?.update).action);
+  return (
+    <section className="view-stack hub-settings-panel" aria-labelledby="hub-general-heading" data-testid="hub-settings-general">
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">About this hub</p>
+          <h2 id="hub-general-heading">General</h2>
+          <p className="page-description">Identity and software information for this Botster Hub.</p>
+        </div>
+      </div>
+      <dl className="hub-metadata-list" data-testid="hub-software-identity">
+        <div><dt>Software</dt><dd>{stringValue(software.product_name, "Not reported")}</dd></div>
+        <div><dt>Version</dt><dd>{stringValue(software.version, "Not reported")}</dd></div>
+        {buildRevision ? <div><dt>Build</dt><dd>{buildRevision}</dd></div> : null}
+        <div><dt>Installation</dt><dd>{stringValue(installation.mode, "Not reported")}</dd></div>
+        <div><dt>Provenance</dt><dd>{stringValue(installation.provenance, "Not reported")}</dd></div>
+        {releaseChannel ? <div><dt>Release channel</dt><dd>{releaseChannel}</dd></div> : null}
+        {provider ? <div><dt>Provider</dt><dd>{provider}</dd></div> : null}
+      </dl>
+      <div
+        className="hub-software-update"
+        data-testid="hub-software-update"
+        {...(updateState ? { "data-hub-update-state": updateState } : {})}
+      >
+        <div>
+          <h3>Software updates</h3>
+          <p data-testid="hub-update-outcome">{hubUpdateOutcomeSummary(hubUpdate)}</p>
+          {updateAction ? <p data-testid="hub-update-action">{updateAction}</p> : null}
+        </div>
+        <IonButton fill="outline" size="small" onClick={onCheckForUpdates}>
+          Check for updates
+        </IonButton>
+      </div>
+      <dl className="hub-metadata-list" data-testid="hub-host-identity">
+        <div><dt>Name</dt><dd>{stringValue(hubStatus?.title, "Local Hub")}</dd></div>
+        <div><dt>Host ID</dt><dd>{stringValue(hubStatus?.host_id, "Not reported")}</dd></div>
+      </dl>
+      <dl className="hub-metadata-list hub-metadata-secondary" data-testid="hub-internal-state">
+        <div><dt>Protocol</dt><dd>{stringValue(compatibility.protocol, "Not reported")} · version {reportedNumber(compatibility.protocol_version, "Not reported")}</dd></div>
+        <div><dt>Conformance revision</dt><dd>{reportedNumber(compatibility.conformance_fixture_revision, "Not reported")}</dd></div>
+        <div><dt>Features</dt><dd>{features.length > 0 ? features.join(", ") : "Not reported"}</dd></div>
+        <div><dt>State schema</dt><dd>Version {reportedNumber(hubStatus?.schema_version, "Not reported")}</dd></div>
+      </dl>
+    </section>
+  );
+}
+
 export function SessionRouteView({
   sessionId,
   children
@@ -884,7 +1028,8 @@ export default function App() {
       hubRuntime.startupError
     )
   );
-  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "sessionTemplate" | "session", HubEntityLoadStatus>>({
+  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<HubEntityLoadKey, HubEntityLoadStatus>>({
+    hubStatus: "not_loaded",
     app: "not_loaded",
     packageNavigation: "not_loaded",
     package: "not_loaded",
@@ -901,6 +1046,7 @@ export default function App() {
   const [spawnSessionForm, setSpawnSessionForm] = useState<SpawnSessionFormState | undefined>();
   const [deleteSpawnTarget, setDeleteSpawnTarget] = useState<Record<string, unknown> | undefined>();
   const [packageActionToast, setPackageActionToast] = useState<{ message: string; color: string } | undefined>();
+  const [hubUpdate, setHubUpdate] = useState<HubUpdateOutcome | undefined>();
   const [selectedPluginSurface, setSelectedPluginSurface] = useState<SelectedPluginSurface | undefined>();
   const [uiPresentationState, setUiPresentationState] = useState<UiPresentationState>({});
   const lastPluginRouteRenderKey = useRef<string | undefined>(undefined);
@@ -968,7 +1114,9 @@ export default function App() {
 
   useEffect(() => {
     const recordWebRtcLifecycle = (event: Event) => {
-      recordDiagnostic(webRtcLifecycleDiagnostic((event as CustomEvent<WebrtcDaemonLifecycleEvent>).detail));
+      const detail = (event as CustomEvent<WebrtcDaemonLifecycleEvent>).detail;
+      recordDiagnostic(webRtcLifecycleDiagnostic(detail));
+      replayHubStatusOnLifecycleEvent(detail, runtimeClient.entities);
     };
 
     window.addEventListener(webRtcDaemonLifecycleEventName, recordWebRtcLifecycle);
@@ -976,7 +1124,7 @@ export default function App() {
     return () => {
       window.removeEventListener(webRtcDaemonLifecycleEventName, recordWebRtcLifecycle);
     };
-  }, [recordDiagnostic]);
+  }, [recordDiagnostic, runtimeClient]);
 
   useEffect(() => {
     const syncViewFromLocation = () => {
@@ -1014,7 +1162,7 @@ export default function App() {
     });
 
     const pullProductionEntity = async (
-      key: "app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "sessionTemplate" | "session",
+      key: HubEntityLoadKey,
       request: { family: string; id?: string }
     ) => {
       setEntityLoadStatus((current) => ({ ...current, [key]: "loading" }));
@@ -1038,6 +1186,7 @@ export default function App() {
       })
       .then(() => runtimeClient.hub.subscribe())
       .then(() => runtimeClient.hub.subscribeSurface({ surface: "botster-web.production.session", path: "/sessions/local" }))
+      .then(() => pullProductionEntity("hubStatus", { family: hubStatusFamily }))
       .then(() => pullProductionEntity("app", { family: "botster-web.app" }))
       .then(() => pullProductionEntity("packageNavigation", { family: "botster-web.package_navigation" }))
       .then(() => pullProductionEntity("package", { family: "botster-web.package" }))
@@ -1109,6 +1258,9 @@ export default function App() {
         if (action.id === "botster.spawn_target.daemon_request") {
           void runtimeClient.entities.pull({ family: "botster-web.spawn_target" });
           void runtimeClient.entities.pull({ family: "botster-web.session_template" });
+        }
+        if (action.id === hubUpdateCheckActionId) {
+          setHubUpdate(hubUpdateOutcomeFromResult(result));
         }
         updateLocalState({
           [statusKey]: result.accepted
@@ -1312,7 +1464,6 @@ export default function App() {
   );
   const installedApps = runtimeClient.entities.list("botster-web.app");
   const hubStatus = runtimeClient.entities.get("botster-web.hub_status", "local-hub");
-  const hubCompatibility = readRecord(hubStatus?.compatibility);
   const packageNavigation = runtimeClient.entities.list("botster-web.package_navigation");
   const packages = runtimeClient.entities.list("botster-web.package");
   const installedPackageNames = useMemo(
@@ -1407,10 +1558,6 @@ export default function App() {
     });
   }, [navigateToView, recordDiagnostic, runtimeClient, spawnSessionForm, updateLocalState]);
   const installedPackageRows = useMemo(() => [...packages].sort(compareInstalledPackageRows), [packages]);
-  const hubPackage = installedPackageRows.find((appPackage) => stringValue(appPackage.package_name, String(appPackage.id)) === "botster-hub");
-  const hubUpdateAction = packageActions(hubPackage ?? {})
-    .map(packageActionBinding)
-    .find((action) => action?.params?.daemon_request && readString(readRecord(action.params.daemon_request).request_type) === "check_package_update");
   const installedAppPackageRows = useMemo(
     () => installedPackageRows.filter((app) => packageAppSurfaces(app).length > 0),
     [installedPackageRows]
@@ -1938,36 +2085,11 @@ export default function App() {
                 ) : null}
 
                 {activeView === "hub-settings" && activeHubSettingsSection === "general" ? (
-                  <section className="view-stack hub-settings-panel" aria-labelledby="hub-general-heading" data-testid="hub-settings-general">
-                    <div className="page-heading">
-                      <div>
-                        <p className="eyebrow">About this hub</p>
-                        <h2 id="hub-general-heading">General</h2>
-                        <p className="page-description">Identity and software information for this Botster Hub.</p>
-                      </div>
-                    </div>
-                    <dl className="hub-metadata-list">
-                      <div><dt>Name</dt><dd>{stringValue(hubStatus?.title, "Local Hub")}</dd></div>
-                      <div><dt>Hub version</dt><dd>{hubPackage ? stringValue(hubPackage.version, "Unknown") : "Not reported"}</dd></div>
-                      <div><dt>Host ID</dt><dd>{stringValue(hubStatus?.host_id, "Not reported")}</dd></div>
-                      <div><dt>Protocol</dt><dd>{stringValue(hubCompatibility.protocol, "Not reported")} · version {stringValue(hubCompatibility.protocol_version, "unknown")}</dd></div>
-                      <div><dt>State schema</dt><dd>Version {stringValue(hubStatus?.schema_version, "unknown")}</dd></div>
-                    </dl>
-                    <div className="hub-software-update">
-                      <div>
-                        <h3>Software updates</h3>
-                        <p>{hubUpdateAction ? "Check whether a newer Hub version is available." : "Hub update checks are not available in this version."}</p>
-                      </div>
-                      <IonButton
-                        fill="outline"
-                        size="small"
-                        disabled={!hubUpdateAction || hubUpdateAction.disabled === true}
-                        onClick={() => hubUpdateAction && dispatchAction(hubUpdateAction)}
-                      >
-                        Check for updates
-                      </IonButton>
-                    </div>
-                  </section>
+                  <HubGeneralSection
+                    hubStatus={hubStatus}
+                    hubUpdate={hubUpdate}
+                    onCheckForUpdates={() => dispatchAction(hubUpdateCheckAction())}
+                  />
                 ) : null}
 
                 {activeView === "hub-settings" && activeHubSettingsSection === "session-types" ? (
@@ -3092,6 +3214,15 @@ function packageActionFromValue(value: unknown): ActionBinding | undefined {
 
 function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+/**
+ * Numeric hub facts such as protocol version, conformance revision, and state schema
+ * arrive as JSON numbers. Rendering them through stringValue() reports every one of
+ * them as the fallback, which is the "regressed to unknown" failure the hub never made.
+ */
+function reportedNumber(value: unknown, fallback: string): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : fallback;
 }
 
 function arrayOfStrings(value: unknown): string[] {

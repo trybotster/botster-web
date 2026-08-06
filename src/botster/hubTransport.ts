@@ -24,7 +24,7 @@ import type {
   DaemonRequest,
   DaemonResponse,
   DaemonSessionEntity,
-  DaemonSessionTemplate,
+  DaemonSessionType,
   JsonValue
 } from "./realHubDaemonDto";
 
@@ -139,7 +139,7 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
         } else if (request.family === spawnTargetFamily) {
           emitResponse(await bridge.request(spawnTargetDaemonRequest({ type: "list_spawn_targets" })));
         } else if (request.family === sessionTemplateFamily) {
-          emitResponse(await bridge.request({ type: "list_session_templates" }));
+          emitResponse(await bridge.request({ type: "list_session_types" }));
         } else if (request.family === availablePackageFamily) {
           const registryPath = typeof request.registry_path === "string" ? request.registry_path : "";
           if (registryPath) {
@@ -243,14 +243,14 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
     });
   }
 
-  if (response.kind === "session_templates" && Array.isArray(response.session_templates)) {
+  if (response.kind === "session_types" && Array.isArray(response.session_types)) {
     frames.push({
       kind: "entity_snapshot",
       payload: {
         operation: "entity_snapshot",
         family: sessionTemplateFamily,
         sequence,
-        records: response.session_templates.map(sessionTemplateRecord)
+        records: response.session_types.map(sessionTemplateRecord)
       } satisfies EntityFrame
     });
   }
@@ -325,6 +325,15 @@ export function daemonEventFrame(event: DaemonEvent): HubControlFrame | undefine
 }
 
 export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | undefined {
+  if (frame.type === "entity_error") {
+    return connectionDiagnosticFrame({
+      kind: frame.code,
+      message: `Entity subscription error for ${frame.entity_type}: ${frame.message}`,
+      operation: "subscribe_entities",
+      feature: frame.entity_type
+    });
+  }
+
   if (frame.entity_type !== "session") return undefined;
 
   if (frame.type === "entity_snapshot") {
@@ -389,6 +398,8 @@ function statusRecord(
     id: "local-hub",
     title: status.host_display_name,
     status: status.lifecycle_state,
+    software: status.software,
+    installation: status.installation,
     host_id: status.host_id,
     schema_version: status.schema_version,
     compatibility: status.compatibility,
@@ -445,12 +456,12 @@ function spawnTargetRecord(target: DaemonSpawnTarget) {
   };
 }
 
-function sessionTemplateRecord(template: DaemonSessionTemplate) {
+function sessionTemplateRecord(template: DaemonSessionType) {
   return {
     ...template,
-    id: template.template_id,
+    id: template.session_type_id,
     title: humanizeIdentifier(template.id),
-    subtitle: template.package_name,
+    subtitle: template.source_name,
     status: template.available ? "available" : "unavailable"
   };
 }
@@ -1066,6 +1077,18 @@ async function dispatchDaemonAction(
     return;
   }
 
+  if (action.id === "botster.hub.check_update") {
+    const response = await bridge.request({ type: "check_hub_update" });
+    emitResponse(response);
+    emit(actionResultFrame(request, !response.error, response.error?.message, {
+      request_type: "check_hub_update",
+      kind: response.kind,
+      hub_update: response.hub_update ?? null,
+      diagnostics: responseDiagnostics(response)
+    }));
+    return;
+  }
+
   if (action.id === "botster.spawn_target.daemon_request") {
     const daemonRequest = spawnTargetRequestFromAction(action);
     if (!daemonRequest) {
@@ -1097,8 +1120,8 @@ async function dispatchDaemonAction(
     }
 
     const response = await bridge.request({
-      type: "spawn_session_template",
-      template_id: templateId,
+      type: "spawn_session_type",
+      session_type_id: templateId,
       session_id: sessionId,
       request: {
         target_id: targetId,
@@ -1107,7 +1130,7 @@ async function dispatchDaemonAction(
     });
     emitResponse(response);
     emit(actionResultFrame(request, !response.error, response.error?.message, {
-      request_type: "spawn_session_template",
+      request_type: "spawn_session_type",
       kind: response.kind,
       target_id: targetId,
       template_id: templateId,

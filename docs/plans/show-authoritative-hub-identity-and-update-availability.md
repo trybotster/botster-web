@@ -295,6 +295,111 @@ Implement while that work is still uncommitted, say so and stop rather than
 re-applying the bump, which would create exactly the divergent state the
 single-owner rule exists to prevent.
 
+### Revision 6 (Implement): revision 5's supersession is WITHDRAWN — this run lands the bump
+
+Revision 5's central premise was factually wrong and its instruction to Implement
+has been overridden. Recorded here because the plan is the durable contract.
+
+**What was wrong.** Revision 5 and the accompanying orchestrator message said the
+sibling "landed" the protocol-6 bump and that the pin, re-vendor, `hub_version`
+deletion, `entity_error` handling, session-type renames,
+`src/App.test.mjs:1373-1374`, and the two documentation coordinate lines were
+therefore prerequisites this run must not re-apply. "Landed" was used to mean
+"done in its own worktree." It does not mean merged, and the difference is the
+one that mattered.
+
+**Evidence gathered at Implement, before editing:**
+
+- `git rev-parse origin/main` after `git fetch` → `9753297`, unchanged.
+- `git show origin/main:package.json` → `"@trybotster/hub-test-support": "0.1.21"`.
+- `git show origin/main:src/botster/generated/daemon-protocol.ts | grep -c
+  "check_hub_update\|entity_error"` → `0`. Main still vendors protocol 4.
+- `git ls-remote --heads origin` → five branches, none for
+  `ticket_1785970233_750553`. The sibling branch is not pushed.
+
+**Consequence.** Following revision 5 would have produced a branch that does not
+compile: `DaemonStatus.software`, `DaemonStatus.installation`,
+`DaemonRequest::check_hub_update`, and `DaemonResponse.hub_update` do not exist at
+protocol 4, so this ticket's entire subject would have had no types to build on.
+There is no identity-only deliverable against `9753297`.
+
+**Authoritative resolution** — `question_1786037342_380989`, answered by the
+orchestrator after independently verifying every point above: **option (A), keep
+the bump, revert nothing.** Approved plan revision 4 governs, and the A/B/C bucket
+ownership table in it is restored as this run's work. The duplicate bump is an
+accepted cost of Jason's concurrent-execution decision, and it is the cheapest
+possible conflict: both branches byte-copy `daemon-protocol.ts` from the same
+immutable published artifact, so that file resolves identically from either side,
+and both resolve `package.json`/`package-lock.json` to `0.1.24`.
+
+**Revision 5's bucket-C correction is retained and independently confirmed.** It
+was right that the fix was never type-level. `entity_error` is handled by an early
+return in `receiveEntityFrame` placed *before* the delta path
+(`src/botster/webrtcDaemonClient.ts` 833-844), so `snapshot_seq` is never compared
+and `resubscribeEntity` never fires. Proven behaviourally, not by typecheck: a live
+`entity_error` frame is delivered to the listener, the channel sends no
+unsubscribe/resubscribe traffic, and a following in-sequence delta still applies.
+
+### Revision 6: additions to the affected-files promise
+
+Three files are touched that revision 4's table did not list:
+
+| File | Why |
+| --- | --- |
+| `src/theme/app.css` | The ticket requires state schema be *secondary* to software status. DOM order alone does not make it visibly secondary, and `.hub-metadata-secondary` had no rule. |
+| `src/botster/entities.ts` | Comment only. Records that `replayActivePulls()` has no production caller so a future reader does not assume registered pulls are replayed. |
+| `scripts/live-packaged-protocol-harness.mjs` | Listed in revision 4, but additionally carries a one-line repair of a **pre-existing** failure (below). |
+
+### Revision 6: resolved unknown 4 — observed live update-check values
+
+Revision 4 assumption 4 left the development-checkout `reason`/`action` strings
+unknown, to be observed rather than invented. Observed against the live Hub built
+from `botster-hub` `8a60bd5`:
+
+```json
+{ "state": "unavailable", "current_version": "0.1.0",
+  "reason": "development_checkout", "action": "manual" }
+```
+
+Rendered verbatim as `Updates unavailable — development_checkout` with
+`data-hub-update-state="unavailable"` and the action shown as `manual`. Note this
+means the development-checkout path exercises `unavailable`, not `current`.
+
+### Revision 6: pre-existing live-harness failures, classified
+
+`npm run smoke:live-packaged-protocol` has three independent failures on
+`origin/main` `9753297`. All three were isolated by running the identical command
+on a base worktree at `9753297`.
+
+| # | Failure | Classification |
+| --- | --- | --- |
+| 1 | `assertCurrentHubCompatibilityAndSchema`: `schema_version !== 2` against live schema 3 | **In scope, fixed.** Changed to a floor (`< 3`) rather than pinned to 3, so the next Hub schema bump does not relocate the same failure. Protocol and conformance floors moved to 6 and 31. |
+| 2 | `closePackageSettingsRoute`: clicks `{ name: "Apps" }` but `9753297` relabelled that control to `Back` | **Pre-existing, repaired to unblock.** One line. This ticket's required reconnect proof runs after it, so it could not be reached otherwise. |
+| 3 | `waitForTerminalDetached`: `[data-terminal-session-id='none']` never appears | **Pre-existing, NOT fixed.** Terminal-lifecycle, unrelated to Hub identity or updates. Base exit 1 and branch exit 1 with an identical message from the same helper. |
+
+Base-vs-branch evidence for #3: on base, failures 1 and 2 were patched away in the
+throwaway worktree purely to let execution reach #3; it then failed identically.
+This run's identity and update assertions were therefore moved *ahead* of the
+terminal shutdown/detach steps so the ticket's evidence executes rather than
+sitting behind an unrelated break.
+
+### Revision 6: the replayActivePulls decision, made explicitly
+
+`EntityFrameStore.replayActivePulls()` has no production caller. Registering
+`botster-web.hub_status` as an active pull therefore makes it replay-*eligible*
+while nothing replays it generically. Both this run's Plan agent and the
+orchestrator asked for an explicit decision rather than leaving the two mechanisms
+implicitly redundant.
+
+**Decision: reconnect hydration stays listener-driven per family.** Widening it to
+a generic replay of every registered family would change reconnect behaviour for
+surfaces this ticket does not own, including the sibling's session-types surface,
+and is out of scope. Made unambiguous three ways: the mechanism is a named,
+exported, unit-tested function (`replayHubStatusOnLifecycleEvent`) rather than an
+inline arrow; its doc comment states it is the *sole* mechanism and that removing
+it would silently reintroduce the regression; and `replayActivePulls()` carries a
+comment saying it has no production caller.
+
 ### This run's subject, undiminished
 
 Nothing has been taken from this ticket. This run still owns, and these all

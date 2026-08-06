@@ -276,7 +276,6 @@ export const generatedPackageResponseFixture = {
       requested_capabilities: [{ surface: "ClientAdmission", scope: "github" }],
       compatibility: {
         botster_requirement: ">=0.1.0",
-        hub_version: "0.1.0",
         result: "compatible",
         diagnostics: []
       },

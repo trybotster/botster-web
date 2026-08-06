@@ -1205,9 +1205,19 @@ assert.match(liveProtocolHarnessScript, /waitForRunningSessionFrame\(page\)/);
 assert.match(liveProtocolHarnessScript, /waitForAutomaticTerminalRestore/);
 assert.match(liveProtocolHarnessScript, /assertCurrentHubCompatibilityAndSchema/);
 assert.match(liveProtocolHarnessScript, /assertCurrentHubSchemaPresentation/);
-assert.match(liveProtocolHarnessScript, /status\?\.schema_version !== 2/);
-assert.match(liveProtocolHarnessScript, /protocolVersion < 4/);
-assert.match(liveProtocolHarnessScript, /revision < 28/);
+assert.match(liveProtocolHarnessScript, /status\.schema_version < 3/);
+assert.match(liveProtocolHarnessScript, /protocolVersion < 6/);
+assert.match(liveProtocolHarnessScript, /revision < 31/);
+// The live harness owns the authoritative-identity and real update-check DOM proof; the
+// bridge-less browser smoke owns the no-Hub and offline rendering.
+assert.match(liveProtocolHarnessScript, /assertAuthoritativeHubIdentity/);
+assert.match(liveProtocolHarnessScript, /assertHubUpdateCheck/);
+assert.match(liveProtocolHarnessScript, /assertHubUpdateSupportDiagnostics/);
+assert.match(liveProtocolHarnessScript, /requiredProvenanceField\(software, "product_name"/);
+assert.match(liveProtocolHarnessScript, /data-hub-update-state/);
+assert.match(browserRuntimeSmokeScript, /proveHubGeneralWithoutHub/);
+assert.match(browserRuntimeSmokeScript, /Update check failed/);
+assert.doesNotMatch(browserRuntimeSmokeScript, /check_hub_update/);
 assert.match(liveProtocolHarnessScript, /Info \/ server/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalRendererWrite/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalCanvas/);
@@ -1370,8 +1380,8 @@ const expectedHubDaemonProtocolSha256 = hubTestSupportMetadata.daemon_protocol.s
 const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name], hubTestSupportMetadata.ui_contract.package_version);
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.protocol_version, 4);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 28);
+assert.equal(hubTestSupportMetadata.protocol_version, 6);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 31);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
@@ -2213,6 +2223,37 @@ assert.equal(daemonEntityFrame({
   snapshot_seq: 1,
   items: [{ id: "ticket-1", title: "Preserve generic package records" }]
 }), undefined);
+// Protocol 6 adds entity_error, which carries no id/patch/snapshot_seq. It must be
+// surfaced as a diagnostic instead of falling through the delta branches.
+const entityErrorFrame = daemonEntityFrame({
+  type: "entity_error",
+  subscription_id: "session-subscription",
+  entity_type: "session",
+  code: "entity_subscription_failed",
+  message: "Session family could not be projected"
+});
+assert.equal(entityErrorFrame.kind, "connection_diagnostic");
+assert.deepEqual(entityErrorFrame.payload, {
+  kind: "entity_subscription_failed",
+  message: "Entity subscription error for session: Session family could not be projected",
+  operation: "subscribe_entities",
+  feature: "session"
+});
+assert.equal(
+  hubConnectionDiagnosticFromFrame(entityErrorFrame).detail,
+  "Entity subscription error for session: Session family could not be projected Capability: session. Operation: subscribe_entities."
+);
+// Non-session families are surfaced too rather than dropped with the family filter.
+assert.equal(
+  daemonEntityFrame({
+    type: "entity_error",
+    subscription_id: "package-entities",
+    entity_type: "project-pipelines.ticket",
+    code: "entity_subscription_failed",
+    message: "Plugin family unavailable"
+  }).kind,
+  "connection_diagnostic"
+);
 sessionLifecycleStore.apply({
   operation: "entity_upsert",
   key: { family: "session", id: "post-resync-row" },
@@ -2483,14 +2524,37 @@ const bridgeRequests = [];
 const bridgeTerminalStreams = [];
 const bridgeEntitySubscriptions = [];
 let authoritativeSessionItems = [];
+let authoritativeHubUpdate = {
+  state: "current",
+  current_version: "0.1.0",
+  reason: "Development checkouts are updated with git.",
+  action: "git pull"
+};
 const bridge = {
   async request(request) {
     bridgeRequests.push(request);
+    if (request.type === "check_hub_update") {
+      return {
+        kind: "hub_update",
+        hub_update: authoritativeHubUpdate,
+        diagnostics: [{ kind: "connected", operation: "check_hub_update", message: "Hub update check completed" }]
+      };
+    }
     if (request.type === "status") {
       return {
         kind: "status",
         status: {
           lifecycle_state: "running",
+          software: {
+            product_id: "botster-hub",
+            product_name: "Botster Hub",
+            version: "0.1.0",
+            build_revision: "8a60bd5"
+          },
+          installation: {
+            mode: "development",
+            provenance: "development_build"
+          },
           compatibility: {
             protocol: "botster-hub-daemon-v1",
             protocol_version: 1,
@@ -2803,13 +2867,13 @@ const bridge = {
       };
     }
 
-    if (request.type === "list_session_templates") {
+    if (request.type === "list_session_types") {
       return {
-        kind: "session_templates",
-        session_templates: [
+        kind: "session_types",
+        session_types: [
           {
-            template_id: "project-main:codex",
-            package_name: "botster",
+            session_type_id: "project-main:codex",
+            source_name: "botster",
             id: "codex",
             source: "built_in",
             command: "codex",
@@ -2928,7 +2992,7 @@ const bridge = {
       };
     }
 
-    if (request.type === "spawn_session_template") {
+    if (request.type === "spawn_session_type") {
       return {
         kind: "spawned",
         sessions: [{ session_id: request.session_id, lifecycle: "running" }],
@@ -3469,6 +3533,88 @@ try {
     { messageId: "resync-final-unsubscribe-response" }
   );
   deltaBeforeSnapshotClient.disconnect();
+
+  // Protocol 6 entity_error carries no snapshot_seq. It must be delivered to the listener
+  // and must NOT reach the sequence-gap branch, where `undefined !== N + 1` would fire an
+  // endless resubscribe. Satisfying tsc with a cast or an `in` guard would still ship that
+  // loop, so this asserts the runtime behavior: no unsubscribe/resubscribe traffic follows.
+  const entityErrorChannel = createFakeDataChannel();
+  const entityErrorClient = createWebrtcTestClient([entityErrorChannel], localWebrtcBootstrapFixture, {
+    entitySubscriptionIdGenerator: () => "entity-error-subscription-1"
+  });
+  const entityErrorFrames = [];
+  const entityErrorSubscription = entityErrorClient.subscribeEntityFrames(
+    "session",
+    (frame) => entityErrorFrames.push(frame)
+  );
+  await waitForTestCondition(() => entityErrorChannel.sent.length === 1);
+  await emitChunkedTestResponse(
+    entityErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_subscribed", events: [], diagnostics: [] },
+    { messageId: "entity-error-subscribe-response" }
+  );
+  await emitChunkedTestResponse(
+    entityErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_snapshot",
+      subscription_id: "entity-error-subscription-1",
+      entity_type: "session",
+      snapshot_seq: 4,
+      items: []
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "entity-error-baseline-snapshot" }
+  );
+  await entityErrorSubscription.ready;
+  await emitChunkedTestResponse(
+    entityErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_error",
+      subscription_id: "entity-error-subscription-1",
+      entity_type: "session",
+      code: "entity_subscription_failed",
+      message: "Session family could not be projected"
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "entity-error-frame" }
+  );
+  await waitForTestCondition(() => entityErrorFrames.length === 2);
+  assert.deepEqual(entityErrorFrames.map((frame) => frame.type), ["entity_snapshot", "entity_error"]);
+  assert.deepEqual(entityErrorFrames[1], {
+    type: "entity_error",
+    subscription_id: "entity-error-subscription-1",
+    entity_type: "session",
+    code: "entity_subscription_failed",
+    message: "Session family could not be projected"
+  });
+  // No resubscribe traffic: the only frame sent remains the original subscribe.
+  assert.equal(entityErrorChannel.sent.length, 1);
+  // A later in-sequence delta still applies, so the baseline sequence was not corrupted.
+  await emitChunkedTestResponse(
+    entityErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_remove",
+      subscription_id: "entity-error-subscription-1",
+      entity_type: "session",
+      snapshot_seq: 5,
+      id: "after-entity-error"
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "entity-error-following-delta" }
+  );
+  await waitForTestCondition(() => entityErrorFrames.length === 3);
+  assert.deepEqual(entityErrorFrames.map((frame) => frame.type), ["entity_snapshot", "entity_error", "entity_remove"]);
+  assert.equal(entityErrorChannel.sent.length, 1);
+  entityErrorSubscription.unsubscribe();
+  await waitForTestCondition(() => entityErrorChannel.sent.length === 2);
+  await emitChunkedTestResponse(
+    entityErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_unsubscribed", events: [], diagnostics: [] },
+    { messageId: "entity-error-unsubscribe-response" }
+  );
+  entityErrorClient.disconnect();
 
   assert.deepEqual(localWebrtcResponseChunkLimits, {
     maximumFrameBytesExclusive: 65_536,
@@ -4262,10 +4408,10 @@ assert.equal(
 assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "spawn"), false);
 assert.deepEqual(
-  bridgeRequests.find((request) => request.type === "spawn_session_template"),
+  bridgeRequests.find((request) => request.type === "spawn_session_type"),
   {
-    type: "spawn_session_template",
-    template_id: "project-main:codex",
+    type: "spawn_session_type",
+    session_type_id: "project-main:codex",
     session_id: "spawned-from-point",
     request: {
       target_id: "project-main",
@@ -4400,6 +4546,156 @@ assert.equal(realRuntime.uiTree.current(), undefined);
 assert.deepEqual(realRuntime.entities.list("session").map((record) => record.id), []);
 assert.equal(realRuntime.entities.get("session", "session-local-1"), undefined);
 assert.equal(realRuntime.entities.get("botster-web.hub_status", "local-hub").host_id, "production-host");
+assert.deepEqual(realRuntime.entities.get("botster-web.hub_status", "local-hub").software, {
+  product_id: "botster-hub",
+  product_name: "Botster Hub",
+  version: "0.1.0",
+  build_revision: "8a60bd5"
+});
+assert.deepEqual(realRuntime.entities.get("botster-web.hub_status", "local-hub").installation, {
+  mode: "development",
+  provenance: "development_build"
+});
+assert.equal(realRuntime.entities.get("botster-web.hub_status", "local-hub").schema_version, 1);
+// Hub identity must never be derived from a package row: the authoritative facts are
+// present with zero botster-hub package rows loaded.
+assert.equal(realRuntime.entities.list("botster-web.package").some((row) => row.package_name === "botster-hub"), false);
+// Support diagnostics survive the software/installation addition to statusRecord().
+assert.equal(
+  realRuntime.entities.get("botster-web.hub_status", "local-hub").diagnostics
+    .some((diagnostic) => diagnostic.message === "Hub control channel is connected"),
+  true
+);
+assert.equal(
+  realRuntime.entities.get("botster-web.hub_status", "local-hub").diagnostics
+    .some((diagnostic) => diagnostic.kind === "unsupported_feature"),
+  true
+);
+
+// botster.hub.check_update issues the Hub self-update request and the outcome is
+// authored entirely by the accepted action result.
+const hubUpdateCurrentResult = await realRuntime.actions.dispatch({
+  origin: "ui_node",
+  action: { id: "botster.hub.check_update", label: "Check for updates" }
+});
+assert.deepEqual(bridgeRequests.filter((request) => request.type === "check_hub_update"), [{ type: "check_hub_update" }]);
+assert.equal(bridgeRequests.some((request) => request.type === "check_package_update"), false);
+assert.equal(hubUpdateCurrentResult.accepted, true);
+assert.deepEqual(hubUpdateCurrentResult.result.hub_update, {
+  state: "current",
+  current_version: "0.1.0",
+  reason: "Development checkouts are updated with git.",
+  action: "git pull"
+});
+assert.equal(hubUpdateCurrentResult.result.request_type, "check_hub_update");
+assert.deepEqual(hubUpdateCurrentResult.result.diagnostics, [
+  { kind: "connected", operation: "check_hub_update", message: "Hub update check completed" }
+]);
+
+authoritativeHubUpdate = {
+  state: "available",
+  current_version: "0.1.0",
+  available_version: "0.2.0",
+  build_revision: "deadbee",
+  reason: "A managed release is published.",
+  action: "Restart Hub to install 0.2.0"
+};
+const hubUpdateAvailableResult = await realRuntime.actions.dispatch({
+  origin: "ui_node",
+  action: { id: "botster.hub.check_update", label: "Check for updates" }
+});
+assert.equal(hubUpdateAvailableResult.result.hub_update.state, "available");
+assert.equal(hubUpdateAvailableResult.result.hub_update.available_version, "0.2.0");
+
+authoritativeHubUpdate = {
+  state: "unavailable",
+  current_version: "0.1.0",
+  reason: "This installation is managed by the operating system package manager.",
+  action: "Use your package manager"
+};
+const hubUpdateUnavailableResult = await realRuntime.actions.dispatch({
+  origin: "ui_node",
+  action: { id: "botster.hub.check_update", label: "Check for updates" }
+});
+assert.equal(hubUpdateUnavailableResult.result.hub_update.state, "unavailable");
+
+// Error path: connected Hub answering check_hub_update with a DaemonOperatorError.
+// This is a different code path from transport rejection and must not synthesize a state.
+const hubUpdateErrorRuntime = createBotsterWebClient({
+  transport: createHubTransport({
+    bridge: {
+      async request() {
+        return {
+          kind: "hub_update",
+          hub_update: null,
+          error: { code: "update_check_failed", message: "Release metadata could not be read", operation: "check_hub_update" },
+          diagnostics: []
+        };
+      }
+    }
+  }),
+  actionIdGenerator: deterministicIds("hub-update-error"),
+  actionTimeoutMs: 50
+});
+const hubUpdateOperatorErrorFrames = [];
+hubUpdateErrorRuntime.hub.onFrame((frame) => hubUpdateOperatorErrorFrames.push(frame));
+await hubUpdateErrorRuntime.hub.connect({ client: "botster-web", capabilities: [] });
+const hubUpdateErrorResult = await hubUpdateErrorRuntime.actions.dispatch({
+  origin: "ui_node",
+  action: { id: "botster.hub.check_update", label: "Check for updates" }
+});
+await flushMicrotasks();
+assert.equal(hubUpdateErrorResult.accepted, false);
+assert.equal(hubUpdateErrorResult.reason, "Release metadata could not be read");
+assert.equal(hubUpdateErrorResult.result.hub_update, null);
+const hubUpdateOperatorErrorFrame = hubUpdateOperatorErrorFrames.find((frame) => frame.kind === "operator_error");
+assert.equal(hubUpdateOperatorErrorFrame.payload.code, "update_check_failed");
+assert.equal(
+  operatorErrorDiagnostic(hubUpdateOperatorErrorFrame).detail,
+  "Release metadata could not be read"
+);
+
+// Offline path: no reachable Hub. The transport rejection surfaces as a rejected action
+// result carrying the transport reason and no hub_update payload at all.
+const hubUpdateOfflineRuntime = createBotsterWebClient({
+  transport: createHubTransport({
+    bridge: {
+      async request() {
+        throw new Error("Local WebRTC data channel is closed");
+      }
+    }
+  }),
+  actionIdGenerator: deterministicIds("hub-update-offline"),
+  actionTimeoutMs: 50
+});
+const hubUpdateOfflineResult = await hubUpdateOfflineRuntime.actions.dispatch({
+  origin: "ui_node",
+  action: { id: "botster.hub.check_update", label: "Check for updates" }
+});
+assert.equal(hubUpdateOfflineResult.accepted, false);
+assert.equal(hubUpdateOfflineResult.reason, "Local WebRTC data channel is closed");
+assert.equal(hubUpdateOfflineResult.result, undefined);
+for (const daemonHubUpdateState of ["current", "available", "unavailable"]) {
+  assert.equal(JSON.stringify(hubUpdateOfflineResult).includes(`"${daemonHubUpdateState}"`), false);
+  assert.equal(JSON.stringify(hubUpdateErrorResult).includes(`"${daemonHubUpdateState}"`), false);
+}
+
+authoritativeHubUpdate = {
+  state: "current",
+  current_version: "0.1.0",
+  reason: "Development checkouts are updated with git.",
+  action: "git pull"
+};
+
+// botster-web.hub_status is a registered active pull, so it is replay-eligible after
+// a WebRTC reconnect rather than depending on connect()'s one-shot status side effect.
+const statusRequestsBeforeReplay = bridgeRequests.filter((request) => request.type === "status").length;
+await realRuntime.entities.replayActivePulls();
+await flushMicrotasks();
+assert.equal(bridgeRequests.filter((request) => request.type === "status").length > statusRequestsBeforeReplay, true);
+assert.equal(realRuntime.entities.get("botster-web.hub_status", "local-hub").software.product_name, "Botster Hub");
+assert.equal(realRuntime.entities.get("botster-web.hub_status", "local-hub").schema_version, 1);
+assert.deepEqual(realRuntime.entities.get("botster-web.hub_status", "local-hub").compatibility.protocol_version, 1);
 assert.deepEqual(realRuntime.entities.list("botster-web.package").map((record) => record.id), [
   "botster-web",
   "project-pipelines",
@@ -4846,6 +5142,45 @@ assert.equal(minimumDaemonProtocolVersion, 1);
 assert.equal(compatibleDescriptorDiagnostics.length, 1);
 assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
 assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
+
+// Stale client / new Hub: a protocol-6 conformance-31 Hub stays compatible under the
+// deliberately permissive floor, and the authoritative facts are carried through for
+// rendering rather than degrading to "Not reported".
+const protocolSixHubStatusRecord = {
+  id: "local-hub",
+  schema_version: 3,
+  software: { product_id: "botster-hub", product_name: "Botster Hub", version: "0.1.0" },
+  installation: { mode: "development", provenance: "development_build" },
+  compatibility: {
+    protocol: "botster-hub-daemon-v1",
+    protocol_version: 6,
+    features: [
+      "sessions",
+      "terminal_streaming",
+      "resize",
+      "terminal_readback",
+      "plugin_surface_render",
+      "plugin_surface_action"
+    ],
+    conformance_fixture_revision: 31
+  }
+};
+const protocolSixDiagnostics = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [protocolSixHubStatusRecord]
+  }
+});
+assert.equal(protocolSixDiagnostics.length, 1);
+assert.equal(protocolSixDiagnostics[0].title, "Hub compatibility descriptor compatible");
+assert.equal(protocolSixDiagnostics[0].severity, "success");
+assert.match(protocolSixDiagnostics[0].detail, /Protocol botster-hub-daemon-v1 v6 advertises required features\./);
+assert.equal(protocolSixDiagnostics.some((diagnostic) => /mismatch/i.test(diagnostic.title)), false);
+assert.equal(protocolSixDiagnostics.some((diagnostic) => /unsupported_feature/.test(JSON.stringify(diagnostic))), false);
+assert.equal(minimumDaemonProtocolVersion, 1);
+assert.equal(minimumConformanceFixtureRevision, 14);
 
 const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -5502,9 +5837,15 @@ try {
       PackageNavigationShortcutButton,
       PluginNavigationShortcuts,
       PluginListItem,
+      HubGeneralSection,
       SessionListItem,
       SessionRouteView,
       SpawnTargetListItem,
+      hubUpdateCheckAction,
+      hubUpdateCheckActionId,
+      hubUpdateOutcomeFromResult,
+      hubUpdateOutcomeSummary,
+      replayHubStatusOnLifecycleEvent,
       PluginSurfaceRoutePage,
       PluginSettingsPanel,
       entityFamilyRecordLimit,
@@ -5591,6 +5932,180 @@ try {
   assert.match(contradictorySessionListItem, />indeterminate</);
   assert.doesNotMatch(contradictorySessionListItem, />Open</);
   assert.equal(entityFamilyRecordLimit, 4);
+
+  // --- Authoritative Hub identity and update availability ---------------------
+  assert.equal(hubUpdateCheckActionId, "botster.hub.check_update");
+  assert.deepEqual(hubUpdateCheckAction(), { id: "botster.hub.check_update", label: "Check for updates" });
+
+  // The outcome is authored by the accepted action result. Every rejected result
+  // yields no update record, so no DaemonHubUpdateState can be synthesized.
+  assert.deepEqual(hubUpdateOutcomeFromResult(hubUpdateCurrentResult), {
+    accepted: true,
+    update: {
+      state: "current",
+      current_version: "0.1.0",
+      reason: "Development checkouts are updated with git.",
+      action: "git pull"
+    }
+  });
+  assert.deepEqual(hubUpdateOutcomeFromResult(hubUpdateOfflineResult), {
+    accepted: false,
+    reason: "Local WebRTC data channel is closed"
+  });
+  assert.deepEqual(hubUpdateOutcomeFromResult(hubUpdateErrorResult), {
+    accepted: false,
+    reason: "Release metadata could not be read"
+  });
+  // An accepted result that somehow carries no state still yields no update record.
+  assert.deepEqual(hubUpdateOutcomeFromResult({ accepted: true, result: { hub_update: null } }), { accepted: true });
+
+  assert.equal(hubUpdateOutcomeSummary(undefined), "Check whether a newer Hub version is available.");
+  assert.equal(
+    hubUpdateOutcomeSummary(hubUpdateOutcomeFromResult(hubUpdateAvailableResult)),
+    "Update available: 0.2.0 — A managed release is published."
+  );
+  assert.equal(
+    hubUpdateOutcomeSummary(hubUpdateOutcomeFromResult(hubUpdateUnavailableResult)),
+    "Updates unavailable — This installation is managed by the operating system package manager."
+  );
+  assert.equal(
+    hubUpdateOutcomeSummary(hubUpdateOutcomeFromResult(hubUpdateCurrentResult)),
+    "Up to date: 0.1.0 — Development checkouts are updated with git."
+  );
+  assert.equal(
+    hubUpdateOutcomeSummary(hubUpdateOutcomeFromResult(hubUpdateOfflineResult)),
+    "Update check failed: Local WebRTC data channel is closed"
+  );
+  assert.equal(hubUpdateOutcomeSummary({ accepted: false }), "Update check failed.");
+
+  const developmentHubStatus = {
+    id: "local-hub",
+    title: "Production Hub",
+    host_id: "production-host",
+    schema_version: 3,
+    software: {
+      product_id: "botster-hub",
+      product_name: "Botster Hub",
+      version: "0.1.0",
+      build_revision: "8a60bd5"
+    },
+    installation: { mode: "development", provenance: "development_build" },
+    compatibility: {
+      protocol: "botster-hub-daemon-v1",
+      protocol_version: 6,
+      features: ["sessions", "terminal_streaming", "resize", "terminal_readback", "plugin_surface_render", "plugin_surface_action"],
+      conformance_fixture_revision: 31
+    }
+  };
+  const renderHubGeneralSection = (hubStatus, hubUpdate) => renderToStaticMarkup(
+    createElement(HubGeneralSection, { hubStatus, hubUpdate, onCheckForUpdates: () => {} })
+  );
+
+  const developmentGeneralMarkup = renderHubGeneralSection(developmentHubStatus, undefined);
+  assert.match(developmentGeneralMarkup, /data-testid="hub-settings-general"/);
+  assert.match(developmentGeneralMarkup, /<dt>Software<\/dt><dd>Botster Hub<\/dd>/);
+  assert.match(developmentGeneralMarkup, /<dt>Version<\/dt><dd>0\.1\.0<\/dd>/);
+  assert.match(developmentGeneralMarkup, /<dt>Build<\/dt><dd>8a60bd5<\/dd>/);
+  assert.match(developmentGeneralMarkup, /<dt>Installation<\/dt><dd>development<\/dd>/);
+  assert.match(developmentGeneralMarkup, /<dt>Provenance<\/dt><dd>development_build<\/dd>/);
+  assert.match(developmentGeneralMarkup, /<dt>Host ID<\/dt><dd>production-host<\/dd>/);
+  assert.match(developmentGeneralMarkup, /<dt>Name<\/dt><dd>Production Hub<\/dd>/);
+  // Protocol, protocol version, conformance revision, features, and schema all render
+  // their authoritative numeric values instead of regressing to a fallback.
+  assert.match(developmentGeneralMarkup, /botster-hub-daemon-v1 · version 6/);
+  assert.match(developmentGeneralMarkup, /<dt>Conformance revision<\/dt><dd>31<\/dd>/);
+  assert.match(developmentGeneralMarkup, /<dt>Features<\/dt><dd>sessions, terminal_streaming, resize, terminal_readback, plugin_surface_render, plugin_surface_action<\/dd>/);
+  assert.match(developmentGeneralMarkup, /<dt>State schema<\/dt><dd>Version 3<\/dd>/);
+  assert.doesNotMatch(developmentGeneralMarkup, /Version unknown|version unknown/);
+  // Release channel and provider are absent for a development checkout.
+  assert.doesNotMatch(developmentGeneralMarkup, /Release channel/);
+  assert.doesNotMatch(developmentGeneralMarkup, /<dt>Provider<\/dt>/);
+  // Internal state schema stays secondary to user-facing software status.
+  assert.equal(
+    developmentGeneralMarkup.indexOf('data-testid="hub-software-identity"') <
+      developmentGeneralMarkup.indexOf('data-testid="hub-internal-state"'),
+    true
+  );
+  assert.match(developmentGeneralMarkup, /class="hub-metadata-list hub-metadata-secondary" data-testid="hub-internal-state"/);
+
+  // A managed release renders distinct, honest, non-destructive identity.
+  const managedGeneralMarkup = renderHubGeneralSection({
+    ...developmentHubStatus,
+    software: { product_id: "botster-hub", product_name: "Botster Hub", version: "0.2.0" },
+    installation: {
+      mode: "managed",
+      provenance: "managed_release",
+      release_channel: "stable",
+      provider: "homebrew"
+    }
+  }, undefined);
+  assert.match(managedGeneralMarkup, /<dt>Installation<\/dt><dd>managed<\/dd>/);
+  assert.match(managedGeneralMarkup, /<dt>Provenance<\/dt><dd>managed_release<\/dd>/);
+  assert.match(managedGeneralMarkup, /<dt>Release channel<\/dt><dd>stable<\/dd>/);
+  assert.match(managedGeneralMarkup, /<dt>Provider<\/dt><dd>homebrew<\/dd>/);
+  assert.doesNotMatch(managedGeneralMarkup, /<dt>Build<\/dt>/);
+  assert.notEqual(managedGeneralMarkup, developmentGeneralMarkup);
+
+  // Nothing was reported: honest fallbacks, no fabricated version, no crash.
+  const unreportedGeneralMarkup = renderHubGeneralSection(undefined, undefined);
+  assert.match(unreportedGeneralMarkup, /<dt>Software<\/dt><dd>Not reported<\/dd>/);
+  assert.match(unreportedGeneralMarkup, /<dt>Version<\/dt><dd>Not reported<\/dd>/);
+  assert.match(unreportedGeneralMarkup, /<dt>State schema<\/dt><dd>Version Not reported<\/dd>/);
+  assert.match(unreportedGeneralMarkup, /<dt>Name<\/dt><dd>Local Hub<\/dd>/);
+  assert.doesNotMatch(unreportedGeneralMarkup, /data-hub-update-state/);
+
+  // Hub-authored update outcomes: state drives the headline, reason and action render verbatim.
+  const currentUpdateMarkup = renderHubGeneralSection(developmentHubStatus, hubUpdateOutcomeFromResult(hubUpdateCurrentResult));
+  assert.match(currentUpdateMarkup, /data-hub-update-state="current"/);
+  assert.match(currentUpdateMarkup, /Up to date: 0\.1\.0 — Development checkouts are updated with git\./);
+  assert.match(currentUpdateMarkup, /<p data-testid="hub-update-action">git pull<\/p>/);
+
+  const availableUpdateMarkup = renderHubGeneralSection(developmentHubStatus, hubUpdateOutcomeFromResult(hubUpdateAvailableResult));
+  assert.match(availableUpdateMarkup, /data-hub-update-state="available"/);
+  assert.match(availableUpdateMarkup, /Update available: 0\.2\.0 — A managed release is published\./);
+  assert.match(availableUpdateMarkup, /<p data-testid="hub-update-action">Restart Hub to install 0\.2\.0<\/p>/);
+
+  const unavailableUpdateMarkup = renderHubGeneralSection(developmentHubStatus, hubUpdateOutcomeFromResult(hubUpdateUnavailableResult));
+  assert.match(unavailableUpdateMarkup, /data-hub-update-state="unavailable"/);
+  assert.match(unavailableUpdateMarkup, /Updates unavailable — This installation is managed by the operating system package manager\./);
+  assert.match(unavailableUpdateMarkup, /<p data-testid="hub-update-action">Use your package manager<\/p>/);
+
+  // Offline: transport rejection. No DaemonHubUpdateState reaches the DOM.
+  const offlineUpdateMarkup = renderHubGeneralSection(developmentHubStatus, hubUpdateOutcomeFromResult(hubUpdateOfflineResult));
+  assert.match(offlineUpdateMarkup, /Update check failed: Local WebRTC data channel is closed/);
+  assert.doesNotMatch(offlineUpdateMarkup, /data-hub-update-state/);
+  assert.doesNotMatch(offlineUpdateMarkup, /data-testid="hub-update-action"/);
+  for (const daemonHubUpdateState of ["current", "available", "unavailable"]) {
+    assert.equal(offlineUpdateMarkup.includes(daemonHubUpdateState), false);
+  }
+
+  // Error: connected Hub, operator error. A different path from transport rejection,
+  // rendered from the Hub's own message and still with no synthesized state.
+  const errorUpdateMarkup = renderHubGeneralSection(developmentHubStatus, hubUpdateOutcomeFromResult(hubUpdateErrorResult));
+  assert.match(errorUpdateMarkup, /Update check failed: Release metadata could not be read/);
+  assert.doesNotMatch(errorUpdateMarkup, /data-hub-update-state/);
+  for (const daemonHubUpdateState of ["current", "available", "unavailable"]) {
+    assert.equal(errorUpdateMarkup.includes(daemonHubUpdateState), false);
+  }
+  assert.notEqual(errorUpdateMarkup, offlineUpdateMarkup);
+
+  // Reconnect hydration is listener-driven per family. replayActivePulls() has no
+  // production caller, so this listener is the sole mechanism and is asserted directly
+  // rather than inferred from hub_status being replay-eligible.
+  const lifecyclePulls = [];
+  const lifecycleEntities = { async pull(request) { lifecyclePulls.push(request); } };
+  assert.equal(replayHubStatusOnLifecycleEvent({ type: "data-channel-open" }, lifecycleEntities), true);
+  assert.deepEqual(lifecyclePulls, [{ family: "botster-web.hub_status" }]);
+  for (const ignoredLifecycle of [
+    { type: "data-channel-closed" },
+    { type: "data-channel-error" },
+    { type: "encrypted-stream-ready", requestType: "status" }
+  ]) {
+    assert.equal(replayHubStatusOnLifecycleEvent(ignoredLifecycle, lifecycleEntities), false);
+  }
+  assert.deepEqual(lifecyclePulls, [{ family: "botster-web.hub_status" }]);
+  assert.equal(replayHubStatusOnLifecycleEvent({ type: "data-channel-open" }, lifecycleEntities), true);
+  assert.equal(lifecyclePulls.length, 2);
 
   const descriptorAppRoute = appRouteFromPathname("/packages/acme%20tools/surfaces/home%2Fmain");
   const fallbackAppRoute = appRouteFromPathname("/apps/acme%20tools/home%2Fmain");
@@ -7124,7 +7639,7 @@ try {
   assert.equal(spawnTargetSnapshot.payload.records[0].id, "project-main");
   assert.equal(spawnTargetSnapshot.payload.records[0].metadata_summary, "owner: platform");
   const sessionTemplateFrames = daemonResponseFrames({
-    kind: "session_templates",
+    kind: "session_types",
     status: null,
     sessions: [],
     packages: [],
@@ -7136,10 +7651,10 @@ try {
     cleanup: null,
     coordination: null,
     error: null,
-    session_templates: [
+    session_types: [
       {
-        template_id: "project-main:codex",
-        package_name: "botster",
+        session_type_id: "project-main:codex",
+        source_name: "botster",
         id: "codex_session",
         source: "built_in",
         command: "codex",
