@@ -358,21 +358,47 @@ Only then does the report's "observed rendered option value" mean anything.
 
 ### Cold-cut gate and negative control
 
-- No live code references `template_id`:
-  `git grep -n 'template_id' -- scripts/ src/ ':!src/App.test.mjs'` returns nothing.
-- `src/App.test.mjs` must assert `parseWorkspacesSpawnAssignment` **rejects** an assignment
-  carrying the old `template_id` key, proving the alias is absent rather than merely
-  unused.
+The cut is proven by three executable checks plus a negative control. Live code may **name**
+the superseded key only in order to **reject** it; it may never read, normalize, or emit it.
 
-**Amended during Implement (revision 2 gate was self-contradictory).** Revision 2 wrote
-this gate as `git grep -n 'template_id' -- . ':!docs/plans'` returning nothing, which the
-negative control on the very next line cannot satisfy: rejecting the old key requires
-naming it in the rejected input. The gate's intent is "no *live* driver or production code
-still keys on `template_id`", so it is scoped to `scripts/` and `src/` excluding the test
-that enforces the cut. The four surviving occurrences in `src/App.test.mjs` are cold-cut
-enforcement, not usage: two explanatory comments, the deliberately-rejected assignment, and
-an `assert.doesNotMatch(..., /template_id/)` pin on the smoke script. `docs/plans/` remains
-excluded as historical record.
+1. **No live code outside the parser's rejection guard names the key at all.** Both return
+   nothing:
+
+   ```bash
+   git grep -n 'template_id' -- scripts/ ':!scripts/workspaces-shared-hub-browser-helpers.mjs'
+   git grep -n 'template_id' -- src/ ':!src/App.test.mjs'
+   ```
+
+2. **No live code reads or emits the key** — no property access, no object key, no
+   normalization fallback. Returns nothing:
+
+   ```bash
+   git grep -nE '(candidate|spawnCase|values|request|assignment|normalized)[^ ]*\.template_id|template_id[[:space:]]*:' \
+     -- scripts/ src/ ':!src/App.test.mjs'
+   ```
+
+3. **The surviving occurrences are exactly the documented rejection sentinel.**
+   `git grep -n 'template_id' -- scripts/ src/ ':!src/App.test.mjs'` returns exactly three
+   lines, all in `scripts/workspaces-shared-hub-browser-helpers.mjs`: the guard comment, the
+   `hasOwnProperty` check, and the thrown `... is superseded by ...` error. Any fourth
+   occurrence fails the gate.
+
+Negative control: `src/App.test.mjs` must assert `parseWorkspacesSpawnAssignment` **rejects**
+the old key on its own merits — a case carrying **both** `template_id` and a valid
+`session_type_id`, alongside the old-key-only case. The both-keys case is the load-bearing
+one; the old-key-only case alone fails on the missing replacement and proves nothing about
+the legacy key. `docs/plans/` is excluded throughout as historical record.
+
+**Amendment history.** Revision 2 of this plan wrote the gate as
+`git grep -n 'template_id' -- . ':!docs/plans'` returning nothing, which the negative control
+on the very next line cannot satisfy: rejecting the old key requires naming it in the
+rejected input. Implement first rescoped it to exclude `src/App.test.mjs`. That was still
+stale after Review `review_1786049679_287454` required an explicit legacy-key rejection,
+because the fail-fast guard itself introduced three intentional occurrences in live code and
+made the no-match form unsatisfiable — the artifact drift
+[[implementation deviations must resync committed plan acceptance checks]] covers. The gate
+above replaces "no occurrences" with "no *usage*, plus an explicit expected survivor set", so
+Verify can execute it as written.
 
 ## Production path
 
