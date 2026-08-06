@@ -149,6 +149,7 @@ export function createLocalWebrtcBootstrapRefresher({
 export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): DaemonBridgeClient {
   const transport = new WebrtcDaemonTransport(options);
   const eventListeners = new Set<(event: DaemonEvent) => void>();
+  installLiveHarnessTransportControl(transport);
 
   return {
     async request(request) {
@@ -366,6 +367,21 @@ class WebrtcDaemonTransport {
     }
     this.resetPeerState();
     this.failPending(webrtcFailure("transport", "local WebRTC transport disconnected"));
+  }
+
+  /**
+   * Closes the live data channel so the client takes its ordinary transport-loss path and
+   * reconnects in place, without navigating. Only reachable when the live-protocol harness
+   * global is installed, and it drives the real channel rather than simulating one, so it
+   * cannot substitute for production behaviour. Same seam pattern as the harness terminal
+   * controls in TerminalViewHost.
+   */
+  closeDataChannelForLiveHarness(): boolean {
+    if (!liveHarnessInstalled()) return false;
+    const dataChannel = this.dataChannel;
+    if (!dataChannel || dataChannel.readyState === "closed") return false;
+    dataChannel.close?.();
+    return true;
   }
 
   private async open(): Promise<void> {
@@ -831,6 +847,19 @@ class WebrtcDaemonTransport {
       return;
     }
 
+    if (frame.type === "entity_error") {
+      recordLiveHarnessEvent("webrtc_entity_subscription", {
+        state: "error",
+        entity_type: frame.entity_type,
+        subscription_id: frame.subscription_id,
+        generation,
+        code: frame.code,
+        message: frame.message
+      });
+      subscription.listener(frame);
+      return;
+    }
+
     if (frame.type === "entity_snapshot") {
       subscription.snapshotSeq = frame.snapshot_seq;
       subscription.resolveReady?.();
@@ -1007,6 +1036,37 @@ function recordLiveHarnessEvent(kind: string, payload: unknown): void {
     };
   }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
   harness?.events?.push({ kind, payload: redactedHarnessPayload(payload) });
+}
+
+/**
+ * Exposes an in-place transport-loss control to the live-protocol harness so reconnect
+ * behaviour can be proven on a surviving document instead of through a page reload, which
+ * remounts the app and re-runs initial hydration. Installed only when the harness global is
+ * already present.
+ */
+function installLiveHarnessTransportControl(transport: WebrtcDaemonTransport): void {
+  if (!liveHarnessInstalled()) return;
+
+  const harness = (window as typeof window & {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
+      transportControl?: { closeDataChannel(): boolean };
+    };
+  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  if (!harness) return;
+
+  harness.transportControl = {
+    closeDataChannel: () => transport.closeDataChannelForLiveHarness()
+  };
+}
+
+function liveHarnessInstalled(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    Boolean(
+      (window as typeof window & { __BOTSTER_LIVE_PROTOCOL_HARNESS__?: unknown })
+        .__BOTSTER_LIVE_PROTOCOL_HARNESS__
+    )
+  );
 }
 
 function redactedHarnessPayload(payload: unknown): unknown {

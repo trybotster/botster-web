@@ -45,7 +45,7 @@ export interface DaemonCompatibility {
 
 export interface DaemonCompatibilityRequirement {
   protocol: string;
-  minimum_protocol_version: number;
+  protocol_version: number;
   required_features: string[];
   minimum_conformance_fixture_revision: number;
   client_name: string;
@@ -53,6 +53,7 @@ export interface DaemonCompatibilityRequirement {
 
 export type DaemonRequest =
   | { type: "status" }
+  | { type: "check_hub_update" }
   | { type: "list_sessions" }
   | { type: "subscribe_entities"; entity_type: string; subscription_id: string }
   | { type: "unsubscribe_entities"; subscription_id: string }
@@ -72,10 +73,13 @@ export type DaemonRequest =
   | { type: "read_screen"; session_id: string }
   | { type: "read_mode_flags"; session_id: string }
   | { type: "capture_snapshot"; session_id: string }
-  | { type: "list_session_templates" }
-  | { type: "show_session_template"; template_id: string }
-  | { type: "resolve_session_template"; template_id: string; request: DaemonSessionTemplateRequest }
-  | { type: "spawn_session_template"; template_id: string; session_id: string; request: DaemonSessionTemplateRequest }
+  | { type: "list_session_types" }
+  | { type: "show_session_type"; session_type_id: string }
+  | { type: "create_session_type"; source: DaemonSessionTypeMutationSource; definition: DaemonSessionTypeDefinition }
+  | { type: "update_session_type"; source: DaemonSessionTypeMutationSource; definition: DaemonSessionTypeDefinition }
+  | { type: "delete_session_type"; source: DaemonSessionTypeMutationSource; session_type_id: string }
+  | { type: "resolve_session_type"; session_type_id: string; request: DaemonSessionTypeRequest }
+  | { type: "spawn_session_type"; session_type_id: string; session_id: string; request: DaemonSessionTypeRequest }
   | { type: "read_session_context"; session_id: string; context_id?: string | null; key?: string | null }
   | { type: "list_spawn_targets" }
   | { type: "show_spawn_target"; target_id: string }
@@ -125,8 +129,8 @@ export interface DaemonResponse {
   kind: DaemonResponseKind;
   status: DaemonStatus | null;
   sessions: DaemonSession[];
-  session_templates?: DaemonSessionTemplate[];
-  resolved_session_template?: DaemonResolvedSessionTemplate | null;
+  session_types?: DaemonSessionType[];
+  resolved_session_type?: DaemonResolvedSessionType | null;
   session_context?: DaemonSessionContext | null;
   read_screen?: DaemonReadScreen | null;
   mode_flags?: DaemonModeFlags | null;
@@ -142,6 +146,7 @@ export interface DaemonResponse {
   available_packages?: DaemonAvailablePackage[];
   install_plan?: DaemonPackageInstallPlan | null;
   update_status?: DaemonPackageUpdateStatus | null;
+  hub_update?: DaemonHubUpdate | null;
   package_decision: DaemonPackageDecision | null;
   lifecycle: DaemonPluginLifecycle[];
   plugin_worker_counters?: DaemonPluginWorkerCounters | null;
@@ -203,14 +208,15 @@ export interface DaemonWorktreeLifecycleEvent {
 
 export type DaemonResponseKind =
   | "status"
+  | "hub_update"
   | "sessions"
   | "entity_subscribed"
   | "entity_unsubscribed"
   | "session_removed"
   | "spawned"
   | "events"
-  | "session_templates"
-  | "resolved_session_template"
+  | "session_types"
+  | "resolved_session_type"
   | "session_context"
   | "read_screen"
   | "read_mode_flags"
@@ -327,14 +333,14 @@ export interface DaemonNotify {
   states: string[];
 }
 
-export interface DaemonSessionTemplateRequest {
+export interface DaemonSessionTypeRequest {
   target_id?: string | null;
   cwd?: string | null;
   environment?: Record<string, string>;
-  context: DaemonSessionTemplateContextInput;
+  context: DaemonSessionTypeContextInput;
 }
 
-export interface DaemonSessionTemplateContextInput {
+export interface DaemonSessionTypeContextInput {
   worktree_path?: string | null;
   repo_path?: string | null;
   branch_name?: string | null;
@@ -344,11 +350,53 @@ export interface DaemonSessionTemplateContextInput {
   metadata?: Record<string, string>;
 }
 
-export interface DaemonSessionTemplate {
-  template_id: string;
-  package_name: string;
+export type DaemonSessionTypeMutationSource =
+  | { source: "device" }
+  | { source: "repo"; target_id: string }
+  | { source: "package"; package_name: string };
+
+export type DaemonSessionTypeWorkingDirectory =
+  | { policy: "package_root" }
+  | { policy: "relative"; path: string };
+
+export interface DaemonSessionTypeDefinition {
+  id: string;
+  label: string;
+  description?: string | null;
+  icon?: string | null;
+  role: string;
+  interaction: string;
+  traits?: string[];
+  lifecycle: string;
+  command: string;
+  args?: string[];
+  working_directory?: DaemonSessionTypeWorkingDirectory;
+  environment?: Record<string, string>;
+  allowed_environment_overrides?: string[];
+  context?: string[];
+  target_id?: string | null;
+}
+
+export interface DaemonSessionTypeSource {
+  kind: string;
+  name: string;
+}
+
+export interface DaemonSessionType {
+  session_type_id: string;
+  source_name: string;
   id: string;
   source: string;
+  editable: boolean;
+  overridden_sources?: DaemonSessionTypeSource[];
+  diagnostics?: string[];
+  label: string;
+  description?: string | null;
+  icon?: string | null;
+  role: string;
+  interaction: string;
+  traits?: string[];
+  lifecycle: string;
   command: string;
   args?: string[];
   working_directory_policy: string;
@@ -358,8 +406,8 @@ export interface DaemonSessionTemplate {
   available: boolean;
 }
 
-export interface DaemonResolvedSessionTemplate {
-  template: DaemonSessionTemplate;
+export interface DaemonResolvedSessionType {
+  session_type: DaemonSessionType;
   session_id: string;
   executable: string;
   arguments?: string[];
@@ -593,7 +641,6 @@ export interface DaemonPackageUpdateStatus {
 
 export interface DaemonPackageCompatibility {
   botster_requirement: string;
-  hub_version: string;
   result: string;
   diagnostics: string[];
 }
@@ -683,6 +730,8 @@ export interface DaemonPluginResourceCounters {
 export interface DaemonStatus {
   lifecycle_state: string;
   compatibility: DaemonCompatibility;
+  software: DaemonSoftwareIdentity;
+  installation: DaemonInstallationIdentity;
   host_id: string;
   host_display_name: string;
   schema_version: number;
@@ -698,6 +747,45 @@ export interface DaemonStatus {
   stale_sessions: string[];
   lifecycle_counters?: DaemonLifecycleCounters;
   diagnostics?: DaemonDiagnostic[];
+}
+
+export interface DaemonSoftwareIdentity {
+  product_id: string;
+  product_name: string;
+  version: string;
+  build_revision?: string | null;
+}
+
+export type DaemonInstallationMode =
+  | "development"
+  | "unmanaged"
+  | "managed";
+
+export interface DaemonInstallationIdentity {
+  mode: DaemonInstallationMode;
+  provenance: string;
+  release_channel?: string | null;
+  provider?: string | null;
+  diagnostics?: DaemonInstallationDiagnostic[];
+}
+
+export interface DaemonInstallationDiagnostic {
+  kind: string;
+  message: string;
+}
+
+export type DaemonHubUpdateState =
+  | "current"
+  | "available"
+  | "unavailable";
+
+export interface DaemonHubUpdate {
+  state: DaemonHubUpdateState;
+  current_version: string;
+  available_version?: string | null;
+  build_revision?: string | null;
+  reason?: string | null;
+  action?: string | null;
 }
 
 export interface DaemonLifecycleCounters {
@@ -740,13 +828,20 @@ export interface DaemonSessionEntity {
   updated_at: number;
   exit_code?: number | null;
   failure_reason?: string | null;
+  session_type_id?: string | null;
+  session_type_source?: string | null;
+  role?: string | null;
+  traits?: string[];
+  interaction?: string | null;
+  session_type_lifecycle?: string | null;
 }
 
 export type DaemonEntityFrame =
   | { type: "entity_snapshot"; subscription_id: string; entity_type: string; snapshot_seq: number; items: JsonValue[]; resync_reason?: string | null }
   | { type: "entity_upsert"; subscription_id: string; entity_type: string; snapshot_seq: number; id: string; entity: JsonValue }
   | { type: "entity_patch"; subscription_id: string; entity_type: string; snapshot_seq: number; id: string; patch: JsonValue }
-  | { type: "entity_remove"; subscription_id: string; entity_type: string; snapshot_seq: number; id: string };
+  | { type: "entity_remove"; subscription_id: string; entity_type: string; snapshot_seq: number; id: string }
+  | { type: "entity_error"; subscription_id: string; entity_type: string; code: string; message: string };
 
 export interface DaemonSessionCleanup {
   session_id: string;

@@ -183,7 +183,7 @@ try {
   await page.getByText("Local Botster health").waitFor();
   await waitForTransportLabel(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "status request");
-  await assertCurrentHubCompatibilityAndSchema(page);
+  const authoritativeHubStatus = await assertCurrentHubCompatibilityAndSchema(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
   const originalRemoteAccessValue = await waitForRemoteAccessPackageConfiguration(page);
@@ -198,7 +198,21 @@ try {
     "authoritative session snapshot"
   );
   await assertNoLegacySessionHydration(page);
-  await assertCurrentHubSchemaPresentation(page);
+  await assertCurrentHubSchemaPresentation(page, authoritativeHubStatus);
+  const initialHubIdentity = await assertAuthoritativeHubIdentity(page, authoritativeHubStatus, "initial connect");
+  const liveHubUpdate = await assertHubUpdateCheck(page);
+  await openDiagnosticsView(page);
+  const hubUpdateSupportDiagnostics = await assertHubUpdateSupportDiagnostics(page);
+  // Proven before any reload cycle, on the document that is already mounted.
+  const inPageReconnect = await proveInPageReconnectReplaysHubStatus(page, initialHubIdentity);
+  // Printed at capture time: page reloads in the reconnect cycles clear the recorded harness
+  // events, so this evidence would otherwise be absent from a later failure dump.
+  console.log(`live-hub-identity-evidence ${JSON.stringify({
+    identity: initialHubIdentity,
+    update: liveHubUpdate,
+    support_diagnostics: hubUpdateSupportDiagnostics,
+    in_page_reconnect: inPageReconnect
+  })}`);
   if (sharedHubDriverMode) {
     const summary = await exerciseSharedHubWorkspaces(page, sharedHubAssignment);
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
@@ -250,6 +264,7 @@ try {
   attachChronology.push({ cycle: 0, ...await assertTerminalAttachChronology(page, productionSessionId) });
   await proveExternalSessionLifecycle(page);
 
+  const hubIdentityAcrossReconnects = [];
   let previousGrantId = await latestLocalWebrtcGrantId(page);
   let previousEntitySubscriptionId = await latestSessionEntitySubscriptionId(page);
   for (const cycle of [1, 2]) {
@@ -275,6 +290,17 @@ try {
     responseAssemblyTelemetry.push({ cycle, ...await waitForAutomaticTerminalRestore(page) });
     await proveLiveTerminalAfterAttach(page, `${attachProbe}-${cycle}`);
     attachChronology.push({ cycle, ...await assertTerminalAttachChronology(page, productionSessionId) });
+    // Reconnect-replay evidence in production shape, asserted structurally so the terminal
+    // route is not disturbed: the new WebRTC generation must re-hydrate botster-web.hub_status
+    // with the authoritative facts rather than leaving them unreported.
+    hubIdentityAcrossReconnects.push({
+      cycle,
+      ...assertHubStatusRehydrated(
+        await hubStatusRehydrationEvidence(page),
+        initialHubIdentity,
+        `reconnect cycle ${cycle}`
+      )
+    });
   }
 
   const sendInputRequestsBeforeEcho = await daemonRequestCount(page, {
@@ -333,6 +359,22 @@ try {
   );
   await waitForResizeProof(page, requestedResize);
 
+  // Rendered-DOM re-check after two WebRTC generations and the full terminal exercise: the
+  // General section must still show the authoritative identity, not "Not reported". Placed
+  // before the terminal shutdown/detach steps, which fail on main for unrelated reasons.
+  const finalHubStatus = await assertCurrentHubCompatibilityAndSchema(page);
+  const finalHubIdentity = await assertAuthoritativeHubIdentity(page, finalHubStatus, "after reconnect cycles");
+  for (const [field, value] of Object.entries(initialHubIdentity)) {
+    if (String(finalHubIdentity[field]) !== String(value)) {
+      throw new Error(
+        `Hub identity changed across the reconnect cycles: ${field} ${String(value)} -> ${String(finalHubIdentity[field])}`
+      );
+    }
+  }
+  await openHomeView(page);
+  await openSessionTerminal(page, productionSessionId);
+  await waitForTerminalSession(page, productionSessionId);
+
   await callTerminalControl(page, "writeInput", "botster-web-production-exit\n");
   await waitForTerminalOutput(page, "botster-web-production-exiting");
   await shutdownProductionSession();
@@ -346,6 +388,10 @@ try {
     "live packaged protocol harness passed (webrtc) " +
       JSON.stringify({
         binary_provenance: binaryProvenance,
+        hub_identity: initialHubIdentity,
+        hub_identity_in_page_reconnect: inPageReconnect,
+        hub_identity_across_reconnects: hubIdentityAcrossReconnects,
+        hub_update: liveHubUpdate,
         attach_chronology: attachChronology,
         response_assembly_telemetry: responseAssemblyTelemetry
       })
@@ -2872,7 +2918,10 @@ async function openPackageSettings(page, packageName) {
 }
 
 async function closePackageSettingsRoute(page) {
-  await page.getByTestId("plugin-settings-route").getByRole("button", { name: "Apps", exact: true }).click();
+  // 9753297 relabelled this control from "Apps" to "Back" (App.tsx PluginSettingsRoutePage)
+  // without updating the harness, so smoke:live-packaged-protocol has been failing here on
+  // main. Repaired only because this ticket's required WebRTC reconnect proof runs after it.
+  await page.getByTestId("plugin-settings-route").getByRole("button", { name: "Back", exact: true }).click();
   await page.waitForURL(/\/apps(?:[?#]|$)/);
 }
 
@@ -3259,29 +3308,59 @@ async function waitForTransportLabel(page) {
 }
 
 async function assertCurrentHubCompatibilityAndSchema(page) {
-  const status = await page.waitForFunction(
+  // Collect both shapes: the authoritative DaemonStatus response and the
+  // botster-web.hub_status projection of it. The projection renames host_display_name to
+  // title, so asserting identity needs the raw record, while proving statusRecord() carries
+  // software/installation needs the projected one.
+  const observed = await page.waitForFunction(
     () => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      for (let index = events.length - 1; index >= 0; index -= 1) {
-        const entry = events[index];
-        if (entry.kind === "daemon_response" && entry.payload?.kind === "status") {
-          return entry.payload?.status ?? null;
+      let raw;
+      let projected;
+      for (const entry of events) {
+        if (entry.kind === "daemon_response" && entry.payload?.kind === "status" && entry.payload?.status) {
+          raw = entry.payload.status;
         }
         if (
           entry.kind === "hub_frame" &&
           entry.payload?.kind === "entity_snapshot" &&
           entry.payload?.payload?.family === "botster-web.hub_status"
         ) {
-          return entry.payload.payload.records?.find((record) => record?.id === "local-hub") ?? null;
+          const record = entry.payload.payload.records?.find((candidate) => candidate?.id === "local-hub");
+          if (record) projected = record;
         }
       }
-      return null;
+      return raw ? { raw, projected: projected ?? null } : false;
     },
     undefined,
     { timeout: 15_000 }
   ).then((handle) => handle.jsonValue()).catch((error) => {
     throw new Error(`timed out waiting for structured hub status: ${error.message}`);
   });
+
+  const status = observed.raw;
+  // statusRecord() must carry software and installation through the projection, and must
+  // still merge diagnostics after that addition.
+  const projected = observed.projected;
+  if (!projected) {
+    throw new Error("botster-web.hub_status was never projected from the DaemonStatus response");
+  }
+  for (const field of ["software", "installation"]) {
+    if (!projected[field] || typeof projected[field] !== "object") {
+      throw new Error(
+        `botster-web.hub_status projection dropped ${field}: ${JSON.stringify(projected)}`
+      );
+    }
+    if (JSON.stringify(projected[field]) !== JSON.stringify(status[field])) {
+      throw new Error(
+        `botster-web.hub_status ${field} does not match DaemonStatus: ` +
+        `${JSON.stringify({ projected: projected[field], status: status[field] })}`
+      );
+    }
+  }
+  if (!Array.isArray(projected.diagnostics)) {
+    throw new Error(`botster-web.hub_status lost its merged diagnostics: ${JSON.stringify(projected)}`);
+  }
 
   const compatibility = status?.compatibility;
   const protocol = compatibility?.protocol;
@@ -3297,13 +3376,17 @@ async function assertCurrentHubCompatibilityAndSchema(page) {
     "plugin_surface_action"
   ];
   const missingFeatures = requiredFeatures.filter((feature) => !features.includes(feature));
+  // Schema is a floor, not an equality. The previous `!== 2` assertion failed against a
+  // protocol-6 Hub reporting schema 3; pinning it to 3 would only relocate that failure to
+  // the next Hub schema bump. Protocol and conformance already used floors.
   if (
-    status?.schema_version !== 2 ||
+    !Number.isInteger(status?.schema_version) ||
+    status.schema_version < 3 ||
     protocol !== "botster-hub-daemon-v1" ||
     !Number.isInteger(protocolVersion) ||
-    protocolVersion < 4 ||
+    protocolVersion < 6 ||
     !Number.isInteger(revision) ||
-    revision < 28 ||
+    revision < 31 ||
     missingFeatures.length > 0
   ) {
     throw new Error(
@@ -3312,26 +3395,427 @@ async function assertCurrentHubCompatibilityAndSchema(page) {
       `missing_features=${missingFeatures.join(",") || "none"}`
     );
   }
+  return status;
 }
 
-async function assertCurrentHubSchemaPresentation(page) {
+async function assertCurrentHubSchemaPresentation(page, status) {
+  const reportedSchemaVersion = requiredProvenanceField(status, "schema_version", "status");
   const schemaRow = page.locator('[data-diagnostic-id="schema-version"]');
   await schemaRow.waitFor();
   const schemaText = await schemaRow.innerText();
   if (
     !schemaText.includes("Hub durable-state schema") ||
-    !schemaText.includes("schema version 2") ||
+    !schemaText.includes(`schema version ${reportedSchemaVersion}`) ||
     !schemaText.includes("Info / server") ||
     /Blocked|mismatch|expected schema/i.test(schemaText)
   ) {
-    throw new Error(`schema diagnostic is not neutral schema-2 context: ${schemaText}`);
+    throw new Error(
+      `schema diagnostic is not neutral schema-${String(reportedSchemaVersion)} context: ${schemaText}`
+    );
   }
 
   const hubCard = page.getByRole("heading", { name: "Hub", exact: true }).locator("xpath=ancestor::article[1]");
   const hubCardText = await hubCard.innerText();
   if (!hubCardText.includes("Healthy") || hubCardText.includes("Blocked")) {
-    throw new Error(`schema 2 incorrectly blocked the Local Hub first-screen row: ${hubCardText}`);
+    throw new Error(
+      `schema ${String(reportedSchemaVersion)} incorrectly blocked the Local Hub first-screen row: ${hubCardText}`
+    );
   }
+}
+
+/**
+ * Reconnect proof on a SURVIVING document.
+ *
+ * The two reload cycles elsewhere in this harness navigate, which remounts App and re-runs
+ * the initial pullProductionEntity("hubStatus") chain — so a fresh status projection there
+ * cannot show the data-channel-open listener is load-bearing. This closes the real live data
+ * channel in place, lets the client take its ordinary transport-loss path, and proves the
+ * listener re-pulls hub_status on the same document.
+ */
+async function proveInPageReconnectReplaysHubStatus(page, expectedIdentity) {
+  // Stamp the live document so a navigation would be detectable rather than assumed.
+  await page.evaluate(() => {
+    globalThis.__BOTSTER_RECONNECT_DOCUMENT_SENTINEL__ = "in-page-reconnect";
+  });
+
+  const statusRequestsBefore = await daemonRequestCount(page, { type: "status" });
+  const openEventsBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length
+  );
+  const hubStatusFramesBefore = await hubStatusProjectionCount(page);
+
+  const closed = await page.evaluate(
+    () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
+  );
+  if (!closed) {
+    throw new Error("in-page reconnect proof could not close the live WebRTC data channel");
+  }
+
+  // The channel must actually be observed closed, then reopened by the client itself.
+  await page.waitForFunction(
+    () => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .some((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "closed"),
+    undefined,
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`in-page reconnect never observed a data-channel close: ${error.message}`);
+  });
+  await page.waitForFunction(
+    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before,
+    { before: openEventsBefore },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(`in-page reconnect never reopened the data channel: ${error.message}`);
+  });
+
+  // The listener must issue a fresh status request and a fresh hub_status projection.
+  await page.waitForFunction(
+    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "status").length > before,
+    { before: statusRequestsBefore },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(
+      `data-channel-open did not re-pull botster-web.hub_status on the surviving document: ${error.message}`
+    );
+  });
+  await page.waitForFunction(
+    ({ before }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events.filter((entry) =>
+        entry.kind === "hub_frame" &&
+        entry.payload?.kind === "entity_snapshot" &&
+        entry.payload?.payload?.family === "botster-web.hub_status").length > before;
+    },
+    { before: hubStatusFramesBefore },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(`reconnect produced no fresh botster-web.hub_status projection: ${error.message}`);
+  });
+
+  // The document was never replaced, so this is genuinely the in-page path.
+  const sentinel = await page.evaluate(() => globalThis.__BOTSTER_RECONNECT_DOCUMENT_SENTINEL__);
+  if (sentinel !== "in-page-reconnect") {
+    throw new Error("in-page reconnect proof navigated; the document was replaced");
+  }
+
+  const evidence = assertHubStatusRehydrated(
+    await hubStatusRehydrationEvidence(page),
+    expectedIdentity,
+    "in-page data-channel reconnect"
+  );
+  // And the rendered General section still shows the authoritative values.
+  const rendered = await assertAuthoritativeHubIdentity(page, {
+    software: { product_name: expectedIdentity.product_name, version: expectedIdentity.version },
+    installation: { mode: expectedIdentity.mode, provenance: expectedIdentity.provenance },
+    compatibility: {
+      protocol: expectedIdentity.protocol,
+      protocol_version: expectedIdentity.protocol_version,
+      conformance_fixture_revision: expectedIdentity.conformance_fixture_revision
+    },
+    host_display_name: expectedIdentity.host_display_name,
+    host_id: expectedIdentity.host_id,
+    schema_version: expectedIdentity.schema_version
+  }, "in-page data-channel reconnect");
+  return { ...evidence, rendered_after_reconnect: rendered };
+}
+
+async function hubStatusProjectionCount(page) {
+  return page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) =>
+      entry.kind === "hub_frame" &&
+      entry.payload?.kind === "entity_snapshot" &&
+      entry.payload?.payload?.family === "botster-web.hub_status").length);
+}
+
+/**
+ * Per-generation hub_status hydration evidence. A reconnect that failed to re-hydrate would
+ * leave the newest generation without its own status response and hub_status projection.
+ */
+async function hubStatusRehydrationEvidence(page) {
+  return page.waitForFunction(
+    () => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      let generation = 0;
+      let statusRequests = 0;
+      let latestRecord;
+      for (const entry of events) {
+        if (entry.kind === "webrtc_response_assembly" && Number.isInteger(entry.payload?.generation)) {
+          generation = Math.max(generation, entry.payload.generation);
+        }
+        if (entry.kind === "daemon_request" && entry.payload?.type === "status") statusRequests += 1;
+        if (
+          entry.kind === "hub_frame" &&
+          entry.payload?.kind === "entity_snapshot" &&
+          entry.payload?.payload?.family === "botster-web.hub_status"
+        ) {
+          const record = entry.payload.payload.records?.find((candidate) => candidate?.id === "local-hub");
+          if (record) latestRecord = record;
+        }
+      }
+      return latestRecord ? { generation, statusRequests, record: latestRecord } : false;
+    },
+    undefined,
+    { timeout: 20_000 }
+  ).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(`timed out waiting for hub_status rehydration evidence: ${error.message}`);
+  });
+}
+
+function assertHubStatusRehydrated(evidence, expectedIdentity, label) {
+  const record = evidence.record;
+  const compatibility = record.compatibility ?? {};
+  const observed = {
+    product_name: record.software?.product_name,
+    version: record.software?.version,
+    mode: record.installation?.mode,
+    provenance: record.installation?.provenance,
+    protocol: compatibility.protocol,
+    protocol_version: compatibility.protocol_version,
+    conformance_fixture_revision: compatibility.conformance_fixture_revision,
+    schema_version: record.schema_version,
+    host_id: record.host_id
+  };
+  for (const [field, value] of Object.entries(observed)) {
+    if (value === undefined || value === null || value === "") {
+      throw new Error(`hub_status regressed to unreported ${field} (${label}): ${JSON.stringify(record)}`);
+    }
+    if (String(expectedIdentity[field]) !== String(value)) {
+      throw new Error(
+        `hub_status ${field} changed (${label}): ${String(expectedIdentity[field])} -> ${String(value)}`
+      );
+    }
+  }
+  if (evidence.statusRequests < 2) {
+    throw new Error(
+      `reconnect did not issue a fresh status request (${label}): ${JSON.stringify(evidence)}`
+    );
+  }
+  return { generation: evidence.generation, status_requests: evidence.statusRequests, ...observed };
+}
+
+async function openHubGeneralView(page) {
+  await page.locator("ion-menu.app-sidebar").getByRole("button", { name: "Hub settings", exact: true }).click();
+  await page.getByLabel("Hub settings sections").getByRole("button", { name: /^General/ }).click();
+  const general = page.getByTestId("hub-settings-general");
+  await general.waitFor();
+  return general;
+}
+
+/**
+ * Rendered-DOM proof that Hub identity comes from DaemonStatus. requiredProvenanceField
+ * throws on undefined/null/"" and is therefore the "must never regress to unknown"
+ * invariant applied to the structured facts; each fact is then matched against the text
+ * the user actually sees in the General section.
+ */
+async function assertAuthoritativeHubIdentity(page, status, label) {
+  const software = requiredProvenanceField(status, "software", "status");
+  const installation = requiredProvenanceField(status, "installation", "status");
+  const compatibility = requiredProvenanceField(status, "compatibility", "status");
+  const expected = {
+    product_name: requiredProvenanceField(software, "product_name", "status.software"),
+    version: requiredProvenanceField(software, "version", "status.software"),
+    mode: requiredProvenanceField(installation, "mode", "status.installation"),
+    provenance: requiredProvenanceField(installation, "provenance", "status.installation"),
+    host_display_name: requiredProvenanceField(status, "host_display_name", "status"),
+    host_id: requiredProvenanceField(status, "host_id", "status"),
+    protocol: requiredProvenanceField(compatibility, "protocol", "status.compatibility"),
+    protocol_version: requiredProvenanceField(compatibility, "protocol_version", "status.compatibility"),
+    conformance_fixture_revision: requiredProvenanceField(compatibility, "conformance_fixture_revision", "status.compatibility"),
+    schema_version: requiredProvenanceField(status, "schema_version", "status")
+  };
+
+  const general = await openHubGeneralView(page);
+  const softwareText = await general.getByTestId("hub-software-identity").innerText();
+  const hostText = await general.getByTestId("hub-host-identity").innerText();
+  const internalText = await general.getByTestId("hub-internal-state").innerText();
+  const renderedText = `${softwareText}\n${hostText}\n${internalText}`;
+
+  const missing = [];
+  for (const [field, value] of Object.entries(expected)) {
+    if (!renderedText.includes(String(value))) missing.push(`${field}=${String(value)}`);
+  }
+  // Optional facts are proven only when the Hub reports them.
+  for (const [field, value] of [
+    ["build_revision", software.build_revision],
+    ["release_channel", installation.release_channel],
+    ["provider", installation.provider]
+  ]) {
+    if (typeof value === "string" && value !== "" && !renderedText.includes(value)) {
+      missing.push(`${field}=${value}`);
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Hub General (${label}) did not render authoritative identity: missing ${missing.join(", ")} in ${renderedText}`
+    );
+  }
+  if (/Not reported|unknown/i.test(renderedText)) {
+    throw new Error(`Hub General (${label}) regressed to an unreported value: ${renderedText}`);
+  }
+
+  // State schema is rendered but stays secondary to user-facing software status.
+  const ordering = await general.evaluate((section) =>
+    Array.from(section.querySelectorAll("[data-testid]"), (node) => node.getAttribute("data-testid"))
+  );
+  if (ordering.indexOf("hub-software-identity") > ordering.indexOf("hub-internal-state")) {
+    throw new Error(`Hub General (${label}) state schema is not secondary: ${ordering.join(", ")}`);
+  }
+  if (!/State schema/.test(internalText)) {
+    throw new Error(`Hub General (${label}) does not render the state schema at all: ${internalText}`);
+  }
+  const secondaryClass = await general.getByTestId("hub-internal-state").getAttribute("class");
+  if (!String(secondaryClass).includes("hub-metadata-secondary")) {
+    throw new Error(`Hub General (${label}) internal-state block is not marked secondary: ${String(secondaryClass)}`);
+  }
+  // Visibly secondary, not merely class-tagged: the internal-state labels must render
+  // smaller than the software-status labels.
+  const emphasis = await general.evaluate((section) => {
+    const labelSize = (testId) => {
+      const term = section.querySelector(`[data-testid="${testId}"] dt`);
+      return term ? Number.parseFloat(globalThis.getComputedStyle(term).fontSize) : Number.NaN;
+    };
+    return { software: labelSize("hub-software-identity"), internal: labelSize("hub-internal-state") };
+  });
+  if (!(emphasis.internal < emphasis.software)) {
+    throw new Error(
+      `Hub General (${label}) internal state is not visually secondary: ${JSON.stringify(emphasis)}`
+    );
+  }
+  return expected;
+}
+
+/**
+ * Clicks the real Check for updates control against the live Hub and asserts the rendered
+ * outcome against the Hub's own state/reason/action. Nothing is invented client-side, so
+ * whatever a development checkout actually returns is what must appear.
+ */
+async function assertHubUpdateCheck(page) {
+  const general = await openHubGeneralView(page);
+  await general.getByTestId("hub-software-update")
+    .getByRole("button", { name: "Check for updates", exact: true })
+    .click();
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "check_hub_update" }, "check_hub_update request");
+  const hubUpdate = await page.waitForFunction(
+    () => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const entry = events[index];
+        if (entry.kind === "action_result" && entry.payload?.result?.request_type === "check_hub_update") {
+          return { accepted: entry.payload.accepted === true, reason: entry.payload.reason ?? null, update: entry.payload.result.hub_update ?? null };
+        }
+        if (entry.kind === "hub_frame" && entry.payload?.kind === "action_result" &&
+            entry.payload?.payload?.result?.request_type === "check_hub_update") {
+          const payload = entry.payload.payload;
+          return { accepted: payload.accepted === true, reason: payload.reason ?? null, update: payload.result.hub_update ?? null };
+        }
+        if (entry.kind === "daemon_response" && entry.payload?.kind === "hub_update") {
+          return { accepted: !entry.payload.error, reason: entry.payload.error?.message ?? null, update: entry.payload.hub_update ?? null };
+        }
+      }
+      return null;
+    },
+    undefined,
+    { timeout: 20_000 }
+  ).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(`timed out waiting for a structured check_hub_update result: ${error.message}`);
+  });
+
+  const updateRegion = general.getByTestId("hub-software-update");
+  const outcomeText = await general.getByTestId("hub-update-outcome").innerText();
+  const renderedState = await updateRegion.getAttribute("data-hub-update-state");
+  const evidence = JSON.stringify({ hubUpdate, outcomeText, renderedState });
+
+  if (!hubUpdate.accepted || !hubUpdate.update) {
+    // A rejected check must render from the rejection and must not invent an update state.
+    if (renderedState !== null) {
+      throw new Error(`rejected check_hub_update synthesized a DaemonHubUpdateState: ${evidence}`);
+    }
+    if (!/Update check failed/.test(outcomeText)) {
+      throw new Error(`rejected check_hub_update did not render a failure outcome: ${evidence}`);
+    }
+    return { ...hubUpdate, outcomeText, renderedState };
+  }
+
+  const state = requiredProvenanceField(hubUpdate.update, "state", "hub_update");
+  if (!["current", "available", "unavailable"].includes(state)) {
+    throw new Error(`Hub reported an unknown DaemonHubUpdateState: ${evidence}`);
+  }
+  if (renderedState !== state) {
+    throw new Error(`rendered update state does not match the Hub-reported state: ${evidence}`);
+  }
+  requiredProvenanceField(hubUpdate.update, "current_version", "hub_update");
+  // Hub-provided reason and action render verbatim, never remapped to client copy.
+  for (const [field, testId] of [["reason", "hub-update-outcome"], ["action", "hub-update-action"]]) {
+    const value = hubUpdate.update[field];
+    if (typeof value !== "string" || value === "") continue;
+    const rendered = await general.getByTestId(testId).innerText();
+    if (!rendered.includes(value)) {
+      throw new Error(`Hub-provided ${field} was not rendered verbatim: ${evidence}`);
+    }
+  }
+  if (state === "available") {
+    const availableVersion = requiredProvenanceField(hubUpdate.update, "available_version", "hub_update");
+    if (!outcomeText.includes(String(availableVersion))) {
+      throw new Error(`available update did not render the Hub-reported version: ${evidence}`);
+    }
+  }
+  return { ...hubUpdate, outcomeText, renderedState };
+}
+
+/**
+ * The ticket requires diagnostics stay usable for support, and this change edits both
+ * statusRecord() and the action-result projection, so both are asserted rather than assumed.
+ */
+async function assertHubUpdateSupportDiagnostics(page) {
+  const projected = await page.waitForFunction(
+    () => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      let statusDiagnostics;
+      let updateDiagnostics;
+      for (const entry of events) {
+        if (
+          entry.kind === "hub_frame" &&
+          entry.payload?.kind === "entity_snapshot" &&
+          entry.payload?.payload?.family === "botster-web.hub_status"
+        ) {
+          const record = entry.payload.payload.records?.find((candidate) => candidate?.id === "local-hub");
+          if (record && Array.isArray(record.diagnostics)) statusDiagnostics = record.diagnostics;
+        }
+        const actionResult = entry.kind === "action_result"
+          ? entry.payload
+          : entry.kind === "hub_frame" && entry.payload?.kind === "action_result"
+            ? entry.payload.payload
+            : undefined;
+        if (actionResult?.result?.request_type === "check_hub_update") {
+          updateDiagnostics = actionResult.result.diagnostics ?? null;
+        }
+      }
+      return statusDiagnostics === undefined || updateDiagnostics === undefined
+        ? false
+        : { statusDiagnostics, updateDiagnostics };
+    },
+    undefined,
+    { timeout: 20_000 }
+  ).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(`timed out waiting for hub_status and check_hub_update diagnostics: ${error.message}`);
+  });
+
+  // statusRecord() still merges status.diagnostics with response diagnostics after
+  // software/installation were added to the projection.
+  if (!Array.isArray(projected.statusDiagnostics)) {
+    throw new Error(`hub_status lost its diagnostics array: ${JSON.stringify(projected)}`);
+  }
+  // The check_hub_update action result carries Hub response diagnostics in the same shape
+  // as the botster.spawn_target.daemon_request branch.
+  if (!Array.isArray(projected.updateDiagnostics)) {
+    throw new Error(`check_hub_update result did not carry a diagnostics array: ${JSON.stringify(projected)}`);
+  }
+  const supportView = page.getByTestId("diagnostics-view");
+  await supportView.waitFor();
+  return projected;
 }
 
 async function waitForRemoteAccessPackageConfiguration(page) {
