@@ -1,0 +1,471 @@
+# Show authoritative Hub identity and update availability
+
+## Target and context loaded
+
+- Target repository: `botster-web` (`trybotster/botster-web`).
+- Target id: `tgt_40abcf71ccf049f4ac0c99953a799869`.
+- Pipeline ticket: `ticket_1785970234_234515`; run `run_1786031355_921193`;
+  run step `run_step_1786031355_272130`.
+- The target was resolved from the admitted Botster spawn-target registry, not
+  from the ambient working directory. The registry display name is misspelled
+  `booster-web`, but its `repo_name` is `trybotster/botster-web` and its path is
+  `/Users/jasonconigliari/Projects/botster-web`. The assigned run worktree
+  `botster-sessions/git@github.com:trybotster-botster-web-project-pipelines-ticket_1785970234_234515`
+  is the only edit location; the target's ambient checkout must not be edited.
+- Repository playbook loaded: [[botster-web-playbook]].
+- Role guidance loaded in order: [[planner-playbook]], then
+  [[botster-planner-playbook]], then [[botster-web-playbook]].
+- Botster architecture and surface guidance loaded: [[botster-architecture]],
+  [[cli-patterns]], [[spa-patterns]],
+  [[project pipeline orchestration belongs in a device-level botster plugin]],
+  [[project pipelines needs an operator workbench not more primitives]],
+  [[project pipelines ui contract belongs in the plugin readme]],
+  [[botster orchestration should spawn agents with explicit target ids]],
+  [[botster orchestration prompts must bind agents to explicit worktrees]].
+- Repository charter required notes loaded:
+  [[botster web uses vanilla ionic primitives by default]],
+  [[botster web dto field names must match authoritative rust serde structs]],
+  [[botster web adapts hub validated snapshot grammar only on ui tree path]],
+  [[botster web plugin app routes are stable host routes]],
+  [[botster web request caches belong in react query not zustand or hub session getters]],
+  [[botster toolbar actions use declaration order plus fixed overflow intent]],
+  [[ui presentation operations are authored by accepted action results]],
+  [[botster-web ionic supersedes catalyst for client shell]].
+- Targeted atomic notes loaded for this ticket:
+  [[botster package daemon dto exposes sanitized package rows]] (package rows
+  are a sanitized projection and are not the Hub identity surface),
+  [[hub support metadata can force a web ui contract cold update]] (support pin
+  and UI-contract pin move together as one cold update),
+  [[cold turkey migrations eliminate dual code paths and version suffixes]],
+  [[prefer framework and library components over custom solutions]],
+  [[vault example paths are not repository placement conventions]].
+- [[project-pipelines-playbook]] deliberately **not** loaded: no Project
+  Pipelines package or plugin path is in scope for this ticket.
+- Plan destination `docs/plans/` was chosen from mainline prior art in this
+  repository (54 existing plans, most recently
+  `docs/plans/stop-treating-hub-persistence-schema-as-client-compatibility.md`
+  landed in `79a1608`), not from a generic vault example path.
+
+## Base ref correction (blocking for Implement)
+
+The run declares `base_ref: main`, but the run worktree and the concurrent Web
+run worktree are both checked out at `713233f`, while `origin/main` has advanced
+to `9753297` ("Improve hub navigation and session UX"). The merge base of this
+branch and `origin/main` equals this branch's HEAD, so `713233f` is strictly
+behind.
+
+**This run is not implementable against `713233f`.** Commit `9753297` is the
+commit that introduced the surface this ticket says to "finish":
+
+- `App.tsx` `AppView` gained `"hub-settings"` at stable host route `/settings`.
+- `hubSettingsSections` gained
+  `{ id: "general", label: "General", description: "Hub identity and software" }`.
+- `/diagnostics` now redirects into the `support` section.
+
+Implement must rebase this branch onto `origin/main` `9753297` before making any
+change, and Plan Review must re-fetch and renew that comparison before approval.
+Every file, line number, and typecheck result below is stated against `9753297`.
+
+## The defect, as it exists on `origin/main`
+
+The ticket's core prohibition is already violated in shipped code:
+
+- `src/App.tsx:1410` derives the Hub row from the installed package registry:
+  `installedPackageRows.find((appPackage) => … === "botster-hub")`.
+- `src/App.tsx:1951` renders
+  `<dt>Hub version</dt><dd>{stringValue(hubPackage.version, "Unknown")}</dd>` —
+  **Hub version derived from a package row.**
+- `src/App.tsx:1411` binds "Check for updates" to that package row's
+  `check_package_update` daemon request — a package update API standing in for a
+  Hub binary update.
+- `src/App.tsx:1953-1954` render protocol version and state schema through
+  `stringValue(…, "unknown")`, so any hydration gap is user-visible as `unknown`.
+- No product name, build revision, installation mode, provenance, release
+  channel, or update outcome is displayed at all.
+
+This is precisely what [[botster package daemon dto exposes sanitized package rows]]
+warns against: `DaemonPackage` is a sanitized client projection, not the
+authoritative identity surface for the Hub itself.
+
+## Authoritative contract (verified, not assumed)
+
+`@trybotster/hub-test-support@0.1.24` was fetched from the registry and verified
+in this run:
+
+- Tarball integrity computes to
+  `sha512-n0/DDMw5PmnFdxp54dk4Y4pdAM0VfotQblBnamqkViwbmJgmSS7ZrAFPskzOcVZ70hHgJdfHaH4UwArwP0DvXw==`,
+  matching the coordinate published by `ticket_1785971560_802153`.
+- `metadata.json` declares `protocol_version: 6`,
+  `conformance_fixture_revision: 31`, and `ui_contract.package_version: 0.3.1`.
+- Web's direct `@trybotster/ui-contract` pin is already `0.3.1`, so the metadata
+  equality invariant in
+  [[hub support metadata can force a web ui contract cold update]] is satisfied
+  and **no UI-contract cold update is forced by this bump.**
+
+The contract Web must consume:
+
+```ts
+DaemonStatus.software: DaemonSoftwareIdentity      // now required
+DaemonStatus.installation: DaemonInstallationIdentity  // now required
+
+DaemonSoftwareIdentity { product_id, product_name, version, build_revision? }
+DaemonInstallationMode = "development" | "unmanaged" | "managed"
+DaemonInstallationIdentity { mode, provenance, release_channel?, provider?, diagnostics? }
+
+DaemonRequest  | { type: "check_hub_update" }
+DaemonResponse.hub_update?: DaemonHubUpdate | null   // response kind "hub_update"
+DaemonHubUpdateState = "current" | "available" | "unavailable"
+DaemonHubUpdate { state, current_version, available_version?, build_revision?, reason?, action? }
+```
+
+`DaemonPackageCompatibility.hub_version` **was removed** by the Hub. That removal
+is the contract-level enforcement of this ticket's prohibition.
+
+Note for the Implement agent: `DaemonHubUpdate` has exactly three states. There
+is no `error` or `offline` state. Offline and error are *transport and operator
+failures of the request*, not update states, and must be rendered from the
+rejected action result / operator error path — never synthesized into a fourth
+`DaemonHubUpdateState`.
+
+## Cross-run collision (escalated, answer pending)
+
+A second run is active in this same repository right now:
+`run_1786031348_611758`, `ticket_1785970233_750553`, "Web: manage authoritative
+Hub session types". It owns the session-types management surface.
+
+`npm test` runs `scripts/check-daemon-protocol-drift.mjs`, which **byte-compares**
+`src/botster/generated/daemon-protocol.ts` against the installed
+`@trybotster/hub-test-support` artifact. A partial protocol bump is therefore
+impossible: it is all-or-nothing, and both runs need it.
+
+I applied the 0.1.24 artifact to a throwaway worktree at `origin/main` and ran
+`npm run typecheck`. Exactly 14 errors, partitioning into three buckets:
+
+| Bucket | Owner | Errors | Sites |
+| --- | --- | --- | --- |
+| A | **This ticket** | 1 | `src/botster/__fixtures__/generatedDaemonProtocol.ts:279` — `hub_version` no longer exists on `DaemonPackageCompatibility` |
+| B | `ticket_1785970233_750553` | 6 | `hubTransport.ts` 27, 142, 246 (×2), 253, 1100 — `DaemonSessionTemplate`→`DaemonSessionType`, `list_session_templates`→`list_session_types`, `session_templates`→`session_types`, `spawn_session_template`→`spawn_session_type` |
+| C | **Neither ticket** | 7 | `hubTransport.ts` 369-378, `webrtcDaemonClient.ts` 850, 855 — protocol 6 adds `DaemonEntityFrame` variant `entity_error { subscription_id, entity_type, code, message }`, which has no `id`/`patch`/`snapshot_seq` and breaks existing union narrowing |
+
+**Resolved: option (A).** Orchestrator answered `question_1786031902_463107`
+with an explicit decision. This run owns the bump and lands it in one PR: the
+support pin, the byte-exact re-vendor, bucket A, bucket C, bucket B as a purely
+mechanical rename, and the documentation coordinate lines. It does not touch the
+session-types UI, CRUD, provenance model, entity family, or the `session-types`
+settings section — all of that stays with `ticket_1785970233_750553`.
+
+Rationale recorded by the orchestrator: the bump is not incidental to this
+ticket, it *is* its subject matter — `hub_version` leaving
+`DaemonPackageCompatibility` is precisely the defect this ticket was filed to
+fix. Option (C) would buy a cleaner boundary at the cost of an extra full run
+cycle while blocking both feature runs; option (B) would serialize this smaller
+ticket behind a materially larger one and still leave bucket C unowned.
+
+`ticket_1785970233_750553` has been registered as blocking-dependent on this
+ticket. That run completes Plan and Plan Review, then holds at Implement until
+this PR merges, then rebases onto it. The ~7 mechanical lines in
+`hubTransport.ts` therefore cannot race that run.
+
+### Bucket C scope discipline (orchestrator constraint)
+
+Fix bucket C at the **type level only**. Make the `DaemonEntityFrame` union
+exhaustive, handle `entity_error` so it cannot crash or fall through silently,
+and surface it through whatever minimal path the existing code already uses for
+transport-level problems. **Do not** design product-facing error UX for entity
+subscriptions — that presentation belongs to the session-types run, which will
+build real user-visible error state on this foundation. Choosing copy,
+iconography, or retry semantics means the change has gone too far.
+
+### Deviation reporting (orchestrator constraint)
+
+Buckets B and C are outside this ticket's literal wording. The implementation
+report must record both explicitly under deviations, labelled **unblock-only**,
+with the reason: the byte-equality drift gate makes a partial bump impossible,
+and `entity_error` is a protocol-6 consequence owned by neither feature ticket.
+The report must **not** say `deviations_from_plan: None` — a previous run in this
+project shipped that line while silently narrowing a public descriptor, and
+Review caught it.
+
+## Scope
+
+1. **Bump the authoritative contract.** `@trybotster/hub-test-support`
+   `0.1.21` → `0.1.24` in `package.json`/`package-lock.json`, and copy the
+   published `daemon-protocol.ts` verbatim into
+   `src/botster/generated/daemon-protocol.ts`. Never hand-edit the generated
+   file — the drift check and
+   [[botster web dto field names must match authoritative rust serde structs]]
+   both forbid it.
+2. **Bucket A — stop deriving Hub identity from a package row.** Remove
+   `hub_version` from the `DaemonPackageCompatibility` fixture at
+   `src/botster/__fixtures__/generatedDaemonProtocol.ts:279`. Delete the
+   `hubPackage`-derived "Hub version" row and the `hubPackage`-derived
+   `hubUpdateAction` from `src/App.tsx`. Cold cut, no fallback to the package
+   row, per [[cold turkey migrations eliminate dual code paths and version suffixes]].
+3. **Project software and installation identity into the hub status record.**
+   Extend `statusRecord()` in `src/botster/hubTransport.ts` (`9753297` line 384)
+   to carry `status.software` and `status.installation` alongside the existing
+   `host_id`, `schema_version`, `compatibility`, and `state_source` facts.
+   This is the single projection point for the `botster-web.hub_status` family.
+4. **Render authoritative identity in the General section** (`src/App.tsx`
+   `hub-settings` / `general`, `data-testid="hub-settings-general"`), reading
+   from `runtimeClient.entities.get("botster-web.hub_status", "local-hub")`:
+   product name and version, build revision when present, installation mode and
+   provenance, release channel and provider when present, host display name and
+   host id, and protocol identifier/version/conformance/features. Keep state
+   schema present but visually secondary to user-facing software status, as the
+   ticket requires.
+5. **Wire "Check for updates" to the Hub self-update action.** Add a
+   `botster.hub.check_update` branch to `dispatchDaemonAction()` in
+   `hubTransport.ts` that issues `{ type: "check_hub_update" }` and emits an
+   action result carrying `hub_update` plus response diagnostics — modelled on
+   the existing `botster.spawn_target.daemon_request` branch (`9753297`
+   lines 1069-1086). Render `current`, `available`, and `unavailable` from the
+   Hub-provided `state`, `current_version`, `available_version`, `reason`, and
+   `action`. Render offline and error from the rejected action result and
+   operator-error path. Per
+   [[ui presentation operations are authored by accepted action results]], the
+   outcome must come from the accepted action result, not from client inference.
+6. **Close the reconnect hydration gap.** Register
+   `botster-web.hub_status` as an explicit production pull in the `App.tsx`
+   connect chain, alongside the existing `pullProductionEntity(…)` calls, so it
+   becomes an entry in `InMemoryEntityFrameStore.activePulls` and is therefore
+   replay-eligible. Re-pull hub status on WebRTC reconnect by extending the
+   `webRtcDaemonLifecycleEventName` window listener that already exists in
+   `App.tsx` (`9753297` lines ~851-857) for diagnostics. Today `hub_status`
+   arrives only as a side effect of `hubTransport.connect()` issuing
+   `{ type: "status" }` once at mount; `entities.replayActivePulls()` has **no
+   production caller at all**, and the WebRTC layer's
+   `reconnectEntitySubscriptions()` re-subscribes Hub entity subscriptions only.
+   That is the concrete mechanism by which protocol and schema can regress to
+   `unknown`.
+7. **Bucket C — handle the new `entity_error` frame variant.** Narrow the
+   `DaemonEntityFrame` union in `hubTransport.ts` and `webrtcDaemonClient.ts`
+   before touching `id`/`patch`/`snapshot_seq`, and surface `entity_error` as a
+   diagnostic rather than dropping it silently. Minimum correct handling only.
+8. **Bucket B — mechanical rename only** (under assumption A). Rename the six
+   session-template symbols in `hubTransport.ts` to their protocol-6 names with
+   no behavior change.
+9. **Update fixtures, tests, and docs** to match:
+   - `src/App.test.mjs:1373-1374` — `hubTestSupportMetadata.protocol_version`
+     `4` → `6` and `conformance_fixture_revision` `28` → `31`. Line numbers
+     verified against `9753297`.
+   - Add `software` and `installation` to the inline `DaemonStatus` fixtures in
+     `src/App.test.mjs` (line 2454 region and the 4426 region).
+   - `README.md` and `docs/architecture.md` coordinate lines.
+     `src/App.test.mjs:1375-1382` asserts both documents literally contain
+     `@trybotster/hub-test-support@<version>`,
+     `@trybotster/ui-contract@<version>`, and `revision-<n>`, so the docs must
+     move to `0.1.24` and `revision-31` or `npm test` fails.
+
+**Explicitly unchanged** (orchestrator constraint): the compatibility floor in
+`src/botster/connectionDiagnostics.ts` — `minimumDaemonProtocolVersion` stays
+`1`, `minimumConformanceFixtureRevision` stays `14`, and `requiredDaemonFeatures`
+is untouched. Commit `2246678` made these deliberately permissive; raising a
+global compatibility floor is in neither ticket. Capability checks stay
+surface-local and Hub-sourced.
+
+## Non-scope
+
+- The session-types management feature: list, detail, create, edit, delete,
+  override, provenance, editability, target eligibility, and the `session-types`
+  settings section. Owned by `ticket_1785970233_750553`.
+- Applying or installing a Hub update. The Hub contract exposes a *check* only;
+  the managed installer is `ticket_1785970573_178886` in `botster-hub`.
+- Any direct GitHub or registry call from Web, and any client-owned release
+  policy, channel selection, or update cadence. Web renders Hub-provided
+  `reason`/`action` verbatim.
+- Hub-side identity, provenance, or update-check logic. Merged and closed under
+  `ticket_1785970233_522967`.
+- Broad refactors of `App.tsx`, the entity store, or the WebRTC client beyond
+  the minimum in items 6 and 7.
+- Restoring a `hub_version` compatibility field anywhere.
+
+## Repository ownership boundaries and cross-repo dependencies
+
+- `botster-web` owns only the browser projection: DTO consumption, the
+  `botster-web.hub_status` entity projection, the General/Maintenance rendering,
+  and the action dispatch that issues `check_hub_update`.
+- `botster-hub` owns software identity, installation provenance, release policy,
+  and the update-check result. Both Hub dependencies are **closed**:
+  `ticket_1785970233_522967` (contract) and `ticket_1785971560_802153`
+  (published coordinate). No new cross-repository dependency is required.
+- `botster-hub-client` owns the generated TypeScript. Web vendors it byte-exact
+  and never edits it.
+- Cross-run seam inside this repository, not cross-repo: the protocol bump,
+  `hubTransport.ts`, and `webrtcDaemonClient.ts` are shared with
+  `run_1786031348_611758`. Flagged above, escalated in
+  `question_1786031902_463107`, not silently claimed.
+
+## Assumptions and unknowns
+
+1. **Resolved, no longer an assumption:** sequencing option (A), confirmed by
+   the orchestrator in `question_1786031902_463107`.
+2. **Resolved, no longer an assumption:** the rebase onto `origin/main`
+   `9753297` is confirmed and mandatory for both Web runs. The orchestrator
+   verified the cause independently — `origin/main` advanced by one commit
+   between the pre-wave fetch and worktree creation, so `713233f` is that
+   commit's immediate parent. `9753297` is not one of this project's runs.
+3. **Unknown:** whether the Hub bumps `DaemonStatus.schema_version` past `2`.
+   `scripts/live-packaged-protocol-harness.mjs` currently hard-asserts
+   `status?.schema_version !== 2`. Implement must read the value from the live
+   Hub and update that assertion to the observed value rather than assuming `2`
+   still holds.
+4. **Unknown:** the exact `installation.mode` and `reason`/`action` strings a
+   development checkout returns. These must be observed from the live Hub at
+   `8a60bd5`, not invented. Web renders them verbatim and must not map them to
+   client-authored copy.
+5. **Assumed:** the local `botster-hub` debug binary is rebuilt from `8a60bd5`
+   before live proof. The checkout is at `8a60bd5` and a binary exists at
+   `target/debug/botster-hub`, but its mtime predates verification, so Implement
+   should rebuild rather than trust it.
+6. **Unknown:** whether `entity_error` is reachable in the current live harness.
+   If it is not, item 7 is proven by unit-level frame handling plus typecheck,
+   and that limitation must be stated rather than papered over.
+
+## Affected surfaces and files
+
+Botster layers touched: React/Ionic SPA client only. No Lua plugin, no Rust hub,
+no core, no TUI, no MCP surface.
+
+| File | Change |
+| --- | --- |
+| `package.json`, `package-lock.json` | hub-test-support `0.1.21` → `0.1.24` |
+| `src/botster/generated/daemon-protocol.ts` | verbatim copy of published artifact |
+| `src/botster/hubTransport.ts` | `statusRecord()` carries `software`/`installation`; `botster.hub.check_update` dispatch branch; `entity_error` narrowing; bucket B rename |
+| `src/botster/webrtcDaemonClient.ts` | `entity_error` narrowing (lines 850, 855) |
+| `src/App.tsx` | remove `hubPackage` version + `check_package_update` binding; render software/installation/host/protocol/schema; update-outcome rendering; register `hub_status` pull; re-pull on WebRTC reconnect |
+| `src/botster/__fixtures__/generatedDaemonProtocol.ts` | drop `hub_version` (line 279) |
+| `src/App.test.mjs` | `software`/`installation` fixtures; General-section and update-outcome assertions |
+| `scripts/browser-runtime-smoke.mjs` | real-browser assertions on the General section |
+| `scripts/live-packaged-protocol-harness.mjs` | authoritative identity + update-check + reconnect assertions; schema assertion corrected to observed value |
+| `README.md`, `docs/architecture.md` | pinned coordinate and Maintenance-surface claims |
+
+## Risks
+
+1. **Cross-run merge conflict in `hubTransport.ts` and `App.tsx`.** Largely
+   retired by the orchestrator's decision: `ticket_1785970233_750553` now holds
+   at Implement until this PR merges, then rebases onto it. Residual mitigation:
+   bucket B stays rename-only and this run never enters the session-types
+   section. Watch item flagged by the orchestrator — the dependency gate that
+   enforces this hold merged only an hour before this run as `8990969`, and this
+   is its first production exercise. If the session-types run activates Implement
+   while this ticket is open, that is a gate regression to report immediately.
+2. **Stale base.** Implementing on `713233f` would recreate a surface that
+   already exists on `9753297` and produce a large false diff. Mitigation:
+   mandatory rebase, re-verified at Plan Review.
+3. **Drift check is byte-exact.** Any hand edit to the generated protocol, or a
+   `package-lock.json` that resolves a different support version, fails
+   `npm test`. Mitigation: copy verbatim, and assert the resolved installed
+   version and integrity hash.
+4. **Silent identity regression to `unknown`.** The reconnect path is the real
+   hazard and is currently unproven in production code. Mitigation: item 6 plus
+   an explicit reconnect-replay acceptance check rather than a first-connect-only
+   assertion.
+5. **Synthesizing a fourth update state.** `offline`/`error` are not
+   `DaemonHubUpdateState` values. Mitigation: render them from the rejected
+   action result path, and assert in tests that no client-authored state string
+   reaches the DTO.
+6. **Fixture-mode blindness.** `smoke:browser-runtime` runs at
+   `/missing-bootstrap` with no Hub, so it can prove only the unavailable and
+   offline rendering. Populated identity requires the live harness. Mitigation:
+   both harnesses are named in acceptance, and neither is treated as sufficient
+   alone.
+7. **UI-contract coupling.** Verified non-issue for this bump (both sides
+   `0.3.1`), but must be re-checked if the support pin moves again.
+
+## Acceptance checks and tests
+
+Repository gates required by [[botster-web-playbook]]:
+
+- `npm run typecheck` — clean. Specifically, all 14 spike errors resolved.
+- `npm test` — includes `scripts/check-daemon-protocol-drift.mjs`; must pass
+  against the installed `0.1.24` artifact with no override env var.
+- `npm run lint` — clean.
+- `npm run build` — production build succeeds.
+
+Contract evidence:
+
+- Assert the installed `@trybotster/hub-test-support` resolves to `0.1.24` with
+  integrity
+  `sha512-n0/DDMw5PmnFdxp54dk4Y4pdAM0VfotQblBnamqkViwbmJgmSS7ZrAFPskzOcVZ70hHgJdfHaH4UwArwP0DvXw==`,
+  and that its metadata declares protocol 6 / conformance 31 / ui-contract
+  `0.3.1` equal to Web's direct pin.
+- Assert `grep -r hub_version src/` returns nothing.
+
+Component and behavior tests in `src/App.test.mjs`:
+
+- Hub version rendering survives with **zero** `botster-web.package` rows loaded
+  — the direct regression test for "never derive Hub version from a package row".
+- `statusRecord()` carries `software` and `installation` through the
+  `botster-web.hub_status` projection.
+- `check_hub_update` dispatch produces `current`, `available`, and `unavailable`
+  renderings driven by Hub-provided `state`/`reason`/`action`.
+- A rejected `check_hub_update` (transport failure) renders the offline/error
+  path and does **not** produce a `DaemonHubUpdateState` value.
+- Development-checkout and managed-release `installation.mode` fixtures render
+  distinct, honest, non-destructive outcomes.
+
+Reconnect proof — the check the ticket calls out explicitly:
+
+- After a simulated WebRTC transport close and reconnect, assert protocol,
+  protocol version, conformance, schema, product name, and version are still the
+  authoritative values and have **not** become `unknown` or `Not reported`.
+- Assert `botster-web.hub_status` is present in `activePulls` so it is
+  replay-eligible, and that the reconnect listener re-pulls it.
+
+Real-render proof (`scripts/browser-runtime-smoke.mjs`) — source regexes and
+snapshots alone are explicitly insufficient under the charter:
+
+- Navigate to `/settings`, open **General**, and assert on rendered DOM text for
+  product, version, build revision, installation mode, provenance, host, and
+  protocol.
+- Click the real **Check for updates** button and assert the rendered outcome.
+- Assert no page errors, reusing the existing `assertNoPageErrors` helper.
+
+Downstream live proof against a real Hub, required by the charter's live-hub
+conformance gate:
+
+```bash
+BOTSTER_HUB_BIN=/path/to/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
+npm run smoke:live-packaged-protocol
+```
+
+- Hub rebuilt from `botster-hub` `8a60bd5` (the commit `0.1.24` was published
+  from).
+- Extend `assertCurrentHubCompatibilityAndSchema` to assert authoritative
+  `software`/`installation` facts and correct the hard-coded
+  `schema_version !== 2` assertion to the observed value.
+- Reuse the existing `requiredProvenanceField(record, field, label)` helper in
+  `scripts/workspaces-shared-hub-browser-helpers.mjs` for those assertions
+  rather than writing new ones. It already fails loudly on `undefined`, `null`,
+  and `""`, which is exactly the "must never regress to unknown" invariant, and
+  reusing it follows
+  [[prefer framework and library components over custom solutions]].
+- Exercise the real `check_hub_update` request against the live Hub and record
+  the actual state, reason, and action for a development checkout.
+- Prove identity survives the harness's existing two-WebRTC-generation reload
+  path — this is the reconnect-replay evidence in production shape.
+
+Structured evidence, not toast text, per the charter: assert on
+`__BOTSTER_LIVE_PROTOCOL_HARNESS__` recorded frames and daemon responses.
+
+## Vault gaps worth capturing
+
+1. **Hub identity is a status projection, never a package row.** The contract
+   removal of `DaemonPackageCompatibility.hub_version` plus the
+   `DaemonStatus.software`/`installation` addition is a durable client rule that
+   already bit `botster-web` and `botster-tui` independently
+   (`ticket_1785976581_841608`). Worth an atomic note linked from
+   [[botster package daemon dto exposes sanitized package rows]].
+2. **Push-hydrated entity families must be registered as active pulls to survive
+   reconnect.** `botster-web.hub_status` arrives as a side effect of
+   `hubTransport.connect()` and is therefore invisible to
+   `replayActivePulls()`; `replayActivePulls()` additionally has no production
+   caller. That is a reusable Botster SPA reconnect gotcha, not a one-off bug.
+3. **The generated-protocol drift check makes a protocol bump indivisible.**
+   Byte-comparison means concurrent runs in `botster-web` cannot each take part
+   of a bump. Worth capturing as a Project Pipelines concurrency constraint so
+   future runs plan the bump as a single owned unit.
+4. **Update state is three-valued; offline and error are transport outcomes.**
+   Worth a short note so no client invents a fourth `DaemonHubUpdateState`.
