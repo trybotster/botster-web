@@ -20,22 +20,3 @@ export function sessionDisplayStatus(record: Record<string, unknown>): string {
     ? record.lifecycle_class
     : "Unknown status";
 }
-
-export function resolveTerminalSessionId(
-  sessions: Record<string, unknown>[],
-  retainedSessionId?: string,
-  attachedSessionId?: string
-): string | undefined {
-  const retainedSession = retainedSessionId
-    ? sessions.find((session) => session.id === retainedSessionId)
-    : undefined;
-  if (
-    retainedSession &&
-    (retainedSessionId === attachedSessionId || isAttachableSession(retainedSession))
-  ) {
-    return retainedSessionId;
-  }
-
-  const attachableSession = sessions.find(isAttachableSession);
-  return attachableSession ? String(attachableSession.id) : undefined;
-}

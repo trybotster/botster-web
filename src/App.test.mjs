@@ -909,7 +909,7 @@ assert.match(app, /pullProductionEntity\("app", \{ family: "botster-web\.app" \}
 assert.match(app, /window\.open\(localUrl, "_blank", "noopener,noreferrer"\)/);
 assert.match(app, /export function AppListItem/);
 assert.match(app, /export function PluginNavigationShortcuts/);
-assert.match(app, /<PluginNavigationShortcuts\s+[\s\S]*entries=\{packageNavigationShortcuts\}[\s\S]*loadStatus=\{entityLoadStatus\.packageNavigation\}[\s\S]*onOpen=\{openPackageNavigation\}/);
+assert.match(app, /<PluginNavigationShortcuts\s+[\s\S]*entries=\{packageNavigationShortcuts\}[\s\S]*onOpen=\{openPackageNavigation\}/);
 assert.doesNotMatch(app, /packageNavigation(?:Shortcuts)?\.slice\(0,\s*8\)/);
 assert.match(app, /appSurfacePackages\.get\(stringValue\(app\.package_name, ""\)\)/);
 assert.match(app, /packageAppSurfaces\(app\)/);
@@ -924,8 +924,7 @@ assert.doesNotMatch(app, /const packagesWithUi|const packagesWithoutUi/);
 assert.match(app, /aria-label="Rendered app surface"/);
 assert.match(app, /routePluginSurface \? \(\s*<PluginSurfaceRoutePage/);
 assert.match(app, /const pluginAppRouteActive = activeView === "apps" && Boolean\(routePluginSurface\)/);
-assert.match(app, /className=\{pluginAppRouteActive \? "workspace-shell plugin-workspace-shell" : "workspace-shell"\}/);
-assert.match(app, /<IonHeader className="app-header">/);
+assert.doesNotMatch(app, /terminal-session-back|aria-label="Back to sessions"/);
 assert.match(app, /aria-label="Back to Apps"/);
 assert.doesNotMatch(app, /function pluginViewSurface/);
 assert.doesNotMatch(app, /function pluginSettingsSurface/);
@@ -953,7 +952,24 @@ assert.match(app, /aria-label="Sessions"/);
 assert.match(app, /<h1 id="dashboard-heading">Your sessions<\/h1>/);
 assert.match(app, /sessions\.map/);
 assert.doesNotMatch(app, /sessionsWithPending|session_draft|pendingSessionId/);
-assert.match(app, /label: "Workspaces"/);
+assert.match(app, /label: "Spawn points"/);
+assert.doesNotMatch(app, /\{ label: "Hub settings", icon: cogOutline, view: "hub-settings" \}/);
+assert.match(app, /className="nav-list sidebar-advanced"/);
+assert.match(app, /<IonFooter className="app-sidebar-footer">/);
+assert.match(app, /<span>Hub settings<\/span>/);
+assert.doesNotMatch(app, /toolbar-status/);
+assert.match(app, /<h1 id="hub-settings-heading">Hub settings<\/h1>/);
+assert.match(app, /<h2 id="spawn-points-heading">Spawn points<\/h2>/);
+assert.match(app, /data-testid="session-types-view"/);
+assert.match(app, /data-testid="extension-settings-view"/);
+assert.match(app, /data-testid="hub-settings-general"/);
+assert.match(app, /aria-label="Installed extensions"/);
+assert.match(app, /Check for updates/);
+assert.doesNotMatch(app, /data-testid="hub-updates-view"/);
+assert.doesNotMatch(app, />Diagnostics<\/span>/);
+assert.doesNotMatch(app, /Hub configuration summary|Hub setup shortcuts/);
+assert.match(app, /label="Spawn point name"/);
+assert.doesNotMatch(app, /(?:Add|Edit|Delete|View) workspace/);
 assert.match(app, /<IonLabel>Installed<\/IonLabel>/);
 assert.doesNotMatch(app, /<IonLabel>Installed apps<\/IonLabel>/);
 assert.doesNotMatch(app, /<IonLabel>Available marketplace packages<\/IonLabel>/);
@@ -963,18 +979,15 @@ assert.doesNotMatch(liveProtocolHarnessScript, /\[aria-label='Installed apps'\]/
 assert.doesNotMatch(liveProtocolHarnessScript, /\[aria-label='Installed packages'\]/);
 assert.match(localPackageServerScript, /function isSpaRoutePath\(pathname\)/);
 assert.match(localPackageServerScript, /pathname\.startsWith\("\/packages\/"\)/);
-assert.match(app, /<IonGrid className="workspace-grid"/);
-assert.match(app, /<IonCol size="12" sizeLg="8"/);
-assert.match(app, /<IonCol size="12" sizeLg="4"/);
+assert.match(localPackageServerScript, /pathname\.startsWith\("\/sessions\/"\)/);
 assert.match(app, /onAction=\{dispatchAction\}/);
-assert.match(app, /selectedRealHubTerminalSessionId/);
+assert.doesNotMatch(app, /selectedRealHubTerminalSessionId|attachedRealHubTerminalSessionId/);
 assert.match(app, /isAttachableSession/);
 assert.match(app, /hubRuntime\.createTerminalDataPlane\(terminalDescriptor\.sessionId\)/);
 assert.match(app, /descriptor=\{terminalDescriptor\}/);
 assert.match(app, /dataPlane=\{terminalDataPlane\}/);
 assert.match(app, /onAttachmentStatus=\{recordTerminalAttachmentStatus\}/);
 assert.match(app, /onExit=\{releaseTerminalSession\}/);
-assert.match(app, /Select a running session to attach the terminal panel/);
 assert.match(app, /onDiagnostic=\{recordTerminalDiagnostic\}/);
 assert.doesNotMatch(app, /terminal-placeholder/);
 assert.match(client, /export const botsterWebClientContract/);
@@ -1744,6 +1757,15 @@ assert.match(occupiedPackageServerResult.stderr, /EADDRINUSE/);
 assert.equal(occupiedPackageServerResult.launchResultPublished, false);
 
 const desktopCss = removeCssAtRules(css);
+const appRootRule = extractTopLevelCssRule(desktopCss, "#root");
+assert.match(appRootRule, /height:\s*100%/);
+assert.match(appRootRule, /min-height:\s*100dvh/);
+assert.match(appRootRule, /border-radius:\s*0/);
+const sidebarContainerRule = extractTopLevelCssRule(desktopCss, ".app-sidebar::part(container)");
+assert.match(sidebarContainerRule, /height:\s*100%/);
+assert.match(sidebarContainerRule, /min-height:\s*100%/);
+assert.match(sidebarContainerRule, /border-radius:\s*0/);
+assert.match(sidebarContainerRule, /background:\s*#10131a/);
 assert.doesNotMatch(desktopCss, /\.workspace-grid\s*\{[^}]*grid-template-columns/);
 assert.doesNotMatch(desktopCss, /\.dashboard-layout\s*\{[^}]*grid-template-columns/);
 assert.doesNotMatch(desktopCss, /\.active-work-grid\s*\{/);
@@ -1752,6 +1774,13 @@ assert.match(variablesCss, /@media\s*\(prefers-color-scheme:\s*dark\)/);
 assert.match(variablesCss, /--ion-background-color:\s*#0f1218/);
 assert.match(variablesCss, /--ion-item-background:\s*#171b23/);
 assert.match(variablesCss, /--app-surface-color:\s*#171b23/);
+
+const sidebarFooterRule = extractTopLevelCssRule(desktopCss, ".app-sidebar-footer");
+assert.match(sidebarFooterRule, /background:\s*#10131a/);
+assert.match(sidebarFooterRule, /border-top:\s*1px\s+solid\s+#242b38/);
+const sidebarSettingsRule = extractTopLevelCssRule(desktopCss, ".app-sidebar .sidebar-advanced");
+assert.match(sidebarSettingsRule, /margin:\s*0/);
+assert.match(sidebarSettingsRule, /env\(safe-area-inset-bottom\)/);
 
 const pluginWorkspaceShellRule = extractTopLevelCssRule(desktopCss, ".workspace-shell.plugin-workspace-shell");
 assert.match(pluginWorkspaceShellRule, /width:\s*100%/);
@@ -1773,6 +1802,30 @@ const terminalPanelRule = extractTopLevelCssRule(desktopCss, ".terminal-panel");
 assert.match(terminalPanelRule, /max-height:\s*calc\(100vh\s*-\s*210px\)/);
 assert.match(terminalPanelRule, /overflow:\s*hidden/);
 assert.match(terminalPanelRule, /background:\s*var\(--app-surface-color\)/);
+
+const terminalSessionShellRule = extractTopLevelCssRule(desktopCss, ".terminal-session-shell");
+assert.match(terminalSessionShellRule, /width:\s*100%/);
+assert.match(terminalSessionShellRule, /height:\s*100%/);
+assert.match(terminalSessionShellRule, /margin:\s*0/);
+assert.match(terminalSessionShellRule, /padding:\s*0/);
+const terminalSessionPanelRule = extractTopLevelCssRule(desktopCss, ".terminal-session-view .terminal-panel");
+assert.match(terminalSessionPanelRule, /width:\s*100%/);
+assert.match(terminalSessionPanelRule, /height:\s*100%/);
+assert.match(terminalSessionPanelRule, /max-height:\s*none/);
+assert.match(terminalSessionPanelRule, /padding:\s*0/);
+assert.match(terminalSessionPanelRule, /border:\s*0/);
+assert.match(terminalSessionPanelRule, /border-radius:\s*0/);
+assert.match(terminalSessionPanelRule, /box-shadow:\s*none/);
+assert.match(terminalSessionPanelRule, /position:\s*relative/);
+const terminalSessionStatusRule = extractTopLevelCssRule(desktopCss, ".terminal-session-view .terminal-status");
+assert.match(terminalSessionStatusRule, /position:\s*absolute/);
+assert.match(terminalSessionStatusRule, /background:\s*rgb\(17\s+19\s+24\s*\/\s*0\.9\)/);
+assert.match(
+  extractTopLevelCssRule(desktopCss, '.terminal-session-view .terminal-status[data-terminal-attach-state="attached"]'),
+  /display:\s*none/
+);
+const desktopTerminalNavigationCss = extractCssAtRule(css, "@media (min-width: 768px)");
+assert.match(extractTopLevelCssRule(desktopTerminalNavigationCss, ".terminal-session-header"), /display:\s*none/);
 
 const localHubMainRule = extractTopLevelCssRule(desktopCss, ".local-hub-main");
 assert.match(localHubMainRule, /display:\s*grid/);
@@ -2750,6 +2803,27 @@ const bridge = {
       };
     }
 
+    if (request.type === "list_session_templates") {
+      return {
+        kind: "session_templates",
+        session_templates: [
+          {
+            template_id: "project-main:codex",
+            package_name: "botster",
+            id: "codex",
+            source: "built_in",
+            command: "codex",
+            working_directory_policy: "spawn_target",
+            context_keys: ["prompt"],
+            target_id: "project-main",
+            available: true
+          }
+        ],
+        sessions: [],
+        events: []
+      };
+    }
+
     if (request.type === "plugin_surface_render") {
       if (request.package_name === "botster-web") {
         const settings = request.surface_id === "production-settings";
@@ -2847,6 +2921,14 @@ const bridge = {
         cols: 80,
         updated_at: 1
       }];
+      return {
+        kind: "spawned",
+        sessions: [{ session_id: request.session_id, lifecycle: "running" }],
+        events: [{ type: "session_lifecycle", session_id: request.session_id, state: "running" }]
+      };
+    }
+
+    if (request.type === "spawn_session_template") {
       return {
         kind: "spawned",
         sessions: [{ session_id: request.session_id, lifecycle: "running" }],
@@ -3973,6 +4055,25 @@ await realTransport.send({ kind: "entity_pull", payload: { family: "botster-web.
 await flushMicrotasks();
 await realTransport.send({ kind: "entity_pull", payload: { family: "botster-web.package" } });
 await flushMicrotasks();
+await realTransport.send({ kind: "entity_pull", payload: { family: "botster-web.session_template" } });
+await flushMicrotasks();
+await realTransport.send({
+  kind: "action_request",
+  payload: {
+    request_id: "real-spawn-session-template-1",
+    origin: "ui_node",
+    action: {
+      id: "botster.spawn_point.spawn_session",
+      target: "project-main",
+      params: {
+        template_id: "project-main:codex",
+        session_id: "spawned-from-point",
+        prompt: "Review the current changes"
+      }
+    }
+  }
+});
+await flushMicrotasks();
 await realTransport.send({
   kind: "action_request",
   payload: {
@@ -4160,6 +4261,19 @@ assert.equal(
 );
 assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "spawn"), false);
+assert.deepEqual(
+  bridgeRequests.find((request) => request.type === "spawn_session_template"),
+  {
+    type: "spawn_session_template",
+    template_id: "project-main:codex",
+    session_id: "spawned-from-point",
+    request: {
+      target_id: "project-main",
+      context: { prompt: "Review the current changes" }
+    }
+  }
+);
+assert.equal(bridgeRequests.some((request) => /workspace_id/.test(JSON.stringify(request))), false);
 const configSaveRequests = bridgeRequests.filter((request) => request.type === "set_package_configuration");
 assert.equal(configSaveRequests.length, 3);
 assert.deepEqual(configSaveRequests[0], {
@@ -4262,6 +4376,10 @@ assert.equal(
 );
 assert.equal(
   realFrames.some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.app"),
+  true
+);
+assert.equal(
+  realFrames.some((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session_template"),
   true
 );
 assert.equal(realFrames.some((frame) => frame.kind === "entity_patch"), true);
@@ -5375,7 +5493,7 @@ try {
       replaceAcceptedSurface
     },
     { configurationFieldType, configurationSaveAction, configurationSubmitValues },
-    { isAttachableSession, resolveTerminalSessionId, sessionDisplayStatus, sessionDisplayTitle },
+    { isAttachableSession, sessionDisplayStatus, sessionDisplayTitle },
     { UiNodeSurface },
     { sessionBindingVariantSnapshot },
     { pluginSurfaceActionRequest },
@@ -5385,18 +5503,26 @@ try {
       PluginNavigationShortcuts,
       PluginListItem,
       SessionListItem,
+      SessionRouteView,
       SpawnTargetListItem,
       PluginSurfaceRoutePage,
       PluginSettingsPanel,
       entityFamilyRecordLimit,
       appRouteFromPathname,
+      appRoutePath,
       compareSpawnTargetRows,
       compareInstalledPackageRows,
       packageAppSurfaces,
       packageNavigationShortcut,
       packageSettingsSurfaces,
       renderedPluginSurfaceState,
-      surfaceLaunchAction
+      rejectedSpawnSessionForm,
+      sessionTemplatesForSpawnTarget,
+      spawnSessionAction,
+      spawnSessionFormForTarget,
+      surfaceLaunchAction,
+      terminalDescriptorForSessionId,
+      terminalReleaseToast
     }
   ] = await Promise.all([
     vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
@@ -5421,13 +5547,6 @@ try {
     registry_state: "active",
     lifecycle: "running",
     lifecycle_class: "current"
-  };
-  const exitedTerminalSession = {
-    id: activeHubSessionId,
-    session_uuid: activeHubSessionId,
-    registry_state: "exited",
-    lifecycle: "exited",
-    lifecycle_class: "ended"
   };
   const indeterminateTerminalSession = {
     id: "indeterminate-session",
@@ -5471,37 +5590,7 @@ try {
   );
   assert.match(contradictorySessionListItem, />indeterminate</);
   assert.doesNotMatch(contradictorySessionListItem, />Open</);
-  assert.equal(resolveTerminalSessionId([runningTerminalSession]), activeHubSessionId);
-  assert.equal(resolveTerminalSessionId([exitedTerminalSession]), undefined);
-  assert.equal(resolveTerminalSessionId([indeterminateTerminalSession]), undefined);
-  assert.equal(resolveTerminalSessionId([contradictoryTerminalSession]), undefined);
   assert.equal(entityFamilyRecordLimit, 4);
-  assert.equal(
-    resolveTerminalSessionId([exitedTerminalSession], activeHubSessionId),
-    undefined
-  );
-  assert.equal(
-    resolveTerminalSessionId(
-      [exitedTerminalSession, { id: "next-running-session", lifecycle: "running", lifecycle_class: "current" }],
-      activeHubSessionId
-    ),
-    "next-running-session"
-  );
-  assert.equal(
-    resolveTerminalSessionId(
-      [exitedTerminalSession, { id: "next-running-session", lifecycle: "running", lifecycle_class: "current" }],
-      activeHubSessionId,
-      activeHubSessionId
-    ),
-    activeHubSessionId
-  );
-  assert.equal(
-    resolveTerminalSessionId(
-      [{ id: "next-running-session", lifecycle: "running", lifecycle_class: "current" }],
-      activeHubSessionId
-    ),
-    "next-running-session"
-  );
 
   const descriptorAppRoute = appRouteFromPathname("/packages/acme%20tools/surfaces/home%2Fmain");
   const fallbackAppRoute = appRouteFromPathname("/apps/acme%20tools/home%2Fmain");
@@ -5532,6 +5621,108 @@ try {
     settings: false
   });
   assert.deepEqual(appRouteFromPathname("/not-an-app-route"), { view: "dashboard" });
+  assert.deepEqual(appRouteFromPathname("/settings/spawn-points"), {
+    view: "hub-settings",
+    section: "spawn-points"
+  });
+  assert.deepEqual(appRouteFromPathname("/settings"), {
+    view: "hub-settings",
+    section: "general"
+  });
+  assert.deepEqual(appRouteFromPathname("/sessions/session%2Fone"), {
+    view: "session",
+    sessionId: "session/one"
+  });
+  assert.deepEqual(appRouteFromPathname("/diagnostics"), {
+    view: "hub-settings",
+    section: "support"
+  });
+  const roundTripRoutes = [
+    { view: "dashboard" },
+    { view: "hub-settings", section: "general" },
+    { view: "hub-settings", section: "extensions" },
+    { view: "session", sessionId: "session/one" },
+    { view: "apps" },
+    { view: "apps", packageName: "acme tools", surfaceId: "home/main", settings: false },
+    { view: "apps", packageName: "acme tools", surfaceId: "advanced", settings: true }
+  ];
+  for (const route of roundTripRoutes) {
+    assert.deepEqual(appRouteFromPathname(appRoutePath(route)), route);
+  }
+  assert.deepEqual(terminalDescriptorForSessionId("session/one"), {
+    sessionId: "session/one",
+    renderer: "restty"
+  });
+  assert.equal(terminalDescriptorForSessionId(undefined), undefined);
+  assert.deepEqual(
+    terminalReleaseToast("web-prod", { state: "failed", message: "Terminal stream attach failed." }),
+    { message: "Terminal stream attach failed.", color: "danger" }
+  );
+  assert.deepEqual(
+    terminalReleaseToast("web-prod"),
+    { message: "Session web-prod ended", color: "medium" }
+  );
+  assert.deepEqual(
+    terminalReleaseToast("web-prod", { state: "exited", message: "Terminal process exited with 0." }),
+    { message: "Session web-prod ended", color: "medium" }
+  );
+  const sessionRouteMarkup = renderToStaticMarkup(
+    createElement(
+      SessionRouteView,
+      { sessionId: "session/one" },
+      createElement("div", { "data-terminal-session-id": "session/one" }, "Mounted terminal")
+    )
+  );
+  assert.match(sessionRouteMarkup, /aria-label="Terminal session session\/one"/);
+  assert.match(sessionRouteMarkup, /data-testid="terminal-session-view"/);
+  assert.match(sessionRouteMarkup, /data-terminal-session-id="session\/one"/);
+
+  const targetSessionTemplates = [
+    { id: "codex", target_id: "project-main", available: true },
+    { id: "claude", target_id: "project-main", available: false },
+    { id: "other", target_id: "another-project", available: true }
+  ];
+  assert.deepEqual(sessionTemplatesForSpawnTarget(targetSessionTemplates, "project-main"), [targetSessionTemplates[0]]);
+  const preparedSpawnForm = spawnSessionFormForTarget(
+    { id: "project-main", label: "Project main" },
+    targetSessionTemplates
+  );
+  assert.deepEqual(preparedSpawnForm, {
+    targetId: "project-main",
+    targetLabel: "Project main",
+    templateId: "codex",
+    prompt: "",
+    submitting: false
+  });
+  assert.equal(spawnSessionFormForTarget(
+    { id: "project-main", label: "Project main" },
+    [...targetSessionTemplates, { id: "shell", target_id: "project-main", available: true }]
+  ).templateId, "");
+  assert.deepEqual(spawnSessionAction(
+    { ...preparedSpawnForm, prompt: "  Review the changes  " },
+    "spawned-session"
+  ), {
+    id: "botster.spawn_point.spawn_session",
+    target: "project-main",
+    label: "Start session",
+    params: {
+      template_id: "codex",
+      session_id: "spawned-session",
+      prompt: "Review the changes"
+    }
+  });
+  assert.deepEqual(rejectedSpawnSessionForm(
+    { ...preparedSpawnForm, submitting: true },
+    "Template unavailable"
+  ), {
+    ...preparedSpawnForm,
+    submitting: false,
+    error: "Template unavailable"
+  });
+  assert.equal(rejectedSpawnSessionForm(
+    { ...preparedSpawnForm, submitting: true },
+    undefined
+  ).error, "Botster could not start this session.");
 
   function findReactElement(node, predicate) {
     if (Array.isArray(node)) {
@@ -5551,6 +5742,21 @@ try {
     }
     return undefined;
   }
+
+  let openedSessionId;
+  const interactiveSessionItem = SessionListItem({
+    session: runningTerminalSession,
+    onOpen: (sessionId) => {
+      openedSessionId = sessionId;
+    }
+  });
+  const openSessionButton = findReactElement(
+    interactiveSessionItem,
+    (node) => node.props?.children === "Open"
+  );
+  assert.ok(openSessionButton);
+  openSessionButton.props.onClick();
+  assert.equal(openedSessionId, activeHubSessionId);
 
   const blockedPluginSurfaceShortcut = packageNavigationShortcut({
     id: "project-pipelines:blocked-home",
@@ -5706,7 +5912,6 @@ try {
   const mixedNavigationMarkup = renderToStaticMarkup(
     createElement(PluginNavigationShortcuts, {
       entries: mixedNavigationRecords,
-      loadStatus: "loaded",
       onOpen: () => undefined
     })
   );
@@ -5726,7 +5931,6 @@ try {
   const boundedNavigationMarkup = renderToStaticMarkup(
     createElement(PluginNavigationShortcuts, {
       entries: mixedNavigationRecords.slice(0, 8),
-      loadStatus: "loaded",
       onOpen: () => undefined
     })
   );
@@ -5926,6 +6130,8 @@ try {
   assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, /data-testid="plugin-route-status-badge"/);
   assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, />Rendered<\/ion-badge>/);
   assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, /Plugin surface/);
+  assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, /Renderer registry/);
+  assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, /botster-web\/production-app/);
   assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, /workflow-section/);
   assert.doesNotMatch(successfulValidatedSnapshotSurfaceMarkup, />Loading<\/ion-badge>/);
   const workspacesNamedSlotSurface = { packageName: "botster-workspaces", surfaceId: "workspaces" };
@@ -6879,6 +7085,7 @@ try {
         enabled: true,
         kind: "directory"
       },
+      onSpawn: () => undefined,
       onEdit: () => undefined,
       onDelete: () => undefined
     })
@@ -6886,6 +7093,7 @@ try {
   assert.match(spawnTargetMarkup, /Project main/);
   assert.match(spawnTargetMarkup, /\/tmp\/project-main/);
   assert.match(spawnTargetMarkup, /Enabled/);
+  assert.match(spawnTargetMarkup, /New session/);
   assert.match(spawnTargetMarkup, /Edit/);
   assert.match(spawnTargetMarkup, /Delete/);
   const spawnTargetFrames = daemonResponseFrames({
@@ -6915,6 +7123,35 @@ try {
   const spawnTargetSnapshot = spawnTargetFrames.find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.spawn_target");
   assert.equal(spawnTargetSnapshot.payload.records[0].id, "project-main");
   assert.equal(spawnTargetSnapshot.payload.records[0].metadata_summary, "owner: platform");
+  const sessionTemplateFrames = daemonResponseFrames({
+    kind: "session_templates",
+    status: null,
+    sessions: [],
+    packages: [],
+    package_decision: null,
+    lifecycle: [],
+    plugin_tools: [],
+    plugin_tool_result: null,
+    events: [],
+    cleanup: null,
+    coordination: null,
+    error: null,
+    session_templates: [
+      {
+        template_id: "project-main:codex",
+        package_name: "botster",
+        id: "codex_session",
+        source: "built_in",
+        command: "codex",
+        working_directory_policy: "spawn_target",
+        target_id: "project-main",
+        available: true
+      }
+    ]
+  }, 43);
+  const sessionTemplateSnapshot = sessionTemplateFrames.find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "botster-web.session_template");
+  assert.equal(sessionTemplateSnapshot.payload.records[0].id, "project-main:codex");
+  assert.equal(sessionTemplateSnapshot.payload.records[0].title, "Codex session");
 
   const collectedActions = [];
   const markup = renderToStaticMarkup(
@@ -8518,8 +8755,8 @@ assert.match(healthyFirstScreenMarkup, /Local Botster health/);
 assert.match(healthyFirstScreenMarkup, /Connection, extensions, sessions, and terminal availability/);
 assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
   assert.match(healthyFirstScreenMarkup, /Packages/);
-  assert.match(healthyFirstScreenMarkup, /<h3>Hub<\/h3><ion-badge color="success">Healthy/);
-  assert.doesNotMatch(healthyFirstScreenMarkup, /<h3>Hub<\/h3><ion-badge color="danger">Blocked/);
+  assert.match(healthyFirstScreenMarkup, /<h4>Hub<\/h4><ion-badge color="success">Healthy/);
+  assert.doesNotMatch(healthyFirstScreenMarkup, /<h4>Hub<\/h4><ion-badge color="danger">Blocked/);
   assert.match(healthyFirstScreenMarkup, /Loaded/);
   assert.match(healthyFirstScreenMarkup, /Sessions/);
   assert.match(healthyFirstScreenMarkup, /Running/);
@@ -8539,10 +8776,10 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
       actionStatus: "connect ECONNREFUSED"
     })
   );
-  assert.match(hubDownFirstScreenMarkup, /<h3>Hub<\/h3><ion-badge color="danger">Blocked/);
-  assert.match(hubDownFirstScreenMarkup, /<h3>Transport<\/h3><ion-badge color="danger">Blocked/);
+  assert.match(hubDownFirstScreenMarkup, /<h4>Hub<\/h4><ion-badge color="danger">Blocked/);
+  assert.match(hubDownFirstScreenMarkup, /<h4>Transport<\/h4><ion-badge color="danger">Blocked/);
   assert.match(hubDownFirstScreenMarkup, /connect ECONNREFUSED/);
-  assert.doesNotMatch(hubDownFirstScreenMarkup, /<h3>Hub<\/h3><ion-badge color="success">Connected/);
+  assert.doesNotMatch(hubDownFirstScreenMarkup, /<h4>Hub<\/h4><ion-badge color="success">Connected/);
 
   const unloadedFirstScreenMarkup = renderToStaticMarkup(
     createElement(LocalHubFirstScreen, {
@@ -8595,7 +8832,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
       actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })
   );
-  assert.match(failedPackageFirstScreenMarkup, /<article class="local-hub-status-card danger"><div class="local-hub-status-title"><h3>Packages<\/h3><ion-badge color="danger">Error/);
+  assert.match(failedPackageFirstScreenMarkup, /<article class="local-hub-status-card danger"><div class="local-hub-status-title"><h4>Packages<\/h4><ion-badge color="danger">Error/);
   assert.match(failedPackageFirstScreenMarkup, /1 has failed entrypoint state/);
 
   const degradedTerminalFirstScreenMarkup = renderToStaticMarkup(
@@ -8627,7 +8864,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
       actionStatus: `Spawn requested for ${activeHubSessionId}; session state below confirms when it is running.`
     })
   );
-  assert.match(spawnRequestedFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="medium">Requested/);
+  assert.match(spawnRequestedFirstScreenMarkup, /<h4>Spawn action<\/h4><ion-badge color="medium">Requested/);
   assert.doesNotMatch(spawnRequestedFirstScreenMarkup, /Session botster-web-production-session is running/);
 
   const spawnFailedFirstScreenMarkup = renderToStaticMarkup(
@@ -8672,9 +8909,9 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
       actionStatus: "Connected to local hub over WebRTC"
     })
   );
-  assert.match(missingSessionFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="medium">Ready/);
+  assert.match(missingSessionFirstScreenMarkup, /<h4>Spawn action<\/h4><ion-badge color="medium">Ready/);
   assert.match(missingSessionFirstScreenMarkup, /Creates a local hub session/);
-  assert.doesNotMatch(missingSessionFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="danger">Blocked/);
+  assert.doesNotMatch(missingSessionFirstScreenMarkup, /<h4>Spawn action<\/h4><ion-badge color="danger">Blocked/);
   assert.doesNotMatch(missingSessionFirstScreenMarkup, /unknown session: missing-real-hub-session/);
 
   const nonSpawnHubActionDiagnostic = hubConnectionDiagnosticFromFrame({
@@ -8697,7 +8934,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
       actionStatus: "Connected to local hub over WebRTC"
     })
   );
-  assert.match(nonSpawnHubActionFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="medium">Ready/);
+  assert.match(nonSpawnHubActionFirstScreenMarkup, /<h4>Spawn action<\/h4><ion-badge color="medium">Ready/);
   assert.doesNotMatch(nonSpawnHubActionFirstScreenMarkup, /unknown session: missing-real-hub-session/);
 
   const primaryActionFailureDiagnostic = actionFailureDiagnostic(
@@ -8716,7 +8953,7 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
       actionStatus: "spawn action rejected"
     })
   );
-  assert.match(primaryActionFailedFirstScreenMarkup, /<h3>Spawn action<\/h3><ion-badge color="warning">Blocked/);
+  assert.match(primaryActionFailedFirstScreenMarkup, /<h4>Spawn action<\/h4><ion-badge color="warning">Blocked/);
   assert.match(primaryActionFailedFirstScreenMarkup, /spawn action rejected/);
 
   const diagnosticsMarkup = renderToStaticMarkup(

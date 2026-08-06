@@ -9,6 +9,7 @@ import {
   IonChip,
   IonCol,
   IonContent,
+  IonFooter,
   IonGrid,
   IonHeader,
   IonIcon,
@@ -33,7 +34,7 @@ import {
   IonToolbar,
   setupIonicReact
 } from "@ionic/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   addOutline,
   arrowBackOutline,
@@ -42,8 +43,8 @@ import {
   cubeOutline,
   keyOutline,
   layersOutline,
-  listCircleOutline,
   openOutline,
+  playOutline,
   powerOutline,
   refreshOutline,
   serverOutline
@@ -75,7 +76,6 @@ import type { EntityFrameStore } from "./botster/entities";
 import type { TerminalAttachmentStatus, TerminalDataPlaneAttachment, TerminalViewDescriptor } from "./botster/terminal";
 import {
   isAttachableSession,
-  resolveTerminalSessionId,
   sessionDisplayStatus,
   sessionDisplayTitle
 } from "./botster/terminalSession";
@@ -103,31 +103,47 @@ setupIonicReact({
   }
 });
 
-type AppView = "dashboard" | "apps" | "spawn-points" | "diagnostics";
+type AppView = "dashboard" | "apps" | "hub-settings" | "session";
+type HubSettingsSection = "general" | "spawn-points" | "session-types" | "extensions" | "support";
 type AppRoute =
   | { view: "dashboard" }
   | { view: "apps"; packageName?: string; surfaceId?: string; settings?: false }
   | { view: "apps"; packageName: string; settings: true; surfaceId?: string }
-  | { view: "spawn-points" }
-  | { view: "diagnostics" };
+  | { view: "hub-settings"; section?: HubSettingsSection }
+  | { view: "session"; sessionId: string };
 
 const navigationItems: Array<{ label: string; icon: string; view: AppView }> = [
   { label: "Home", icon: layersOutline, view: "dashboard" },
-  { label: "Apps", icon: cubeOutline, view: "apps" },
-  { label: "Workspaces", icon: serverOutline, view: "spawn-points" }
+  { label: "Apps", icon: cubeOutline, view: "apps" }
 ];
 
 const appViewPaths: Record<AppView, string> = {
   dashboard: "/dashboard",
   apps: "/apps",
-  "spawn-points": "/spawn-points",
-  diagnostics: "/diagnostics"
+  "hub-settings": "/settings",
+  session: "/sessions"
 };
+
+const hubSettingsSections: Array<{ id: HubSettingsSection; label: string; description: string }> = [
+  { id: "general", label: "General", description: "Hub identity and software" },
+  { id: "spawn-points", label: "Spawn points", description: "Where sessions can start" },
+  { id: "session-types", label: "Session types", description: "How sessions are launched" },
+  { id: "extensions", label: "Extensions", description: "Plugin configuration" },
+  { id: "support", label: "Support", description: "Health and diagnostics" }
+];
 
 export function appRouteFromPathname(pathname: string): AppRoute {
   const normalizedPath = pathname.replace(/\/+$/, "") || "/";
-  if (normalizedPath === appViewPaths.diagnostics || normalizedPath.startsWith(`${appViewPaths.diagnostics}/`)) return { view: "diagnostics" };
-  if (normalizedPath === appViewPaths["spawn-points"] || normalizedPath.startsWith(`${appViewPaths["spawn-points"]}/`)) return { view: "spawn-points" };
+  if (normalizedPath === "/diagnostics" || normalizedPath.startsWith("/diagnostics/")) return { view: "hub-settings", section: "support" };
+  if (normalizedPath === "/spawn-points" || normalizedPath.startsWith("/spawn-points/")) return { view: "hub-settings", section: "spawn-points" };
+  if (normalizedPath.startsWith(`${appViewPaths.session}/`)) {
+    const sessionId = decodeURIComponent(normalizedPath.slice(appViewPaths.session.length + 1));
+    if (sessionId) return { view: "session", sessionId };
+  }
+  if (normalizedPath === appViewPaths["hub-settings"] || normalizedPath.startsWith(`${appViewPaths["hub-settings"]}/`)) {
+    const section = normalizedPath.slice(appViewPaths["hub-settings"].length + 1) as HubSettingsSection;
+    return { view: "hub-settings", section: hubSettingsSections.some((entry) => entry.id === section) ? section : "general" };
+  }
   if (normalizedPath === appViewPaths.apps) return { view: "apps" };
   if (normalizedPath.startsWith("/packages/")) {
     const segments = normalizedPath
@@ -175,7 +191,13 @@ function appRouteFromLocation(): AppRoute {
   return appRouteFromPathname(window.location.pathname);
 }
 
-function appRoutePath(route: AppRoute): string {
+export function appRoutePath(route: AppRoute): string {
+  if (route.view === "hub-settings") {
+    return route.section
+      ? `${appViewPaths["hub-settings"]}/${route.section}`
+      : appViewPaths["hub-settings"];
+  }
+  if (route.view === "session") return `${appViewPaths.session}/${encodeURIComponent(route.sessionId)}`;
   if (route.view !== "apps") return appViewPaths[route.view];
   if (!route.packageName) return appViewPaths.apps;
   const packageSegment = encodeURIComponent(route.packageName);
@@ -264,13 +286,13 @@ export function PackageNavigationShortcutButton({
 
 export function PluginNavigationShortcuts({
   entries,
-  loadStatus,
   onOpen
 }: {
   entries: Record<string, unknown>[];
-  loadStatus: HubEntityLoadStatus;
   onOpen: (entry: Record<string, unknown>) => void;
 }) {
+  if (entries.length === 0) return null;
+
   const hasOverflow = entries.length > 8;
   const shortcuts = entries.map((entry) => {
     const shortcut = packageNavigationShortcut(entry);
@@ -286,9 +308,6 @@ export function PluginNavigationShortcuts({
   return (
     <div className="sidebar-section" aria-label="Admitted plugin navigation">
       <p className="sidebar-section-label">Plugins</p>
-      {loadStatus === "loaded" && entries.length === 0 ? (
-        <p className="sidebar-empty">No plugin navigation</p>
-      ) : null}
       {hasOverflow ? (
         <>
           <div
@@ -327,6 +346,19 @@ const loadingSnapshot: UiTreeSnapshot = {
 };
 
 const terminalRenderer = "restty" as const;
+
+export function terminalDescriptorForSessionId(sessionId: string | undefined): TerminalViewDescriptor | undefined {
+  return sessionId ? { sessionId, renderer: terminalRenderer } : undefined;
+}
+
+export function terminalReleaseToast(
+  sessionId: string,
+  status?: TerminalAttachmentStatus
+): { message: string; color: "danger" | "medium" } {
+  return status?.state === "failed"
+    ? { message: status.message, color: "danger" }
+    : { message: `Session ${sessionId} ended`, color: "medium" };
+}
 
 type BotsterPackageWindow = typeof window & {
   __BOTSTER_PACKAGE_RUNTIME__?: boolean;
@@ -571,10 +603,11 @@ function spawnTargetActionFeedback(result: { accepted: boolean; reason?: string;
   const payload = readRecord(result.result);
   const requestType = readString(payload.request_type);
   if (!requestType?.includes("spawn_target")) return undefined;
+  const actionLabel = actionLabelFromId(requestType).replace("Spawn Target", "Spawn Point");
 
   if (!result.accepted) {
     return {
-      message: result.reason ?? `${actionLabelFromId(requestType)} failed`,
+      message: result.reason ?? `${actionLabel} failed`,
       color: "danger"
     };
   }
@@ -583,7 +616,7 @@ function spawnTargetActionFeedback(result: { accepted: boolean; reason?: string;
   const target = readRecord(targets[0]);
   const targetId = readString(target.target_id) ?? readString(payload.target_id);
   return {
-    message: targetId ? `${targetId}: ${actionLabelFromId(requestType)}` : `${actionLabelFromId(requestType)} accepted`,
+    message: targetId ? `${targetId}: ${actionLabel}` : `${actionLabel} accepted`,
     color: "success"
   };
 }
@@ -610,6 +643,63 @@ interface SpawnTargetFormState {
   kind: string;
   enabled: boolean;
   metadata: string;
+}
+
+export interface SpawnSessionFormState {
+  targetId: string;
+  targetLabel: string;
+  templateId: string;
+  prompt: string;
+  submitting: boolean;
+  error?: string;
+}
+
+export function sessionTemplatesForSpawnTarget(
+  templates: Record<string, unknown>[],
+  targetId: string
+): Record<string, unknown>[] {
+  return templates.filter((template) => (
+    template.available !== false && stringValue(template.target_id, "") === targetId
+  ));
+}
+
+export function spawnSessionFormForTarget(
+  target: Record<string, unknown>,
+  templates: Record<string, unknown>[]
+): SpawnSessionFormState {
+  const targetId = stringValue(target.target_id, String(target.id));
+  const availableTemplates = sessionTemplatesForSpawnTarget(templates, targetId);
+  return {
+    targetId,
+    targetLabel: stringValue(target.label, stringValue(target.title, targetId)),
+    templateId: availableTemplates.length === 1 ? String(availableTemplates[0].id) : "",
+    prompt: "",
+    submitting: false
+  };
+}
+
+export function spawnSessionAction(form: SpawnSessionFormState, sessionId: string): ActionBinding {
+  return {
+    id: "botster.spawn_point.spawn_session",
+    target: form.targetId,
+    label: "Start session",
+    params: {
+      template_id: form.templateId,
+      session_id: sessionId,
+      prompt: form.prompt.trim()
+    }
+  };
+}
+
+export function rejectedSpawnSessionForm(
+  form: SpawnSessionFormState,
+  reason: string | undefined
+): SpawnSessionFormState {
+  return {
+    ...form,
+    submitting: false,
+    error: reason ?? "Botster could not start this session."
+  };
 }
 
 const emptySpawnTargetForm: SpawnTargetFormState = {
@@ -659,7 +749,7 @@ function parseMetadata(input: string): Record<string, string> {
   );
 }
 
-function workspaceIdFromLabel(label: string): string {
+function spawnTargetIdFromLabel(label: string): string {
   return label
     .trim()
     .toLocaleLowerCase()
@@ -677,10 +767,12 @@ export function compareSpawnTargetRows(left: Record<string, unknown>, right: Rec
 
 export function SpawnTargetListItem({
   target,
+  onSpawn,
   onEdit,
   onDelete
 }: {
   target: Record<string, unknown>;
+  onSpawn: (target: Record<string, unknown>) => void;
   onEdit: (target: Record<string, unknown>) => void;
   onDelete: (target: Record<string, unknown>) => void;
 }) {
@@ -695,12 +787,21 @@ export function SpawnTargetListItem({
       <IonLabel>
         <h2>{label}</h2>
         <p>{root}</p>
-        <p className="workspace-technical-detail">{targetId} · {kind}</p>
+        <p className="spawn-target-technical-detail">{targetId} · {kind}</p>
       </IonLabel>
       <IonBadge color={enabled ? "success" : "medium"} slot="end">
         {enabled ? "Enabled" : "Disabled"}
       </IonBadge>
       <IonButtons slot="end">
+        <IonButton
+          aria-label={`New session at ${label}`}
+          fill="outline"
+          disabled={!enabled}
+          onClick={() => onSpawn(target)}
+        >
+          <IonIcon icon={playOutline} slot="start" aria-hidden="true" />
+          New session
+        </IonButton>
         <IonButton aria-label={`Edit ${label}`} onClick={() => onEdit(target)}>
           Edit
         </IonButton>
@@ -728,10 +829,22 @@ export function SessionListItem({
         <h2>{sessionDisplayTitle(session)}</h2>
         <p>{sessionDisplayStatus(session)}</p>
       </IonLabel>
-      {attachable ? (
-        <IonButton slot="end" fill="outline" onClick={() => onOpen(sessionId)}>Open</IonButton>
-      ) : null}
+      {attachable ? <IonButton slot="end" fill="outline" onClick={() => onOpen(sessionId)}>Open</IonButton> : null}
     </IonItem>
+  );
+}
+
+export function SessionRouteView({
+  sessionId,
+  children
+}: {
+  sessionId: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="terminal-session-view" aria-label={`Terminal session ${sessionId}`} data-testid="terminal-session-view">
+      {children}
+    </section>
   );
 }
 
@@ -771,12 +884,13 @@ export default function App() {
       hubRuntime.startupError
     )
   );
-  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "session", HubEntityLoadStatus>>({
+  const [entityLoadStatus, setEntityLoadStatus] = useState<Record<"app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "sessionTemplate" | "session", HubEntityLoadStatus>>({
     app: "not_loaded",
     packageNavigation: "not_loaded",
     package: "not_loaded",
     availablePackage: "not_loaded",
     spawnTarget: "not_loaded",
+    sessionTemplate: "not_loaded",
     session: "not_loaded"
   });
   const [activeRoute, setActiveRoute] = useState<AppRoute>(() => appRouteFromLocation());
@@ -784,13 +898,13 @@ export default function App() {
   const [localPackagePath, setLocalPackagePath] = useState("");
   const [addPackageOpen, setAddPackageOpen] = useState(false);
   const [spawnTargetForm, setSpawnTargetForm] = useState<SpawnTargetFormState | undefined>();
+  const [spawnSessionForm, setSpawnSessionForm] = useState<SpawnSessionFormState | undefined>();
   const [deleteSpawnTarget, setDeleteSpawnTarget] = useState<Record<string, unknown> | undefined>();
   const [packageActionToast, setPackageActionToast] = useState<{ message: string; color: string } | undefined>();
   const [selectedPluginSurface, setSelectedPluginSurface] = useState<SelectedPluginSurface | undefined>();
   const [uiPresentationState, setUiPresentationState] = useState<UiPresentationState>({});
   const lastPluginRouteRenderKey = useRef<string | undefined>(undefined);
-  const [selectedRealHubTerminalSessionId, setSelectedRealHubTerminalSessionId] = useState<string | undefined>();
-  const attachedRealHubTerminalSessionId = useRef<string | undefined>(undefined);
+  const packageSettingsReturnRoute = useRef<AppRoute>({ view: "apps" });
   const [, setFrameVersion] = useState(0);
   const updateLocalState = useCallback((patch: Record<string, unknown>) => {
     setLocalState((current) => ({ ...current, ...patch }));
@@ -817,7 +931,13 @@ export default function App() {
   const navigateToView = useCallback((view: AppView) => {
     navigateToRoute({ view } as AppRoute);
   }, [navigateToRoute]);
+  const navigateToHubSettings = useCallback((section: HubSettingsSection = "general") => {
+    navigateToRoute({ view: "hub-settings", section });
+  }, [navigateToRoute]);
   const activeView = appViewFromRoute(activeRoute);
+  const activeHubSettingsSection = activeRoute.view === "hub-settings"
+    ? activeRoute.section ?? "general"
+    : "general";
   const routePluginSurface = useMemo(
     () => activeRoute.view === "apps" && !activeRoute.settings && activeRoute.packageName && activeRoute.surfaceId
       ? { packageName: activeRoute.packageName, surfaceId: activeRoute.surfaceId }
@@ -881,13 +1001,6 @@ export default function App() {
     });
     const unsubscribeFrames = runtimeClient.hub.onFrame(() => {
       if (!cancelled) {
-        setSelectedRealHubTerminalSessionId((currentSessionId) =>
-          resolveTerminalSessionId(
-            runtimeClient.entities.list("session"),
-            currentSessionId,
-            attachedRealHubTerminalSessionId.current
-          )
-        );
         setFrameVersion((version) => version + 1);
       }
     });
@@ -901,7 +1014,7 @@ export default function App() {
     });
 
     const pullProductionEntity = async (
-      key: "app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "session",
+      key: "app" | "packageNavigation" | "package" | "availablePackage" | "spawnTarget" | "sessionTemplate" | "session",
       request: { family: string; id?: string }
     ) => {
       setEntityLoadStatus((current) => ({ ...current, [key]: "loading" }));
@@ -930,6 +1043,7 @@ export default function App() {
       .then(() => pullProductionEntity("package", { family: "botster-web.package" }))
       .then(() => pullProductionEntity("availablePackage", { family: "botster-web.available_package" }))
       .then(() => pullProductionEntity("spawnTarget", { family: "botster-web.spawn_target" }))
+      .then(() => pullProductionEntity("sessionTemplate", { family: "botster-web.session_template" }))
       .then(() => pullProductionEntity("session", { family: "session" }))
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -961,10 +1075,6 @@ export default function App() {
       const statusKey = "production.diagnostic_action_status";
       updateLocalState({ [statusKey]: `Dispatching ${action.id}` });
       void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
-        const isAttachAction = action.id === "botster.session.attach";
-        if (result.accepted && isAttachAction && action.target) {
-          setSelectedRealHubTerminalSessionId(action.target);
-        }
         const renderedSurface = action.id === "botster.package.surface.render"
           ? renderedPluginSurfaceState(
               result,
@@ -998,11 +1108,10 @@ export default function App() {
         }
         if (action.id === "botster.spawn_target.daemon_request") {
           void runtimeClient.entities.pull({ family: "botster-web.spawn_target" });
+          void runtimeClient.entities.pull({ family: "botster-web.session_template" });
         }
         updateLocalState({
-          [statusKey]: result.accepted && isAttachAction && action.target
-              ? `Attached terminal panel to ${visibleStatusText(action.target)}.`
-            : result.accepted
+          [statusKey]: result.accepted
               ? `Accepted ${action.id}`
               : result.reason ?? `Rejected ${action.id}`,
           ...(renderedSurface?.status ? { "production.plugin_surface_status": visibleStatusText(renderedSurface.status) } : {})
@@ -1156,7 +1265,7 @@ export default function App() {
     if (!spawnTargetForm) return;
     const root = spawnTargetForm.root.trim();
     const label = spawnTargetForm.label.trim();
-    const targetId = spawnTargetForm.targetId.trim() || workspaceIdFromLabel(label);
+    const targetId = spawnTargetForm.targetId.trim() || spawnTargetIdFromLabel(label);
     if (!root || !label || !targetId || (spawnTargetForm.mode === "edit" && !spawnTargetForm.originalTargetId)) return;
 
     const requestType = spawnTargetForm.mode === "create" ? "create_spawn_target" : "update_spawn_target";
@@ -1202,6 +1311,8 @@ export default function App() {
     [recordDiagnostic]
   );
   const installedApps = runtimeClient.entities.list("botster-web.app");
+  const hubStatus = runtimeClient.entities.get("botster-web.hub_status", "local-hub");
+  const hubCompatibility = readRecord(hubStatus?.compatibility);
   const packageNavigation = runtimeClient.entities.list("botster-web.package_navigation");
   const packages = runtimeClient.entities.list("botster-web.package");
   const installedPackageNames = useMemo(
@@ -1259,7 +1370,47 @@ export default function App() {
   }, [routePluginSurfaceKey]);
   const availablePackages = runtimeClient.entities.list("botster-web.available_package");
   const spawnTargets = [...runtimeClient.entities.list("botster-web.spawn_target")].sort(compareSpawnTargetRows);
+  const sessionTemplates = runtimeClient.entities.list("botster-web.session_template");
+  const spawnSessionTemplates = spawnSessionForm
+    ? sessionTemplatesForSpawnTarget(sessionTemplates, spawnSessionForm.targetId)
+    : [];
+  const openSpawnSession = useCallback((target: Record<string, unknown>) => {
+    setSpawnSessionForm(spawnSessionFormForTarget(
+      target,
+      runtimeClient.entities.list("botster-web.session_template")
+    ));
+  }, [runtimeClient]);
+  const submitSpawnSession = useCallback(() => {
+    if (!spawnSessionForm || !spawnSessionForm.templateId || spawnSessionForm.submitting) return;
+    const sessionId = crypto.randomUUID();
+    const action = spawnSessionAction(spawnSessionForm, sessionId);
+
+    setSpawnSessionForm((current) => current ? { ...current, submitting: true, error: undefined } : current);
+    void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
+      recordDiagnostic(actionFailureDiagnostic(action, result));
+      if (!result.accepted) {
+        setSpawnSessionForm((current) => current ? rejectedSpawnSessionForm(current, result.reason) : current);
+        return;
+      }
+
+      const resultPayload = readRecord(result.result);
+      const spawnedSessionId = stringValue(resultPayload.session_id, sessionId);
+      setSpawnSessionForm(undefined);
+      setPackageActionToast({ message: `Session started at ${spawnSessionForm.targetLabel}`, color: "success" });
+      updateLocalState({ "production.diagnostic_action_status": `Started session ${visibleStatusText(spawnedSessionId)}` });
+      navigateToView("dashboard");
+    }).catch((error: unknown) => {
+      setSpawnSessionForm((current) => current ? rejectedSpawnSessionForm(
+        current,
+        error instanceof Error ? error.message : undefined
+      ) : current);
+    });
+  }, [navigateToView, recordDiagnostic, runtimeClient, spawnSessionForm, updateLocalState]);
   const installedPackageRows = useMemo(() => [...packages].sort(compareInstalledPackageRows), [packages]);
+  const hubPackage = installedPackageRows.find((appPackage) => stringValue(appPackage.package_name, String(appPackage.id)) === "botster-hub");
+  const hubUpdateAction = packageActions(hubPackage ?? {})
+    .map(packageActionBinding)
+    .find((action) => action?.params?.daemon_request && readString(readRecord(action.params.daemon_request).request_type) === "check_package_update");
   const installedAppPackageRows = useMemo(
     () => installedPackageRows.filter((app) => packageAppSurfaces(app).length > 0),
     [installedPackageRows]
@@ -1455,8 +1606,11 @@ export default function App() {
     });
   }, [appSurfacePackages, navigateToPluginSurfaceRecord]);
   const openPackageSettings = useCallback((app: Record<string, unknown>) => {
+    packageSettingsReturnRoute.current = activeView === "hub-settings"
+      ? { view: "hub-settings", section: "extensions" }
+      : { view: "apps" };
     navigateToPackageSettings(stringValue(app.package_name, String(app.id)));
-  }, [navigateToPackageSettings]);
+  }, [activeView, navigateToPackageSettings]);
   const openPackageSettingsSurface = useCallback((packageName: string, surface: PackageSurfaceRecord) => {
     const surfaceId = firstString(surface.surface_id, surface.id);
     if (surfaceId) navigateToPackageSettings(packageName, surfaceId);
@@ -1478,40 +1632,30 @@ export default function App() {
   }, [navigateToHubRoutePath, navigateToPluginSurface]);
   const packageNavigationShortcuts = packageNavigation;
   const sessions = runtimeClient.entities.list("session");
-  const attachSession = useCallback((sessionId: string) => {
-    dispatchAction({
-      id: "botster.session.attach",
-      target: sessionId,
-      label: "Open session"
-    });
-  }, [dispatchAction]);
-  const releaseTerminalSession = useCallback((sessionId: string) => {
-    if (attachedRealHubTerminalSessionId.current === sessionId) {
-      attachedRealHubTerminalSessionId.current = undefined;
-    }
-    setSelectedRealHubTerminalSessionId((currentSessionId) =>
-      currentSessionId === sessionId
-        ? resolveTerminalSessionId(runtimeClient.entities.list("session"))
-        : currentSessionId
-    );
-  }, [runtimeClient]);
+  const openSession = useCallback((sessionId: string) => {
+    navigateToRoute({ view: "session", sessionId });
+  }, [navigateToRoute]);
+  const releaseTerminalSession = useCallback((
+    sessionId: string,
+    status?: TerminalAttachmentStatus
+  ) => {
+    if (activeRoute.view !== "session" || activeRoute.sessionId !== sessionId) return;
+
+    setPackageActionToast(terminalReleaseToast(sessionId, status));
+    navigateToView("dashboard");
+  }, [activeRoute, navigateToView]);
   const recordTerminalAttachmentStatus = useCallback((
     sessionId: string,
     status: TerminalAttachmentStatus
   ) => {
-    if (status.state === "attached" || status.state === "live_only") {
-      attachedRealHubTerminalSessionId.current = sessionId;
-    } else if (status.state === "failed") {
-      releaseTerminalSession(sessionId);
+    if (status.state === "failed") {
+      releaseTerminalSession(sessionId, status);
     }
   }, [releaseTerminalSession]);
+  const routeSessionId = activeRoute.view === "session" ? activeRoute.sessionId : undefined;
   const terminalDescriptor: TerminalViewDescriptor | undefined = useMemo(
-    () => selectedRealHubTerminalSessionId
-      ? { sessionId: selectedRealHubTerminalSessionId, renderer: terminalRenderer }
-      : undefined,
-    [
-      selectedRealHubTerminalSessionId
-    ]
+    () => terminalDescriptorForSessionId(routeSessionId),
+    [routeSessionId]
   );
   const terminalDataPlane: TerminalDataPlaneAttachment | undefined = useMemo(
     () => (terminalDescriptor ? hubRuntime.createTerminalDataPlane(terminalDescriptor.sessionId) : undefined),
@@ -1526,17 +1670,19 @@ export default function App() {
       ? localState["production.diagnostic_action_status"]
       : "No diagnostic action has been dispatched.";
   const blockingDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "danger");
-  const warningDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "warning");
-  const hubStateLoading = [entityLoadStatus.package, entityLoadStatus.session].some((status) => status === "not_loaded" || status === "loading");
-  const healthLabel = blockingDiagnostics.length > 0
-    ? "Needs attention"
-    : hubStateLoading
-      ? "Connecting"
-      : warningDiagnostics.length > 0
-          ? "Connected with warnings"
-          : "Connected";
-  const healthColor = blockingDiagnostics.length > 0 ? "danger" : hubStateLoading ? "medium" : warningDiagnostics.length > 0 ? "warning" : "success";
   const pluginAppRouteActive = activeView === "apps" && Boolean(routePluginSurface);
+  const terminalSessionRouteActive = activeRoute.view === "session";
+  const toolbarTitle = activeView === "dashboard"
+    ? "Home"
+    : activeView === "hub-settings"
+      ? "Hub settings"
+      : activeView === "session"
+        ? "Session"
+        : routeSettingsPackageName
+          ? "App settings"
+          : routePluginSurface
+            ? undefined
+            : "Apps";
   const terminalPanel = terminalDescriptor && terminalDataPlane ? (
     <TerminalViewHost
       dataPlane={terminalDataPlane}
@@ -1545,16 +1691,7 @@ export default function App() {
       onDiagnostic={recordTerminalDiagnostic}
       onExit={releaseTerminalSession}
     />
-  ) : (
-    <aside className="terminal-panel" aria-labelledby="terminal-heading">
-      <div className="panel-heading">
-        <h2 id="terminal-heading">Terminal renderer</h2>
-      </div>
-      <p className="terminal-status" data-terminal-session-id="none">
-        Select a running session to attach the terminal panel.
-      </p>
-    </aside>
-  );
+  ) : null;
 
   return (
     <IonApp>
@@ -1588,54 +1725,54 @@ export default function App() {
               </IonList>
               <PluginNavigationShortcuts
                 entries={packageNavigationShortcuts}
-                loadStatus={entityLoadStatus.packageNavigation}
                 onOpen={openPackageNavigation}
               />
-              <div className="sidebar-section sidebar-advanced">
-                <p className="sidebar-section-label">Advanced</p>
-                <IonMenuToggle autoHide={false}>
-                  <button
-                    type="button"
-                    className={activeView === "diagnostics" ? "nav-item active" : "nav-item"}
-                    aria-current={activeView === "diagnostics" ? "page" : undefined}
-                    onClick={() => navigateToView("diagnostics")}
-                  >
-                    <IonIcon icon={listCircleOutline} aria-hidden="true" />
-                    <span>Diagnostics</span>
-                  </button>
-                </IonMenuToggle>
-              </div>
             </nav>
           </IonContent>
+          <IonFooter className="app-sidebar-footer">
+            <IonList lines="none" className="nav-list sidebar-advanced">
+              <IonMenuToggle autoHide={false}>
+                <button
+                  type="button"
+                  className={activeView === "hub-settings" ? "nav-item active" : "nav-item"}
+                  aria-current={activeView === "hub-settings" ? "page" : undefined}
+                  onClick={() => navigateToHubSettings("general")}
+                >
+                  <IonIcon icon={cogOutline} aria-hidden="true" />
+                  <span>Hub settings</span>
+                </button>
+              </IonMenuToggle>
+            </IonList>
+          </IonFooter>
         </IonMenu>
 
         <IonPage id="main-content">
-          <IonHeader className="app-header">
+          <IonHeader className={terminalSessionRouteActive ? "app-header terminal-session-header" : "app-header"}>
             <IonToolbar>
               <IonButtons slot="start">
-                <IonMenuButton />
+                <IonMenuButton aria-label="Open navigation" />
                 {pluginAppRouteActive ? (
                   <IonButton aria-label="Back to Apps" fill="clear" onClick={() => navigateToView("apps")}>
                     <IonIcon icon={arrowBackOutline} slot="icon-only" aria-hidden="true" />
                   </IonButton>
                 ) : null}
               </IonButtons>
-              <IonTitle>Botster</IonTitle>
-              <IonButtons slot="end" className="toolbar-status">
-                <IonButton fill="clear" color={healthColor} onClick={() => navigateToView("diagnostics")}>
-                  <IonBadge color={healthColor}>{healthLabel}</IonBadge>
-                </IonButton>
-              </IonButtons>
+              {toolbarTitle ? <IonTitle className="app-toolbar-title">{toolbarTitle}</IonTitle> : null}
             </IonToolbar>
           </IonHeader>
 
-          <IonContent fullscreen className={pluginAppRouteActive ? "plugin-app-content" : undefined}>
-            <main className={pluginAppRouteActive ? "workspace-shell plugin-workspace-shell" : "workspace-shell"}>
+          <IonContent fullscreen className={terminalSessionRouteActive ? "terminal-session-content" : pluginAppRouteActive ? "plugin-app-content" : undefined}>
+            <main className={terminalSessionRouteActive ? "terminal-session-shell" : pluginAppRouteActive ? "workspace-shell plugin-workspace-shell" : "workspace-shell"}>
+              {terminalSessionRouteActive ? (
+                <SessionRouteView sessionId={activeRoute.sessionId}>
+                  {terminalPanel}
+                </SessionRouteView>
+              ) : null}
               {activeView === "dashboard" ? (
                 <section className="view-stack" aria-labelledby="dashboard-heading" data-testid="dashboard-view">
                   <section className="home-hero">
                     <div>
-                      <p className="eyebrow">Local Botster</p>
+                      <p className="eyebrow">Local hub</p>
                       <h1 id="dashboard-heading">Your sessions</h1>
                       <p>Return to work already running on this device.</p>
                     </div>
@@ -1649,21 +1786,24 @@ export default function App() {
                       <IonBadge color="medium">{sessions.length}</IonBadge>
                     </div>
                     {entityLoadStatus.session === "error" ? (
-                      <p className="entity-empty">Sessions could not be loaded. Check Diagnostics for connection details.</p>
+                      <p className="entity-empty">Sessions could not be loaded. Open Hub settings for connection details.</p>
                     ) : sessions.length > 0 ? (
                       <IonList lines="full" aria-label="Sessions">
                         {sessions.map((session) => (
                           <SessionListItem
                             key={String(session.id)}
                             session={session}
-                            onOpen={attachSession}
+                            onOpen={openSession}
                           />
                         ))}
                       </IonList>
                     ) : (
                       <div className="home-empty-state">
                         <h3>No sessions yet</h3>
-                        <p>Start a session to begin working with Botster.</p>
+                        <p>Choose a spawn point to get ready for your first session.</p>
+                        <IonButton fill="outline" size="small" onClick={() => navigateToHubSettings("spawn-points")}>
+                          View spawn points
+                        </IonButton>
                       </div>
                     )}
                   </section>
@@ -1672,12 +1812,11 @@ export default function App() {
                       <IonIcon icon={cubeOutline} aria-hidden="true" />
                       <span><strong>Apps</strong><small>Open installed tools and extensions</small></span>
                     </button>
-                    <button type="button" onClick={() => navigateToView("spawn-points")}>
+                    <button type="button" onClick={() => navigateToHubSettings("spawn-points")}>
                       <IonIcon icon={serverOutline} aria-hidden="true" />
-                      <span><strong>Workspaces</strong><small>Choose where sessions can run</small></span>
+                      <span><strong>Spawn points</strong><small>Choose where sessions can run</small></span>
                     </button>
                   </div>
-                  {terminalDescriptor ? terminalPanel : null}
                 </section>
               ) : null}
 
@@ -1708,7 +1847,7 @@ export default function App() {
                         dispatchPluginSurfaceAction(selectedPluginSurface.packageName, selectedPluginSurface.surfaceId, dispatch);
                       }
                     }}
-                    onBack={() => navigateToView("apps")}
+                    onBack={() => navigateToRoute(packageSettingsReturnRoute.current)}
                     onOpenSurface={openPackageSettingsSurface}
                     selectedSurface={routeSettingsSurfaceKey && selectedPluginSurface?.routeKey === routeSettingsSurfaceKey ? selectedPluginSurface : undefined}
                     surfaceDiagnostic={routeSettingsSurfaceDiagnostic}
@@ -1772,28 +1911,158 @@ export default function App() {
                   )
                 ) : null}
 
-                {activeView === "spawn-points" ? (
-                  <section className="view-stack" aria-labelledby="spawn-points-heading" data-testid="spawn-points-view">
+                {activeView === "hub-settings" ? (
+                  <section className="view-stack" aria-labelledby="hub-settings-heading" data-testid="hub-settings-view">
+                    <div className="page-heading">
+                      <div>
+                        <p className="eyebrow">Local hub</p>
+                        <h1 id="hub-settings-heading">Hub settings</h1>
+                        <p className="page-description">Manage where sessions run, how they start, and the extensions connected to this hub.</p>
+                      </div>
+                    </div>
+                    <nav className="hub-settings-nav" aria-label="Hub settings sections">
+                      {hubSettingsSections.map((section) => (
+                        <button
+                          type="button"
+                          key={section.id}
+                          className={activeHubSettingsSection === section.id ? "active" : undefined}
+                          aria-current={activeHubSettingsSection === section.id ? "page" : undefined}
+                          onClick={() => navigateToHubSettings(section.id)}
+                        >
+                          <strong>{section.label}</strong>
+                          <span>{section.description}</span>
+                        </button>
+                      ))}
+                    </nav>
+                  </section>
+                ) : null}
+
+                {activeView === "hub-settings" && activeHubSettingsSection === "general" ? (
+                  <section className="view-stack hub-settings-panel" aria-labelledby="hub-general-heading" data-testid="hub-settings-general">
+                    <div className="page-heading">
+                      <div>
+                        <p className="eyebrow">About this hub</p>
+                        <h2 id="hub-general-heading">General</h2>
+                        <p className="page-description">Identity and software information for this Botster Hub.</p>
+                      </div>
+                    </div>
+                    <dl className="hub-metadata-list">
+                      <div><dt>Name</dt><dd>{stringValue(hubStatus?.title, "Local Hub")}</dd></div>
+                      <div><dt>Hub version</dt><dd>{hubPackage ? stringValue(hubPackage.version, "Unknown") : "Not reported"}</dd></div>
+                      <div><dt>Host ID</dt><dd>{stringValue(hubStatus?.host_id, "Not reported")}</dd></div>
+                      <div><dt>Protocol</dt><dd>{stringValue(hubCompatibility.protocol, "Not reported")} · version {stringValue(hubCompatibility.protocol_version, "unknown")}</dd></div>
+                      <div><dt>State schema</dt><dd>Version {stringValue(hubStatus?.schema_version, "unknown")}</dd></div>
+                    </dl>
+                    <div className="hub-software-update">
+                      <div>
+                        <h3>Software updates</h3>
+                        <p>{hubUpdateAction ? "Check whether a newer Hub version is available." : "Hub update checks are not available in this version."}</p>
+                      </div>
+                      <IonButton
+                        fill="outline"
+                        size="small"
+                        disabled={!hubUpdateAction || hubUpdateAction.disabled === true}
+                        onClick={() => hubUpdateAction && dispatchAction(hubUpdateAction)}
+                      >
+                        Check for updates
+                      </IonButton>
+                    </div>
+                  </section>
+                ) : null}
+
+                {activeView === "hub-settings" && activeHubSettingsSection === "session-types" ? (
+                  <section className="view-stack hub-settings-panel" aria-labelledby="session-types-heading" data-testid="session-types-view">
+                    <div className="page-heading">
+                      <div>
+                        <p className="eyebrow">Sessions</p>
+                        <h2 id="session-types-heading">Session types</h2>
+                        <p className="page-description">Available ways to start a session at each spawn point.</p>
+                      </div>
+                      <IonBadge color="medium">{sessionTemplates.length}</IonBadge>
+                    </div>
+                    {entityLoadStatus.sessionTemplate === "error" ? (
+                      <IonNote color="danger">Session types could not be loaded from Botster.</IonNote>
+                    ) : sessionTemplates.length > 0 ? (
+                      <IonList lines="full" aria-label="Session types">
+                        {sessionTemplates.map((template) => {
+                          const targetId = stringValue(template.target_id, "");
+                          const target = spawnTargets.find((spawnTarget) => stringValue(spawnTarget.target_id, String(spawnTarget.id)) === targetId);
+                          return (
+                            <IonItem key={String(template.id)} disabled={template.available === false}>
+                              <IonLabel>
+                                <h2>{stringValue(template.title, String(template.id))}</h2>
+                                <p>{target ? stringValue(target.label, String(target.id)) : targetId || "Any spawn point"}</p>
+                              </IonLabel>
+                              <IonBadge slot="end" color={template.available === false ? "medium" : "success"}>
+                                {template.available === false ? "Unavailable" : "Available"}
+                              </IonBadge>
+                            </IonItem>
+                          );
+                        })}
+                      </IonList>
+                    ) : (
+                      <p className="entity-empty">No session types are available yet.</p>
+                    )}
+                  </section>
+                ) : null}
+
+                {activeView === "hub-settings" && activeHubSettingsSection === "extensions" ? (
+                  <section className="view-stack hub-settings-panel" aria-labelledby="extension-settings-heading" data-testid="extension-settings-view">
+                    <div className="page-heading">
+                      <div>
+                        <p className="eyebrow">Installed</p>
+                        <h2 id="extension-settings-heading">Extension configuration</h2>
+                        <p className="page-description">Open settings supplied by apps and extensions installed on this hub.</p>
+                      </div>
+                    </div>
+                    {installedPackageRows.length > 0 ? (
+                      <IonList lines="full" aria-label="Installed extensions">
+                        {installedPackageRows.map((appPackage) => {
+                          const packageType = packageAppSurfaces(appPackage).length > 0
+                            ? "App"
+                            : stringValue(appPackage.classification, "") === "provider"
+                              ? "Provider"
+                              : "Extension";
+                          return (
+                          <IonItem button detail key={String(appPackage.id)} onClick={() => openPackageSettings(appPackage)}>
+                            <IonLabel>
+                              <h2>{appDisplayName(appPackage.title, String(appPackage.id))}</h2>
+                              <p>{packageType} · Version {stringValue(appPackage.version, "unknown")} · {stringValue(appPackage.status, "unknown")}</p>
+                            </IonLabel>
+                            <IonNote slot="end">Manage</IonNote>
+                          </IonItem>
+                          );
+                        })}
+                      </IonList>
+                    ) : (
+                      <p className="entity-empty">No apps or extensions are installed.</p>
+                    )}
+                  </section>
+                ) : null}
+
+                {activeView === "hub-settings" && activeHubSettingsSection === "spawn-points" ? (
+                  <section className="view-stack hub-settings-panel" aria-labelledby="spawn-points-heading" data-testid="spawn-points-view">
                     <div className="page-heading">
                       <div>
                         <p className="eyebrow">Local setup</p>
-                        <h1 id="spawn-points-heading">Workspaces</h1>
-                        <p className="page-description">Folders where Botster is allowed to start sessions.</p>
+                        <h2 id="spawn-points-heading">Spawn points</h2>
+                        <p className="page-description">Directories and Git repositories where Botster can start sessions.</p>
                       </div>
                       <IonButton onClick={openCreateSpawnTarget}>
                         <IonIcon icon={addOutline} slot="start" aria-hidden="true" />
-                        Add workspace
+                        Add spawn point
                       </IonButton>
                     </div>
                     {entityLoadStatus.spawnTarget === "error" ? (
-                      <IonNote color="danger">Workspaces could not be loaded from Botster.</IonNote>
+                      <IonNote color="danger">Spawn points could not be loaded from Botster.</IonNote>
                     ) : null}
                     {spawnTargets.length > 0 ? (
-                      <IonList lines="full" aria-label="Workspaces">
+                      <IonList lines="full" aria-label="Spawn points">
                         {spawnTargets.map((target) => (
                           <SpawnTargetListItem
                             key={String(target.id)}
                             target={target}
+                            onSpawn={openSpawnSession}
                             onEdit={openEditSpawnTarget}
                             onDelete={setDeleteSpawnTarget}
                           />
@@ -1803,22 +2072,22 @@ export default function App() {
                       <article className="workflow-section">
                           <div className="section-heading">
                             <div>
-                              <p className="eyebrow">Workspaces</p>
-                              <h2>No workspaces yet</h2>
+                              <p className="eyebrow">Spawn points</p>
+                              <h2>No spawn points yet</h2>
                             </div>
                           </div>
-                          <p className="entity-empty">Add a folder where Botster can start local sessions.</p>
+                          <p className="entity-empty">Add a directory or Git repository where Botster can start local sessions.</p>
                       </article>
                     )}
                   </section>
                 ) : null}
 
-                {activeView === "diagnostics" ? (
-                <section className="view-stack" aria-labelledby="diagnostics-view-heading" data-testid="diagnostics-view">
+                {activeView === "hub-settings" && activeHubSettingsSection === "support" ? (
+                <section className="view-stack hub-settings-panel" aria-labelledby="diagnostics-view-heading" data-testid="diagnostics-view">
                   <div className="page-heading">
                     <div>
                       <p className="eyebrow">Operations</p>
-                      <h1 id="diagnostics-view-heading">Diagnostics</h1>
+                      <h2 id="diagnostics-view-heading">Support</h2>
                     </div>
                     <IonBadge color={blockingDiagnostics.length > 0 ? "danger" : "medium"}>
                       {diagnostics.length}
@@ -1839,7 +2108,7 @@ export default function App() {
                     <p>Protocol, renderer, entity-frame, and terminal details for troubleshooting.</p>
                   <IonGrid className="workspace-grid" aria-label="Developer diagnostic details">
                     <IonRow>
-                      <IonCol size="12" sizeLg="8">
+                      <IonCol size="12">
                         <div className="local-hub-main">
                           <section className="workflow-section" aria-label="Renderer registry surface" data-testid="renderer-registry-workflow">
                             <div className="section-heading">
@@ -1931,16 +2200,9 @@ export default function App() {
                                 <dt>Diagnostic action</dt>
                                 <dd>{diagnosticActionStatus}</dd>
                               </div>
-                              <div>
-                                <dt>Terminal session</dt>
-                                <dd>{terminalDescriptor?.sessionId ?? "No terminal session attached"}</dd>
-                              </div>
                             </dl>
                           </section>
                         </div>
-                      </IonCol>
-                      <IonCol size="12" sizeLg="4">
-                        {terminalPanel}
                       </IonCol>
                     </IonRow>
                   </IonGrid>
@@ -2013,10 +2275,91 @@ export default function App() {
                 </div>
               </IonContent>
             </IonModal>
+            <IonModal isOpen={Boolean(spawnSessionForm)} onDidDismiss={() => setSpawnSessionForm(undefined)}>
+              <IonHeader>
+                <IonToolbar>
+                  <IonTitle>New session</IonTitle>
+                  <IonButtons slot="end">
+                    <IonButton disabled={spawnSessionForm?.submitting} onClick={() => setSpawnSessionForm(undefined)}>
+                      Close
+                    </IonButton>
+                  </IonButtons>
+                </IonToolbar>
+              </IonHeader>
+              <IonContent className="ion-padding">
+                {spawnSessionForm ? (
+                  <div className="spawn-session-form">
+                    <div className="spawn-session-intro">
+                      <p className="eyebrow">Spawn point</p>
+                      <h2>{spawnSessionForm.targetLabel}</h2>
+                      <p>Choose how this session should start. Botster will use the spawn point's folder and policy.</p>
+                    </div>
+                    {entityLoadStatus.sessionTemplate === "error" ? (
+                      <IonNote color="danger">Session types could not be loaded from Botster.</IonNote>
+                    ) : spawnSessionTemplates.length === 0 ? (
+                      <IonNote color="medium">
+                        {entityLoadStatus.sessionTemplate === "loaded"
+                          ? "No session types are available for this spawn point."
+                          : "Loading session types…"}
+                      </IonNote>
+                    ) : (
+                      <IonList lines="full" aria-label="New session form">
+                        <IonItem>
+                          <IonSelect
+                            label="Session type"
+                            labelPlacement="stacked"
+                            value={spawnSessionForm.templateId}
+                            placeholder="Choose a session type"
+                            disabled={spawnSessionForm.submitting}
+                            onIonChange={(event) => setSpawnSessionForm((current) => current ? {
+                              ...current,
+                              templateId: String(event.detail.value ?? ""),
+                              error: undefined
+                            } : current)}
+                          >
+                            {spawnSessionTemplates.map((template) => (
+                              <IonSelectOption key={String(template.id)} value={String(template.id)}>
+                                {stringValue(template.title, String(template.id))}
+                              </IonSelectOption>
+                            ))}
+                          </IonSelect>
+                        </IonItem>
+                        <IonItem>
+                          <IonTextarea
+                            label="Prompt (optional)"
+                            labelPlacement="stacked"
+                            value={spawnSessionForm.prompt}
+                            autoGrow
+                            rows={4}
+                            placeholder="What should this session work on?"
+                            disabled={spawnSessionForm.submitting}
+                            onIonInput={(event) => setSpawnSessionForm((current) => current ? {
+                              ...current,
+                              prompt: String(event.detail.value ?? ""),
+                              error: undefined
+                            } : current)}
+                          />
+                        </IonItem>
+                      </IonList>
+                    )}
+                    {spawnSessionForm.error ? <IonNote color="danger">{spawnSessionForm.error}</IonNote> : null}
+                    <div className="modal-actions">
+                      <IonButton
+                        disabled={!spawnSessionForm.templateId || spawnSessionForm.submitting}
+                        onClick={submitSpawnSession}
+                      >
+                        <IonIcon icon={playOutline} slot="start" aria-hidden="true" />
+                        {spawnSessionForm.submitting ? "Starting…" : "Start session"}
+                      </IonButton>
+                    </div>
+                  </div>
+                ) : null}
+              </IonContent>
+            </IonModal>
             <IonModal isOpen={Boolean(spawnTargetForm)} onDidDismiss={() => setSpawnTargetForm(undefined)}>
                 <IonHeader>
                   <IonToolbar>
-                  <IonTitle>{spawnTargetForm?.mode === "edit" ? "Edit workspace" : "Add workspace"}</IonTitle>
+                  <IonTitle>{spawnTargetForm?.mode === "edit" ? "Edit spawn point" : "Add spawn point"}</IonTitle>
                     <IonButtons slot="end">
                       <IonButton onClick={() => setSpawnTargetForm(undefined)}>Close</IonButton>
                     </IonButtons>
@@ -2028,7 +2371,7 @@ export default function App() {
                       <IonList lines="full" aria-label="Spawn point form">
                         <IonItem>
                           <IonInput
-                            label="Workspace name"
+                            label="Spawn point name"
                             labelPlacement="stacked"
                             value={spawnTargetForm.label}
                             placeholder="My project"
@@ -2053,16 +2396,16 @@ export default function App() {
                           </IonCheckbox>
                         </IonItem>
                       </IonList>
-                      <details className="advanced-workspace-options">
+                      <details className="advanced-spawn-target-options">
                         <summary>Advanced options</summary>
-                        <IonList lines="full" aria-label="Advanced workspace options">
+                        <IonList lines="full" aria-label="Advanced spawn point options">
                           <IonItem>
                             <IonInput
                               label="Identifier"
                               labelPlacement="stacked"
                               value={spawnTargetForm.targetId}
                               disabled={spawnTargetForm.mode === "edit"}
-                              placeholder={workspaceIdFromLabel(spawnTargetForm.label) || "my-project"}
+                              placeholder={spawnTargetIdFromLabel(spawnTargetForm.label) || "my-project"}
                               onIonInput={(event) => setSpawnTargetForm((current) => current ? { ...current, targetId: String(event.detail.value ?? "") } : current)}
                             />
                           </IonItem>
@@ -2095,7 +2438,7 @@ export default function App() {
         </IonSplitPane>
         <IonAlert
           isOpen={Boolean(deleteSpawnTarget)}
-          header="Delete workspace"
+          header="Delete spawn point"
           message={deleteSpawnTarget ? `Delete ${stringValue(deleteSpawnTarget.label, String(deleteSpawnTarget.id))}?` : undefined}
           buttons={[
             {
@@ -2153,6 +2496,7 @@ export function PluginSurfaceRoutePage({
         <UiNodeSurface
           snapshot={selectedSurface.snapshot}
           entities={entities}
+          showTechnicalHeader={false}
           capabilities={{
             ...defaultUiCapabilitySet,
             isolated_plugin_asset: false
@@ -2223,13 +2567,13 @@ function PluginSettingsRoutePage({
   presentationState = {}
 }: PluginSettingsRoutePageProps) {
   return (
-    <article className="workflow-section" aria-label="Plugin settings" data-testid="plugin-settings-route">
+    <article className="workflow-section" aria-label="Extension settings" data-testid="plugin-settings-route">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Plugin settings</p>
+          <p className="eyebrow">Extension settings</p>
           <h2>{packageRecord ? appDisplayName(packageRecord.title, String(packageRecord.id)) : packageName}</h2>
         </div>
-        <IonButton fill="clear" onClick={onBack}>Apps</IonButton>
+        <IonButton fill="clear" onClick={onBack}>Back</IonButton>
       </div>
       {diagnostic ? (
         <p className="entity-empty" data-testid="plugin-settings-route-diagnostic">{diagnostic}</p>
@@ -2247,6 +2591,7 @@ function PluginSettingsRoutePage({
             <UiNodeSurface
               snapshot={selectedSurface.snapshot}
               entities={entities}
+              showTechnicalHeader={false}
               capabilities={{
                 ...defaultUiCapabilitySet,
                 isolated_plugin_asset: false

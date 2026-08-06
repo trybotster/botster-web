@@ -292,7 +292,7 @@ function hasFileExtension(pathname) {
 }
 
 function isSpaRoutePath(pathname) {
-  return pathname.startsWith("/apps/") || pathname.startsWith("/packages/");
+  return pathname.startsWith("/apps/") || pathname.startsWith("/packages/") || pathname.startsWith("/sessions/");
 }
 
 async function injectPackageRuntimeMarker(html) {

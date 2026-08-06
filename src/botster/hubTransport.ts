@@ -24,6 +24,7 @@ import type {
   DaemonRequest,
   DaemonResponse,
   DaemonSessionEntity,
+  DaemonSessionTemplate,
   JsonValue
 } from "./realHubDaemonDto";
 
@@ -35,6 +36,7 @@ const packageNavigationFamily = "botster-web.package_navigation";
 const packageFamily = "botster-web.package";
 const availablePackageFamily = "botster-web.available_package";
 const spawnTargetFamily = "botster-web.spawn_target";
+const sessionTemplateFamily = "botster-web.session_template";
 const statusFamily = hubStatusFamily;
 
 type HubConnectionDiagnosticPayload = Omit<Partial<DaemonDiagnostic>, "kind"> & { kind: string };
@@ -136,6 +138,8 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
           emitResponse(await bridge.request({ type: "list_packages" }));
         } else if (request.family === spawnTargetFamily) {
           emitResponse(await bridge.request(spawnTargetDaemonRequest({ type: "list_spawn_targets" })));
+        } else if (request.family === sessionTemplateFamily) {
+          emitResponse(await bridge.request({ type: "list_session_templates" }));
         } else if (request.family === availablePackageFamily) {
           const registryPath = typeof request.registry_path === "string" ? request.registry_path : "";
           if (registryPath) {
@@ -235,6 +239,18 @@ export function daemonResponseFrames(response: DaemonResponse, sequence: number)
         family: spawnTargetFamily,
         sequence,
         records: spawnTargets.map(spawnTargetRecord)
+      } satisfies EntityFrame
+    });
+  }
+
+  if (response.kind === "session_templates" && Array.isArray(response.session_templates)) {
+    frames.push({
+      kind: "entity_snapshot",
+      payload: {
+        operation: "entity_snapshot",
+        family: sessionTemplateFamily,
+        sequence,
+        records: response.session_templates.map(sessionTemplateRecord)
       } satisfies EntityFrame
     });
   }
@@ -427,6 +443,21 @@ function spawnTargetRecord(target: DaemonSpawnTarget) {
     }),
     delete_action: spawnTargetAction("delete_spawn_target", target.target_id, "Delete")
   };
+}
+
+function sessionTemplateRecord(template: DaemonSessionTemplate) {
+  return {
+    ...template,
+    id: template.template_id,
+    title: humanizeIdentifier(template.id),
+    subtitle: template.package_name,
+    status: template.available ? "available" : "unavailable"
+  };
+}
+
+function humanizeIdentifier(value: string): string {
+  const words = value.replace(/[-_]+/g, " ").trim();
+  return words ? words.replace(/^\w/, (letter) => letter.toUpperCase()) : value;
 }
 
 function metadataSummary(metadata: Record<string, string> | undefined): string {
@@ -1050,6 +1081,37 @@ async function dispatchDaemonAction(
       target_id: "target_id" in daemonRequest ? daemonRequest.target_id : undefined,
       spawn_targets: responseSpawnTargets(response),
       validation: responseSpawnTargetValidation(response),
+      diagnostics: responseDiagnostics(response)
+    }));
+    return;
+  }
+
+  if (action.id === "botster.spawn_point.spawn_session") {
+    const templateId = readConfigString(action.params?.template_id);
+    const sessionId = readConfigString(action.params?.session_id);
+    const targetId = action.target ?? readConfigString(action.params?.target_id);
+    const prompt = readConfigString(action.params?.prompt).trim();
+    if (!templateId || !sessionId || !targetId) {
+      emit(actionResultFrame(request, false, "New session is missing a spawn point or session template"));
+      return;
+    }
+
+    const response = await bridge.request({
+      type: "spawn_session_template",
+      template_id: templateId,
+      session_id: sessionId,
+      request: {
+        target_id: targetId,
+        context: prompt ? { prompt } : {}
+      }
+    });
+    emitResponse(response);
+    emit(actionResultFrame(request, !response.error, response.error?.message, {
+      request_type: "spawn_session_template",
+      kind: response.kind,
+      target_id: targetId,
+      template_id: templateId,
+      session_id: response.sessions?.[0]?.session_id ?? sessionId,
       diagnostics: responseDiagnostics(response)
     }));
     return;

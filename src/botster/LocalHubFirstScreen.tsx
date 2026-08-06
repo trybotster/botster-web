@@ -50,7 +50,7 @@ export function LocalHubFirstScreen({
     <section className="local-hub-first-screen" aria-labelledby="local-hub-status-heading">
       <div className="local-hub-status-lead">
         <p className="eyebrow">System status</p>
-        <h1 id="local-hub-status-heading">Local Botster health</h1>
+        <h3 id="local-hub-status-heading">Local Botster health</h3>
         <p>
           Connection, extensions, sessions, and terminal availability for this device.
         </p>
@@ -59,7 +59,7 @@ export function LocalHubFirstScreen({
         {summaries.map((summary) => (
           <article className={`local-hub-status-card ${summary.severity}`} key={summary.key}>
             <div className="local-hub-status-title">
-              <h3>{summary.label}</h3>
+              <h4>{summary.label}</h4>
               <IonBadge color={badgeColor(summary.severity)}>{summary.state}</IonBadge>
             </div>
             <p>{summary.detail}</p>

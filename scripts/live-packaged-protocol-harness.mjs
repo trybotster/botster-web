@@ -242,7 +242,7 @@ try {
   }
   await startProductionSession();
   await waitForSessionStatus(page, "running");
-  await openDiagnosticsView(page);
+  await openSessionTerminal(page, productionSessionId);
   await waitForRunningSessionFrame(page);
   await waitForTerminalSession(page, productionSessionId);
   responseAssemblyTelemetry.push({ cycle: 0, ...await waitForAutomaticTerminalRestore(page) });
@@ -264,7 +264,11 @@ try {
     );
     previousGrantId = reconnect.grantId;
     previousEntitySubscriptionId = reconnect.subscriptionId;
-    await openDiagnosticsView(page);
+    if (await page.getByTestId("terminal-session-view").count() === 0) {
+      await openHomeView(page);
+      await waitForSessionStatus(page, "running");
+      await openSessionTerminal(page, productionSessionId);
+    }
     await waitForSessionStatus(page, "running");
     await waitForRunningSessionFrame(page);
     await waitForTerminalSession(page, productionSessionId);
@@ -606,8 +610,17 @@ async function openHomeView(page) {
   await page.getByTestId("dashboard-view").waitFor();
 }
 
+async function openSessionTerminal(page, sessionId) {
+  const sessionRow = page.getByTestId("dashboard-view").locator("ion-item").filter({
+    has: page.getByText(sessionId, { exact: true })
+  });
+  await sessionRow.getByRole("button", { name: "Open", exact: true }).click();
+  await page.getByTestId("terminal-session-view").waitFor();
+}
+
 async function openDiagnosticsView(page) {
-  await page.getByLabel("Botster workbench").getByRole("button", { name: "Diagnostics", exact: true }).click();
+  await page.locator("ion-menu.app-sidebar").getByRole("button", { name: "Hub settings", exact: true }).click();
+  await page.getByLabel("Hub settings sections").getByRole("button", { name: /Support/ }).click();
   await page.getByTestId("diagnostics-view").waitFor();
   const developerDetails = page.locator("details.developer-diagnostics");
   if (!(await developerDetails.evaluate((details) => details.open))) {
@@ -3312,19 +3325,6 @@ async function assertCurrentHubSchemaPresentation(page) {
     /Blocked|mismatch|expected schema/i.test(schemaText)
   ) {
     throw new Error(`schema diagnostic is not neutral schema-2 context: ${schemaText}`);
-  }
-
-  const healthBadge = page.locator(".toolbar-status ion-badge");
-  await page.waitForFunction(
-    () => ["Connected", "Connected with warnings"].includes(
-      globalThis.document.querySelector(".toolbar-status ion-badge")?.textContent?.trim() ?? ""
-    ),
-    undefined,
-    { timeout: 15_000 }
-  );
-  const healthText = (await healthBadge.innerText()).trim();
-  if (healthText === "Needs attention") {
-    throw new Error("schema 2 incorrectly marked the connected shell as Needs attention");
   }
 
   const hubCard = page.getByRole("heading", { name: "Hub", exact: true }).locator("xpath=ancestor::article[1]");

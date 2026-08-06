@@ -10,6 +10,7 @@ import type { JsonValue, UiActionResult, UiNodeActionDispatch, UiTreeSnapshot } 
 interface UiNodeSurfaceProps {
   snapshot: UiTreeSnapshot;
   entities: EntityFrameStore;
+  showTechnicalHeader?: boolean;
   capabilities?: UiCapabilitySet;
   localState?: Record<string, unknown>;
   presentation?: Record<string, JsonValue>;
@@ -20,6 +21,7 @@ interface UiNodeSurfaceProps {
 export function UiNodeSurface({
   snapshot,
   entities,
+  showTechnicalHeader = true,
   capabilities,
   localState,
   presentation,
@@ -33,6 +35,14 @@ export function UiNodeSurface({
     localState,
     presentation
   }) as ReactNode;
+
+  if (!showTechnicalHeader) {
+    return (
+      <div className="uinode-root" data-testid="ui-node-surface">
+        {renderedTree}
+      </div>
+    );
+  }
 
   return (
     <section className="renderer-surface" aria-labelledby="renderer-heading" data-testid="ui-node-surface">
