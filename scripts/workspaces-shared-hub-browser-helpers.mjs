@@ -62,6 +62,13 @@ export function parseWorkspacesSpawnAssignment(serialized) {
   const caseIds = new Set();
   const cases = assignment.cases.map((candidate, index) => {
     const path = `cases[${index}]`;
+    // Cold cut: reject the superseded key outright rather than ignoring it. Requiring
+    // session_type_id alone would still accept a case carrying both and silently discard
+    // template_id, leaving this caller seam tolerant of a field the installed Workspaces
+    // package no longer reads.
+    if (candidate != null && Object.prototype.hasOwnProperty.call(candidate, "template_id")) {
+      throw new Error(`${path}.template_id is superseded by ${path}.session_type_id`);
+    }
     const normalized = {
       case_id: requiredString(candidate?.case_id, `${path}.case_id`),
       target_id: requiredString(candidate?.target_id, `${path}.target_id`),

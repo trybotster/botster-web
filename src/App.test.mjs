@@ -110,7 +110,14 @@ assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
     branch: "branch-a",
     template_id: "template-a"
   }]
-})), /cases\[0\]\.session_type_id must be a non-empty string/);
+})), /cases\[0\]\.template_id is superseded by cases\[0\]\.session_type_id/);
+// The old key must be rejected on its own merits, not merely because session_type_id is
+// missing. A case carrying both would otherwise validate and silently drop template_id,
+// which is the compatibility tolerance this migration forbids.
+assert.throws(() => parseWorkspacesSpawnAssignment(JSON.stringify({
+  ...sharedHubColdAssignment,
+  cases: [{ ...sharedHubColdAssignment.cases[0], template_id: "template-a" }]
+})), /cases\[0\]\.template_id is superseded by cases\[0\]\.session_type_id/);
 assert.throws(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_SURFACE_SKIP: "1" }), /rejects allow-skip inputs/);
 assert.throws(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_BROWSER_SKIP: "true" }), /rejects allow-skip inputs/);
 assert.doesNotThrow(() => assertNoRequiredSmokeSkip({ BOTSTER_LIVE_ALLOW_SURFACE_SKIP: "0" }));
