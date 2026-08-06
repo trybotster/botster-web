@@ -8,10 +8,9 @@
   run step `run_step_1786031355_272130`.
 - The target was resolved from the admitted Botster spawn-target registry, not
   from the ambient working directory. The registry display name is misspelled
-  `booster-web`, but its `repo_name` is `trybotster/botster-web` and its path is
-  `/Users/jasonconigliari/Projects/botster-web`. The assigned run worktree
-  `botster-sessions/git@github.com:trybotster-botster-web-project-pipelines-ticket_1785970234_234515`
-  is the only edit location; the target's ambient checkout must not be edited.
+  `booster-web`, but its `repo_name` is `trybotster/botster-web`, which is what
+  the routing follows. The pipeline-provided ticket worktree for this run is the
+  only edit location; the authoritative target checkout must not be edited.
 - Repository playbook loaded: [[botster-web-playbook]].
 - Role guidance loaded in order: [[planner-playbook]], then
   [[botster-planner-playbook]], then [[botster-web-playbook]].
@@ -399,6 +398,64 @@ exported, unit-tested function (`replayHubStatusOnLifecycleEvent`) rather than a
 inline arrow; its doc comment states it is the *sole* mechanism and that removing
 it would silently reintroduce the regression; and `replayActivePulls()` carries a
 comment saying it has no production caller.
+
+### Revision 7 (Implement): Review findings resolved
+
+`review_1786039442_283259` sent the work back with two findings. Both are fixed.
+
+**`finding_1786039442_526202` (high) — reconnect acceptance reloaded the page.** The
+finding was correct and it named a gap this run had *declared* as residual risk rather
+than closed. Both prior reconnect cycles call
+`navigatePackageRuntimeAndAssertWebrtc()`, whose reload/goto branches create a new
+document; that remounts `App` and re-runs the initial
+`pullProductionEntity("hubStatus")` chain, so a fresh projection there cannot show the
+`data-channel-open` listener is load-bearing. Declaring the gap is not proving the
+criterion.
+
+Closed with `proveInPageReconnectReplaysHubStatus()`, which keeps the document mounted
+and drives the **real** transport:
+
+1. Stamps a sentinel on the live document so a navigation would be detected, not assumed.
+2. Closes the current real WebRTC data channel through a harness-only transport seam.
+3. Waits for an observed `data-channel-closed`, then for the client to reopen the channel
+   itself — peer generation observed rolling to 2.
+4. Waits for a **new** `status` request and a **new** `botster-web.hub_status` projection
+   in that new generation.
+5. Re-asserts the sentinel, so the document provably was never replaced.
+6. Re-asserts the structured record *and* the rendered General section.
+
+The seam is `WebrtcDaemonTransport.closeDataChannelForLiveHarness()`, installed onto the
+harness global by `installLiveHarnessTransportControl()` only when
+`__BOTSTER_LIVE_PROTOCOL_HARNESS__` is already present. This follows the existing
+harness-control pattern in this repository (`installLiveHarnessTerminalControls` in
+`TerminalViewHost.tsx`, and `harness.dispatchAction` in `App.tsx`) rather than
+introducing a new abstraction, and it drives the real channel rather than simulating
+one, so it cannot stand in for production behaviour. Unit tests assert it is absent
+without the harness global, returns `false` with no open channel, closes the real
+channel and emits `data-channel-closed`, and is idempotent.
+
+**Ablation evidence, as the finding required.** Two separate ablations, each rebuilt and
+run against the live Hub:
+
+| Ablation | Result |
+| --- | --- |
+| Remove the `entities.pull` inside `replayHubStatusOnLifecycleEvent` | exit 1, `data-channel-open did not re-pull botster-web.hub_status on the surviving document` |
+| Remove App's call to `replayHubStatusOnLifecycleEvent` entirely (unwired implementation) | exit 1, identical message |
+
+Both fail *earlier* than the unrelated pre-existing terminal-detach failure, so the new
+proof is genuinely load-bearing rather than passing incidentally. Restored and re-run
+green afterwards. A third, unit-level ablation (returning success without closing the
+channel) turns the seam test red on `readyState`.
+
+**`finding_1786039442_224717` (medium) — machine and session identifiers.** The
+absolute target path and the worktree path are removed from this plan's context section
+in favour of "the pipeline-provided ticket worktree" and "the authoritative target
+checkout". Raw full-tree scans now return no `/Users/<name>` or `/home/<name>` match
+(the one remaining regex hit is the URL path `/packages/acme%20tools/surfaces/home/extra`
+in a route test, not a home directory) and no `sess-[0-9]{6,}` match, with a
+known-positive control confirming the scans match when they should. The PR body's
+trailing `sess-…` identifier came from the MCP create tool's generated footer, not the
+authored body; the body has been rewritten without it.
 
 ### This run's subject, undiminished
 

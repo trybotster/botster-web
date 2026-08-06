@@ -1215,6 +1215,12 @@ assert.match(liveProtocolHarnessScript, /assertHubUpdateCheck/);
 assert.match(liveProtocolHarnessScript, /assertHubUpdateSupportDiagnostics/);
 assert.match(liveProtocolHarnessScript, /requiredProvenanceField\(software, "product_name"/);
 assert.match(liveProtocolHarnessScript, /data-hub-update-state/);
+// Reconnect is proven on a surviving document, not by a reload that remounts App.
+assert.match(liveProtocolHarnessScript, /proveInPageReconnectReplaysHubStatus/);
+assert.match(liveProtocolHarnessScript, /transportControl\?\.closeDataChannel/);
+assert.match(liveProtocolHarnessScript, /__BOTSTER_RECONNECT_DOCUMENT_SENTINEL__/);
+assert.match(webrtcDaemonClient, /closeDataChannelForLiveHarness/);
+assert.match(webrtcDaemonClient, /installLiveHarnessTransportControl/);
 assert.match(browserRuntimeSmokeScript, /proveHubGeneralWithoutHub/);
 assert.match(browserRuntimeSmokeScript, /Update check failed/);
 assert.doesNotMatch(browserRuntimeSmokeScript, /check_hub_update/);
@@ -3615,6 +3621,50 @@ try {
     { messageId: "entity-error-unsubscribe-response" }
   );
   entityErrorClient.disconnect();
+
+  // The in-place transport-loss seam is installed ONLY when the live-protocol harness global
+  // is present, so it cannot leak into an ordinary production runtime.
+  assert.equal(globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__, undefined);
+  const noHarnessChannel = createFakeDataChannel();
+  const noHarnessClient = createWebrtcTestClient([noHarnessChannel], localWebrtcBootstrapFixture);
+  assert.equal(globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__, undefined);
+  noHarnessClient.disconnect();
+
+  globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = { events: [] };
+  try {
+    const seamChannel = createFakeDataChannel();
+    const seamClient = createWebrtcTestClient([seamChannel], localWebrtcBootstrapFixture, {
+      entitySubscriptionIdGenerator: () => "transport-seam-subscription-1"
+    });
+    const transportControl = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl;
+    assert.equal(typeof transportControl?.closeDataChannel, "function");
+    // No channel open yet, so there is nothing to close.
+    assert.equal(transportControl.closeDataChannel(), false);
+
+    const seamSubscription = seamClient.subscribeEntityFrames("session", () => {});
+    await waitForTestCondition(() => seamChannel.sent.length === 1);
+    await emitChunkedTestResponse(
+      seamChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      { kind: "entity_subscribed", events: [], diagnostics: [] },
+      { messageId: "transport-seam-subscribe-response" }
+    );
+    assert.equal(seamChannel.readyState, "open");
+    const lifecycleBefore = lifecycleEvents.length;
+    // Closes the real channel and takes the ordinary transport-loss path.
+    assert.equal(transportControl.closeDataChannel(), true);
+    assert.equal(seamChannel.readyState, "closed");
+    assert.equal(
+      lifecycleEvents.slice(lifecycleBefore).some((event) => event.detail?.type === "data-channel-closed"),
+      true
+    );
+    // Idempotent: an already-closed channel reports nothing left to close.
+    assert.equal(transportControl.closeDataChannel(), false);
+    seamSubscription.unsubscribe();
+    seamClient.disconnect();
+  } finally {
+    delete globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  }
 
   assert.deepEqual(localWebrtcResponseChunkLimits, {
     maximumFrameBytesExclusive: 65_536,

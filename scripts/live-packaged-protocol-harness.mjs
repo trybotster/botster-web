@@ -203,12 +203,15 @@ try {
   const liveHubUpdate = await assertHubUpdateCheck(page);
   await openDiagnosticsView(page);
   const hubUpdateSupportDiagnostics = await assertHubUpdateSupportDiagnostics(page);
+  // Proven before any reload cycle, on the document that is already mounted.
+  const inPageReconnect = await proveInPageReconnectReplaysHubStatus(page, initialHubIdentity);
   // Printed at capture time: page reloads in the reconnect cycles clear the recorded harness
   // events, so this evidence would otherwise be absent from a later failure dump.
   console.log(`live-hub-identity-evidence ${JSON.stringify({
     identity: initialHubIdentity,
     update: liveHubUpdate,
-    support_diagnostics: hubUpdateSupportDiagnostics
+    support_diagnostics: hubUpdateSupportDiagnostics,
+    in_page_reconnect: inPageReconnect
   })}`);
   if (sharedHubDriverMode) {
     const summary = await exerciseSharedHubWorkspaces(page, sharedHubAssignment);
@@ -386,6 +389,7 @@ try {
       JSON.stringify({
         binary_provenance: binaryProvenance,
         hub_identity: initialHubIdentity,
+        hub_identity_in_page_reconnect: inPageReconnect,
         hub_identity_across_reconnects: hubIdentityAcrossReconnects,
         hub_update: liveHubUpdate,
         attach_chronology: attachChronology,
@@ -3417,6 +3421,113 @@ async function assertCurrentHubSchemaPresentation(page, status) {
       `schema ${String(reportedSchemaVersion)} incorrectly blocked the Local Hub first-screen row: ${hubCardText}`
     );
   }
+}
+
+/**
+ * Reconnect proof on a SURVIVING document.
+ *
+ * The two reload cycles elsewhere in this harness navigate, which remounts App and re-runs
+ * the initial pullProductionEntity("hubStatus") chain — so a fresh status projection there
+ * cannot show the data-channel-open listener is load-bearing. This closes the real live data
+ * channel in place, lets the client take its ordinary transport-loss path, and proves the
+ * listener re-pulls hub_status on the same document.
+ */
+async function proveInPageReconnectReplaysHubStatus(page, expectedIdentity) {
+  // Stamp the live document so a navigation would be detectable rather than assumed.
+  await page.evaluate(() => {
+    globalThis.__BOTSTER_RECONNECT_DOCUMENT_SENTINEL__ = "in-page-reconnect";
+  });
+
+  const statusRequestsBefore = await daemonRequestCount(page, { type: "status" });
+  const openEventsBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length
+  );
+  const hubStatusFramesBefore = await hubStatusProjectionCount(page);
+
+  const closed = await page.evaluate(
+    () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
+  );
+  if (!closed) {
+    throw new Error("in-page reconnect proof could not close the live WebRTC data channel");
+  }
+
+  // The channel must actually be observed closed, then reopened by the client itself.
+  await page.waitForFunction(
+    () => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .some((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "closed"),
+    undefined,
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`in-page reconnect never observed a data-channel close: ${error.message}`);
+  });
+  await page.waitForFunction(
+    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before,
+    { before: openEventsBefore },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(`in-page reconnect never reopened the data channel: ${error.message}`);
+  });
+
+  // The listener must issue a fresh status request and a fresh hub_status projection.
+  await page.waitForFunction(
+    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "status").length > before,
+    { before: statusRequestsBefore },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(
+      `data-channel-open did not re-pull botster-web.hub_status on the surviving document: ${error.message}`
+    );
+  });
+  await page.waitForFunction(
+    ({ before }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events.filter((entry) =>
+        entry.kind === "hub_frame" &&
+        entry.payload?.kind === "entity_snapshot" &&
+        entry.payload?.payload?.family === "botster-web.hub_status").length > before;
+    },
+    { before: hubStatusFramesBefore },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(`reconnect produced no fresh botster-web.hub_status projection: ${error.message}`);
+  });
+
+  // The document was never replaced, so this is genuinely the in-page path.
+  const sentinel = await page.evaluate(() => globalThis.__BOTSTER_RECONNECT_DOCUMENT_SENTINEL__);
+  if (sentinel !== "in-page-reconnect") {
+    throw new Error("in-page reconnect proof navigated; the document was replaced");
+  }
+
+  const evidence = assertHubStatusRehydrated(
+    await hubStatusRehydrationEvidence(page),
+    expectedIdentity,
+    "in-page data-channel reconnect"
+  );
+  // And the rendered General section still shows the authoritative values.
+  const rendered = await assertAuthoritativeHubIdentity(page, {
+    software: { product_name: expectedIdentity.product_name, version: expectedIdentity.version },
+    installation: { mode: expectedIdentity.mode, provenance: expectedIdentity.provenance },
+    compatibility: {
+      protocol: expectedIdentity.protocol,
+      protocol_version: expectedIdentity.protocol_version,
+      conformance_fixture_revision: expectedIdentity.conformance_fixture_revision
+    },
+    host_display_name: expectedIdentity.host_display_name,
+    host_id: expectedIdentity.host_id,
+    schema_version: expectedIdentity.schema_version
+  }, "in-page data-channel reconnect");
+  return { ...evidence, rendered_after_reconnect: rendered };
+}
+
+async function hubStatusProjectionCount(page) {
+  return page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) =>
+      entry.kind === "hub_frame" &&
+      entry.payload?.kind === "entity_snapshot" &&
+      entry.payload?.payload?.family === "botster-web.hub_status").length);
 }
 
 /**
