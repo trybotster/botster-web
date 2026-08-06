@@ -34,6 +34,7 @@ import {
   assertNoRequiredSmokeSkip,
   assertReconciliationCounts,
   assertSharedHubSpawnResult,
+  assertSharedHubSpawnSubmission,
   chooseCreateControl,
   parseWorkspacesSpawnAssignment,
   requiredProvenanceField,
@@ -1953,7 +1954,18 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
   const spawnForm = page.locator("ion-modal.show-modal form:has([data-ui-node-id='botster-workspaces-spawn-branch'])").first();
   await spawnForm.waitFor({ timeout: 15_000 });
   await spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-branch'] input").fill(spawnCase.branch);
-  await setUiNodeSelectValue(spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-template'] ion-select"), spawnCase.template_id);
+  const sessionTypeSelect = spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-template'] ion-select");
+  // Observe what Hub and Workspaces actually published BEFORE injecting anything.
+  // setUiNodeSelectValue assigns select.value without checking membership, so a value
+  // that exists among the rendered options is only provable upstream of the injection.
+  const renderedSessionTypeOptions = await readUiNodeSelectOptionValues(sessionTypeSelect);
+  if (!renderedSessionTypeOptions.includes(spawnCase.session_type_id)) {
+    throw new Error(
+      `${spawnCase.case_id} session_type_id ${JSON.stringify(spawnCase.session_type_id)} is not among the ` +
+      `rendered Workspaces session-type options; rendered=${JSON.stringify(renderedSessionTypeOptions)}`
+    );
+  }
+  await setUiNodeSelectValue(sessionTypeSelect, spawnCase.session_type_id);
   if (spawnCase.prompt) await spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-prompt'] input").fill(spawnCase.prompt);
   if (spawnCase.ticket_id) await spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-ticket'] input").fill(spawnCase.ticket_id);
   const submitMetadata = spawnForm.locator(":scope > ion-button[data-action-id]");
@@ -1961,18 +1973,14 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
   const nodeId = await spawnForm.getAttribute("data-ui-node-id");
   const sinceIndex = await harnessEventCount(page);
   await submitMetadata.evaluate((button) => button.click());
+  // Correlate the submitted request by rendered action/node identity and sequence
+  // position only. Passing the expected values map here would make it the admission
+  // predicate, so the session_type_id check below would be a selection criterion rather
+  // than an assertion that can fail against live output.
   await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId,
     nodeId,
     kind: "submit",
-    values: {
-      target_id: spawnCase.target_id,
-      workspace_id: workspace.workspace_id,
-      branch: spawnCase.branch,
-      template_id: spawnCase.template_id,
-      prompt: spawnCase.prompt ?? "",
-      ticket_id: spawnCase.ticket_id ?? ""
-    },
     sinceIndex,
     label: `${spawnCase.case_id} renderer-collected Spawn request`
   });
@@ -1986,6 +1994,13 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
   });
   const result = await latestWorkspacesActionResult(page, sinceIndex, actionId, nodeId);
   const request = await latestWorkspacesActionRequest(page, sinceIndex, actionId, nodeId);
+  const submission = assertSharedHubSpawnSubmission(spawnCase, workspace, request);
+  if (submission.request_id !== result.request_id) {
+    throw new Error(
+      `${spawnCase.case_id} submit request_id ${submission.request_id} did not correlate with the ` +
+      `accepted action result request_id ${result.request_id}`
+    );
+  }
   const payload = result.plugin_action_result?.payload;
   const sessionId = payload?.session_id;
   const hubResult = payload?.hub_result;
@@ -2017,9 +2032,21 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
         action_id: openResult.plugin_action_result?.action_id
       }
     },
-    rendered: { package_name: "botster-workspaces", surface_id: "workspaces", node_id: nodeId, action_id: actionId },
+    rendered: {
+      package_name: "botster-workspaces",
+      surface_id: "workspaces",
+      node_id: nodeId,
+      action_id: actionId,
+      session_type_options: renderedSessionTypeOptions,
+      selected_session_type_id: spawnCase.session_type_id
+    },
     submitted_values: request.request?.values,
-    action_request: { request_id: result.request_id, node_id: request.request?.node_id, action_id: request.request?.action_id },
+    action_request: {
+      request_id: request.request?.request_id,
+      result_request_id: result.request_id,
+      node_id: request.request?.node_id,
+      action_id: request.request?.action_id
+    },
     action_result: { accepted, request_id: result.request_id, state: result.plugin_action_result?.state },
     workspace: { workspace_id: workspace.workspace_id, rendered_row_node_id: workspace.rendered_row_node_id },
     session: {
@@ -2062,6 +2089,14 @@ async function selectSharedHubWorkspace(page, workspace) {
     sinceIndex,
     label: "shared-Hub accepted workspace selection"
   });
+}
+
+// Reads the option values Workspaces actually published, from the rendered
+// ion-select-option elements the UiNode renderer emits.
+async function readUiNodeSelectOptionValues(locator) {
+  return locator.locator("ion-select-option").evaluateAll((options) =>
+    options.map((option) => option.value ?? option.getAttribute("value"))
+  );
 }
 
 async function setUiNodeSelectValue(locator, value) {

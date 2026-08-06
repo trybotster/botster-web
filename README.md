@@ -156,15 +156,18 @@ structured consumer evidence:
 
 ```bash
 BOTSTER_LIVE_DATA_DIR=/path/to/running-hub-data \
-BOTSTER_WORKSPACES_SPAWN_CASES='{"generation":"web-1","entry_state":"reused","workspace_name":"Web cases","observe":{"workspace_id":"...","workspace_name":"Earlier stage","session_id":"...","lifecycle":"ended"},"cases":[{"case_id":"existing-worktree","target_id":"repo","branch":"feature/shared","template_id":"implement","expected_lifecycle":"ended"}]}' \
+BOTSTER_WORKSPACES_SPAWN_CASES='{"generation":"web-1","entry_state":"reused","workspace_name":"Web cases","observe":{"workspace_id":"...","workspace_name":"Earlier stage","session_id":"...","lifecycle":"ended"},"cases":[{"case_id":"existing-worktree","target_id":"repo","branch":"feature/shared","session_type_id":"repo/implement","expected_lifecycle":"ended"}]}' \
 npm run drive:workspaces-shared-hub-browser
 ```
 
 The assignment is required and has no discovery defaults. `entry_state` is
 `cold` or `reused`; reused invocations must identify the exact prior workspace
 and session to observe. Every case supplies `case_id`, `target_id`, `branch`, and
-`template_id`, with optional `prompt` and `ticket_id`; `expected_lifecycle`, when
-present, must be `ended`. Test coordinators may also supply
+`session_type_id`, with optional `prompt` and `ticket_id`; `expected_lifecycle`,
+when present, must be `ended`. `session_type_id` is the Hub-qualified effective
+session-type id (`<source name>/<id>`, where a repo source's name is the spawn
+target id), matching the option value Workspaces renders — the driver rejects an
+assignment whose `session_type_id` is absent from the rendered options. Test coordinators may also supply
 `expect_created_branch`, `expect_created_worktree`, and
 `expect_reused_worktree` outcomes so named
 managed-Git cases are enforced rather than merely recorded. The repository
