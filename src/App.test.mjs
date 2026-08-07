@@ -36,10 +36,20 @@ import {
   classifyWorkspacesReference,
   convergeEntityFamily,
   durableSeedSessionIdsForDiagnosticsLimit,
+  deleteSessionTypeTestId,
+  editSessionTypeTestId,
+  extractAttachStateFromMarkup,
+  extractDashboardPresentFromMarkup,
+  extractTerminalSessionIdsFromMarkup,
   formatWorkspacesLifecycleFailure,
   harnessEventMatches,
+  HOST_CHROME,
+  HOST_CHROME_CONTRACTS,
   htmlAssetUrls,
+  isTerminalDetached,
   latestAcceptedWorkspacesUiTree,
+  markupContainsDiagnosticId,
+  markupContainsTestId,
   packageRuntimeNavigation,
   packageEnsureDecision,
   reconnectGenerationEvidence,
@@ -995,7 +1005,7 @@ assert.match(app, /<IonLabel>Installed<\/IonLabel>/);
 assert.doesNotMatch(app, /<IonLabel>Installed apps<\/IonLabel>/);
 assert.doesNotMatch(app, /<IonLabel>Available marketplace packages<\/IonLabel>/);
 assert.doesNotMatch(app, /<IonLabel>Installed packages<\/IonLabel>/);
-assert.match(liveProtocolHarnessScript, /\[aria-label='Installed'\]/);
+assert.match(liveProtocolHarnessScript, /HOST_CHROME\.installedListLabel/);
 assert.doesNotMatch(liveProtocolHarnessScript, /\[aria-label='Installed apps'\]/);
 assert.doesNotMatch(liveProtocolHarnessScript, /\[aria-label='Installed packages'\]/);
 assert.match(localPackageServerScript, /function isSpaRoutePath\(pathname\)/);
@@ -1254,6 +1264,13 @@ assert.match(liveProtocolHarnessScript, /assertCurrentHubSchemaPresentation/);
 assert.match(liveProtocolHarnessScript, /status\.schema_version < 3/);
 assert.match(liveProtocolHarnessScript, /protocolVersion < 6/);
 assert.match(liveProtocolHarnessScript, /revision < 31/);
+// Shared detach decision + constants — no residual none-placeholder oracle.
+assert.match(liveProtocolHarnessScript, /isTerminalDetached/);
+assert.match(liveProtocolHarnessScript, /HOST_CHROME/);
+assert.match(liveProtocolHarnessScript, /waitForTerminalDetached\(page, productionSessionId\)/);
+assert.doesNotMatch(liveProtocolHarnessScript, /data-terminal-session-id=['"]none['"]/);
+assert.equal(HOST_CHROME.schemaFloorSourcePin, "status.schema_version < 3");
+assert.match(liveProtocolHarnessScript, new RegExp(HOST_CHROME.schemaFloorSourcePin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 // The live harness owns the authoritative-identity and real update-check DOM proof; the
 // bridge-less browser smoke owns the no-Hub and offline rendering.
 assert.match(liveProtocolHarnessScript, /assertAuthoritativeHubIdentity/);
@@ -6206,8 +6223,10 @@ try {
     { UiNodeSurface },
     { sessionBindingVariantSnapshot },
     { pluginSurfaceActionRequest },
+    { TerminalViewHost },
     {
       AppListItem,
+      AppsView,
       PackageNavigationShortcutButton,
       PluginNavigationShortcuts,
       PluginListItem,
@@ -6215,14 +6234,23 @@ try {
       SessionListItem,
       SessionRouteView,
       SessionTypeListItem,
+      SessionTypesSurfaceNotices,
+      SessionTypesView,
+      SessionTypeSubmitButton,
       SpawnTargetListItem,
+      DashboardView,
+      DiagnosticsView,
+      HubSettingsSectionsNav,
+      WorkbenchNav,
       hubUpdateCheckAction,
       hubUpdateCheckActionId,
       hubUpdateOutcomeFromResult,
       hubUpdateOutcomeSummary,
       replayHubStatusOnLifecycleEvent,
       PluginSurfaceRoutePage,
+      PluginSettingsRoutePage,
       PluginSettingsPanel,
+      RemoteAccessConfigurationItem,
       entityFamilyRecordLimit,
       appRouteFromPathname,
       appRoutePath,
@@ -6238,12 +6266,9 @@ try {
       writableSessionTypeSources,
       sessionTypeMutationSourceFromRecord,
       sessionTypeManagementSupported,
-      SessionTypesSurfaceNotices,
       sessionTypeDefinitionFromForm,
       sessionTypeFormFromAuthoringDefinition,
       sessionTypeFormIsStructurallyComplete,
-      sessionTypeFormSubmitDisabled,
-      sessionTypeFormSubmitLabel,
       sessionTypeMutationSource,
       rejectedSessionTypeForm,
       entitySubscriptionErrorFromFrame,
@@ -6268,6 +6293,7 @@ try {
     vite.ssrLoadModule("/src/botster/UiNodeSurface.tsx"),
     vite.ssrLoadModule("/src/botster/__fixtures__/sessionBindingUiChildren.ts"),
     vite.ssrLoadModule("/src/botster/uiNodes.ts"),
+    vite.ssrLoadModule("/src/botster/TerminalViewHost.tsx"),
     vite.ssrLoadModule("/src/App.tsx")
   ]);
 
@@ -6580,6 +6606,395 @@ try {
   assert.match(sessionRouteMarkup, /aria-label="Terminal session session\/one"/);
   assert.match(sessionRouteMarkup, /data-testid="terminal-session-view"/);
   assert.match(sessionRouteMarkup, /data-terminal-session-id="session\/one"/);
+  assert.equal(markupContainsTestId(sessionRouteMarkup, HOST_CHROME.terminalSessionViewTestId), true);
+
+  // --- Default-path host-chrome inventory (shared constants + decision vs rendered markup) ---
+  // Completeness is binding: ids are recorded only when an evaluation actually runs.
+  const evaluatedHostChromeContractIds = new Set();
+  const markHostChromeContract = (id) => {
+    assert.equal(
+      HOST_CHROME_CONTRACTS.some((entry) => entry.id === id),
+      true,
+      `evaluation recorded for unknown inventory id ${id}`
+    );
+    evaluatedHostChromeContractIds.add(id);
+  };
+  const hostChromeRenderSymbols = {
+    TerminalViewHost,
+    DashboardView,
+    PluginSettingsRoutePage,
+    ConnectionDiagnosticsPanel,
+    SessionRouteView,
+    HubGeneralSection,
+    AppsView,
+    WorkbenchNav,
+    PluginSurfaceRoutePage,
+    DiagnosticsView,
+    HubSettingsSectionsNav,
+    SessionTypesView,
+    SessionTypesSurfaceNotices,
+    SessionTypeListItem,
+    SessionTypeSubmitButton,
+    PluginSettingsPanel,
+    RemoteAccessConfigurationItem,
+    LocalHubFirstScreen
+  };
+
+  // terminal-mounted
+  const mountedTerminalMarkup = renderToStaticMarkup(
+    createElement(TerminalViewHost, {
+      descriptor: { sessionId: "web-prod", renderer: "restty" },
+      bridge: {
+        mount: async () => ({ id: "mock-mount" }),
+        unmount: async () => undefined,
+        attach: async () => undefined,
+        focus: async () => undefined,
+        writeInput: async () => undefined,
+        resize: async () => undefined
+      },
+      dataPlane: {
+        sessionId: "web-prod",
+        subscribeStatus: () => ({ unsubscribe() {} }),
+        readScreen: async () => ({ text: "" }),
+        captureSnapshot: async () => ({ rows: 24, cols: 80, payload_bytes: 0 })
+      }
+    })
+  );
+  assert.match(mountedTerminalMarkup, new RegExp(`class="${HOST_CHROME.terminalContainerClass}"`));
+  assert.match(mountedTerminalMarkup, new RegExp(`${HOST_CHROME.terminalSessionIdAttr}="web-prod"`));
+  assert.match(mountedTerminalMarkup, new RegExp(`class="${HOST_CHROME.terminalStatusClass}"`));
+  assert.match(mountedTerminalMarkup, new RegExp(`${HOST_CHROME.terminalAttachStateAttr}="unknown"`));
+  assert.deepEqual(extractTerminalSessionIdsFromMarkup(mountedTerminalMarkup), ["web-prod"]);
+  assert.equal(extractAttachStateFromMarkup(mountedTerminalMarkup), "unknown");
+  assert.equal(
+    isTerminalDetached({
+      sessionContainerIds: extractTerminalSessionIdsFromMarkup(mountedTerminalMarkup),
+      dashboardPresent: false
+    }, "web-prod"),
+    false
+  );
+  markHostChromeContract("terminal-mounted");
+
+  // terminal-detached + dashboard-view
+  const dashboardMarkup = renderToStaticMarkup(
+    createElement(DashboardView, {
+      sessions: [{
+        id: "web-prod",
+        session_uuid: "web-prod",
+        registry_state: "active",
+        lifecycle: "running",
+        lifecycle_class: "current"
+      }],
+      sessionLoadStatus: "loaded",
+      onOpenSession: () => {},
+      onNavigateToApps: () => {},
+      onNavigateToSpawnPoints: () => {}
+    })
+  );
+  assert.equal(extractDashboardPresentFromMarkup(dashboardMarkup), true);
+  assert.equal(markupContainsTestId(dashboardMarkup, HOST_CHROME.dashboardTestId), true);
+  assert.match(dashboardMarkup, new RegExp(`data-testid="${HOST_CHROME.dashboardTestId}"`));
+  assert.match(dashboardMarkup, new RegExp(`>${HOST_CHROME.sessionsHeadingName}<`));
+  assert.match(dashboardMarkup, new RegExp(`>${HOST_CHROME.openSessionButtonName}<`));
+  assert.equal(
+    isTerminalDetached({
+      sessionContainerIds: extractTerminalSessionIdsFromMarkup(dashboardMarkup),
+      dashboardPresent: extractDashboardPresentFromMarkup(dashboardMarkup)
+    }, "web-prod"),
+    true
+  );
+  assert.equal(
+    isTerminalDetached({ sessionContainerIds: ["web-prod"], dashboardPresent: true }, "web-prod"),
+    false
+  );
+  assert.equal(
+    isTerminalDetached({
+      sessionContainerIds: extractTerminalSessionIdsFromMarkup(mountedTerminalMarkup),
+      dashboardPresent: true
+    }, "web-prod"),
+    false
+  );
+  markHostChromeContract("terminal-detached");
+  markHostChromeContract("dashboard-view");
+
+  // settings-back
+  const settingsRouteMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsRoutePage, {
+      packageName: "botster-web",
+      packageRecord: { id: "botster-web", title: "Botster Web" },
+      onAction: () => {},
+      onBack: () => {},
+      onOpenSurface: () => {},
+      entities: createInMemoryEntityFrameStore()
+    })
+  );
+  assert.equal(markupContainsTestId(settingsRouteMarkup, HOST_CHROME.pluginSettingsRouteTestId), true);
+  assert.match(settingsRouteMarkup, new RegExp(`data-testid="${HOST_CHROME.pluginSettingsRouteTestId}"`));
+  assert.match(settingsRouteMarkup, new RegExp(`>${HOST_CHROME.settingsBackButtonName}<`));
+  markHostChromeContract("settings-back");
+
+  // schema-presentation-neutral
+  const schemaNeutralDiagnostic = {
+    id: HOST_CHROME.schemaDiagnosticId,
+    title: "Hub durable-state schema",
+    detail: "Hub durable-state schema version 3. Client compatibility is reported by DaemonStatus.compatibility.",
+    severity: "info",
+    source: "server"
+  };
+  const schemaPresentationMarkup = renderToStaticMarkup(
+    createElement(ConnectionDiagnosticsPanel, { diagnostics: [schemaNeutralDiagnostic] })
+  );
+  assert.equal(markupContainsDiagnosticId(schemaPresentationMarkup, HOST_CHROME.schemaDiagnosticId), true);
+  assert.match(schemaPresentationMarkup, /Hub durable-state schema/);
+  assert.match(schemaPresentationMarkup, /schema version 3/);
+  assert.match(schemaPresentationMarkup, /Info \/ server/);
+  assert.doesNotMatch(schemaPresentationMarkup, /Blocked|mismatch|expected schema/i);
+  markHostChromeContract("schema-presentation-neutral");
+
+  // schema-floor-in-harness
+  assert.equal(HOST_CHROME.schemaFloorSourcePin, "status.schema_version < 3");
+  assert.match(liveProtocolHarnessScript, /status\.schema_version < 3/);
+  assert.doesNotMatch(liveProtocolHarnessScript, /status\.schema_version\s*!==\s*2/);
+  assert.doesNotMatch(liveProtocolHarnessScript, /status\.schema_version\s*===\s*[23]/);
+  markHostChromeContract("schema-floor-in-harness");
+
+  // terminal-session-view (already rendered above; re-assert constants)
+  assert.equal(markupContainsTestId(sessionRouteMarkup, HOST_CHROME.terminalSessionViewTestId), true);
+  markHostChromeContract("terminal-session-view");
+
+  // hub-general-chrome
+  const hubGeneralChromeMarkup = renderToStaticMarkup(
+    createElement(HubGeneralSection, {
+      hubStatus: {
+        title: "Production Hub",
+        host_id: "production-host",
+        schema_version: 3,
+        software: { product_name: "Botster Hub", version: "0.1.0", build_revision: "8a60bd5" },
+        installation: { mode: "development", provenance: "development_build" },
+        compatibility: {
+          protocol: "botster-hub-daemon-v1",
+          protocol_version: 6,
+          conformance_fixture_revision: 31,
+          features: ["sessions", "terminal_streaming"]
+        }
+      },
+      hubUpdate: undefined,
+      onCheckForUpdates: () => {}
+    })
+  );
+  assert.equal(markupContainsTestId(hubGeneralChromeMarkup, HOST_CHROME.hubSettingsGeneralTestId), true);
+  assert.equal(markupContainsTestId(hubGeneralChromeMarkup, HOST_CHROME.hubSoftwareIdentityTestId), true);
+  assert.equal(markupContainsTestId(hubGeneralChromeMarkup, HOST_CHROME.hubHostIdentityTestId), true);
+  assert.equal(markupContainsTestId(hubGeneralChromeMarkup, HOST_CHROME.hubInternalStateTestId), true);
+  assert.equal(markupContainsTestId(hubGeneralChromeMarkup, HOST_CHROME.hubSoftwareUpdateTestId), true);
+  assert.equal(markupContainsTestId(hubGeneralChromeMarkup, HOST_CHROME.hubUpdateOutcomeTestId), true);
+  assert.match(hubGeneralChromeMarkup, new RegExp(`>${HOST_CHROME.checkForUpdatesButtonName}<`));
+  markHostChromeContract("hub-general-chrome");
+
+  // apps-view — empty + populated (Installed list) branches
+  const appsViewEmptyMarkup = renderToStaticMarkup(
+    createElement(AppsView, { installedRowCount: 0, onAddPackage: () => {} })
+  );
+  assert.equal(markupContainsTestId(appsViewEmptyMarkup, HOST_CHROME.appsViewTestId), true);
+  assert.match(appsViewEmptyMarkup, new RegExp(`data-testid="${HOST_CHROME.appsViewTestId}"`));
+  const appsViewPopulatedMarkup = renderToStaticMarkup(
+    createElement(
+      AppsView,
+      { installedRowCount: 1, onAddPackage: () => {} },
+      createElement("div", null, "row")
+    )
+  );
+  assert.match(
+    appsViewPopulatedMarkup,
+    new RegExp(`aria-label="${HOST_CHROME.installedListLabel}"`)
+  );
+  markHostChromeContract("apps-view");
+
+  // workbench-nav
+  const workbenchNavMarkup = renderToStaticMarkup(
+    createElement(WorkbenchNav, { activeView: "dashboard", onNavigate: () => {} })
+  );
+  assert.match(workbenchNavMarkup, new RegExp(`aria-label="${HOST_CHROME.workbenchNavLabel}"`));
+  assert.match(workbenchNavMarkup, new RegExp(`>${HOST_CHROME.homeNavButtonName}<`));
+  assert.match(workbenchNavMarkup, new RegExp(`>${HOST_CHROME.appsNavButtonName}<`));
+  markHostChromeContract("workbench-nav");
+
+  // selected-app-surface
+  const selectedSurfaceMarkup = renderToStaticMarkup(
+    createElement(PluginSurfaceRoutePage, {
+      packageName: "botster-web",
+      surfaceId: "web-client",
+      localState: {},
+      entities: createInMemoryEntityFrameStore(),
+      onAction: () => {}
+    })
+  );
+  assert.equal(markupContainsTestId(selectedSurfaceMarkup, HOST_CHROME.selectedAppSurfaceTestId), true);
+  assert.match(selectedSurfaceMarkup, new RegExp(`data-testid="${HOST_CHROME.selectedAppSurfaceTestId}"`));
+  markHostChromeContract("selected-app-surface");
+
+  // diagnostics-view + developer-diagnostics (owned by DiagnosticsView)
+  const diagnosticsViewMarkup = renderToStaticMarkup(
+    createElement(
+      DiagnosticsView,
+      {
+        diagnosticCount: 1,
+        blocking: false,
+        developerDetails: createElement("div", null, "dev body")
+      },
+      createElement("div", null, "status body")
+    )
+  );
+  assert.equal(markupContainsTestId(diagnosticsViewMarkup, HOST_CHROME.diagnosticsViewTestId), true);
+  assert.match(diagnosticsViewMarkup, new RegExp(`data-testid="${HOST_CHROME.diagnosticsViewTestId}"`));
+  assert.match(diagnosticsViewMarkup, new RegExp(`class="${HOST_CHROME.developerDiagnosticsClass}"`));
+  assert.match(diagnosticsViewMarkup, new RegExp(`>${HOST_CHROME.supportSectionLabel}<`));
+  markHostChromeContract("diagnostics-view");
+
+  // hub-settings-sections
+  const hubSettingsNavMarkup = renderToStaticMarkup(
+    createElement(HubSettingsSectionsNav, {
+      activeSection: "support",
+      onNavigate: () => {}
+    })
+  );
+  assert.match(hubSettingsNavMarkup, new RegExp(`aria-label="${HOST_CHROME.hubSettingsSectionsLabel}"`));
+  assert.match(hubSettingsNavMarkup, new RegExp(`>${HOST_CHROME.sessionTypesSectionLabel}<`));
+  assert.match(hubSettingsNavMarkup, new RegExp(`>${HOST_CHROME.supportSectionLabel}<`));
+  markHostChromeContract("hub-settings-sections");
+
+  // session-types-chrome
+  const sessionTypesViewMarkup = renderToStaticMarkup(
+    createElement(SessionTypesView, { sessionTypeCount: 1 },
+      createElement(SessionTypesSurfaceNotices, {
+        supported: true,
+        subscriptionError: undefined,
+        onCreate: () => {}
+      })
+    )
+  );
+  assert.equal(markupContainsTestId(sessionTypesViewMarkup, HOST_CHROME.sessionTypesViewTestId), true);
+  assert.equal(markupContainsTestId(sessionTypesViewMarkup, HOST_CHROME.createSessionTypeTestId), true);
+  const sessionTypeListMarkup = renderToStaticMarkup(
+    createElement(SessionTypeListItem, {
+      sessionType: {
+        id: "device/web-authored-agent",
+        label: "Web authored agent",
+        source: "device",
+        available: true,
+        editable: true
+      },
+      onEdit: () => {},
+      onDelete: () => {}
+    })
+  );
+  assert.equal(
+    markupContainsTestId(sessionTypeListMarkup, deleteSessionTypeTestId("device/web-authored-agent")),
+    true
+  );
+  assert.equal(
+    markupContainsTestId(sessionTypeListMarkup, editSessionTypeTestId("device/web-authored-agent")),
+    true
+  );
+  const sessionTypeSubmitMarkup = renderToStaticMarkup(
+    createElement(SessionTypeSubmitButton, {
+      mode: "create",
+      disabled: false,
+      submitting: false,
+      onClick: () => {}
+    })
+  );
+  assert.equal(markupContainsTestId(sessionTypeSubmitMarkup, HOST_CHROME.submitSessionTypeTestId), true);
+  assert.match(sessionTypeSubmitMarkup, />Create</);
+  // Edit + pending are the real SessionTypeSubmitButton, not a synthetic button.
+  const editSubmitMarkup = renderToStaticMarkup(
+    createElement(SessionTypeSubmitButton, {
+      mode: "edit",
+      disabled: false,
+      submitting: false,
+      onClick: () => {}
+    })
+  );
+  assert.match(editSubmitMarkup, />Save</);
+  const pendingSubmitMarkup = renderToStaticMarkup(
+    createElement(SessionTypeSubmitButton, {
+      mode: "edit",
+      disabled: true,
+      submitting: true,
+      onClick: () => {}
+    })
+  );
+  assert.match(pendingSubmitMarkup, /Saving…/);
+  assert.match(pendingSubmitMarkup, /disabled=""/);
+  assert.equal(markupContainsTestId(pendingSubmitMarkup, HOST_CHROME.submitSessionTypeTestId), true);
+  markHostChromeContract("session-types-chrome");
+
+  // package-settings-chrome
+  const packageSettingsMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsPanel, {
+      app: {
+        id: "botster-web",
+        configuration_fields: [{
+          id: "remote_browser_rendezvous_enabled",
+          value: false,
+          errors: []
+        }],
+        configuration_submit: { id: "botster.package.configure", disabled: false }
+      },
+      onAction: () => {},
+      onOpenSurface: () => {}
+    })
+  );
+  assert.match(packageSettingsMarkup, new RegExp(`>${HOST_CHROME.packageConfigurationLabel}<`));
+  assert.match(packageSettingsMarkup, new RegExp(`>${HOST_CHROME.remoteBrowserAccessHeading}<`));
+  const remoteAccessMarkup = renderToStaticMarkup(
+    createElement(RemoteAccessConfigurationItem, {
+      field: { id: "remote_browser_rendezvous_enabled", value: false, errors: [] },
+      submit: { id: "botster.package.configure", disabled: false },
+      onAction: () => {}
+    })
+  );
+  assert.match(remoteAccessMarkup, new RegExp(`>${HOST_CHROME.remoteBrowserAccessHeading}<`));
+  markHostChromeContract("package-settings-chrome");
+
+  // local-hub-first-screen (Hub heading used by schema presentation)
+  const localHubFirstScreenMarkup = renderToStaticMarkup(
+    createElement(LocalHubFirstScreen, {
+      mode: "webrtc",
+      statusText: "Connected",
+      diagnostics: [],
+      packages: [],
+      packageLoadStatus: "loaded",
+      sessions: [],
+      sessionLoadStatus: "loaded",
+      actionStatus: ""
+    })
+  );
+  assert.match(localHubFirstScreenMarkup, new RegExp(`>${HOST_CHROME.hubHeadingName}<`));
+  markHostChromeContract("local-hub-first-screen");
+
+  // Binding completeness: every inventory id evaluated, no stale evaluations
+  const inventoryIds = HOST_CHROME_CONTRACTS.map((entry) => entry.id).sort();
+  const evaluatedIds = [...evaluatedHostChromeContractIds].sort();
+  assert.deepEqual(
+    evaluatedIds,
+    inventoryIds,
+    `host-chrome inventory/evaluation mismatch: inventory=${JSON.stringify(inventoryIds)} evaluated=${JSON.stringify(evaluatedIds)}`
+  );
+  // render field names a symbol imported into this suite (or a named pin)
+  for (const entry of HOST_CHROME_CONTRACTS) {
+    if (entry.render === "schemaFloorSourcePin") continue;
+    const primaryRender = String(entry.render).split("+")[0].trim().split(/\s+/)[0];
+    assert.equal(
+      Object.hasOwn(hostChromeRenderSymbols, primaryRender) || hostChromeRenderSymbols[primaryRender] != null,
+      true,
+      `inventory ${entry.id} render "${entry.render}" is not imported (primary=${primaryRender})`
+    );
+  }
+
+  // No DOM-parser dependency introduced for this mechanism
+  const packageJsonText = await readFile(new URL("../package.json", import.meta.url), "utf8");
+  assert.doesNotMatch(packageJsonText, /"jsdom"|"happy-dom"|"linkedom"|"cheerio"|"parse5"|"domino"/);
 
   const targetSessionTypes = [
     { id: "codex", target_id: "project-main", available: true },
@@ -6907,22 +7322,8 @@ try {
     { policy: "relative", path: "" }
   );
 
-  // Form promise: pending label/disabled, rejection keeps draft, success path is live.
-  assert.equal(sessionTypeFormSubmitLabel({ mode: "create", submitting: false }), "Create");
-  assert.equal(sessionTypeFormSubmitLabel({ mode: "edit", submitting: false }), "Save");
-  assert.equal(sessionTypeFormSubmitLabel({ mode: "edit", submitting: true }), "Saving…");
-  assert.equal(sessionTypeFormSubmitDisabled({ ...seededForm, submitting: true }), true);
-  assert.equal(sessionTypeFormSubmitDisabled(seededForm), false);
-  assert.match(app, /sessionTypeFormSubmitLabel\(sessionTypeForm\)/);
-  assert.match(app, /sessionTypeFormSubmitDisabled\(sessionTypeForm\)/);
-  const pendingSubmitMarkup = renderToStaticMarkup(
-    createElement("button", {
-      disabled: sessionTypeFormSubmitDisabled({ ...seededForm, submitting: true }),
-      "data-testid": "submit-session-type"
-    }, sessionTypeFormSubmitLabel({ mode: "edit", submitting: true }))
-  );
-  assert.match(pendingSubmitMarkup, /Saving…/);
-  assert.match(pendingSubmitMarkup, /disabled=""/);
+  // Form promise: rejection keeps draft (pending Save/Saving… asserted via real
+  // SessionTypeSubmitButton render in the host-chrome inventory block above).
   assert.deepEqual(
     rejectedSessionTypeForm(
       { ...seededForm, submitting: true },
