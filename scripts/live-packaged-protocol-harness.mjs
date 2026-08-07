@@ -18,7 +18,9 @@ import {
   durableSeedSessionIdsForDiagnosticsLimit,
   formatWorkspacesLifecycleFailure,
   harnessEventMatches,
+  HOST_CHROME,
   htmlAssetUrls,
+  isTerminalDetached,
   latestAcceptedWorkspacesUiTree,
   packageRuntimeNavigation,
   packageEnsureDecision,
@@ -297,7 +299,7 @@ try {
     );
     previousGrantId = reconnect.grantId;
     previousEntitySubscriptionId = reconnect.subscriptionId;
-    if (await page.getByTestId("terminal-session-view").count() === 0) {
+    if (await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).count() === 0) {
       await openHomeView(page);
       await waitForSessionStatus(page, "running");
       await openSessionTerminal(page, productionSessionId);
@@ -396,7 +398,7 @@ try {
   await callTerminalControl(page, "writeInput", "botster-web-production-exit\n");
   await waitForTerminalOutput(page, "botster-web-production-exiting");
   await shutdownProductionSession();
-  await waitForTerminalDetached(page);
+  await waitForTerminalDetached(page, productionSessionId);
 
   await assertNoUnknownSession(page);
   assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
@@ -665,27 +667,39 @@ async function typeThroughMountedTerminal(page, data) {
 }
 
 async function openAppsView(page) {
-  await page.getByLabel("Botster workbench").getByRole("button", { name: "Apps", exact: true }).click();
-  await page.getByTestId("apps-view").waitFor();
+  await page
+    .getByLabel(HOST_CHROME.workbenchNavLabel)
+    .getByRole("button", { name: HOST_CHROME.appsNavButtonName, exact: true })
+    .click();
+  await page.getByTestId(HOST_CHROME.appsViewTestId).waitFor();
 }
 
 async function openHomeView(page) {
-  await page.getByLabel("Botster workbench").getByRole("button", { name: "Home", exact: true }).click();
-  await page.getByTestId("dashboard-view").waitFor();
+  await page
+    .getByLabel(HOST_CHROME.workbenchNavLabel)
+    .getByRole("button", { name: HOST_CHROME.homeNavButtonName, exact: true })
+    .click();
+  await page.getByTestId(HOST_CHROME.dashboardTestId).waitFor();
 }
 
 async function openSessionTerminal(page, sessionId) {
-  const sessionRow = page.getByTestId("dashboard-view").locator("ion-item").filter({
+  const sessionRow = page.getByTestId(HOST_CHROME.dashboardTestId).locator("ion-item").filter({
     has: page.getByText(sessionId, { exact: true })
   });
-  await sessionRow.getByRole("button", { name: "Open", exact: true }).click();
-  await page.getByTestId("terminal-session-view").waitFor();
+  await sessionRow.getByRole("button", { name: HOST_CHROME.openSessionButtonName, exact: true }).click();
+  await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor();
 }
 
 async function openDiagnosticsView(page) {
-  await page.locator("ion-menu.app-sidebar").getByRole("button", { name: "Hub settings", exact: true }).click();
-  await page.getByLabel("Hub settings sections").getByRole("button", { name: /Support/ }).click();
-  await page.getByTestId("diagnostics-view").waitFor();
+  await page
+    .locator("ion-menu.app-sidebar")
+    .getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true })
+    .click();
+  await page
+    .getByLabel(HOST_CHROME.hubSettingsSectionsLabel)
+    .getByRole("button", { name: /Support/ })
+    .click();
+  await page.getByTestId(HOST_CHROME.diagnosticsViewTestId).waitFor();
   const developerDetails = page.locator("details.developer-diagnostics");
   if (!(await developerDetails.evaluate((details) => details.open))) {
     await developerDetails.locator("summary").click();
@@ -933,7 +947,7 @@ async function dispatchContractSessionsSurface(page, references) {
 }
 
 async function assertContractSessionBindingText(page) {
-  const selectedSurface = page.getByTestId("selected-app-surface");
+  const selectedSurface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   await selectedSurface.getByText("current", { exact: true }).first().waitFor({ timeout: 45_000 });
   await selectedSurface.getByText("ended", { exact: true }).waitFor({ timeout: 45_000 });
   const unavailableCount = await selectedSurface.getByText("Session unavailable", { exact: true }).count();
@@ -943,7 +957,7 @@ async function assertContractSessionBindingText(page) {
 }
 
 async function assertContractSessionRows(page, expectedRows) {
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   for (const row of expectedRows) {
     const renderedRow = surface.locator(`[data-ui-node-id='${row.node_id}']`);
     await renderedRow.waitFor({ timeout: 45_000 });
@@ -967,7 +981,7 @@ async function assertContractSessionRows(page, expectedRows) {
 }
 
 async function activateContractSessionControl(page, expectedControl, activation) {
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const control = surface.locator(`[data-ui-node-id='${expectedControl.node_id}']`);
   const actionId = await control.getAttribute("data-action-id");
   const nodeId = await control.getAttribute("data-ui-node-id");
@@ -1101,7 +1115,7 @@ async function assertContractSurfaceRoute(page, surfaceId, visibleText, sinceInd
     `${surfaceId} plugin_surface_render request`,
     sinceIndex
   );
-  await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
+  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).waitFor({ timeout: 15_000 });
   await page.getByText(visibleText).waitFor({ timeout: 45_000 });
   await assertSelectedSurfaceNotLoading(page, surfaceId);
 }
@@ -1161,7 +1175,7 @@ async function assertSelectedSurfaceNotLoading(page, surfaceId) {
     undefined,
     { timeout: 45_000 }
   ).catch(async (error) => {
-    const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
+    const selectedText = await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).innerText().catch(() => "");
     throw new Error(`${surfaceId} remained in a loading/rendering state; text=${JSON.stringify(selectedText)}: ${error.message}`);
   });
 }
@@ -1173,7 +1187,7 @@ async function assertContractBlockedSurface(page) {
     { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: "contract.blocked" },
     "contract.blocked plugin_surface_render request"
   );
-  await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
+  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).waitFor({ timeout: 15_000 });
   await waitForVisibleContractMatrixText(
     page,
     ["contract matrix blocked render", "Plugin surface render was rejected", "Hub action failed"],
@@ -1196,11 +1210,11 @@ async function exerciseContractMatrixSettings(page) {
   const endpoint = "https://example.invalid/contract-matrix-web-smoke";
   await openPackageSettings(page, contractMatrixPackageName);
   await page.waitForURL(new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/settings`));
-  await page.getByTestId("plugin-settings-route").getByText("Package configuration", { exact: true }).waitFor();
+  await page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).getByText("Package configuration", { exact: true }).waitFor();
   await page.getByText("Endpoint").waitFor();
   await page.getByText("Mode").waitFor();
   await page.getByText("API token").waitFor();
-  await page.getByTestId("plugin-settings-route").getByText("Contract Settings", { exact: true }).click();
+  await page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).getByText("Contract Settings", { exact: true }).click();
   await page.waitForURL(new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/settings/contract\\.settings`));
   await waitForHarnessEvent(
     page,
@@ -1646,7 +1660,7 @@ async function loadProductionAppRouteFromPathname() {
 }
 
 async function assertSelectedAppSurfaceRendered(page, target) {
-  await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
+  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).waitFor({ timeout: 15_000 });
   if (target.packageName === "botster-workspaces" && target.surfaceId === "workspaces") {
     if (sharedHubDriverMode) {
       await assertWorkspacesNodeIds(page, [
@@ -1712,13 +1726,13 @@ async function assertSelectedAppSurfaceRendered(page, target) {
     target,
     { timeout: 45_000 }
   ).catch(async (error) => {
-    const selectedText = await page.getByTestId("selected-app-surface").innerText().catch(() => "");
+    const selectedText = await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).innerText().catch(() => "");
     throw new Error(`selected app surface did not render visible first-party content; text=${JSON.stringify(selectedText)}: ${error.message}`);
   });
 }
 
 async function assertWorkspacesNodeIds(page, expectedNodeIds, stage) {
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   await Promise.all(
     expectedNodeIds.map((nodeId) =>
       surface.locator(`[data-ui-node-id='${nodeId}']`).waitFor({ timeout: 45_000 })
@@ -1746,7 +1760,7 @@ async function assertNoUnsupportedWorkspacesNodes(page) {
 async function exerciseSharedHubWorkspaces(page, assignment) {
   await openAppsView(page);
   await openFirstPartyUiAppSurface(page, "webrtc");
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const baselineCounts = await sharedHubRequestCounts(page);
   const renderedNodeIds = await surface.locator("[data-ui-node-id]").evaluateAll((nodes) =>
     nodes.map((node) => node.getAttribute("data-ui-node-id")).filter(Boolean)
@@ -1783,7 +1797,7 @@ async function exerciseSharedHubWorkspaces(page, assignment) {
 }
 
 async function observeSharedHubPriorState(page, expected) {
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const workspaceTitle = surface.getByText(expected.workspace_name, { exact: true }).first();
   await workspaceTitle.waitFor({ timeout: 20_000 });
   const workspaceNodeId = await workspaceTitle.evaluate((node) =>
@@ -1808,7 +1822,7 @@ async function observeSharedHubPriorState(page, expected) {
 }
 
 async function createSharedHubWorkspace(page, workspaceName, createControlId) {
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const openButton = surface.locator(`[data-ui-node-id='${createControlId}']`);
   await openButton.waitFor({ timeout: 15_000 });
   const openActionId = await openButton.getAttribute("data-action-id");
@@ -1877,7 +1891,7 @@ async function createSharedHubWorkspace(page, workspaceName, createControlId) {
 }
 
 async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCounts) {
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   await selectSharedHubWorkspace(page, workspace);
   const spawnButtons = surface.locator(WORKSPACES_SPAWN_OPENER_SELECTOR);
   await spawnButtons.first().waitFor({ timeout: 15_000 }).catch(async (error) => {
@@ -2071,7 +2085,7 @@ async function renderedActionDiagnostics(surface) {
 }
 
 async function selectSharedHubWorkspace(page, workspace) {
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const row = surface.locator(`[data-ui-node-id='${workspace.rendered_row_node_id}']`);
   const action = row.locator("ion-button[data-action-id]");
   await action.waitFor({ timeout: 15_000 });
@@ -2159,7 +2173,7 @@ async function waitForExactSessionLifecycle(page, sessionId, lifecycleClass) {
 }
 
 async function waitForRenderedSessionLifecycle(page, sessionId, lifecycleClass) {
-  const exactText = page.getByTestId("selected-app-surface").getByText(sessionId, { exact: true });
+  const exactText = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).getByText(sessionId, { exact: true });
   await exactText.waitFor({ timeout: 30_000 });
   await page.waitForFunction(({ sessionId, lifecycleClass }) => {
     const nodes = [...globalThis.document.querySelectorAll("[data-testid='selected-app-surface'] [data-ui-node-id]")];
@@ -2200,7 +2214,7 @@ async function sharedHubRequestCounts(page) {
 }
 
 async function createWorkspacesCompatibilityWorkspace(page) {
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const openButton = surface.locator("[data-ui-node-id='botster-workspaces-empty-create']");
   const openActionId = await openButton.getAttribute("data-action-id");
   if (openActionId !== "botster_workspaces.open") {
@@ -2280,7 +2294,7 @@ async function createWorkspacesCompatibilityWorkspace(page) {
 }
 
 async function readRetainedWorkspacesCompatibilityWorkspace(page) {
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const rows = surface.locator(
     "ion-item.uinode-list-item[data-ui-node-id^='botster-workspaces-row-']"
   );
@@ -2408,7 +2422,7 @@ async function assertWorkspacesCompatibilityRow(page, state, stage, expectedSess
     `botster-workspaces-row-count-${state.workspaceId}`
   ];
   await assertWorkspacesNodeIds(page, expectedNodeIds, stage);
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const titleText = await surface
     .locator(`[data-ui-node-id='botster-workspaces-row-title-${state.workspaceId}']`)
     .innerText();
@@ -2592,7 +2606,7 @@ async function exerciseWorkspacesLifecycle(page) {
   if (reconnect.beforeUrl !== selectedRouteUrl || reconnect.afterUrl !== selectedRouteUrl) {
     throw new Error(`Workspaces selected route changed across reconnect: ${JSON.stringify({ selectedRouteUrl, reconnect })}`);
   }
-  await page.getByTestId("selected-app-surface").waitFor({ timeout: 15_000 });
+  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).waitFor({ timeout: 15_000 });
   await assertWorkspacesNodeIds(page, [
     "botster-workspaces-app",
     "botster-workspaces-toolbar",
@@ -2654,7 +2668,7 @@ async function exerciseWorkspacesLifecycle(page) {
 }
 
 async function selectWorkspacesLifecycleWorkspace(page, state) {
-  const row = page.getByTestId("selected-app-surface")
+  const row = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
     .locator(`[data-ui-node-id='botster-workspaces-row-${state.workspaceId}']`);
   await row.waitFor({ timeout: 15_000 });
   const openButton = row.locator("ion-button[data-action-id]");
@@ -2677,13 +2691,13 @@ async function selectWorkspacesLifecycleWorkspace(page, state) {
     sinceIndex,
     label: "Workspaces accepted workspace selection"
   });
-  await page.getByTestId("selected-app-surface")
+  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
     .getByRole("button", { name: "Add existing session", exact: true })
     .waitFor({ timeout: 15_000 });
 }
 
 async function addWorkspacesLifecycleReference(page, state, sessionId) {
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const openButton = surface
     .locator("ion-button[data-action-id='botster_workspaces.open']")
     .filter({ hasText: "Add existing session" });
@@ -2842,7 +2856,7 @@ async function workspacesLifecycleDomEvidence(page, classification) {
 }
 
 async function workspacesLifecycleNodeDetails(page, nodeId) {
-  const surface = page.getByTestId("selected-app-surface");
+  const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const row = surface.locator(`[data-ui-node-id='${nodeId}']`);
   const count = await row.count();
   if (count !== 1) return { count, visible: false, text: "", actions: [], ancestors: [] };
@@ -2873,7 +2887,7 @@ async function workspacesLifecycleEvidence(page) {
   const events = await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []);
   const { records, chronology } = convergeEntityFamily(events, "session");
   const uiTree = latestAcceptedWorkspacesUiTree(events);
-  const renderedRows = await page.getByTestId("selected-app-surface")
+  const renderedRows = await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
     .locator("[data-ui-node-id]")
     .evaluateAll((nodes) => nodes.map((node) => ({
       id: node.getAttribute("data-ui-node-id") ?? "",
@@ -2966,14 +2980,17 @@ async function openPackageSettings(page, packageName) {
   });
   await settingsButton.click();
   await page.waitForURL(new RegExp(`/apps/${packageName}/settings`));
-  await page.getByTestId("plugin-settings-route").waitFor();
+  await page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).waitFor();
 }
 
 async function closePackageSettingsRoute(page) {
   // 9753297 relabelled this control from "Apps" to "Back" (App.tsx PluginSettingsRoutePage)
   // without updating the harness, so smoke:live-packaged-protocol has been failing here on
   // main. Repaired only because this ticket's required WebRTC reconnect proof runs after it.
-  await page.getByTestId("plugin-settings-route").getByRole("button", { name: "Back", exact: true }).click();
+  await page
+    .getByTestId(HOST_CHROME.pluginSettingsRouteTestId)
+    .getByRole("button", { name: HOST_CHROME.settingsBackButtonName, exact: true })
+    .click();
   await page.waitForURL(/\/apps(?:[?#]|$)/);
 }
 
@@ -3248,8 +3265,8 @@ async function setSessionTypeFormField(page, label, value) {
  * which is exactly how the composite-id defect survived the first implementation.
  */
 async function createSessionTypeThroughRenderedForm(page) {
-  await page.locator("ion-menu.app-sidebar").getByRole("button", { name: "Hub settings", exact: true }).click();
-  await page.getByLabel("Hub settings sections").getByRole("button", { name: /Session types/ }).click();
+  await page.locator("ion-menu.app-sidebar").getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true }).click();
+  await page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole("button", { name: /Session types/ }).click();
   await page.getByTestId("session-types-view").waitFor();
 
   const sinceIndex = await harnessEventCount(page);
@@ -3398,8 +3415,8 @@ async function exerciseSessionTypes(page) {
   }
 
   // The surface renders from the subscription, not a refetch.
-  await page.locator("ion-menu.app-sidebar").getByRole("button", { name: "Hub settings", exact: true }).click();
-  await page.getByLabel("Hub settings sections").getByRole("button", { name: /Session types/ }).click();
+  await page.locator("ion-menu.app-sidebar").getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true }).click();
+  await page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole("button", { name: /Session types/ }).click();
   const sessionTypesView = page.getByTestId("session-types-view");
   await sessionTypesView.waitFor();
   const renderedRow = sessionTypesView.getByTestId(`session-type-${createdRow.id}`);
@@ -3531,7 +3548,7 @@ async function proveExternalSessionLifecycle(page) {
     "externally spawned session upsert"
   );
   if (durableStateMode) {
-    const diagnostics = page.getByTestId("diagnostics-view");
+    const diagnostics = page.getByTestId(HOST_CHROME.diagnosticsViewTestId);
     await diagnostics.waitFor();
     const sessionsPanel = diagnostics.locator(".entity-family-panel").filter({
       has: page.getByRole("heading", { name: "Sessions", exact: true })
@@ -3542,7 +3559,7 @@ async function proveExternalSessionLifecycle(page) {
     }
   }
   await openHomeView(page);
-  const sessionRow = page.getByTestId("dashboard-view").getByText(sessionId, { exact: true });
+  const sessionRow = page.getByTestId(HOST_CHROME.dashboardTestId).getByText(sessionId, { exact: true });
   await sessionRow.waitFor({ state: "visible" });
   const shutdownResponse = await sendDaemonRequest(socketPath, {
     type: "shutdown_session",
@@ -3572,7 +3589,7 @@ async function proveExternalSessionLifecycle(page) {
 }
 
 async function assertDurableSeededSessionsVisible(page) {
-  const dashboard = page.getByTestId("dashboard-view");
+  const dashboard = page.getByTestId(HOST_CHROME.dashboardTestId);
   for (const sessionId of durableSeedSessionIds) {
     await dashboard.getByText(sessionId, { exact: true }).waitFor({ state: "visible" });
   }
@@ -3749,7 +3766,7 @@ async function assertCurrentHubCompatibilityAndSchema(page) {
 
 async function assertCurrentHubSchemaPresentation(page, status) {
   const reportedSchemaVersion = requiredProvenanceField(status, "schema_version", "status");
-  const schemaRow = page.locator('[data-diagnostic-id="schema-version"]');
+  const schemaRow = page.locator(`[data-diagnostic-id="${HOST_CHROME.schemaDiagnosticId}"]`);
   await schemaRow.waitFor();
   const schemaText = await schemaRow.innerText();
   // The point of this assertion is neutrality -- Hub's durable-state schema is reported as
@@ -3950,9 +3967,9 @@ function assertHubStatusRehydrated(evidence, expectedIdentity, label) {
 }
 
 async function openHubGeneralView(page) {
-  await page.locator("ion-menu.app-sidebar").getByRole("button", { name: "Hub settings", exact: true }).click();
-  await page.getByLabel("Hub settings sections").getByRole("button", { name: /^General/ }).click();
-  const general = page.getByTestId("hub-settings-general");
+  await page.locator("ion-menu.app-sidebar").getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true }).click();
+  await page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole("button", { name: /^General/ }).click();
+  const general = page.getByTestId(HOST_CHROME.hubSettingsGeneralTestId);
   await general.waitFor();
   return general;
 }
@@ -3981,9 +3998,9 @@ async function assertAuthoritativeHubIdentity(page, status, label) {
   };
 
   const general = await openHubGeneralView(page);
-  const softwareText = await general.getByTestId("hub-software-identity").innerText();
-  const hostText = await general.getByTestId("hub-host-identity").innerText();
-  const internalText = await general.getByTestId("hub-internal-state").innerText();
+  const softwareText = await general.getByTestId(HOST_CHROME.hubSoftwareIdentityTestId).innerText();
+  const hostText = await general.getByTestId(HOST_CHROME.hubHostIdentityTestId).innerText();
+  const internalText = await general.getByTestId(HOST_CHROME.hubInternalStateTestId).innerText();
   const renderedText = `${softwareText}\n${hostText}\n${internalText}`;
 
   const missing = [];
@@ -4019,7 +4036,7 @@ async function assertAuthoritativeHubIdentity(page, status, label) {
   if (!/State schema/.test(internalText)) {
     throw new Error(`Hub General (${label}) does not render the state schema at all: ${internalText}`);
   }
-  const secondaryClass = await general.getByTestId("hub-internal-state").getAttribute("class");
+  const secondaryClass = await general.getByTestId(HOST_CHROME.hubInternalStateTestId).getAttribute("class");
   if (!String(secondaryClass).includes("hub-metadata-secondary")) {
     throw new Error(`Hub General (${label}) internal-state block is not marked secondary: ${String(secondaryClass)}`);
   }
@@ -4047,8 +4064,8 @@ async function assertAuthoritativeHubIdentity(page, status, label) {
  */
 async function assertHubUpdateCheck(page) {
   const general = await openHubGeneralView(page);
-  await general.getByTestId("hub-software-update")
-    .getByRole("button", { name: "Check for updates", exact: true })
+  await general.getByTestId(HOST_CHROME.hubSoftwareUpdateTestId)
+    .getByRole("button", { name: HOST_CHROME.checkForUpdatesButtonName, exact: true })
     .click();
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "check_hub_update" }, "check_hub_update request");
   const hubUpdate = await page.waitForFunction(
@@ -4076,8 +4093,8 @@ async function assertHubUpdateCheck(page) {
     throw new Error(`timed out waiting for a structured check_hub_update result: ${error.message}`);
   });
 
-  const updateRegion = general.getByTestId("hub-software-update");
-  const outcomeText = await general.getByTestId("hub-update-outcome").innerText();
+  const updateRegion = general.getByTestId(HOST_CHROME.hubSoftwareUpdateTestId);
+  const outcomeText = await general.getByTestId(HOST_CHROME.hubUpdateOutcomeTestId).innerText();
   const renderedState = await updateRegion.getAttribute("data-hub-update-state");
   const evidence = JSON.stringify({ hubUpdate, outcomeText, renderedState });
 
@@ -4166,7 +4183,7 @@ async function assertHubUpdateSupportDiagnostics(page) {
   if (!Array.isArray(projected.updateDiagnostics)) {
     throw new Error(`check_hub_update result did not carry a diagnostics array: ${JSON.stringify(projected)}`);
   }
-  const supportView = page.getByTestId("diagnostics-view");
+  const supportView = page.getByTestId(HOST_CHROME.diagnosticsViewTestId);
   await supportView.waitFor();
   return projected;
 }
@@ -4561,13 +4578,17 @@ async function waitForRunningSessionFrame(page) {
 async function waitForTerminalAttachState(page, states) {
   const expectedStates = Array.isArray(states) ? states : [states];
   await page.waitForFunction(
-    ({ expectedStates: nextExpectedStates }) => {
+    ({ expectedStates: nextExpectedStates, statusClass, attachStateAttr }) => {
       const status = globalThis.document
-        .querySelector(".terminal-status")
-        ?.getAttribute("data-terminal-attach-state");
+        .querySelector(`.${statusClass}`)
+        ?.getAttribute(attachStateAttr);
       return nextExpectedStates.includes(status);
     },
-    { expectedStates },
+    {
+      expectedStates,
+      statusClass: HOST_CHROME.terminalStatusClass,
+      attachStateAttr: HOST_CHROME.terminalAttachStateAttr
+    },
     { timeout: 15_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for terminal attach state ${expectedStates.join(" or ")}: ${error.message}`);
@@ -4576,23 +4597,84 @@ async function waitForTerminalAttachState(page, states) {
 
 async function waitForTerminalSession(page, sessionId) {
   await page.waitForFunction(
-    ({ expectedSessionId }) =>
-      globalThis.document.querySelector(".terminal-view-container")?.getAttribute("data-terminal-session-id") === expectedSessionId,
-    { expectedSessionId: sessionId },
+    ({ expectedSessionId, containerClass, sessionIdAttr }) =>
+      globalThis.document
+        .querySelector(`.${containerClass}`)
+        ?.getAttribute(sessionIdAttr) === expectedSessionId,
+    {
+      expectedSessionId: sessionId,
+      containerClass: HOST_CHROME.terminalContainerClass,
+      sessionIdAttr: HOST_CHROME.terminalSessionIdAttr
+    },
     { timeout: 15_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for terminal session ${sessionId}: ${error.message}`);
   });
 }
 
-async function waitForTerminalDetached(page) {
-  await page.waitForFunction(
-    () => globalThis.document.querySelector("[data-terminal-session-id='none']") !== null,
-    undefined,
-    { timeout: 15_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for terminal detach placeholder: ${error.message}`);
-  });
+/**
+ * Wait until production release has unmounted the session terminal host and shown dashboard.
+ * Uses shared HOST_CHROME constants for DOM extraction and shared isTerminalDetached decision.
+ * Timeout diagnostics distinguish "exited never arrived" from "exited but destination missing".
+ */
+async function waitForTerminalDetached(page, sessionId, { timeoutMs = 15_000 } = {}) {
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    throw new Error("waitForTerminalDetached requires an explicit sessionId");
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let exitedObserved = false;
+  let lastObservedAttachState = null;
+  let lastSessionContainerIds = [];
+  let lastDashboardPresent = false;
+
+  while (Date.now() < deadline) {
+    const snapshot = await page.evaluate((chrome) => {
+      const containers = [
+        ...globalThis.document.querySelectorAll(`.${chrome.terminalContainerClass}`)
+      ];
+      const sessionContainerIds = containers
+        .map((node) => node.getAttribute(chrome.terminalSessionIdAttr))
+        .filter((id) => typeof id === "string" && id.length > 0);
+      const dashboardPresent =
+        globalThis.document.querySelector(`[data-testid="${chrome.dashboardTestId}"]`) != null;
+      const statusNode = globalThis.document.querySelector(`.${chrome.terminalStatusClass}`);
+      const attachState = statusNode?.getAttribute(chrome.terminalAttachStateAttr) ?? null;
+      return { sessionContainerIds, dashboardPresent, attachState };
+    }, {
+      terminalContainerClass: HOST_CHROME.terminalContainerClass,
+      terminalSessionIdAttr: HOST_CHROME.terminalSessionIdAttr,
+      terminalStatusClass: HOST_CHROME.terminalStatusClass,
+      terminalAttachStateAttr: HOST_CHROME.terminalAttachStateAttr,
+      dashboardTestId: HOST_CHROME.dashboardTestId
+    });
+
+    lastSessionContainerIds = snapshot.sessionContainerIds;
+    lastDashboardPresent = snapshot.dashboardPresent;
+    lastObservedAttachState = snapshot.attachState;
+    if (snapshot.attachState === "exited") {
+      exitedObserved = true;
+    }
+
+    if (isTerminalDetached({
+      sessionContainerIds: snapshot.sessionContainerIds,
+      dashboardPresent: snapshot.dashboardPresent
+    }, sessionId)) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  const sessionContainerPresent = lastSessionContainerIds.includes(sessionId);
+  throw new Error(
+    `timed out waiting for terminal detach: sessionId=${sessionId}` +
+      ` exitedObserved=${exitedObserved}` +
+      ` lastObservedAttachState=${String(lastObservedAttachState)}` +
+      ` sessionContainerPresent=${sessionContainerPresent}` +
+      ` dashboardPresent=${lastDashboardPresent}` +
+      ` sessionContainerIds=${JSON.stringify(lastSessionContainerIds)}`
+  );
 }
 
 async function terminalOutputCount(page) {

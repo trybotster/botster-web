@@ -12,6 +12,176 @@ export function packageEnsureDecision(packages, packageName) {
   };
 }
 
+/**
+ * Shared host-chrome selector/attribute vocabulary for the live packaged harness and
+ * default-suite anti-drift contracts. Extraction stays per-side (DOM vs markup); names and
+ * detach decision logic do not.
+ */
+export const HOST_CHROME = Object.freeze({
+  terminalContainerClass: "terminal-view-container",
+  terminalStatusClass: "terminal-status",
+  terminalSessionIdAttr: "data-terminal-session-id",
+  terminalAttachStateAttr: "data-terminal-attach-state",
+  dashboardTestId: "dashboard-view",
+  appsViewTestId: "apps-view",
+  diagnosticsViewTestId: "diagnostics-view",
+  terminalSessionViewTestId: "terminal-session-view",
+  pluginSettingsRouteTestId: "plugin-settings-route",
+  selectedAppSurfaceTestId: "selected-app-surface",
+  hubSettingsGeneralTestId: "hub-settings-general",
+  hubSoftwareIdentityTestId: "hub-software-identity",
+  hubHostIdentityTestId: "hub-host-identity",
+  hubInternalStateTestId: "hub-internal-state",
+  hubSoftwareUpdateTestId: "hub-software-update",
+  hubUpdateOutcomeTestId: "hub-update-outcome",
+  schemaDiagnosticId: "schema-version",
+  workbenchNavLabel: "Botster workbench",
+  hubSettingsSectionsLabel: "Hub settings sections",
+  homeNavButtonName: "Home",
+  appsNavButtonName: "Apps",
+  hubSettingsNavButtonName: "Hub settings",
+  openSessionButtonName: "Open",
+  settingsBackButtonName: "Back",
+  checkForUpdatesButtonName: "Check for updates",
+  sessionsHeadingName: "Sessions",
+  hubHeadingName: "Hub",
+  schemaFloorSourcePin: "status.schema_version < 3"
+});
+
+/**
+ * Pure detach decision over already-extracted facts.
+ * Success = positive destination (dashboard) + session terminal host gone.
+ */
+export function isTerminalDetached({ sessionContainerIds, dashboardPresent }, sessionId) {
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    return false;
+  }
+  const ids = Array.isArray(sessionContainerIds) ? sessionContainerIds : [];
+  return dashboardPresent === true && !ids.includes(sessionId);
+}
+
+/** Extract terminal container session ids from renderToStaticMarkup HTML using shared attr names. */
+export function extractTerminalSessionIdsFromMarkup(markup) {
+  const attr = HOST_CHROME.terminalSessionIdAttr;
+  const pattern = new RegExp(`${attr}="([^"]*)"`, "g");
+  const ids = [];
+  for (const match of String(markup).matchAll(pattern)) {
+    if (match[1]) ids.push(match[1]);
+  }
+  return ids;
+}
+
+export function extractDashboardPresentFromMarkup(markup) {
+  return String(markup).includes(`data-testid="${HOST_CHROME.dashboardTestId}"`);
+}
+
+export function extractAttachStateFromMarkup(markup) {
+  const attr = HOST_CHROME.terminalAttachStateAttr;
+  const match = String(markup).match(new RegExp(`${attr}="([^"]*)"`));
+  return match?.[1] ?? null;
+}
+
+export function markupContainsTestId(markup, testId) {
+  return String(markup).includes(`data-testid="${testId}"`);
+}
+
+export function markupContainsDiagnosticId(markup, diagnosticId) {
+  return String(markup).includes(`data-diagnostic-id="${diagnosticId}"`);
+}
+
+/**
+ * Default-path host-chrome inventory. Unit suite evaluates each entry against rendered
+ * product markup (or shared decision facts). Mode-branch chrome is out of scope.
+ */
+export const HOST_CHROME_CONTRACTS = Object.freeze([
+  Object.freeze({
+    id: "terminal-mounted",
+    harnessUse: "waitForTerminalSession / terminal attach assertions",
+    render: "TerminalViewHost",
+    constants: ["terminalContainerClass", "terminalSessionIdAttr", "terminalAttachStateAttr", "terminalStatusClass"],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "terminal-detached",
+    harnessUse: "waitForTerminalDetached after shutdownProductionSession",
+    render: "DashboardView + TerminalViewHost (true/false fact pairs via isTerminalDetached)",
+    constants: ["dashboardTestId", "terminalSessionIdAttr"],
+    decide: "isTerminalDetached",
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "settings-back",
+    harnessUse: "plugin settings close path (getByRole Back)",
+    render: "PluginSettingsRoutePage",
+    constants: ["pluginSettingsRouteTestId", "settingsBackButtonName"],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "schema-presentation-neutral",
+    harnessUse: "assertCurrentHubSchemaPresentation",
+    render: "ConnectionDiagnosticsPanel + schemaVersionInformationFromFrame",
+    constants: ["schemaDiagnosticId"],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "schema-floor-in-harness",
+    harnessUse: "assertCurrentHubCompatibilityAndSchema floor check",
+    render: "secondary harness-source pin (schemaFloorSourcePin); product diagnostic remains rendered-output based",
+    constants: ["schemaFloorSourcePin"],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "dashboard-view",
+    harnessUse: "openHomeView / openSessionTerminal / detach destination",
+    render: "DashboardView",
+    constants: ["dashboardTestId", "sessionsHeadingName", "openSessionButtonName"],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "terminal-session-view",
+    harnessUse: "openSessionTerminal / reconnect cycle route restore",
+    render: "SessionRouteView",
+    constants: ["terminalSessionViewTestId"],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "hub-general-chrome",
+    harnessUse: "assertAuthoritativeHubIdentity / assertHubUpdateCheck",
+    render: "HubGeneralSection",
+    constants: [
+      "hubSettingsGeneralTestId",
+      "hubSoftwareIdentityTestId",
+      "hubHostIdentityTestId",
+      "hubInternalStateTestId",
+      "hubSoftwareUpdateTestId",
+      "hubUpdateOutcomeTestId",
+      "checkForUpdatesButtonName"
+    ],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "apps-view",
+    harnessUse: "openAppsView",
+    render: "AppsViewShell",
+    constants: ["appsViewTestId", "appsNavButtonName"],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "workbench-nav",
+    harnessUse: "openHomeView / openAppsView Home+Apps buttons",
+    render: "WorkbenchNav",
+    constants: ["workbenchNavLabel", "homeNavButtonName", "appsNavButtonName"],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "selected-app-surface",
+    harnessUse: "plugin surface wait/read paths (default path package surfaces)",
+    render: "PluginSurfaceRoutePage",
+    constants: ["selectedAppSurfaceTestId"],
+    class: "host-chrome"
+  })
+]);
+
 export function assertDurableStateOwnership({ durableStateMode, suppliedDataDir }) {
   if (durableStateMode && suppliedDataDir !== undefined) {
     throw new Error(
