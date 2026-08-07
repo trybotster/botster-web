@@ -1194,6 +1194,277 @@ export function SessionListItem({
   );
 }
 
+/**
+ * Workbench primary nav (Home / Apps). Exported for host-chrome anti-drift contracts —
+ * no behavior change; App renders this in the sidebar.
+ */
+export function WorkbenchNav({
+  activeView,
+  onNavigate,
+  children
+}: {
+  activeView: AppView;
+  onNavigate: (view: AppView) => void;
+  children?: ReactNode;
+}) {
+  return (
+    <nav aria-label="Botster workbench">
+      <IonList lines="none" className="nav-list">
+        {navigationItems.map((item) => (
+          <IonMenuToggle autoHide={false} key={item.label}>
+            <button
+              type="button"
+              className={activeView === item.view ? "nav-item active" : "nav-item"}
+              aria-current={activeView === item.view ? "page" : undefined}
+              onClick={() => onNavigate(item.view)}
+            >
+              <IonIcon icon={item.icon} aria-hidden="true" />
+              <span>{item.label}</span>
+            </button>
+          </IonMenuToggle>
+        ))}
+      </IonList>
+      {children}
+    </nav>
+  );
+}
+
+/**
+ * Dashboard (Home) view. Extracted for export-for-contract so detach oracle unit tests
+ * can prove data-testid="dashboard-view" against real rendered product markup.
+ * Behavior-neutral structural extraction — App renders the same tree via this component.
+ */
+export function DashboardView({
+  sessions,
+  sessionLoadStatus,
+  onOpenSession,
+  onNavigateToApps,
+  onNavigateToSpawnPoints
+}: {
+  sessions: Record<string, unknown>[];
+  sessionLoadStatus: HubEntityLoadStatus;
+  onOpenSession: (sessionId: string) => void;
+  onNavigateToApps: () => void;
+  onNavigateToSpawnPoints: () => void;
+}) {
+  return (
+    <section className="view-stack" aria-labelledby="dashboard-heading" data-testid="dashboard-view">
+      <section className="home-hero">
+        <div>
+          <p className="eyebrow">Local hub</p>
+          <h1 id="dashboard-heading">Your sessions</h1>
+          <p>Return to work already running on this device.</p>
+        </div>
+      </section>
+      <section className="workflow-section home-sessions" aria-labelledby="recent-sessions-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Recent work</p>
+            <h2 id="recent-sessions-heading">Sessions</h2>
+          </div>
+          <IonBadge color="medium">{sessions.length}</IonBadge>
+        </div>
+        {sessionLoadStatus === "error" ? (
+          <p className="entity-empty">Sessions could not be loaded. Open Hub settings for connection details.</p>
+        ) : sessions.length > 0 ? (
+          <IonList lines="full" aria-label="Sessions">
+            {sessions.map((session) => (
+              <SessionListItem
+                key={String(session.id)}
+                session={session}
+                onOpen={onOpenSession}
+              />
+            ))}
+          </IonList>
+        ) : (
+          <div className="home-empty-state">
+            <h3>No sessions yet</h3>
+            <p>Choose a spawn point to get ready for your first session.</p>
+            <IonButton fill="outline" size="small" onClick={onNavigateToSpawnPoints}>
+              View spawn points
+            </IonButton>
+          </div>
+        )}
+      </section>
+      <div className="home-shortcuts" aria-label="Set up Botster">
+        <button type="button" onClick={onNavigateToApps}>
+          <IonIcon icon={cubeOutline} aria-hidden="true" />
+          <span><strong>Apps</strong><small>Open installed tools and extensions</small></span>
+        </button>
+        <button type="button" onClick={onNavigateToSpawnPoints}>
+          <IonIcon icon={serverOutline} aria-hidden="true" />
+          <span><strong>Spawn points</strong><small>Choose where sessions can run</small></span>
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Apps launcher shell. Exported so default-path host-chrome inventory can prove
+ * data-testid="apps-view" from rendered markup (behavior-neutral).
+ */
+export function AppsView({
+  installedRowCount,
+  onAddPackage,
+  children
+}: {
+  installedRowCount: number;
+  onAddPackage: () => void;
+  children?: ReactNode;
+}) {
+  return (
+    <section className="view-stack" aria-labelledby="apps-heading" data-testid="apps-view">
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">Launcher</p>
+          <h1 id="apps-heading">Apps</h1>
+        </div>
+        <IonButton aria-label="Add package" onClick={onAddPackage}>
+          <IonIcon icon={addOutline} slot="start" aria-hidden="true" />
+          Add
+        </IonButton>
+      </div>
+      {installedRowCount > 0 ? (
+        <IonList lines="full" aria-label="Installed">
+          {children}
+        </IonList>
+      ) : (
+        <article className="workflow-section">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Installed</p>
+              <h2>No packages installed</h2>
+            </div>
+          </div>
+          <p className="entity-empty">Add a package to make an app or plugin available here.</p>
+        </article>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Hub settings section nav (General / Session types / Support / …).
+ * Exported for host-chrome anti-drift contracts — behavior-neutral.
+ */
+export function HubSettingsSectionsNav({
+  activeSection,
+  onNavigate
+}: {
+  activeSection: HubSettingsSection;
+  onNavigate: (section: HubSettingsSection) => void;
+}) {
+  return (
+    <nav className="hub-settings-nav" aria-label="Hub settings sections">
+      {hubSettingsSections.map((section) => (
+        <button
+          type="button"
+          key={section.id}
+          className={activeSection === section.id ? "active" : undefined}
+          aria-current={activeSection === section.id ? "page" : undefined}
+          onClick={() => onNavigate(section.id)}
+        >
+          <strong>{section.label}</strong>
+          <span>{section.description}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+/**
+ * Support / diagnostics panel shell. Exported so diagnostics-view and
+ * developer-diagnostics remain inventory-covered under npm test.
+ */
+export function DiagnosticsView({
+  diagnosticCount,
+  blocking,
+  children,
+  developerDetails
+}: {
+  diagnosticCount: number;
+  blocking: boolean;
+  children?: ReactNode;
+  developerDetails?: ReactNode;
+}) {
+  return (
+    <section
+      className="view-stack hub-settings-panel"
+      aria-labelledby="diagnostics-view-heading"
+      data-testid="diagnostics-view"
+    >
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">Operations</p>
+          <h2 id="diagnostics-view-heading">Support</h2>
+        </div>
+        <IonBadge color={blocking ? "danger" : "medium"}>
+          {diagnosticCount}
+        </IonBadge>
+      </div>
+      {children}
+      {developerDetails !== undefined ? (
+        <details className="developer-diagnostics">
+          <summary>Developer details</summary>
+          <p>Protocol, renderer, entity-frame, and terminal details for troubleshooting.</p>
+          {developerDetails}
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+/**
+ * Session types settings panel shell. Exported for default-path host-chrome inventory.
+ */
+export function SessionTypesView({
+  sessionTypeCount,
+  children
+}: {
+  sessionTypeCount: number;
+  children?: ReactNode;
+}) {
+  return (
+    <section
+      className="view-stack hub-settings-panel"
+      aria-labelledby="session-types-heading"
+      data-testid="session-types-view"
+    >
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">Sessions</p>
+          <h2 id="session-types-heading">Session types</h2>
+          <p className="page-description">Available ways to start a session at each spawn point.</p>
+        </div>
+        <IonBadge color="medium">{sessionTypeCount}</IonBadge>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/** Create-session-type form submit control — export-for-contract for harness testid. */
+export function SessionTypeSubmitButton({
+  disabled,
+  submitting,
+  onClick
+}: {
+  disabled: boolean;
+  submitting: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <IonButton
+      disabled={disabled}
+      onClick={onClick}
+      data-testid="submit-session-type"
+    >
+      {submitting ? "Saving…" : "Create"}
+    </IonButton>
+  );
+}
+
 type HubEntityLoadKey =
   | "hubStatus"
   | "app"
@@ -2290,27 +2561,12 @@ export default function App() {
             </IonToolbar>
           </IonHeader>
           <IonContent>
-            <nav aria-label="Botster workbench">
-              <IonList lines="none" className="nav-list">
-                {navigationItems.map((item) => (
-                  <IonMenuToggle autoHide={false} key={item.label}>
-                    <button
-                      type="button"
-                      className={activeView === item.view ? "nav-item active" : "nav-item"}
-                      aria-current={activeView === item.view ? "page" : undefined}
-                      onClick={() => navigateToView(item.view)}
-                    >
-                      <IonIcon icon={item.icon} aria-hidden="true" />
-                      <span>{item.label}</span>
-                    </button>
-                  </IonMenuToggle>
-                ))}
-              </IonList>
+            <WorkbenchNav activeView={activeView} onNavigate={navigateToView}>
               <PluginNavigationShortcuts
                 entries={packageNavigationShortcuts}
                 onOpen={openPackageNavigation}
               />
-            </nav>
+            </WorkbenchNav>
           </IonContent>
           <IonFooter className="app-sidebar-footer">
             <IonList lines="none" className="nav-list sidebar-advanced">
@@ -2352,55 +2608,13 @@ export default function App() {
                 </SessionRouteView>
               ) : null}
               {activeView === "dashboard" ? (
-                <section className="view-stack" aria-labelledby="dashboard-heading" data-testid="dashboard-view">
-                  <section className="home-hero">
-                    <div>
-                      <p className="eyebrow">Local hub</p>
-                      <h1 id="dashboard-heading">Your sessions</h1>
-                      <p>Return to work already running on this device.</p>
-                    </div>
-                  </section>
-                  <section className="workflow-section home-sessions" aria-labelledby="recent-sessions-heading">
-                    <div className="section-heading">
-                      <div>
-                        <p className="eyebrow">Recent work</p>
-                        <h2 id="recent-sessions-heading">Sessions</h2>
-                      </div>
-                      <IonBadge color="medium">{sessions.length}</IonBadge>
-                    </div>
-                    {entityLoadStatus.session === "error" ? (
-                      <p className="entity-empty">Sessions could not be loaded. Open Hub settings for connection details.</p>
-                    ) : sessions.length > 0 ? (
-                      <IonList lines="full" aria-label="Sessions">
-                        {sessions.map((session) => (
-                          <SessionListItem
-                            key={String(session.id)}
-                            session={session}
-                            onOpen={openSession}
-                          />
-                        ))}
-                      </IonList>
-                    ) : (
-                      <div className="home-empty-state">
-                        <h3>No sessions yet</h3>
-                        <p>Choose a spawn point to get ready for your first session.</p>
-                        <IonButton fill="outline" size="small" onClick={() => navigateToHubSettings("spawn-points")}>
-                          View spawn points
-                        </IonButton>
-                      </div>
-                    )}
-                  </section>
-                  <div className="home-shortcuts" aria-label="Set up Botster">
-                    <button type="button" onClick={() => navigateToView("apps")}>
-                      <IonIcon icon={cubeOutline} aria-hidden="true" />
-                      <span><strong>Apps</strong><small>Open installed tools and extensions</small></span>
-                    </button>
-                    <button type="button" onClick={() => navigateToHubSettings("spawn-points")}>
-                      <IonIcon icon={serverOutline} aria-hidden="true" />
-                      <span><strong>Spawn points</strong><small>Choose where sessions can run</small></span>
-                    </button>
-                  </div>
-                </section>
+                <DashboardView
+                  sessions={sessions}
+                  sessionLoadStatus={entityLoadStatus.session}
+                  onOpenSession={openSession}
+                  onNavigateToApps={() => navigateToView("apps")}
+                  onNavigateToSpawnPoints={() => navigateToHubSettings("spawn-points")}
+                />
               ) : null}
 
                 {activeView === "apps" ? (
@@ -2438,59 +2652,38 @@ export default function App() {
                     presentationState={uiPresentationState}
                   />
                 ) : (
-                  <section className="view-stack" aria-labelledby="apps-heading" data-testid="apps-view">
-                    <div className="page-heading">
-                      <div>
-                        <p className="eyebrow">Launcher</p>
-                        <h1 id="apps-heading">Apps</h1>
-                      </div>
-                      <IonButton aria-label="Add package" onClick={() => setAddPackageOpen(true)}>
-                        <IonIcon icon={addOutline} slot="start" aria-hidden="true" />
-                        Add
-                      </IonButton>
-                    </div>
-                      {installedRowCount > 0 ? (
-                        <IonList lines="full" aria-label="Installed">
-                        <IonListHeader>
-                          <IonLabel>Installed</IonLabel>
-                        </IonListHeader>
-                        {installedAppPackageRows.map((app) => (
-                          <PluginListItem
-                            app={app}
-                            key={app.id}
-                            onOpen={openPackage}
-                            onSettings={openPackageSettings}
-                          />
-                        ))}
-                        {installedAppRows.map((app) => (
-                          <AppListItem
-                            app={app}
-                            key={app.id}
-                            surface={packageAppSurfaces(appSurfacePackages.get(stringValue(app.package_name, "")) ?? {})[0]}
-                            onOpen={openApp}
-                          />
-                        ))}
-                        {installedPluginPackageRows.map((app) => (
-                          <PluginListItem
-                            app={app}
-                            key={app.id}
-                            onOpen={openPackage}
-                            onSettings={openPackageSettings}
-                          />
-                        ))}
-                      </IonList>
-                      ) : (
-                        <article className="workflow-section">
-                          <div className="section-heading">
-                            <div>
-                              <p className="eyebrow">Installed</p>
-                              <h2>No packages installed</h2>
-                            </div>
-                          </div>
-                          <p className="entity-empty">Add a package to make an app or plugin available here.</p>
-                        </article>
-                      )}
-                    </section>
+                  <AppsView
+                    installedRowCount={installedRowCount}
+                    onAddPackage={() => setAddPackageOpen(true)}
+                  >
+                    <IonListHeader>
+                      <IonLabel>Installed</IonLabel>
+                    </IonListHeader>
+                    {installedAppPackageRows.map((app) => (
+                      <PluginListItem
+                        app={app}
+                        key={app.id}
+                        onOpen={openPackage}
+                        onSettings={openPackageSettings}
+                      />
+                    ))}
+                    {installedAppRows.map((app) => (
+                      <AppListItem
+                        app={app}
+                        key={app.id}
+                        surface={packageAppSurfaces(appSurfacePackages.get(stringValue(app.package_name, "")) ?? {})[0]}
+                        onOpen={openApp}
+                      />
+                    ))}
+                    {installedPluginPackageRows.map((app) => (
+                      <PluginListItem
+                        app={app}
+                        key={app.id}
+                        onOpen={openPackage}
+                        onSettings={openPackageSettings}
+                      />
+                    ))}
+                  </AppsView>
                   )
                 ) : null}
 
@@ -2503,20 +2696,10 @@ export default function App() {
                         <p className="page-description">Manage where sessions run, how they start, and the extensions connected to this hub.</p>
                       </div>
                     </div>
-                    <nav className="hub-settings-nav" aria-label="Hub settings sections">
-                      {hubSettingsSections.map((section) => (
-                        <button
-                          type="button"
-                          key={section.id}
-                          className={activeHubSettingsSection === section.id ? "active" : undefined}
-                          aria-current={activeHubSettingsSection === section.id ? "page" : undefined}
-                          onClick={() => navigateToHubSettings(section.id)}
-                        >
-                          <strong>{section.label}</strong>
-                          <span>{section.description}</span>
-                        </button>
-                      ))}
-                    </nav>
+                    <HubSettingsSectionsNav
+                      activeSection={activeHubSettingsSection}
+                      onNavigate={navigateToHubSettings}
+                    />
                   </section>
                 ) : null}
 
@@ -2529,15 +2712,7 @@ export default function App() {
                 ) : null}
 
                 {activeView === "hub-settings" && activeHubSettingsSection === "session-types" ? (
-                  <section className="view-stack hub-settings-panel" aria-labelledby="session-types-heading" data-testid="session-types-view">
-                    <div className="page-heading">
-                      <div>
-                        <p className="eyebrow">Sessions</p>
-                        <h2 id="session-types-heading">Session types</h2>
-                        <p className="page-description">Available ways to start a session at each spawn point.</p>
-                      </div>
-                      <IonBadge color="medium">{sessionTypes.length}</IonBadge>
-                    </div>
+                  <SessionTypesView sessionTypeCount={sessionTypes.length}>
                     <SessionTypesSurfaceNotices
                       supported={sessionTypeSubscriptionsSupported}
                       subscriptionError={sessionTypeSubscriptionError}
@@ -2570,7 +2745,7 @@ export default function App() {
                     ) : (
                       <p className="entity-empty">No session types are available yet.</p>
                     )}
-                  </section>
+                  </SessionTypesView>
                 ) : null}
 
                 {activeView === "hub-settings" && activeHubSettingsSection === "extensions" ? (
@@ -2650,16 +2825,112 @@ export default function App() {
                 ) : null}
 
                 {activeView === "hub-settings" && activeHubSettingsSection === "support" ? (
-                <section className="view-stack hub-settings-panel" aria-labelledby="diagnostics-view-heading" data-testid="diagnostics-view">
-                  <div className="page-heading">
-                    <div>
-                      <p className="eyebrow">Operations</p>
-                      <h2 id="diagnostics-view-heading">Support</h2>
-                    </div>
-                    <IonBadge color={blockingDiagnostics.length > 0 ? "danger" : "medium"}>
-                      {diagnostics.length}
-                    </IonBadge>
-                  </div>
+                <DiagnosticsView
+                  diagnosticCount={diagnostics.length}
+                  blocking={blockingDiagnostics.length > 0}
+                  developerDetails={(
+                    <IonGrid className="workspace-grid" aria-label="Developer diagnostic details">
+                      <IonRow>
+                        <IonCol size="12">
+                          <div className="local-hub-main">
+                            <section className="workflow-section" aria-label="Renderer registry surface" data-testid="renderer-registry-workflow">
+                              <div className="section-heading">
+                                <div>
+                                  <p className="eyebrow">Renderer surface</p>
+                                  <h2>Renderer registry</h2>
+                                </div>
+                                <IonBadge color="medium">Diagnostic</IonBadge>
+                              </div>
+                              <UiNodeSurface
+                                snapshot={surfaceSnapshot ?? loadingSnapshot}
+                                entities={runtimeClient.entities}
+                                capabilities={{
+                                  ...defaultUiCapabilitySet,
+                                  isolated_plugin_asset: false
+                                }}
+                                localState={localState}
+                                onAction={({ action }) => dispatchAction({
+                                  id: action.id,
+                                  payload: action.payload,
+                                  disabled: action.disabled
+                                })}
+                              />
+                            </section>
+                            <section className="workflow-section contract-section" aria-label="Botster client contract" data-testid="client-contract">
+                              <div className="section-heading">
+                                <div>
+                                  <p className="eyebrow">Client contract</p>
+                                  <h2>Protocol surfaces under test</h2>
+                                </div>
+                                <IonBadge color="medium">{botsterWebClientContract.seams.length} seams</IonBadge>
+                              </div>
+                              <div className="contract-strip">
+                                {botsterWebClientContract.seams.map((seam) => (
+                                  <IonChip key={seam} color="light">
+                                    <IonLabel>{seam}</IonLabel>
+                                  </IonChip>
+                                ))}
+                              </div>
+                            </section>
+                            <div id="diagnostics-workflow" data-testid="diagnostics-workflow">
+                              <ConnectionDiagnosticsPanel diagnostics={diagnostics} />
+                            </div>
+                            <section className="workflow-section" id="entity-workflow" aria-labelledby="entity-workflow-heading" data-testid="entity-workflow">
+                              <div className="section-heading">
+                                <div>
+                                  <p className="eyebrow">Entity frames</p>
+                                  <h2 id="entity-workflow-heading">Loaded hub state</h2>
+                                </div>
+                                <IonBadge color="medium">{runtimeClient.entities.activePullCount()} active pulls</IonBadge>
+                              </div>
+                              <IonGrid className="entity-summary-grid">
+                                <IonRow>
+                                  <IonCol size="12" sizeMd="6">
+                                    <EntityFamilyPanel
+                                      title="Packages"
+                                      records={packages}
+                                      emptyText="No package records loaded."
+                                      primaryField="title"
+                                      secondaryField="status"
+                                    />
+                                  </IonCol>
+                                  <IonCol size="12" sizeMd="6">
+                                    <EntityFamilyPanel
+                                      title="Sessions"
+                                      records={sessions}
+                                      emptyText="No session records loaded."
+                                      primaryField="title"
+                                      secondaryField="status"
+                                    />
+                                  </IonCol>
+                                </IonRow>
+                              </IonGrid>
+                            </section>
+                            <section className="workflow-section" id="action-workflow" aria-labelledby="action-workflow-heading" data-testid="action-workflow">
+                              <div className="section-heading">
+                                <div>
+                                  <p className="eyebrow">Actions</p>
+                                  <h2 id="action-workflow-heading">Dispatch status</h2>
+                                </div>
+                                <IonIcon icon={serverOutline} aria-hidden="true" />
+                              </div>
+                              <dl className="action-status-list">
+                                <div>
+                                  <dt>Spawn session</dt>
+                                  <dd>{actionStatus}</dd>
+                                </div>
+                                <div>
+                                  <dt>Diagnostic action</dt>
+                                  <dd>{diagnosticActionStatus}</dd>
+                                </div>
+                              </dl>
+                            </section>
+                          </div>
+                        </IonCol>
+                      </IonRow>
+                    </IonGrid>
+                  )}
+                >
                   <LocalHubFirstScreen
                     mode={hubRuntime.mode}
                     statusText={hubRuntime.statusText}
@@ -2670,111 +2941,7 @@ export default function App() {
                     sessionLoadStatus={entityLoadStatus.session}
                     actionStatus={actionStatus}
                   />
-                  <details className="developer-diagnostics">
-                    <summary>Developer details</summary>
-                    <p>Protocol, renderer, entity-frame, and terminal details for troubleshooting.</p>
-                  <IonGrid className="workspace-grid" aria-label="Developer diagnostic details">
-                    <IonRow>
-                      <IonCol size="12">
-                        <div className="local-hub-main">
-                          <section className="workflow-section" aria-label="Renderer registry surface" data-testid="renderer-registry-workflow">
-                            <div className="section-heading">
-                              <div>
-                                <p className="eyebrow">Renderer surface</p>
-                                <h2>Renderer registry</h2>
-                              </div>
-                              <IonBadge color="medium">Diagnostic</IonBadge>
-                            </div>
-                            <UiNodeSurface
-                              snapshot={surfaceSnapshot ?? loadingSnapshot}
-                              entities={runtimeClient.entities}
-                              capabilities={{
-                                ...defaultUiCapabilitySet,
-                                isolated_plugin_asset: false
-                              }}
-                              localState={localState}
-                              onAction={({ action }) => dispatchAction({
-                                id: action.id,
-                                payload: action.payload,
-                                disabled: action.disabled
-                              })}
-                            />
-                          </section>
-                          <section className="workflow-section contract-section" aria-label="Botster client contract" data-testid="client-contract">
-                            <div className="section-heading">
-                              <div>
-                                <p className="eyebrow">Client contract</p>
-                                <h2>Protocol surfaces under test</h2>
-                              </div>
-                              <IonBadge color="medium">{botsterWebClientContract.seams.length} seams</IonBadge>
-                            </div>
-                            <div className="contract-strip">
-                              {botsterWebClientContract.seams.map((seam) => (
-                                <IonChip key={seam} color="light">
-                                  <IonLabel>{seam}</IonLabel>
-                                </IonChip>
-                              ))}
-                            </div>
-                          </section>
-                          <div id="diagnostics-workflow" data-testid="diagnostics-workflow">
-                            <ConnectionDiagnosticsPanel diagnostics={diagnostics} />
-                          </div>
-                          <section className="workflow-section" id="entity-workflow" aria-labelledby="entity-workflow-heading" data-testid="entity-workflow">
-                            <div className="section-heading">
-                              <div>
-                                <p className="eyebrow">Entity frames</p>
-                                <h2 id="entity-workflow-heading">Loaded hub state</h2>
-                              </div>
-                              <IonBadge color="medium">{runtimeClient.entities.activePullCount()} active pulls</IonBadge>
-                            </div>
-                            <IonGrid className="entity-summary-grid">
-                              <IonRow>
-                                <IonCol size="12" sizeMd="6">
-                                  <EntityFamilyPanel
-                                    title="Packages"
-                                    records={packages}
-                                    emptyText="No package records loaded."
-                                    primaryField="title"
-                                    secondaryField="status"
-                                  />
-                                </IonCol>
-                                <IonCol size="12" sizeMd="6">
-                                  <EntityFamilyPanel
-                                    title="Sessions"
-                                    records={sessions}
-                                    emptyText="No session records loaded."
-                                    primaryField="title"
-                                    secondaryField="status"
-                                  />
-                                </IonCol>
-                              </IonRow>
-                            </IonGrid>
-                          </section>
-                          <section className="workflow-section" id="action-workflow" aria-labelledby="action-workflow-heading" data-testid="action-workflow">
-                            <div className="section-heading">
-                              <div>
-                                <p className="eyebrow">Actions</p>
-                                <h2 id="action-workflow-heading">Dispatch status</h2>
-                              </div>
-                              <IonIcon icon={serverOutline} aria-hidden="true" />
-                            </div>
-                            <dl className="action-status-list">
-                              <div>
-                                <dt>Spawn session</dt>
-                                <dd>{actionStatus}</dd>
-                              </div>
-                              <div>
-                                <dt>Diagnostic action</dt>
-                                <dd>{diagnosticActionStatus}</dd>
-                              </div>
-                            </dl>
-                          </section>
-                        </div>
-                      </IonCol>
-                    </IonRow>
-                  </IonGrid>
-                  </details>
-                </section>
+                </DiagnosticsView>
               ) : null}
             </main>
             <IonModal isOpen={addPackageOpen} onDidDismiss={() => setAddPackageOpen(false)}>
@@ -3099,15 +3266,11 @@ export default function App() {
                       <IonNote color="danger" data-testid="session-type-form-error">{sessionTypeForm.error}</IonNote>
                     ) : null}
                     <div className="modal-actions">
-                      <IonButton
+                      <SessionTypeSubmitButton
                         disabled={!sessionTypeFormIsStructurallyComplete(sessionTypeForm) || sessionTypeForm.submitting}
+                        submitting={Boolean(sessionTypeForm.submitting)}
                         onClick={submitSessionTypeForm}
-                        data-testid="submit-session-type"
-                      >
-                        {sessionTypeForm.submitting
-                          ? "Saving…"
-                          : "Create"}
-                      </IonButton>
+                      />
                     </div>
                   </div>
                 ) : null}
@@ -3320,7 +3483,7 @@ interface PluginSettingsRoutePageProps {
   presentationState?: UiPresentationState;
 }
 
-function PluginSettingsRoutePage({
+export function PluginSettingsRoutePage({
   packageName,
   packageRecord,
   diagnostic,
@@ -3649,7 +3812,7 @@ function GenericConfigurationForm({
   );
 }
 
-function RemoteAccessConfigurationItem({
+export function RemoteAccessConfigurationItem({
   field,
   submit,
   onAction
