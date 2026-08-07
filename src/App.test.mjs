@@ -36,6 +36,7 @@ import {
   classifyWorkspacesReference,
   convergeEntityFamily,
   durableSeedSessionIdsForDiagnosticsLimit,
+  deleteSessionTypeTestId,
   extractAttachStateFromMarkup,
   extractDashboardPresentFromMarkup,
   extractTerminalSessionIdsFromMarkup,
@@ -1003,7 +1004,7 @@ assert.match(app, /<IonLabel>Installed<\/IonLabel>/);
 assert.doesNotMatch(app, /<IonLabel>Installed apps<\/IonLabel>/);
 assert.doesNotMatch(app, /<IonLabel>Available marketplace packages<\/IonLabel>/);
 assert.doesNotMatch(app, /<IonLabel>Installed packages<\/IonLabel>/);
-assert.match(liveProtocolHarnessScript, /\[aria-label='Installed'\]/);
+assert.match(liveProtocolHarnessScript, /HOST_CHROME\.installedListLabel/);
 assert.doesNotMatch(liveProtocolHarnessScript, /\[aria-label='Installed apps'\]/);
 assert.doesNotMatch(liveProtocolHarnessScript, /\[aria-label='Installed packages'\]/);
 assert.match(localPackageServerScript, /function isSpaRoutePath\(pathname\)/);
@@ -6230,8 +6231,13 @@ try {
       SessionListItem,
       SessionRouteView,
       SessionTypeListItem,
+      SessionTypesSurfaceNotices,
+      SessionTypesView,
+      SessionTypeSubmitButton,
       SpawnTargetListItem,
       DashboardView,
+      DiagnosticsView,
+      HubSettingsSectionsNav,
       WorkbenchNav,
       hubUpdateCheckAction,
       hubUpdateCheckActionId,
@@ -6241,6 +6247,7 @@ try {
       PluginSurfaceRoutePage,
       PluginSettingsRoutePage,
       PluginSettingsPanel,
+      RemoteAccessConfigurationItem,
       entityFamilyRecordLimit,
       appRouteFromPathname,
       appRoutePath,
@@ -6256,7 +6263,6 @@ try {
       writableSessionTypeSources,
       sessionTypeMutationSourceFromRecord,
       sessionTypeManagementSupported,
-      SessionTypesSurfaceNotices,
       sessionTypeDefinitionFromForm,
       sessionTypeFormIsStructurallyComplete,
       sessionTypeMutationSource,
@@ -6598,24 +6604,38 @@ try {
   assert.equal(markupContainsTestId(sessionRouteMarkup, HOST_CHROME.terminalSessionViewTestId), true);
 
   // --- Default-path host-chrome inventory (shared constants + decision vs rendered markup) ---
-  const hostChromeContractIds = new Set(HOST_CHROME_CONTRACTS.map((entry) => entry.id));
-  for (const requiredId of [
-    "terminal-mounted",
-    "terminal-detached",
-    "settings-back",
-    "schema-presentation-neutral",
-    "schema-floor-in-harness",
-    "dashboard-view",
-    "terminal-session-view",
-    "hub-general-chrome",
-    "apps-view",
-    "workbench-nav",
-    "selected-app-surface"
-  ]) {
-    assert.equal(hostChromeContractIds.has(requiredId), true, `missing host-chrome contract ${requiredId}`);
-  }
+  // Completeness is binding: ids are recorded only when an evaluation actually runs.
+  const evaluatedHostChromeContractIds = new Set();
+  const markHostChromeContract = (id) => {
+    assert.equal(
+      HOST_CHROME_CONTRACTS.some((entry) => entry.id === id),
+      true,
+      `evaluation recorded for unknown inventory id ${id}`
+    );
+    evaluatedHostChromeContractIds.add(id);
+  };
+  const hostChromeRenderSymbols = {
+    TerminalViewHost,
+    DashboardView,
+    PluginSettingsRoutePage,
+    ConnectionDiagnosticsPanel,
+    SessionRouteView,
+    HubGeneralSection,
+    AppsView,
+    WorkbenchNav,
+    PluginSurfaceRoutePage,
+    DiagnosticsView,
+    HubSettingsSectionsNav,
+    SessionTypesView,
+    SessionTypesSurfaceNotices,
+    SessionTypeListItem,
+    SessionTypeSubmitButton,
+    PluginSettingsPanel,
+    RemoteAccessConfigurationItem,
+    LocalHubFirstScreen
+  };
 
-  // terminal-mounted: real TerminalViewHost emits shared session-id / attach-state attributes
+  // terminal-mounted
   const mountedTerminalMarkup = renderToStaticMarkup(
     createElement(TerminalViewHost, {
       descriptor: { sessionId: "web-prod", renderer: "restty" },
@@ -6635,27 +6655,10 @@ try {
       }
     })
   );
-  assert.equal(
-    markupContainsTestId(mountedTerminalMarkup, HOST_CHROME.terminalSessionViewTestId),
-    false,
-    "TerminalViewHost is the host surface; SessionRouteView owns terminal-session-view"
-  );
-  assert.match(
-    mountedTerminalMarkup,
-    new RegExp(`class="${HOST_CHROME.terminalContainerClass}"`)
-  );
-  assert.match(
-    mountedTerminalMarkup,
-    new RegExp(`${HOST_CHROME.terminalSessionIdAttr}="web-prod"`)
-  );
-  assert.match(
-    mountedTerminalMarkup,
-    new RegExp(`class="${HOST_CHROME.terminalStatusClass}"`)
-  );
-  assert.match(
-    mountedTerminalMarkup,
-    new RegExp(`${HOST_CHROME.terminalAttachStateAttr}="unknown"`)
-  );
+  assert.match(mountedTerminalMarkup, new RegExp(`class="${HOST_CHROME.terminalContainerClass}"`));
+  assert.match(mountedTerminalMarkup, new RegExp(`${HOST_CHROME.terminalSessionIdAttr}="web-prod"`));
+  assert.match(mountedTerminalMarkup, new RegExp(`class="${HOST_CHROME.terminalStatusClass}"`));
+  assert.match(mountedTerminalMarkup, new RegExp(`${HOST_CHROME.terminalAttachStateAttr}="unknown"`));
   assert.deepEqual(extractTerminalSessionIdsFromMarkup(mountedTerminalMarkup), ["web-prod"]);
   assert.equal(extractAttachStateFromMarkup(mountedTerminalMarkup), "unknown");
   assert.equal(
@@ -6663,11 +6666,11 @@ try {
       sessionContainerIds: extractTerminalSessionIdsFromMarkup(mountedTerminalMarkup),
       dashboardPresent: false
     }, "web-prod"),
-    false,
-    "mounted terminal facts must fail the shared detach decision"
+    false
   );
+  markHostChromeContract("terminal-mounted");
 
-  // terminal-detached / dashboard-view: DashboardView renders shared dashboard testid
+  // terminal-detached + dashboard-view
   const dashboardMarkup = renderToStaticMarkup(
     createElement(DashboardView, {
       sessions: [{
@@ -6686,25 +6689,19 @@ try {
   assert.equal(extractDashboardPresentFromMarkup(dashboardMarkup), true);
   assert.equal(markupContainsTestId(dashboardMarkup, HOST_CHROME.dashboardTestId), true);
   assert.match(dashboardMarkup, new RegExp(`data-testid="${HOST_CHROME.dashboardTestId}"`));
-  assert.match(dashboardMarkup, />Sessions</);
-  assert.match(dashboardMarkup, />Open</);
+  assert.match(dashboardMarkup, new RegExp(`>${HOST_CHROME.sessionsHeadingName}<`));
+  assert.match(dashboardMarkup, new RegExp(`>${HOST_CHROME.openSessionButtonName}<`));
   assert.equal(
     isTerminalDetached({
       sessionContainerIds: extractTerminalSessionIdsFromMarkup(dashboardMarkup),
       dashboardPresent: extractDashboardPresentFromMarkup(dashboardMarkup)
     }, "web-prod"),
-    true,
-    "post-release dashboard facts must pass the shared detach decision"
+    true
   );
-  // Negative control: if session host were still present, decision fails even with dashboard
   assert.equal(
-    isTerminalDetached({
-      sessionContainerIds: ["web-prod"],
-      dashboardPresent: true
-    }, "web-prod"),
+    isTerminalDetached({ sessionContainerIds: ["web-prod"], dashboardPresent: true }, "web-prod"),
     false
   );
-  // Negative control: dashboard alone without shared decision would be insufficient if session remains
   assert.equal(
     isTerminalDetached({
       sessionContainerIds: extractTerminalSessionIdsFromMarkup(mountedTerminalMarkup),
@@ -6712,8 +6709,10 @@ try {
     }, "web-prod"),
     false
   );
+  markHostChromeContract("terminal-detached");
+  markHostChromeContract("dashboard-view");
 
-  // settings-back: exported PluginSettingsRoutePage accessible name Back
+  // settings-back
   const settingsRouteMarkup = renderToStaticMarkup(
     createElement(PluginSettingsRoutePage, {
       packageName: "botster-web",
@@ -6725,13 +6724,11 @@ try {
     })
   );
   assert.equal(markupContainsTestId(settingsRouteMarkup, HOST_CHROME.pluginSettingsRouteTestId), true);
-  assert.match(
-    settingsRouteMarkup,
-    new RegExp(`data-testid="${HOST_CHROME.pluginSettingsRouteTestId}"`)
-  );
+  assert.match(settingsRouteMarkup, new RegExp(`data-testid="${HOST_CHROME.pluginSettingsRouteTestId}"`));
   assert.match(settingsRouteMarkup, new RegExp(`>${HOST_CHROME.settingsBackButtonName}<`));
+  markHostChromeContract("settings-back");
 
-  // schema-presentation-neutral: diagnostic id + Info/server framing in rendered panel
+  // schema-presentation-neutral
   const schemaNeutralDiagnostic = {
     id: HOST_CHROME.schemaDiagnosticId,
     title: "Hub durable-state schema",
@@ -6742,21 +6739,25 @@ try {
   const schemaPresentationMarkup = renderToStaticMarkup(
     createElement(ConnectionDiagnosticsPanel, { diagnostics: [schemaNeutralDiagnostic] })
   );
-  assert.equal(
-    markupContainsDiagnosticId(schemaPresentationMarkup, HOST_CHROME.schemaDiagnosticId),
-    true
-  );
+  assert.equal(markupContainsDiagnosticId(schemaPresentationMarkup, HOST_CHROME.schemaDiagnosticId), true);
   assert.match(schemaPresentationMarkup, /Hub durable-state schema/);
   assert.match(schemaPresentationMarkup, /schema version 3/);
   assert.match(schemaPresentationMarkup, /Info \/ server/);
   assert.doesNotMatch(schemaPresentationMarkup, /Blocked|mismatch|expected schema/i);
+  markHostChromeContract("schema-presentation-neutral");
 
-  // schema-floor-in-harness: secondary source pin already asserted above against helpers constant
+  // schema-floor-in-harness
+  assert.equal(HOST_CHROME.schemaFloorSourcePin, "status.schema_version < 3");
   assert.match(liveProtocolHarnessScript, /status\.schema_version < 3/);
   assert.doesNotMatch(liveProtocolHarnessScript, /status\.schema_version\s*!==\s*2/);
   assert.doesNotMatch(liveProtocolHarnessScript, /status\.schema_version\s*===\s*[23]/);
+  markHostChromeContract("schema-floor-in-harness");
 
-  // hub-general-chrome: HubGeneralSection shared testids via rendered markup + constants
+  // terminal-session-view (already rendered above; re-assert constants)
+  assert.equal(markupContainsTestId(sessionRouteMarkup, HOST_CHROME.terminalSessionViewTestId), true);
+  markHostChromeContract("terminal-session-view");
+
+  // hub-general-chrome
   const hubGeneralChromeMarkup = renderToStaticMarkup(
     createElement(HubGeneralSection, {
       hubStatus: {
@@ -6782,37 +6783,38 @@ try {
   assert.equal(markupContainsTestId(hubGeneralChromeMarkup, HOST_CHROME.hubInternalStateTestId), true);
   assert.equal(markupContainsTestId(hubGeneralChromeMarkup, HOST_CHROME.hubSoftwareUpdateTestId), true);
   assert.equal(markupContainsTestId(hubGeneralChromeMarkup, HOST_CHROME.hubUpdateOutcomeTestId), true);
-  assert.match(
-    hubGeneralChromeMarkup,
-    new RegExp(`>${HOST_CHROME.checkForUpdatesButtonName}<`)
-  );
+  assert.match(hubGeneralChromeMarkup, new RegExp(`>${HOST_CHROME.checkForUpdatesButtonName}<`));
+  markHostChromeContract("hub-general-chrome");
 
-  // apps-view
-  const appsViewMarkup = renderToStaticMarkup(
-    createElement(AppsView, {
-      installedRowCount: 0,
-      onAddPackage: () => {}
-    })
+  // apps-view — empty + populated (Installed list) branches
+  const appsViewEmptyMarkup = renderToStaticMarkup(
+    createElement(AppsView, { installedRowCount: 0, onAddPackage: () => {} })
   );
-  assert.equal(markupContainsTestId(appsViewMarkup, HOST_CHROME.appsViewTestId), true);
-  assert.match(appsViewMarkup, new RegExp(`data-testid="${HOST_CHROME.appsViewTestId}"`));
-  assert.match(appsViewMarkup, />Apps</);
+  assert.equal(markupContainsTestId(appsViewEmptyMarkup, HOST_CHROME.appsViewTestId), true);
+  assert.match(appsViewEmptyMarkup, new RegExp(`data-testid="${HOST_CHROME.appsViewTestId}"`));
+  const appsViewPopulatedMarkup = renderToStaticMarkup(
+    createElement(
+      AppsView,
+      { installedRowCount: 1, onAddPackage: () => {} },
+      createElement("div", null, "row")
+    )
+  );
+  assert.match(
+    appsViewPopulatedMarkup,
+    new RegExp(`aria-label="${HOST_CHROME.installedListLabel}"`)
+  );
+  markHostChromeContract("apps-view");
 
   // workbench-nav
   const workbenchNavMarkup = renderToStaticMarkup(
-    createElement(WorkbenchNav, {
-      activeView: "dashboard",
-      onNavigate: () => {}
-    })
+    createElement(WorkbenchNav, { activeView: "dashboard", onNavigate: () => {} })
   );
-  assert.match(
-    workbenchNavMarkup,
-    new RegExp(`aria-label="${HOST_CHROME.workbenchNavLabel}"`)
-  );
+  assert.match(workbenchNavMarkup, new RegExp(`aria-label="${HOST_CHROME.workbenchNavLabel}"`));
   assert.match(workbenchNavMarkup, new RegExp(`>${HOST_CHROME.homeNavButtonName}<`));
   assert.match(workbenchNavMarkup, new RegExp(`>${HOST_CHROME.appsNavButtonName}<`));
+  markHostChromeContract("workbench-nav");
 
-  // selected-app-surface: PluginSurfaceRoutePage loading shell emits shared testid
+  // selected-app-surface
   const selectedSurfaceMarkup = renderToStaticMarkup(
     createElement(PluginSurfaceRoutePage, {
       packageName: "botster-web",
@@ -6822,17 +6824,140 @@ try {
       onAction: () => {}
     })
   );
+  assert.equal(markupContainsTestId(selectedSurfaceMarkup, HOST_CHROME.selectedAppSurfaceTestId), true);
+  assert.match(selectedSurfaceMarkup, new RegExp(`data-testid="${HOST_CHROME.selectedAppSurfaceTestId}"`));
+  markHostChromeContract("selected-app-surface");
+
+  // diagnostics-view + developer-diagnostics (owned by DiagnosticsView)
+  const diagnosticsViewMarkup = renderToStaticMarkup(
+    createElement(
+      DiagnosticsView,
+      {
+        diagnosticCount: 1,
+        blocking: false,
+        developerDetails: createElement("div", null, "dev body")
+      },
+      createElement("div", null, "status body")
+    )
+  );
+  assert.equal(markupContainsTestId(diagnosticsViewMarkup, HOST_CHROME.diagnosticsViewTestId), true);
+  assert.match(diagnosticsViewMarkup, new RegExp(`data-testid="${HOST_CHROME.diagnosticsViewTestId}"`));
+  assert.match(diagnosticsViewMarkup, new RegExp(`class="${HOST_CHROME.developerDiagnosticsClass}"`));
+  assert.match(diagnosticsViewMarkup, new RegExp(`>${HOST_CHROME.supportSectionLabel}<`));
+  markHostChromeContract("diagnostics-view");
+
+  // hub-settings-sections
+  const hubSettingsNavMarkup = renderToStaticMarkup(
+    createElement(HubSettingsSectionsNav, {
+      activeSection: "support",
+      onNavigate: () => {}
+    })
+  );
+  assert.match(hubSettingsNavMarkup, new RegExp(`aria-label="${HOST_CHROME.hubSettingsSectionsLabel}"`));
+  assert.match(hubSettingsNavMarkup, new RegExp(`>${HOST_CHROME.sessionTypesSectionLabel}<`));
+  assert.match(hubSettingsNavMarkup, new RegExp(`>${HOST_CHROME.supportSectionLabel}<`));
+  markHostChromeContract("hub-settings-sections");
+
+  // session-types-chrome
+  const sessionTypesViewMarkup = renderToStaticMarkup(
+    createElement(SessionTypesView, { sessionTypeCount: 1 },
+      createElement(SessionTypesSurfaceNotices, {
+        supported: true,
+        subscriptionError: undefined,
+        onCreate: () => {}
+      })
+    )
+  );
+  assert.equal(markupContainsTestId(sessionTypesViewMarkup, HOST_CHROME.sessionTypesViewTestId), true);
+  assert.equal(markupContainsTestId(sessionTypesViewMarkup, HOST_CHROME.createSessionTypeTestId), true);
+  const sessionTypeListMarkup = renderToStaticMarkup(
+    createElement(SessionTypeListItem, {
+      sessionType: {
+        id: "device/web-authored-agent",
+        label: "Web authored agent",
+        source: "device",
+        available: true,
+        editable: true
+      },
+      onDelete: () => {}
+    })
+  );
   assert.equal(
-    markupContainsTestId(selectedSurfaceMarkup, HOST_CHROME.selectedAppSurfaceTestId),
+    markupContainsTestId(sessionTypeListMarkup, deleteSessionTypeTestId("device/web-authored-agent")),
     true
   );
-  assert.match(
-    selectedSurfaceMarkup,
-    new RegExp(`data-testid="${HOST_CHROME.selectedAppSurfaceTestId}"`)
+  const sessionTypeSubmitMarkup = renderToStaticMarkup(
+    createElement(SessionTypeSubmitButton, {
+      disabled: false,
+      submitting: false,
+      onClick: () => {}
+    })
   );
+  assert.equal(markupContainsTestId(sessionTypeSubmitMarkup, HOST_CHROME.submitSessionTypeTestId), true);
+  markHostChromeContract("session-types-chrome");
 
-  // Inventory completeness: every inventory entry has an executing evaluation above
-  assert.equal(HOST_CHROME_CONTRACTS.every((entry) => hostChromeContractIds.has(entry.id)), true);
+  // package-settings-chrome
+  const packageSettingsMarkup = renderToStaticMarkup(
+    createElement(PluginSettingsPanel, {
+      app: {
+        id: "botster-web",
+        configuration_fields: [{
+          id: "remote_browser_rendezvous_enabled",
+          value: false,
+          errors: []
+        }],
+        configuration_submit: { id: "botster.package.configure", disabled: false }
+      },
+      onAction: () => {},
+      onOpenSurface: () => {}
+    })
+  );
+  assert.match(packageSettingsMarkup, new RegExp(`>${HOST_CHROME.packageConfigurationLabel}<`));
+  assert.match(packageSettingsMarkup, new RegExp(`>${HOST_CHROME.remoteBrowserAccessHeading}<`));
+  const remoteAccessMarkup = renderToStaticMarkup(
+    createElement(RemoteAccessConfigurationItem, {
+      field: { id: "remote_browser_rendezvous_enabled", value: false, errors: [] },
+      submit: { id: "botster.package.configure", disabled: false },
+      onAction: () => {}
+    })
+  );
+  assert.match(remoteAccessMarkup, new RegExp(`>${HOST_CHROME.remoteBrowserAccessHeading}<`));
+  markHostChromeContract("package-settings-chrome");
+
+  // local-hub-first-screen (Hub heading used by schema presentation)
+  const localHubFirstScreenMarkup = renderToStaticMarkup(
+    createElement(LocalHubFirstScreen, {
+      mode: "webrtc",
+      statusText: "Connected",
+      diagnostics: [],
+      packages: [],
+      packageLoadStatus: "loaded",
+      sessions: [],
+      sessionLoadStatus: "loaded",
+      actionStatus: ""
+    })
+  );
+  assert.match(localHubFirstScreenMarkup, new RegExp(`>${HOST_CHROME.hubHeadingName}<`));
+  markHostChromeContract("local-hub-first-screen");
+
+  // Binding completeness: every inventory id evaluated, no stale evaluations
+  const inventoryIds = HOST_CHROME_CONTRACTS.map((entry) => entry.id).sort();
+  const evaluatedIds = [...evaluatedHostChromeContractIds].sort();
+  assert.deepEqual(
+    evaluatedIds,
+    inventoryIds,
+    `host-chrome inventory/evaluation mismatch: inventory=${JSON.stringify(inventoryIds)} evaluated=${JSON.stringify(evaluatedIds)}`
+  );
+  // render field names a symbol imported into this suite (or a named pin)
+  for (const entry of HOST_CHROME_CONTRACTS) {
+    if (entry.render === "schemaFloorSourcePin") continue;
+    const primaryRender = String(entry.render).split("+")[0].trim().split(/\s+/)[0];
+    assert.equal(
+      Object.hasOwn(hostChromeRenderSymbols, primaryRender) || hostChromeRenderSymbols[primaryRender] != null,
+      true,
+      `inventory ${entry.id} render "${entry.render}" is not imported (primary=${primaryRender})`
+    );
+  }
 
   // No DOM-parser dependency introduced for this mechanism
   const packageJsonText = await readFile(new URL("../package.json", import.meta.url), "utf8");

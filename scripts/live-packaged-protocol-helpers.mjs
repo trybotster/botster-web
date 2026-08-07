@@ -28,6 +28,10 @@ export const HOST_CHROME = Object.freeze({
   terminalSessionViewTestId: "terminal-session-view",
   pluginSettingsRouteTestId: "plugin-settings-route",
   selectedAppSurfaceTestId: "selected-app-surface",
+  sessionTypesViewTestId: "session-types-view",
+  createSessionTypeTestId: "create-session-type",
+  submitSessionTypeTestId: "submit-session-type",
+  deleteSessionTypeTestIdPrefix: "delete-session-type-",
   hubSettingsGeneralTestId: "hub-settings-general",
   hubSoftwareIdentityTestId: "hub-software-identity",
   hubHostIdentityTestId: "hub-host-identity",
@@ -35,11 +39,17 @@ export const HOST_CHROME = Object.freeze({
   hubSoftwareUpdateTestId: "hub-software-update",
   hubUpdateOutcomeTestId: "hub-update-outcome",
   schemaDiagnosticId: "schema-version",
+  developerDiagnosticsClass: "developer-diagnostics",
+  installedListLabel: "Installed",
+  packageConfigurationLabel: "Package configuration",
+  remoteBrowserAccessHeading: "Remote browser access",
   workbenchNavLabel: "Botster workbench",
   hubSettingsSectionsLabel: "Hub settings sections",
   homeNavButtonName: "Home",
   appsNavButtonName: "Apps",
   hubSettingsNavButtonName: "Hub settings",
+  sessionTypesSectionLabel: "Session types",
+  supportSectionLabel: "Support",
   openSessionButtonName: "Open",
   settingsBackButtonName: "Back",
   checkForUpdatesButtonName: "Check for updates",
@@ -47,6 +57,10 @@ export const HOST_CHROME = Object.freeze({
   hubHeadingName: "Hub",
   schemaFloorSourcePin: "status.schema_version < 3"
 });
+
+export function deleteSessionTypeTestId(sessionTypeId) {
+  return `${HOST_CHROME.deleteSessionTypeTestIdPrefix}${sessionTypeId}`;
+}
 
 /**
  * Pure detach decision over already-extracted facts.
@@ -104,7 +118,7 @@ export const HOST_CHROME_CONTRACTS = Object.freeze([
   Object.freeze({
     id: "terminal-detached",
     harnessUse: "waitForTerminalDetached after shutdownProductionSession",
-    render: "DashboardView + TerminalViewHost (true/false fact pairs via isTerminalDetached)",
+    render: "DashboardView",
     constants: ["dashboardTestId", "terminalSessionIdAttr"],
     decide: "isTerminalDetached",
     class: "host-chrome"
@@ -119,14 +133,14 @@ export const HOST_CHROME_CONTRACTS = Object.freeze([
   Object.freeze({
     id: "schema-presentation-neutral",
     harnessUse: "assertCurrentHubSchemaPresentation",
-    render: "ConnectionDiagnosticsPanel + schemaVersionInformationFromFrame",
-    constants: ["schemaDiagnosticId"],
+    render: "ConnectionDiagnosticsPanel",
+    constants: ["schemaDiagnosticId", "hubHeadingName"],
     class: "host-chrome"
   }),
   Object.freeze({
     id: "schema-floor-in-harness",
     harnessUse: "assertCurrentHubCompatibilityAndSchema floor check",
-    render: "secondary harness-source pin (schemaFloorSourcePin); product diagnostic remains rendered-output based",
+    render: "schemaFloorSourcePin",
     constants: ["schemaFloorSourcePin"],
     class: "host-chrome"
   }),
@@ -161,9 +175,9 @@ export const HOST_CHROME_CONTRACTS = Object.freeze([
   }),
   Object.freeze({
     id: "apps-view",
-    harnessUse: "openAppsView",
-    render: "AppsViewShell",
-    constants: ["appsViewTestId", "appsNavButtonName"],
+    harnessUse: "openAppsView / installedList",
+    render: "AppsView",
+    constants: ["appsViewTestId", "installedListLabel"],
     class: "host-chrome"
   }),
   Object.freeze({
@@ -178,6 +192,51 @@ export const HOST_CHROME_CONTRACTS = Object.freeze([
     harnessUse: "plugin surface wait/read paths (default path package surfaces)",
     render: "PluginSurfaceRoutePage",
     constants: ["selectedAppSurfaceTestId"],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "diagnostics-view",
+    harnessUse: "openDiagnosticsView / durable diagnostics panel",
+    render: "DiagnosticsView",
+    constants: ["diagnosticsViewTestId", "developerDiagnosticsClass", "supportSectionLabel"],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "hub-settings-sections",
+    harnessUse: "openDiagnosticsView / createSessionTypeThroughRenderedForm section nav",
+    render: "HubSettingsSectionsNav",
+    constants: [
+      "hubSettingsSectionsLabel",
+      "sessionTypesSectionLabel",
+      "supportSectionLabel",
+      "hubSettingsNavButtonName"
+    ],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "session-types-chrome",
+    harnessUse: "exerciseSessionTypes / createSessionTypeThroughRenderedForm",
+    render: "SessionTypesView + SessionTypesSurfaceNotices + SessionTypeListItem + SessionTypeSubmitButton",
+    constants: [
+      "sessionTypesViewTestId",
+      "createSessionTypeTestId",
+      "submitSessionTypeTestId",
+      "deleteSessionTypeTestIdPrefix"
+    ],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "package-settings-chrome",
+    harnessUse: "assertRemoteAccessSettingsDispatch / package settings open",
+    render: "PluginSettingsPanel + RemoteAccessConfigurationItem",
+    constants: ["packageConfigurationLabel", "remoteBrowserAccessHeading"],
+    class: "host-chrome"
+  }),
+  Object.freeze({
+    id: "local-hub-first-screen",
+    harnessUse: "assertCurrentHubSchemaPresentation Hub card heading",
+    render: "LocalHubFirstScreen",
+    constants: ["hubHeadingName"],
     class: "host-chrome"
   })
 ]);
