@@ -3241,25 +3241,65 @@ async function setSessionTypeFormField(page, label, value) {
   await input.fill(value);
 }
 
-/**
- * Drives create and delete through the RENDERED Ionic controls rather than the Hub socket,
- * and asserts the exact daemon request the WEB CLIENT produced. Talking to Hub directly
- * would confirm Hub's contract while leaving a client-side request-shape bug invisible --
- * which is exactly how the composite-id defect survived the first implementation.
- */
-async function createSessionTypeThroughRenderedForm(page) {
+async function setSessionTypeFormTextarea(page, label, value) {
+  const textarea = page.locator(`ion-textarea:has-text("${label}") textarea`).first();
+  await textarea.waitFor();
+  await textarea.fill(value);
+}
+
+async function openSessionTypesView(page) {
   await page.locator("ion-menu.app-sidebar").getByRole("button", { name: "Hub settings", exact: true }).click();
   await page.getByLabel("Hub settings sections").getByRole("button", { name: /Session types/ }).click();
   await page.getByTestId("session-types-view").waitFor();
+}
+
+async function latestHarnessRequest(page, type, sinceIndex) {
+  return page.evaluate(({ since, requestType }) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .slice(since)
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === requestType)
+      .map((entry) => entry.payload)
+      .at(-1), { since: sinceIndex, requestType: type });
+}
+
+async function latestHarnessActionResult(page, requestType, sinceIndex) {
+  return page.evaluate(({ since, expectedType }) => {
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    for (let index = events.length - 1; index >= since; index -= 1) {
+      const entry = events[index];
+      if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") continue;
+      const result = entry.payload?.payload?.result;
+      if (result?.request_type === expectedType) {
+        return entry.payload.payload;
+      }
+    }
+    return undefined;
+  }, { since: sinceIndex, expectedType: requestType });
+}
+
+/**
+ * Drives create through the RENDERED Ionic controls with the ticket-critical authored
+ * fields (relative path, environment, context), then edit/read-back and delete.
+ * Socket-direct create would leave client request-shape bugs invisible.
+ */
+async function createSessionTypeThroughRenderedForm(page) {
+  await openSessionTypesView(page);
 
   const sinceIndex = await harnessEventCount(page);
   await page.getByTestId("create-session-type").click();
+  await page.getByTestId("session-type-form").waitFor();
   await setSessionTypeFormField(page, "Identifier", "web-authored-agent");
   await setSessionTypeFormField(page, "Name", "Web authored agent");
   await setSessionTypeFormField(page, "Role", "botster.agent");
   await setSessionTypeFormField(page, "Interaction", "interactive");
   await setSessionTypeFormField(page, "Lifecycle", "task");
   await setSessionTypeFormField(page, "Command", "sleep");
+  // Ticket-critical fields: relative path + environment + context must survive edit.
+  await page.locator("details.advanced-session-type-options summary").click();
+  await setSessionTypeFormField(page, "Working directory policy", "relative");
+  await setSessionTypeFormField(page, "Working directory path", "agents/live");
+  await setSessionTypeFormTextarea(page, "Environment", "LIVE_KEY=live-value");
+  await setSessionTypeFormField(page, "Context keys", "prompt");
   await page.getByTestId("submit-session-type").click();
 
   await waitForHarnessEvent(
@@ -3283,10 +3323,129 @@ async function createSessionTypeThroughRenderedForm(page) {
   if (createRequest.source?.source !== "device") {
     throw new Error(`web create sent the wrong source: ${JSON.stringify(createRequest.source)}`);
   }
+  if (createRequest.definition?.working_directory?.policy !== "relative"
+    || createRequest.definition?.working_directory?.path !== "agents/live") {
+    throw new Error(
+      `web create must author relative path, sent ${JSON.stringify(createRequest.definition?.working_directory)}`
+    );
+  }
+  if (createRequest.definition?.environment?.LIVE_KEY !== "live-value") {
+    throw new Error(
+      `web create must author environment, sent ${JSON.stringify(createRequest.definition?.environment)}`
+    );
+  }
+  if (!Array.isArray(createRequest.definition?.context) || !createRequest.definition.context.includes("prompt")) {
+    throw new Error(
+      `web create must author context, sent ${JSON.stringify(createRequest.definition?.context)}`
+    );
+  }
 
   // Accepted -> the form closes and the row arrives as a pushed delta, not a refetch.
   const row = page.getByTestId("session-type-device/web-authored-agent");
   await row.waitFor();
+  await page.getByTestId("session-type-form").waitFor({ state: "detached" });
+  await assertNoSessionTypeListHydration(page);
+
+  // --- Primary edit path: change only label; prove path/env/context survive ---
+  const editSince = await harnessEventCount(page);
+  await page.getByTestId("edit-session-type-device/web-authored-agent").click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "show_session_type_definition" },
+    "web-produced show_session_type_definition request",
+    editSince
+  );
+  const showRequest = await latestHarnessRequest(page, "show_session_type_definition", editSince);
+  if (showRequest?.session_type_id !== "device/web-authored-agent") {
+    throw new Error(
+      `web show must use composite session_type_id, sent ${JSON.stringify(showRequest?.session_type_id)}`
+    );
+  }
+  await page.getByTestId("session-type-form").waitFor();
+  // Form promise pending/rejection: force Hub rejection with an invalid role, keep draft.
+  await setSessionTypeFormField(page, "Role", "not a namespaced role");
+  const rejectSince = await harnessEventCount(page);
+  await page.getByTestId("submit-session-type").click();
+  await page.getByTestId("session-type-form-error").waitFor();
+  const formStillOpen = await page.getByTestId("session-type-form").count();
+  if (formStillOpen < 1) {
+    throw new Error("form closed after Hub rejection; draft must stay open");
+  }
+  // Restore valid role and change only label (unrelated field).
+  await setSessionTypeFormField(page, "Role", "botster.agent");
+  await setSessionTypeFormField(page, "Name", "Web authored agent renamed");
+  const updateSince = await harnessEventCount(page);
+  await page.getByTestId("submit-session-type").click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "update_session_type" },
+    "web-produced update_session_type request",
+    updateSince
+  );
+  const updateRequest = await latestHarnessRequest(page, "update_session_type", updateSince);
+  if (updateRequest?.definition?.id !== "web-authored-agent") {
+    throw new Error(
+      `web update must send bare definition.id, sent ${JSON.stringify(updateRequest?.definition?.id)}`
+    );
+  }
+  if (updateRequest?.definition?.label !== "Web authored agent renamed") {
+    throw new Error(`web update missing renamed label: ${JSON.stringify(updateRequest?.definition?.label)}`);
+  }
+  if (updateRequest?.definition?.working_directory?.policy !== "relative"
+    || updateRequest?.definition?.working_directory?.path !== "agents/live") {
+    throw new Error(
+      `web update dropped working_directory: ${JSON.stringify(updateRequest?.definition?.working_directory)}`
+    );
+  }
+  if (updateRequest?.definition?.environment?.LIVE_KEY !== "live-value") {
+    throw new Error(
+      `web update dropped environment: ${JSON.stringify(updateRequest?.definition?.environment)}`
+    );
+  }
+  if (!Array.isArray(updateRequest?.definition?.context) || !updateRequest.definition.context.includes("prompt")) {
+    throw new Error(
+      `web update dropped context: ${JSON.stringify(updateRequest?.definition?.context)}`
+    );
+  }
+  await page.getByTestId("session-type-form").waitFor({ state: "detached" });
+  await page.getByText("Web authored agent renamed").waitFor();
+
+  // Read-back: re-open Edit and assert fresh show still carries path/env/context.
+  const readbackSince = await harnessEventCount(page);
+  await page.getByTestId("edit-session-type-device/web-authored-agent").click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "show_session_type_definition" },
+    "read-back show_session_type_definition",
+    readbackSince
+  );
+  const readbackResult = await latestHarnessActionResult(page, "show_session_type_definition", readbackSince);
+  const readbackDefinition = readbackResult?.result?.session_type_definition?.definition;
+  if (!readbackDefinition) {
+    throw new Error(`read-back missing session_type_definition: ${JSON.stringify(readbackResult)}`);
+  }
+  if (readbackDefinition.working_directory?.policy !== "relative"
+    || readbackDefinition.working_directory?.path !== "agents/live") {
+    throw new Error(
+      `read-back dropped working_directory: ${JSON.stringify(readbackDefinition.working_directory)}`
+    );
+  }
+  if (readbackDefinition.environment?.LIVE_KEY !== "live-value") {
+    throw new Error(
+      `read-back dropped environment: ${JSON.stringify(readbackDefinition.environment)}`
+    );
+  }
+  if (!Array.isArray(readbackDefinition.context) || !readbackDefinition.context.includes("prompt")) {
+    throw new Error(
+      `read-back dropped context: ${JSON.stringify(readbackDefinition.context)}`
+    );
+  }
+  if (readbackDefinition.label !== "Web authored agent renamed") {
+    throw new Error(`read-back label mismatch: ${JSON.stringify(readbackDefinition.label)}`);
+  }
+  // Close form without further mutation.
+  await page.getByRole("button", { name: "Close", exact: true }).last().click();
+  await page.getByTestId("session-type-form").waitFor({ state: "detached" });
   await assertNoSessionTypeListHydration(page);
 
   // Delete through the rendered control must address the BARE authoring id.
@@ -3314,7 +3473,121 @@ async function createSessionTypeThroughRenderedForm(page) {
 
   return {
     web_create_definition_id: createRequest.definition.id,
-    web_delete_session_type_id: deleteRequest.session_type_id
+    web_delete_session_type_id: deleteRequest.session_type_id,
+    web_show_session_type_id: showRequest.session_type_id,
+    web_update_definition_id: updateRequest.definition.id,
+    web_update_preserved_path: updateRequest.definition.working_directory.path,
+    web_update_preserved_environment: updateRequest.definition.environment,
+    web_update_preserved_context: updateRequest.definition.context,
+    web_readback_path: readbackDefinition.working_directory.path,
+    web_readback_environment: readbackDefinition.environment,
+    form_rejection_kept_draft: true
+  };
+}
+
+/**
+ * Oracle B: authored definition.target_id survives an unrelated-field edit through the
+ * rendered Edit control, including authoritative read-back. Fixture may be socket-created
+ * because create form does not expose definition target_id.
+ */
+async function proveSessionTypeTargetIdSurvival(page, socketPath) {
+  const definition = {
+    id: "target-id-agent",
+    label: "Target id agent",
+    role: "botster.agent",
+    interaction: "interactive",
+    lifecycle: "task",
+    command: "sleep",
+    args: ["30"],
+    working_directory: { policy: "relative", path: "agents/target" },
+    environment: { TARGET_ENV: "kept" },
+    context: ["prompt"],
+    target_id: "project-main"
+  };
+
+  const createSince = await harnessEventCount(page);
+  const createResponse = await sendDaemonRequest(socketPath, {
+    type: "create_session_type",
+    source: { source: "device" },
+    definition
+  });
+  if (createResponse.error) {
+    throw new Error(`target_id fixture create failed: ${JSON.stringify(createResponse.error)}`);
+  }
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "session_type" },
+    "pushed session_type delta after target_id fixture create",
+    createSince
+  );
+
+  await openSessionTypesView(page);
+  const row = page.getByTestId("session-type-device/target-id-agent");
+  await row.waitFor();
+
+  const editSince = await harnessEventCount(page);
+  await page.getByTestId("edit-session-type-device/target-id-agent").click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "show_session_type_definition" },
+    "target_id show_session_type_definition",
+    editSince
+  );
+  await page.getByTestId("session-type-form").waitFor();
+  await setSessionTypeFormField(page, "Name", "Target id agent renamed");
+  const updateSince = await harnessEventCount(page);
+  await page.getByTestId("submit-session-type").click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "update_session_type" },
+    "target_id update_session_type",
+    updateSince
+  );
+  const updateRequest = await latestHarnessRequest(page, "update_session_type", updateSince);
+  if (updateRequest?.definition?.target_id !== "project-main") {
+    throw new Error(
+      `web update dropped definition.target_id: ${JSON.stringify(updateRequest?.definition?.target_id)}`
+    );
+  }
+  if (updateRequest?.definition?.working_directory?.path !== "agents/target") {
+    throw new Error(
+      `target_id path oracle failed: ${JSON.stringify(updateRequest?.definition?.working_directory)}`
+    );
+  }
+  await page.getByTestId("session-type-form").waitFor({ state: "detached" });
+
+  const readbackSince = await harnessEventCount(page);
+  await page.getByTestId("edit-session-type-device/target-id-agent").click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "show_session_type_definition" },
+    "target_id read-back show",
+    readbackSince
+  );
+  const readbackResult = await latestHarnessActionResult(page, "show_session_type_definition", readbackSince);
+  const readbackDefinition = readbackResult?.result?.session_type_definition?.definition;
+  if (readbackDefinition?.target_id !== "project-main") {
+    throw new Error(
+      `read-back dropped definition.target_id: ${JSON.stringify(readbackDefinition?.target_id)}`
+    );
+  }
+  await page.getByRole("button", { name: "Close", exact: true }).last().click();
+  await page.getByTestId("session-type-form").waitFor({ state: "detached" });
+
+  const deleteResponse = await sendDaemonRequest(socketPath, {
+    type: "delete_session_type",
+    source: { source: "device" },
+    session_type_id: definition.id
+  });
+  if (deleteResponse.error) {
+    throw new Error(`target_id fixture delete failed: ${JSON.stringify(deleteResponse.error)}`);
+  }
+  await row.waitFor({ state: "detached" });
+  await assertNoSessionTypeListHydration(page);
+
+  return {
+    target_id_update_preserved: updateRequest.definition.target_id,
+    target_id_readback_preserved: readbackDefinition.target_id
   };
 }
 
@@ -3326,6 +3599,7 @@ async function exerciseSessionTypes(page) {
   const subscribesBefore = await recordSessionTypeSubscribeCount(page);
 
   const webAuthored = await createSessionTypeThroughRenderedForm(page);
+  const targetIdProof = await proveSessionTypeTargetIdSurvival(page, socketPath);
 
   const definition = {
     id: "live-harness-agent",
@@ -3482,6 +3756,7 @@ async function exerciseSessionTypes(page) {
     read_only_error_kind: readOnlyResponse.error?.code ?? null,
     session_type_subscribes: subscribesAfter,
     ...webAuthored,
+    ...targetIdProof,
     entity_error_terminal_state: "covered_in_unit_suite_not_live_see_report"
   };
 }

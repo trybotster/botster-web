@@ -796,13 +796,19 @@ export function rejectedSpawnSessionForm(
 }
 
 /**
- * Create-only. See SessionTypeListItem for why editing is withheld until Hub publishes a
- * lossless authoring view (ticket_1786039258_173310 / ticket_1786039279_917823).
+ * Create and edit share one form. Edit seeds only from Hub's lossless
+ * `show_session_type_definition` response — never from the sanitized entity row.
+ * Opaque authored fields the form does not surface (notably definition `target_id`)
+ * are carried through `definitionTargetId` and re-emitted on update so wholesale
+ * replacement cannot silently drop them.
  */
 export interface SessionTypeFormState {
+  mode: "create" | "edit";
   source: string;
   sourceTargetId: string;
   sessionTypeId?: string;
+  /** Authored definition.target_id — distinct from mutation source target_id. */
+  definitionTargetId: string;
   id: string;
   label: string;
   description: string;
@@ -823,8 +829,10 @@ export interface SessionTypeFormState {
 }
 
 export const emptySessionTypeForm: SessionTypeFormState = {
+  mode: "create",
   source: "device",
   sourceTargetId: "",
+  definitionTargetId: "",
   id: "",
   label: "",
   description: "",
@@ -884,28 +892,79 @@ export function sessionTypeMutationSource(form: SessionTypeFormState): Record<st
 }
 
 export function sessionTypeDefinitionFromForm(form: SessionTypeFormState): Record<string, unknown> {
+  const description = form.description.trim();
+  const icon = form.icon.trim();
+  const definitionTargetId = form.definitionTargetId.trim();
+  const workingDirectoryPolicy = form.workingDirectoryPolicy.trim();
+  const workingDirectoryPath = form.workingDirectoryPath.trim();
+
   return {
     id: form.id.trim(),
     label: form.label.trim(),
-    description: form.description.trim(),
-    icon: form.icon.trim(),
+    // Empty description/icon omit so Hub's Option+skip_serializing_if stay absent, not Some("").
+    ...(description ? { description } : {}),
+    ...(icon ? { icon } : {}),
     role: form.role.trim(),
     interaction: form.interaction.trim(),
     traits: parseTokenList(form.traits),
     lifecycle: form.lifecycle.trim(),
     command: form.command.trim(),
     args: parseTokenList(form.args),
-    ...(form.workingDirectoryPolicy.trim()
+    ...(workingDirectoryPolicy
       ? {
           working_directory: {
-            policy: form.workingDirectoryPolicy.trim(),
-            path: form.workingDirectoryPath.trim()
+            policy: workingDirectoryPolicy,
+            ...(workingDirectoryPath ? { path: workingDirectoryPath } : {})
           }
         }
       : {}),
     environment: parseMetadata(form.environment),
     allowed_environment_overrides: parseTokenList(form.allowedEnvironmentOverrides),
-    context: parseTokenList(form.contextKeys)
+    context: parseTokenList(form.contextKeys),
+    // Opaque authored field: re-emit on every create/update when present so wholesale
+    // replacement cannot drop it. Never invent this from the sanitized row's target_id.
+    ...(definitionTargetId ? { target_id: definitionTargetId } : {})
+  };
+}
+
+/**
+ * Seed the edit form solely from an accepted `DaemonSessionTypeEditableDefinition`.
+ * Sanitized entity rows must not be passed here — they omit path/environment and would
+ * cause silent data loss under wholesale update.
+ */
+export function sessionTypeFormFromAuthoringDefinition(
+  editable: Record<string, unknown>
+): SessionTypeFormState | undefined {
+  const definition = readRecord(editable.definition);
+  const source = readRecord(editable.source);
+  const sourceKind = stringValue(source.source, "");
+  if (!definition.id || !sourceKind) return undefined;
+
+  const workingDirectory = readRecord(definition.working_directory);
+  const environment = readRecord(definition.environment);
+
+  return {
+    mode: "edit",
+    source: sourceKind,
+    sourceTargetId: sourceKind === "repo" ? stringValue(source.target_id, "") : "",
+    sessionTypeId: stringValue(editable.session_type_id, ""),
+    definitionTargetId: stringValue(definition.target_id, ""),
+    id: stringValue(definition.id, ""),
+    label: stringValue(definition.label, ""),
+    description: stringValue(definition.description, ""),
+    icon: stringValue(definition.icon, ""),
+    role: stringValue(definition.role, ""),
+    interaction: stringValue(definition.interaction, ""),
+    traits: joinTokenList(definition.traits),
+    lifecycle: stringValue(definition.lifecycle, ""),
+    command: stringValue(definition.command, ""),
+    args: joinTokenList(definition.args),
+    workingDirectoryPolicy: stringValue(workingDirectory.policy, ""),
+    workingDirectoryPath: stringValue(workingDirectory.path, ""),
+    environment: formatMetadata(environment),
+    allowedEnvironmentOverrides: joinTokenList(definition.allowed_environment_overrides),
+    contextKeys: joinTokenList(definition.context),
+    submitting: false
   };
 }
 
@@ -974,6 +1033,13 @@ function parseTokenList(input: string): string[] {
     .filter(Boolean);
 }
 
+function joinTokenList(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  return value
+    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    .join(", ");
+}
+
 const emptySpawnTargetForm: SpawnTargetFormState = {
   mode: "create",
   targetId: "",
@@ -1040,20 +1106,18 @@ export function compareSpawnTargetRows(left: Record<string, unknown>, right: Rec
 /**
  * Renders one Hub session-type row. Every visible value is a Hub descriptor rendered
  * verbatim -- no name humanising, no lookup table, no classification inferred from
- * command or id. Delete is gated solely on Hub's per-row `editable`.
+ * command or id. Edit and delete are gated solely on Hub's per-row `editable`.
  *
- * Editing is deliberately absent. Hub's published row carries `working_directory_policy`
- * but not the authored path, and no `environment`, while Hub's update replaces the stored
- * definition wholesale -- so a client-side edit would silently drop those fields. Rather
- * than let the affordance look broken or missing for no reason, editable rows say so.
- * Tracked by ticket_1786039279_917823, which depends on the Hub-side lossless authoring
- * view in ticket_1786039258_173310.
+ * Edit opens via a lossless authoring read (`show_session_type_definition`), never by
+ * reconstructing a definition from this sanitized row.
  */
 export function SessionTypeListItem({
   sessionType,
+  onEdit,
   onDelete
 }: {
   sessionType: Record<string, unknown>;
+  onEdit: (sessionType: Record<string, unknown>) => void;
   onDelete: (sessionType: Record<string, unknown>) => void;
 }) {
   const sessionTypeId = String(sessionType.id);
@@ -1103,9 +1167,14 @@ export function SessionTypeListItem({
       </IonBadge>
       {editable ? (
         <IonButtons slot="end">
-          <IonNote data-testid={`session-type-edit-unavailable-${sessionTypeId}`}>
-            Editing not available yet
-          </IonNote>
+          <IonButton
+            aria-label={`Edit ${label}`}
+            fill="outline"
+            onClick={() => onEdit(sessionType)}
+            data-testid={`edit-session-type-${sessionTypeId}`}
+          >
+            Edit
+          </IonButton>
           <IonButton
             aria-label={`Delete ${label}`}
             fill="outline"
@@ -1936,17 +2005,68 @@ export default function App() {
   const openCreateSessionType = useCallback(() => {
     setSessionTypeForm(emptySessionTypeForm);
   }, []);
+  const openEditSessionType = useCallback((sessionType: Record<string, unknown>) => {
+    // Prefer Hub's composite session_type_id for the authoring read so Hub can disambiguate.
+    const compositeId = stringValue(
+      sessionType.session_type_id,
+      stringValue(sessionType.id, "")
+    );
+    if (!compositeId) return;
+
+    const action: ActionBinding = {
+      id: "botster.session_type.daemon_request",
+      target: compositeId,
+      label: "Load session type for edit",
+      params: {
+        daemon_request: {
+          request_type: "show_session_type_definition",
+          session_type_id: compositeId
+        }
+      }
+    };
+
+    void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
+      recordDiagnostic(actionFailureDiagnostic(action, result));
+      if (!result.accepted) {
+        setPackageActionToast({
+          message: result.reason ?? "Botster could not load this session type for editing.",
+          color: "danger"
+        });
+        return;
+      }
+
+      const payload = readRecord(result.result);
+      const editable = readRecord(payload.session_type_definition);
+      const form = sessionTypeFormFromAuthoringDefinition(editable);
+      if (!form) {
+        // Never fall back to the sanitized entity row — that is the silent-loss path.
+        setPackageActionToast({
+          message: "Botster returned an incomplete authoring definition for this session type.",
+          color: "danger"
+        });
+        return;
+      }
+
+      setSessionTypeForm(form);
+    }).catch((error: unknown) => {
+      setPackageActionToast({
+        message: error instanceof Error ? error.message : "Botster could not load this session type for editing.",
+        color: "danger"
+      });
+    });
+  }, [recordDiagnostic, runtimeClient]);
   const submitSessionTypeForm = useCallback(() => {
     if (!sessionTypeForm || !sessionTypeFormIsStructurallyComplete(sessionTypeForm)) return;
     if (sessionTypeForm.submitting) return;
 
+    const isEdit = sessionTypeForm.mode === "edit";
     const action: ActionBinding = {
       id: "botster.session_type.daemon_request",
       target: sessionTypeForm.sessionTypeId,
-      label: "Create session type",
+      label: isEdit ? "Update session type" : "Create session type",
       params: {
         daemon_request: {
-          request_type: "create_session_type",
+          request_type: isEdit ? "update_session_type" : "create_session_type",
           source: sessionTypeMutationSource(sessionTypeForm),
           definition: sessionTypeDefinitionFromForm(sessionTypeForm)
         }
@@ -2560,6 +2680,7 @@ export default function App() {
                                 <SessionTypeListItem
                                   key={String(sessionType.id)}
                                   sessionType={sessionType}
+                                  onEdit={openEditSessionType}
                                   onDelete={setDeleteSessionType}
                                 />
                               ))}
@@ -2930,7 +3051,7 @@ export default function App() {
             <IonModal isOpen={Boolean(sessionTypeForm)} onDidDismiss={() => setSessionTypeForm(undefined)}>
               <IonHeader>
                 <IonToolbar>
-                  <IonTitle>Add session type</IonTitle>
+                  <IonTitle>{sessionTypeForm?.mode === "edit" ? "Edit session type" : "Add session type"}</IonTitle>
                   <IonButtons slot="end">
                     <IonButton disabled={sessionTypeForm?.submitting} onClick={() => setSessionTypeForm(undefined)}>
                       Close
@@ -2940,7 +3061,7 @@ export default function App() {
               </IonHeader>
               <IonContent className="ion-padding">
                 {sessionTypeForm ? (
-                  <div className="session-type-form">
+                  <div className="session-type-form" data-testid="session-type-form">
                     <IonList lines="full" aria-label="Session type form">
                       <IonItem>
                         <IonSelect
@@ -2948,6 +3069,7 @@ export default function App() {
                           labelPlacement="stacked"
                           value={sessionTypeForm.source === "repo" ? `repo:${sessionTypeForm.sourceTargetId}` : sessionTypeForm.source}
                           data-testid="session-type-source"
+                          disabled={sessionTypeForm.mode === "edit"}
                           onIonChange={(event) => {
                             const selected = String(event.detail.value ?? "device");
                             setSessionTypeForm((current) => current ? {
@@ -2973,6 +3095,8 @@ export default function App() {
                           labelPlacement="stacked"
                           value={sessionTypeForm.id}
                           placeholder="my-agent"
+                          disabled={sessionTypeForm.mode === "edit"}
+                          data-testid="session-type-id"
                           onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, id: String(event.detail.value ?? "") } : current)}
                         />
                       </IonItem>
@@ -3106,7 +3230,9 @@ export default function App() {
                       >
                         {sessionTypeForm.submitting
                           ? "Saving…"
-                          : "Create"}
+                          : sessionTypeForm.mode === "edit"
+                            ? "Save"
+                            : "Create"}
                       </IonButton>
                     </div>
                   </div>

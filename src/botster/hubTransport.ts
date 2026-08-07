@@ -1229,11 +1229,15 @@ async function dispatchDaemonAction(
     emitResponse(response);
     // Hub owns validation, admission, and precedence. Report its verdict verbatim and
     // publish no optimistic entity frame; the held subscription delivers the truth.
+    // Authoring reads carry session_type_definition so the form can seed a lossless edit.
     emit(actionResultFrame(request, !response.error, response.error?.message, {
       request_type: daemonRequest.type,
       kind: response.kind,
       error_kind: response.error?.code,
-      diagnostics: responseDiagnostics(response)
+      diagnostics: responseDiagnostics(response),
+      ...(response.session_type_definition
+        ? { session_type_definition: response.session_type_definition }
+        : {})
     }));
     return;
   }
@@ -1431,16 +1435,26 @@ function sessionTypeRequestFromAction(action: ActionBinding): DaemonRequest | un
   if (!isRecord(request)) return undefined;
 
   const requestType = readConfigString(request.request_type);
+
+  // Authoring read: composite session_type_id preferred. No mutation source on the wire.
+  if (requestType === "show_session_type_definition") {
+    const sessionTypeId = readConfigString(request.session_type_id);
+    return sessionTypeId
+      ? { type: "show_session_type_definition", session_type_id: sessionTypeId }
+      : undefined;
+  }
+
   const source = sessionTypeMutationSource(request.source);
   if (!source) return undefined;
 
-  // No update_session_type branch: the edit control is withheld until Hub publishes a
-  // lossless authoring view, so nothing can construct that request. ticket_1786039279_917823
-  // re-adds it together with the control and its own coverage, rather than this run leaving
-  // an unreachable clause behind for it.
   if (requestType === "create_session_type") {
     const definition = sessionTypeDefinition(request.definition);
     return definition ? { type: "create_session_type", source, definition } : undefined;
+  }
+
+  if (requestType === "update_session_type") {
+    const definition = sessionTypeDefinition(request.definition);
+    return definition ? { type: "update_session_type", source, definition } : undefined;
   }
 
   if (requestType === "delete_session_type") {

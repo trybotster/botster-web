@@ -1124,10 +1124,12 @@ assert.match(hubTransport, /botster\.session_type\.daemon_request/);
 // satisfied by explanatory prose and would stay green with every branch deleted.
 assert.match(hubTransport, /type: "create_session_type"/);
 assert.match(hubTransport, /type: "delete_session_type"/);
-// The edit control is withheld, so no update request can be constructed. The comment naming
-// the token is deliberately not enough to satisfy this.
-assert.doesNotMatch(hubTransport, /type: "update_session_type"/);
-assert.doesNotMatch(hubTransport, /requestType === "update_session_type"/);
+// Edit control is live: transport constructs show (authoring read) and update requests.
+assert.match(hubTransport, /type: "show_session_type_definition"/);
+assert.match(hubTransport, /type: "update_session_type"/);
+assert.match(hubTransport, /requestType === "update_session_type"/);
+assert.match(hubTransport, /requestType === "show_session_type_definition"/);
+assert.match(hubTransport, /session_type_definition: response\.session_type_definition/);
 assert.doesNotMatch(app, /botster-web\.session_template|list_session_templates|list_session_types/);
 assert.match(app, /runtimeClient\.entities\.list\("session_type"\)/);
 assert.match(hubTransport, /const packageFamily = "botster-web\.package"/);
@@ -1461,7 +1463,7 @@ const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name], hubTestSupportMetadata.ui_contract.package_version);
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.protocol_version, 6);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 31);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 32);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
@@ -5534,7 +5536,7 @@ const protocolSixHubStatusRecord = {
       "plugin_surface_render",
       "plugin_surface_action"
     ],
-    conformance_fixture_revision: 31
+    conformance_fixture_revision: 32
   }
 };
 const protocolSixDiagnostics = compatibilityDiagnosticsFromFrame({
@@ -6238,6 +6240,7 @@ try {
       sessionTypeManagementSupported,
       SessionTypesSurfaceNotices,
       sessionTypeDefinitionFromForm,
+      sessionTypeFormFromAuthoringDefinition,
       sessionTypeFormIsStructurallyComplete,
       sessionTypeMutationSource,
       entitySubscriptionErrorFromFrame,
@@ -6377,7 +6380,7 @@ try {
       protocol: "botster-hub-daemon-v1",
       protocol_version: 6,
       features: ["sessions", "terminal_streaming", "resize", "terminal_readback", "plugin_surface_render", "plugin_surface_action"],
-      conformance_fixture_revision: 31
+      conformance_fixture_revision: 32
     }
   };
   const renderHubGeneralSection = (hubStatus, hubUpdate) => renderToStaticMarkup(
@@ -6396,7 +6399,7 @@ try {
   // Protocol, protocol version, conformance revision, features, and schema all render
   // their authoritative numeric values instead of regressing to a fallback.
   assert.match(developmentGeneralMarkup, /botster-hub-daemon-v1 · version 6/);
-  assert.match(developmentGeneralMarkup, /<dt>Conformance revision<\/dt><dd>31<\/dd>/);
+  assert.match(developmentGeneralMarkup, /<dt>Conformance revision<\/dt><dd>32<\/dd>/);
   assert.match(developmentGeneralMarkup, /<dt>Features<\/dt><dd>sessions, terminal_streaming, resize, terminal_readback, plugin_surface_render, plugin_surface_action<\/dd>/);
   assert.match(developmentGeneralMarkup, /<dt>State schema<\/dt><dd>Version 3<\/dd>/);
   assert.doesNotMatch(developmentGeneralMarkup, /Version unknown|version unknown/);
@@ -6793,14 +6796,72 @@ try {
   assert.deepEqual(createDefinition.traits, ["terminal", "companion"]);
   assert.deepEqual(createDefinition.args, ["--interactive", "--json"]);
   assert.deepEqual(createDefinition.context, ["prompt"]);
+  // Empty description/icon omit rather than forcing Some("").
+  assert.equal(Object.hasOwn(createDefinition, "description"), false);
+  assert.equal(Object.hasOwn(createDefinition, "icon"), false);
+  assert.equal(Object.hasOwn(createDefinition, "target_id"), false);
 
-  // The published row cannot reconstruct an authoring definition: Hub exposes
-  // working_directory_policy but not the authored path, and no environment at all. Editing
-  // is therefore withheld until ticket_1786039258_173310 lands a lossless authoring view.
+  // The published row still cannot reconstruct an authoring definition: Hub exposes
+  // working_directory_policy but not the authored path, and no environment at all. Edit
+  // therefore seeds only from show_session_type_definition.
   const publishedRow = authoritativeSessionTypeItems.find((item) => item.session_type_id === "device/codex");
   assert.equal(Object.hasOwn(publishedRow, "working_directory_policy"), true);
   assert.equal(Object.hasOwn(publishedRow, "working_directory"), false);
   assert.equal(Object.hasOwn(publishedRow, "environment"), false);
+
+  // Lossless field map: seed from authoring definition, change only label, re-emit preserves
+  // relative path, environment, context, and opaque definition target_id.
+  const authoringEditable = {
+    session_type_id: "device/lossless-agent",
+    source: { source: "device" },
+    definition: {
+      id: "lossless-agent",
+      label: "Lossless agent",
+      description: "Authored description",
+      role: "botster.agent",
+      interaction: "interactive",
+      traits: ["terminal"],
+      lifecycle: "task",
+      command: "sleep",
+      args: ["30"],
+      working_directory: { policy: "relative", path: "agents/live" },
+      environment: { LIVE_KEY: "live-value" },
+      context: ["prompt", "workspace"],
+      target_id: "project-main"
+    }
+  };
+  const seededForm = sessionTypeFormFromAuthoringDefinition(authoringEditable);
+  assert.ok(seededForm);
+  assert.equal(seededForm.mode, "edit");
+  assert.equal(seededForm.id, "lossless-agent");
+  assert.equal(seededForm.workingDirectoryPolicy, "relative");
+  assert.equal(seededForm.workingDirectoryPath, "agents/live");
+  assert.equal(seededForm.environment, "LIVE_KEY=live-value");
+  assert.equal(seededForm.contextKeys, "prompt, workspace");
+  assert.equal(seededForm.definitionTargetId, "project-main");
+  assert.equal(seededForm.source, "device");
+
+  const updatedDefinition = sessionTypeDefinitionFromForm({
+    ...seededForm,
+    label: "Lossless agent renamed"
+  });
+  assert.equal(updatedDefinition.label, "Lossless agent renamed");
+  assert.equal(updatedDefinition.id, "lossless-agent");
+  assert.deepEqual(updatedDefinition.working_directory, { policy: "relative", path: "agents/live" });
+  assert.deepEqual(updatedDefinition.environment, { LIVE_KEY: "live-value" });
+  assert.deepEqual(updatedDefinition.context, ["prompt", "workspace"]);
+  assert.equal(updatedDefinition.target_id, "project-main");
+  assert.equal(updatedDefinition.description, "Authored description");
+
+  // Ablation: dropping definitionTargetId must fail the target_id oracle (proves the
+  // carry is load-bearing, not incidental).
+  const ablatedDefinition = sessionTypeDefinitionFromForm({
+    ...seededForm,
+    label: "Lossless agent renamed",
+    definitionTargetId: ""
+  });
+  assert.equal(Object.hasOwn(ablatedDefinition, "target_id"), false);
+  assert.notEqual(ablatedDefinition.target_id, "project-main");
 
   // entity_error is surface-scoped, verbatim, and matched by family.
   assert.deepEqual(
@@ -8209,9 +8270,11 @@ try {
   assert.match(spawnTargetMarkup, /Delete/);
   // Rendered proof: Hub descriptors verbatim, provenance, override chain, diagnostics,
   // unknown namespaced role/trait rendered literally, and editability gating controls.
+  let editedSessionTypeId;
   const deviceAgentMarkup = renderToStaticMarkup(
     createElement(SessionTypeListItem, {
       sessionType: { ...authoritativeSessionTypeItems[0], id: "device/codex" },
+      onEdit: (sessionType) => { editedSessionTypeId = sessionType.id; },
       onDelete: () => undefined
     })
   );
@@ -8220,15 +8283,30 @@ try {
   assert.match(deviceAgentMarkup, /device · device · project-main/);
   assert.match(deviceAgentMarkup, /Available/);
   assert.match(deviceAgentMarkup, /Delete/);
-  // Editing is withheld visibly, not silently absent.
-  assert.match(deviceAgentMarkup, /Editing not available yet/);
+  // Editable rows expose Edit; the withheld placeholder is gone.
+  assert.match(deviceAgentMarkup, /data-testid="edit-session-type-device\/codex"/);
+  assert.doesNotMatch(deviceAgentMarkup, /Editing not available yet/);
   assert.doesNotMatch(deviceAgentMarkup, /Read-only/);
   // The id is never humanised into a display name.
   assert.doesNotMatch(deviceAgentMarkup, /Device:codex|Codex<\/h2>/);
 
+  const interactiveDeviceItem = SessionTypeListItem({
+    sessionType: { ...authoritativeSessionTypeItems[0], id: "device/codex" },
+    onEdit: (sessionType) => { editedSessionTypeId = sessionType.id; },
+    onDelete: () => undefined
+  });
+  const editButton = findReactElement(
+    interactiveDeviceItem,
+    (node) => node.props?.["data-testid"] === "edit-session-type-device/codex"
+  );
+  assert.ok(editButton);
+  editButton.props.onClick();
+  assert.equal(editedSessionTypeId, "device/codex");
+
   const interactiveAccessoryMarkup = renderToStaticMarkup(
     createElement(SessionTypeListItem, {
       sessionType: { ...authoritativeSessionTypeItems[1], id: "device/companion" },
+      onEdit: () => undefined,
       onDelete: () => undefined
     })
   );
@@ -8239,6 +8317,7 @@ try {
   const serviceAccessoryMarkup = renderToStaticMarkup(
     createElement(SessionTypeListItem, {
       sessionType: { ...authoritativeSessionTypeItems[2], id: "device/watcher" },
+      onEdit: () => undefined,
       onDelete: () => undefined
     })
   );
@@ -8250,17 +8329,20 @@ try {
   const packageRowMarkup = renderToStaticMarkup(
     createElement(SessionTypeListItem, {
       sessionType: { ...authoritativeSessionTypeItems[3], id: "botster/reviewer" },
+      onEdit: () => undefined,
       onDelete: () => undefined
     })
   );
   assert.match(packageRowMarkup, /Read-only/);
   assert.doesNotMatch(packageRowMarkup, />Delete</);
-  // A read-only row is not offered the edit explanation either.
+  // A read-only row is not offered Edit.
+  assert.doesNotMatch(packageRowMarkup, /data-testid="edit-session-type-/);
   assert.doesNotMatch(packageRowMarkup, /Editing not available yet/);
 
   const overrideRowMarkup = renderToStaticMarkup(
     createElement(SessionTypeListItem, {
       sessionType: { ...authoritativeSessionTypeItems[4], id: "project-main/repo-codex" },
+      onEdit: () => undefined,
       onDelete: () => undefined
     })
   );
