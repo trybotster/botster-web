@@ -23,7 +23,7 @@
 - **Run:** `run_1786064625_324223`, Plan step `botster_stack_plan`, run step `run_step_1786065590_775493` (sequence 3 — post Plan Review bounce)
 - **Authoritative target repository:** `trybotster/botster-web`
 - **target_id:** `tgt_40abcf71ccf049f4ac0c99953a799869`
-- **base_target_path (run registry):** `/Users/jasonconigliari/Projects/botster-web`
+- **base_target_path (run registry):** the spawn-target registry path for `tgt_40abcf71ccf049f4ac0c99953a799869`
 - **Repository ownership charter:** [[botster-web-playbook]]
 - **Routing proof:** Resolved from `project_pipelines_current_context` → `run.target_id` / `ticket.target_id` → spawn-target registry path and worktree remote `git@github.com:trybotster/botster-web.git`. Not inferred from the ambient process directory name. Plan Review independently confirmed the same routing.
 - **Assigned worktree:** branch `project-pipelines/ticket_1786039279_917823` at `8048118` = `origin/main` (zero left/right delta after `git fetch origin main`). No rebase required before Implement. Plan Review must re-fetch.
@@ -152,14 +152,14 @@ Hub id shapes:
 | `icon` | `icon` | yes (existing if present) | yes | **omit when empty** |
 | `role` | `role` | yes | yes | required |
 | `interaction` | `interaction` | yes | yes | required |
-| `traits` | `traits` (token string) | yes | join tokens | token list (omit empty list if transport already does) |
+| `traits` | `traits` + **`seededTraits`** | yes | join + seed | **seeded list while text untouched**; else token list |
 | `lifecycle` | `lifecycle` | yes | yes | required |
 | `command` | `command` | yes | yes | required |
-| `args` | `args` | yes | join | token list |
-| `working_directory` | `workingDirectoryPolicy` + `workingDirectoryPath` | yes | policy + path for `relative`; policy only for `package_root` | relative+path or package_root; never invent path from sanitized row |
-| `environment` | `environment` (`KEY=value` lines) | yes | `formatMetadata` | parseMetadata; empty map omittable |
-| `allowed_environment_overrides` | `allowedEnvironmentOverrides` | yes | join | token list |
-| `context` | `contextKeys` | yes | join | token list (`definition.context`, not published `context_keys` alone on edit seed) |
+| `args` | `args` + **`seededArgs`** | yes | join + seed | **seeded list while text untouched**; else token list |
+| `working_directory` | `workingDirectoryPolicy` + `workingDirectoryPath` | yes | policy + path for `relative`; policy only for `package_root` | relative always emits `path` (incl. `""`); package_root omits path; never invent path from sanitized row |
+| `environment` | `environment` (`KEY=value` lines) + **`seededEnvironment`** | yes | `formatMetadata` + seed map | **seeded map while text untouched**; else parseMetadata |
+| `allowed_environment_overrides` | `allowedEnvironmentOverrides` + **`seededAllowedEnvironmentOverrides`** | yes | join + seed | **seeded list while text untouched**; else token list |
+| `context` | `contextKeys` + **`seededContext`** | yes | join + seed | **seeded list while text untouched** (`definition.context`, not published `context_keys` alone on edit seed) |
 | **`target_id`** | **`definitionTargetId`** (new) | **no new UI required** — opaque carry | **from `definition.target_id` only** | **re-emit when non-empty; never drop on edit** |
 | — | `source` / `sourceTargetId` | create source picker | from authoring **`source`** (mutation source), not from sanitized row alone | mutation `source` on create/update/delete — **distinct from** definition `target_id` |
 

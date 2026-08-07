@@ -798,9 +798,13 @@ export function rejectedSpawnSessionForm(
 /**
  * Create and edit share one form. Edit seeds only from Hub's lossless
  * `show_session_type_definition` response — never from the sanitized entity row.
- * Opaque authored fields the form does not surface (notably definition `target_id`)
- * are carried through `definitionTargetId` and re-emitted on update so wholesale
- * replacement cannot silently drop them.
+ *
+ * Opaque or lossily projected authored fields are carried so wholesale replacement
+ * cannot silently drop them when the operator edits an unrelated field:
+ * - `definitionTargetId` (no control)
+ * - `seededArgs` / `seededTraits` / `seededContext` / `seededAllowedEnvironmentOverrides`
+ *   / `seededEnvironment` (text controls cannot losslessly encode whitespace, commas,
+ *   multi-line values, or padding)
  */
 export interface SessionTypeFormState {
   mode: "create" | "edit";
@@ -824,6 +828,12 @@ export interface SessionTypeFormState {
   environment: string;
   allowedEnvironmentOverrides: string;
   contextKeys: string;
+  /** Authored arrays/maps; re-emitted verbatim while the paired text control is untouched. */
+  seededTraits?: string[];
+  seededArgs?: string[];
+  seededContext?: string[];
+  seededAllowedEnvironmentOverrides?: string[];
+  seededEnvironment?: Record<string, string>;
   submitting: boolean;
   error?: string;
 }
@@ -891,36 +901,59 @@ export function sessionTypeMutationSource(form: SessionTypeFormState): Record<st
     : { source: form.source };
 }
 
+/**
+ * Submit-button label for the session-type form. Extracted so pending "Saving…" is a
+ * single production path unit-tested without mounting the full modal.
+ */
+export function sessionTypeFormSubmitLabel(form: Pick<SessionTypeFormState, "mode" | "submitting">): string {
+  if (form.submitting) return "Saving…";
+  return form.mode === "edit" ? "Save" : "Create";
+}
+
+export function sessionTypeFormSubmitDisabled(form: SessionTypeFormState): boolean {
+  return !sessionTypeFormIsStructurallyComplete(form) || form.submitting;
+}
+
 export function sessionTypeDefinitionFromForm(form: SessionTypeFormState): Record<string, unknown> {
   const description = form.description.trim();
   const icon = form.icon.trim();
   const definitionTargetId = form.definitionTargetId.trim();
   const workingDirectoryPolicy = form.workingDirectoryPolicy.trim();
+  // Preserve empty relative paths: Hub's Relative variant requires `path` (no serde default).
   const workingDirectoryPath = form.workingDirectoryPath.trim();
 
   return {
     id: form.id.trim(),
     label: form.label.trim(),
-    // Empty description/icon omit so Hub's Option+skip_serializing_if stay absent, not Some("").
+    // Accepted normalization (plan + Hub Option+skip_serializing_if): blank form strings
+    // omit on the wire (absent / None), not Some(""). Opening and saving therefore collapses
+    // authored Some("") and whitespace-only values to absent; not dual-stated in the UI.
     ...(description ? { description } : {}),
     ...(icon ? { icon } : {}),
     role: form.role.trim(),
     interaction: form.interaction.trim(),
-    traits: parseTokenList(form.traits),
+    traits: tokenListFromForm(form.traits, form.seededTraits),
     lifecycle: form.lifecycle.trim(),
     command: form.command.trim(),
-    args: parseTokenList(form.args),
-    ...(workingDirectoryPolicy
-      ? {
-          working_directory: {
-            policy: workingDirectoryPolicy,
-            ...(workingDirectoryPath ? { path: workingDirectoryPath } : {})
-          }
-        }
-      : {}),
-    environment: parseMetadata(form.environment),
-    allowed_environment_overrides: parseTokenList(form.allowedEnvironmentOverrides),
-    context: parseTokenList(form.contextKeys),
+    args: tokenListFromForm(form.args, form.seededArgs),
+    ...(workingDirectoryPolicy === "relative"
+      ? { working_directory: { policy: "relative", path: workingDirectoryPath } }
+      : workingDirectoryPolicy === "package_root"
+        ? { working_directory: { policy: "package_root" } }
+        : workingDirectoryPolicy
+          ? {
+              working_directory: {
+                policy: workingDirectoryPolicy,
+                ...(workingDirectoryPath ? { path: workingDirectoryPath } : {})
+              }
+            }
+          : {}),
+    environment: environmentFromForm(form.environment, form.seededEnvironment),
+    allowed_environment_overrides: tokenListFromForm(
+      form.allowedEnvironmentOverrides,
+      form.seededAllowedEnvironmentOverrides
+    ),
+    context: tokenListFromForm(form.contextKeys, form.seededContext),
     // Opaque authored field: re-emit on every create/update when present so wholesale
     // replacement cannot drop it. Never invent this from the sanitized row's target_id.
     ...(definitionTargetId ? { target_id: definitionTargetId } : {})
@@ -941,7 +974,11 @@ export function sessionTypeFormFromAuthoringDefinition(
   if (!definition.id || !sourceKind) return undefined;
 
   const workingDirectory = readRecord(definition.working_directory);
-  const environment = readRecord(definition.environment);
+  const seededTraits = stringArray(definition.traits);
+  const seededArgs = stringArray(definition.args);
+  const seededContext = stringArray(definition.context);
+  const seededAllowedEnvironmentOverrides = stringArray(definition.allowed_environment_overrides);
+  const seededEnvironment = stringRecord(definition.environment);
 
   return {
     mode: "edit",
@@ -955,15 +992,20 @@ export function sessionTypeFormFromAuthoringDefinition(
     icon: stringValue(definition.icon, ""),
     role: stringValue(definition.role, ""),
     interaction: stringValue(definition.interaction, ""),
-    traits: joinTokenList(definition.traits),
+    traits: joinTokenList(seededTraits),
     lifecycle: stringValue(definition.lifecycle, ""),
     command: stringValue(definition.command, ""),
-    args: joinTokenList(definition.args),
+    args: joinTokenList(seededArgs),
     workingDirectoryPolicy: stringValue(workingDirectory.policy, ""),
     workingDirectoryPath: stringValue(workingDirectory.path, ""),
-    environment: formatMetadata(environment),
-    allowedEnvironmentOverrides: joinTokenList(definition.allowed_environment_overrides),
-    contextKeys: joinTokenList(definition.context),
+    environment: formatMetadata(seededEnvironment),
+    allowedEnvironmentOverrides: joinTokenList(seededAllowedEnvironmentOverrides),
+    contextKeys: joinTokenList(seededContext),
+    seededTraits,
+    seededArgs,
+    seededContext,
+    seededAllowedEnvironmentOverrides,
+    seededEnvironment,
     submitting: false
   };
 }
@@ -1033,11 +1075,43 @@ function parseTokenList(input: string): string[] {
     .filter(Boolean);
 }
 
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+function stringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) => (
+      typeof entry === "string" ? [[key, entry]] : []
+    ))
+  );
+}
+
 function joinTokenList(value: unknown): string {
-  if (!Array.isArray(value)) return "";
-  return value
-    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
-    .join(", ");
+  return stringArray(value).join(", ");
+}
+
+/**
+ * Prefer the seeded authored array while the paired text control is byte-identical to the
+ * seed projection; re-parse only after the operator edits the control.
+ */
+function tokenListFromForm(text: string, seeded: string[] | undefined): string[] {
+  if (seeded !== undefined && text === joinTokenList(seeded)) {
+    return seeded;
+  }
+  return parseTokenList(text);
+}
+
+function environmentFromForm(
+  text: string,
+  seeded: Record<string, string> | undefined
+): Record<string, string> {
+  if (seeded !== undefined && text === formatMetadata(seeded)) {
+    return seeded;
+  }
+  return parseMetadata(text);
 }
 
 const emptySpawnTargetForm: SpawnTargetFormState = {
@@ -3224,15 +3298,11 @@ export default function App() {
                     ) : null}
                     <div className="modal-actions">
                       <IonButton
-                        disabled={!sessionTypeFormIsStructurallyComplete(sessionTypeForm) || sessionTypeForm.submitting}
+                        disabled={sessionTypeFormSubmitDisabled(sessionTypeForm)}
                         onClick={submitSessionTypeForm}
                         data-testid="submit-session-type"
                       >
-                        {sessionTypeForm.submitting
-                          ? "Saving…"
-                          : sessionTypeForm.mode === "edit"
-                            ? "Save"
-                            : "Create"}
+                        {sessionTypeFormSubmitLabel(sessionTypeForm)}
                       </IonButton>
                     </div>
                   </div>

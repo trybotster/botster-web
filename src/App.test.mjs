@@ -6242,7 +6242,10 @@ try {
       sessionTypeDefinitionFromForm,
       sessionTypeFormFromAuthoringDefinition,
       sessionTypeFormIsStructurallyComplete,
+      sessionTypeFormSubmitDisabled,
+      sessionTypeFormSubmitLabel,
       sessionTypeMutationSource,
+      rejectedSessionTypeForm,
       entitySubscriptionErrorFromFrame,
       emptySessionTypeForm,
       spawnSessionAction,
@@ -6810,7 +6813,8 @@ try {
   assert.equal(Object.hasOwn(publishedRow, "environment"), false);
 
   // Lossless field map: seed from authoring definition, change only label, re-emit preserves
-  // relative path, environment, context, and opaque definition target_id.
+  // relative path, environment, context, opaque definition target_id, and token fields that
+  // cannot survive text projection (whitespace, commas, multi-line / padded env values).
   const authoringEditable = {
     session_type_id: "device/lossless-agent",
     source: { source: "device" },
@@ -6820,13 +6824,18 @@ try {
       description: "Authored description",
       role: "botster.agent",
       interaction: "interactive",
-      traits: ["terminal"],
+      traits: ["terminal", "acme.custom trait"],
       lifecycle: "task",
       command: "sleep",
-      args: ["30"],
+      args: ["--append-system-prompt", "You are a careful reviewer", "--fields", "a,b,c"],
       working_directory: { policy: "relative", path: "agents/live" },
-      environment: { LIVE_KEY: "live-value" },
-      context: ["prompt", "workspace"],
+      environment: {
+        LIVE_KEY: "live-value",
+        BANNER: "line1\nline2",
+        PS1: "  prompt> "
+      },
+      allowed_environment_overrides: ["CODEX_TOKEN", "PATH,with,commas"],
+      context: ["prompt", "workspace key"],
       target_id: "project-main"
     }
   };
@@ -6836,10 +6845,10 @@ try {
   assert.equal(seededForm.id, "lossless-agent");
   assert.equal(seededForm.workingDirectoryPolicy, "relative");
   assert.equal(seededForm.workingDirectoryPath, "agents/live");
-  assert.equal(seededForm.environment, "LIVE_KEY=live-value");
-  assert.equal(seededForm.contextKeys, "prompt, workspace");
   assert.equal(seededForm.definitionTargetId, "project-main");
   assert.equal(seededForm.source, "device");
+  assert.deepEqual(seededForm.seededArgs, authoringEditable.definition.args);
+  assert.deepEqual(seededForm.seededEnvironment, authoringEditable.definition.environment);
 
   const updatedDefinition = sessionTypeDefinitionFromForm({
     ...seededForm,
@@ -6848,13 +6857,18 @@ try {
   assert.equal(updatedDefinition.label, "Lossless agent renamed");
   assert.equal(updatedDefinition.id, "lossless-agent");
   assert.deepEqual(updatedDefinition.working_directory, { policy: "relative", path: "agents/live" });
-  assert.deepEqual(updatedDefinition.environment, { LIVE_KEY: "live-value" });
-  assert.deepEqual(updatedDefinition.context, ["prompt", "workspace"]);
+  assert.deepEqual(updatedDefinition.environment, authoringEditable.definition.environment);
+  assert.deepEqual(updatedDefinition.context, authoringEditable.definition.context);
+  assert.deepEqual(updatedDefinition.args, authoringEditable.definition.args);
+  assert.deepEqual(updatedDefinition.traits, authoringEditable.definition.traits);
+  assert.deepEqual(
+    updatedDefinition.allowed_environment_overrides,
+    authoringEditable.definition.allowed_environment_overrides
+  );
   assert.equal(updatedDefinition.target_id, "project-main");
   assert.equal(updatedDefinition.description, "Authored description");
 
-  // Ablation: dropping definitionTargetId must fail the target_id oracle (proves the
-  // carry is load-bearing, not incidental).
+  // Ablation: dropping definitionTargetId must fail the target_id oracle.
   const ablatedDefinition = sessionTypeDefinitionFromForm({
     ...seededForm,
     label: "Lossless agent renamed",
@@ -6862,6 +6876,64 @@ try {
   });
   assert.equal(Object.hasOwn(ablatedDefinition, "target_id"), false);
   assert.notEqual(ablatedDefinition.target_id, "project-main");
+
+  // Ablation: clearing seeded token/env carries must fail the lossless token oracle —
+  // proves the carry is load-bearing, not incidental text projection luck.
+  const ablatedTokens = sessionTypeDefinitionFromForm({
+    ...seededForm,
+    label: "Lossless agent renamed",
+    seededArgs: undefined,
+    seededTraits: undefined,
+    seededContext: undefined,
+    seededAllowedEnvironmentOverrides: undefined,
+    seededEnvironment: undefined
+  });
+  assert.notDeepEqual(ablatedTokens.args, authoringEditable.definition.args);
+  assert.notDeepEqual(ablatedTokens.environment, authoringEditable.definition.environment);
+  // parseTokenList splits whitespace and commas — the multi-word prompt becomes many tokens.
+  assert.ok(ablatedTokens.args.includes("You"));
+  assert.ok(ablatedTokens.args.includes("careful"));
+  // Multi-line env value is truncated at the first newline by parseMetadata.
+  assert.equal(ablatedTokens.environment.BANNER, "line1");
+  assert.equal(ablatedTokens.environment.PS1, "prompt>");
+
+  // Relative empty path still emits path so Hub's Relative { path: String } can deserialize.
+  assert.deepEqual(
+    sessionTypeDefinitionFromForm({
+      ...seededForm,
+      workingDirectoryPolicy: "relative",
+      workingDirectoryPath: ""
+    }).working_directory,
+    { policy: "relative", path: "" }
+  );
+
+  // Form promise: pending label/disabled, rejection keeps draft, success path is live.
+  assert.equal(sessionTypeFormSubmitLabel({ mode: "create", submitting: false }), "Create");
+  assert.equal(sessionTypeFormSubmitLabel({ mode: "edit", submitting: false }), "Save");
+  assert.equal(sessionTypeFormSubmitLabel({ mode: "edit", submitting: true }), "Saving…");
+  assert.equal(sessionTypeFormSubmitDisabled({ ...seededForm, submitting: true }), true);
+  assert.equal(sessionTypeFormSubmitDisabled(seededForm), false);
+  assert.match(app, /sessionTypeFormSubmitLabel\(sessionTypeForm\)/);
+  assert.match(app, /sessionTypeFormSubmitDisabled\(sessionTypeForm\)/);
+  const pendingSubmitMarkup = renderToStaticMarkup(
+    createElement("button", {
+      disabled: sessionTypeFormSubmitDisabled({ ...seededForm, submitting: true }),
+      "data-testid": "submit-session-type"
+    }, sessionTypeFormSubmitLabel({ mode: "edit", submitting: true }))
+  );
+  assert.match(pendingSubmitMarkup, /Saving…/);
+  assert.match(pendingSubmitMarkup, /disabled=""/);
+  assert.deepEqual(
+    rejectedSessionTypeForm(
+      { ...seededForm, submitting: true },
+      { reason: "invalid role", result: { error_kind: "invalid_session_type_role" } }
+    ),
+    {
+      ...seededForm,
+      submitting: false,
+      error: "invalid_session_type_role: invalid role"
+    }
+  );
 
   // entity_error is surface-scoped, verbatim, and matched by family.
   assert.deepEqual(
