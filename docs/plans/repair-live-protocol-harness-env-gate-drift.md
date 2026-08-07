@@ -4,8 +4,10 @@ Ticket: `ticket_1786042828_142991`
 Run: `run_1786060051_411729`
 Target repository: **trybotster/botster-web** (`tgt_40abcf71ccf049f4ac0c99953a799869`)
 
-Revision 2 — amended after Plan Review `review_1786060819_237168` (changes required).
-All seven findings are accepted. See **Plan Review response** at the end.
+Revision 3 — amended after Plan Review `review_1786061434_375617` (changes required).
+Revision 2 resolved all seven r1 findings. This revision accepts the three remaining
+r2 findings (shared-artifact shape, export-for-contract, mode-branch coverage limit).
+See **Plan Review response** at the end.
 
 ## Routing
 
@@ -80,8 +82,9 @@ Pipeline context:
 
 - Ticket description: outstanding `waitForTerminalDetached` break; three already-repaired
   latent breaks; structural env-gate drift requirement.
-- Plan Review `review_1786060819_237168` → **changes_required** with 7 open findings
-  (1 blocker, 3 high, 2 medium, 1 low). This revision addresses all seven.
+- Plan Review `review_1786060819_237168` → **changes_required** (7 findings; resolved in r2).
+- Plan Review `review_1786061434_375617` → **changes_required** (3 remaining findings;
+  resolved in r3): shared-artifact executability, export-for-contract, mode-branch limit.
 - Sibling evidence: `docs/plans/manage-authoritative-hub-session-types.md` (checks 11/13/14
   not executed at detach); `docs/plans/rename-workspaces-browser-driver-spawn-field.md`
   (this ticket correctly non-scoped there; `sharedHubDriverMode` returns before the wait).
@@ -125,45 +128,57 @@ DOM and times out after substantive terminal assertions already passed.
 
 ## Scope
 
-### A. Fix the outstanding detach oracle (shared predicate)
+### A. Fix the outstanding detach oracle (shared constants + decision, per-side extraction)
 
-1. Export a **pure DOM detach predicate** from
-   `scripts/live-packaged-protocol-helpers.mjs` (existing shared module already imported by
-   unit tests). Signature sketch (Implement may refine names):
+**Shared-artifact shape (r3 — chosen option (a), no new dependency):**
 
-   - Input: a document-like root (or HTML string + parse) and the expected `sessionId`.
-   - Success when:
-     - no `.terminal-view-container` still carries `data-terminal-session-id === sessionId`,
-       and
-     - `[data-testid="dashboard-view"]` is present (positive destination from
-       `releaseTerminalSession`).
-   - Failure diagnostics must be structured enough for live timeouts to report
-     `lastObservedAttachState`, whether the session container was still present, and
-     whether dashboard was present.
+There is no jsdom/happy-dom/linkedom/cheerio in this repo, and this ticket does **not**
+add a DOM parser or launch Chromium under `npm test`. Therefore the shared artifact is
+**not** a single function that both sides call on a live `document`.
 
-2. `waitForTerminalDetached(page, sessionId)` in the harness **must call that same
-   predicate** via `page.waitForFunction` / `page.evaluate` — not a second copy of the
-   selector string. One source of truth.
+| Shared (one source of truth) | Not shared (honest per-side extraction) |
+| --- | --- |
+| Selector/attribute **constants** (e.g. terminal container class, `data-terminal-session-id`, `data-testid="dashboard-view"`, attach-state attribute name) | Browser: `document.querySelector` / Playwright in `page.waitForFunction` |
+| Pure **decision logic** over already-extracted facts, e.g. `isTerminalDetached({ sessionContainerIds, dashboardPresent }, sessionId)` → boolean | Unit: assertions / regex / substring checks against `renderToStaticMarkup` HTML strings (existing suite pattern, e.g. `assert.match(markup, /data-diagnostic-id="…"/)`) |
+| Structured diagnostic field names for timeouts | How each side obtains `lastObservedAttachState` |
 
-3. Do **not** reintroduce a product-only `none` placeholder to satisfy the harness.
+Export those constants + `isTerminalDetached` (name flexible) from
+`scripts/live-packaged-protocol-helpers.mjs` (already imported by `src/App.test.mjs:51`).
 
-4. Keep the call site after `shutdownProductionSession()`; pass `productionSessionId`
+**Detach decision (shared):**
+
+- Success when:
+  - `sessionId` is **not** among observed terminal-container session ids, **and**
+  - `dashboardPresent === true` (positive destination from `releaseTerminalSession`).
+- Failure diagnostics must be structured enough for live timeouts to report
+  `lastObservedAttachState`, whether the session container was still present, and
+  whether dashboard was present.
+
+**Harness wiring:**
+
+1. `waitForTerminalDetached(page, sessionId)` extracts facts from the live document using
+   the **shared constants**, then applies the **shared decision**. It must not hardcode a
+   second private copy of attribute names or the success rule (no residual
+   `[data-terminal-session-id='none']` oracle).
+2. Do **not** reintroduce a product-only `none` placeholder to satisfy the harness.
+3. Keep the call site after `shutdownProductionSession()`; pass `productionSessionId`
    explicitly.
 
-5. **Discriminating exit observation (finding on load-bearing assumption):**
-   After `shutdownProductionSession()`, the live path must observe evidence that the
-   exit chain started, not only the final dashboard:
+**Discriminating exit observation (load-bearing assumption remains checked):**
 
-   - While waiting, record snapshots of `data-terminal-attach-state` on `.terminal-status`
-     when present.
-   - Success requires the detach predicate (dashboard + session host gone for that id).
-   - On timeout, throw an error that includes at least:
-     - whether `exited` was ever observed on `data-terminal-attach-state`,
-     - last observed attach state,
-     - whether the session terminal container remained,
-     - whether dashboard was present.
-   - This distinguishes **exit status never arrived** from **exit arrived but destination
-     never rendered**. Green unit pins alone cannot make that discrimination.
+After `shutdownProductionSession()`, the live path must observe evidence that the exit
+chain started, not only the final dashboard:
+
+- While waiting, record snapshots of `data-terminal-attach-state` on `.terminal-status`
+  when present (using the shared attribute constant).
+- Success requires the shared detach decision (dashboard present + session host gone).
+- On timeout, throw an error that includes at least:
+  - whether `exited` was ever observed on `data-terminal-attach-state`,
+  - last observed attach state,
+  - whether the session terminal container remained,
+  - whether dashboard was present.
+- This distinguishes **exit status never arrived** from **exit arrived but destination
+  never rendered**.
 
 ### B. Audit — checkable procedure, not an unaided reading pass
 
@@ -174,14 +189,38 @@ falsifiable.
 
 | Class | Examples | Unit-contractable? | Live-only? |
 | --- | --- | --- | --- |
-| **Host chrome (static)** | `data-testid` values, nav button names (`Apps`, `Home`, `Back`), `data-terminal-session-id` / `data-terminal-attach-state`, `data-diagnostic-id="schema-version"`, `plugin-settings-route`, `dashboard-view`, `terminal-session-view` | **Yes** — predicate against `renderToStaticMarkup` of the owning product component | Live still re-proves end-to-end |
+| **Host chrome (static), default path** | `data-testid` values, nav button names (`Apps`, `Home`, `Back`), `data-terminal-session-id` / `data-terminal-attach-state`, `data-diagnostic-id="schema-version"`, `plugin-settings-route`, `dashboard-view`, `terminal-session-view` | **Yes** — evaluate shared constants / decision against `renderToStaticMarkup` of the owning product component | Live still re-proves end-to-end |
 | **Dynamic plugin trees** | `data-ui-node-id='…'`, Workspaces/contract matrix node ids, installed-package row text from live Hub | No without full Hub fixtures | **Yes** |
 | **Protocol/event oracles** | `hub_frame`, `daemon_request`, WebRTC lifecycle kinds | No (not DOM chrome) | **Yes** |
+| **Non-default mode-branch host chrome** | Chrome only reached under env-gated modes listed below | **Out of inventory scope for this ticket** | Still env-gated live smokes |
 
 The structural half of the ticket is about **host chrome** renames breaking the harness —
 the class that already failed three times (Back, schema floor, schema presentation) plus
 detach. Dynamic plugin ids and protocol events are not the env-gate chrome-drift class;
 they remain live-proven.
+
+##### Mode-branch coverage limit (explicit — r3)
+
+Inventory extraction and unit contracts cover **default-path**
+`smoke:live-packaged-protocol` host chrome only
+([[live packaged harness failures are scoped to the active mode branch]]).
+
+The same harness file is also driven by these **env-gated lanes that remain outside this
+ticket’s inventory claim** (default-path-first is intentional; not silent):
+
+| npm script / mode flag | Why out of scope here |
+| --- | --- |
+| `smoke:workspaces-compat` (`BOTSTER_LIVE_REQUIRE_WORKSPACES`) | Mode-specific Workspaces chrome; separate required smoke |
+| `smoke:workspaces-lifecycle` (`BOTSTER_LIVE_WORKSPACES_LIFECYCLE`) | Lifecycle-only UI and session mutations |
+| `smoke:live-packaged-protocol:durable` (`BOTSTER_LIVE_DURABLE_STATE`) | Seeded durable-state path |
+| `smoke:plugin-contract-matrix` (`BOTSTER_LIVE_CONTRACT_MATRIX`) | Contract-matrix package chrome |
+| `smoke:plugin-payload-contract` (`BOTSTER_LIVE_PAYLOAD_CONTRACT`) | Payload-contract package chrome |
+| `BOTSTER_LIVE_SHARED_HUB_DRIVER` / driver shim | Early-return shared-Hub branch; returns before detach wait |
+| `BOTSTER_LIVE_SURFACE_ONLY` / `BOTSTER_LIVE_ALLOW_SURFACE_SKIP` | Surface-only / skip branches |
+
+**Coverage claim language:** this ticket delivers “**default-path host chrome** is
+inventory-covered under `npm test`,” not “all host chrome in the harness file.” A
+follow-up may extend the inventory to other modes; it is not absorbed here.
 
 #### B.2 Host-chrome contract inventory (by construction)
 
@@ -193,24 +232,27 @@ Implement adds a **named inventory** in `scripts/live-packaged-protocol-helpers.
 | `id` | stable contract id |
 | `harnessUse` | where the default live path depends on it |
 | `render` | which product component/fixture produces the markup |
-| `predicate` | pure function over markup/DOM — **the same function the harness uses when applicable** |
+| `constants` / `decide` | shared selector constants and, where applicable, pure decision over extracted facts (not a DOM-walking function) |
 | `class` | always `host-chrome` for inventory members |
 
 **Minimum inventory for this ticket (must ship):**
 
 1. **terminal-mounted** — real `TerminalViewHost` (not a stub div) with a known session id
-   renders `data-terminal-session-id="<id>"` and `data-terminal-attach-state`.
-2. **terminal-detached** — markup representing post-release dashboard (dashboard testid
-   present, no terminal container for that session id) satisfies the shared detach
-   predicate; mounted terminal markup must **not**.
-3. **settings-back** — `PluginSettingsRoutePage` (or equivalent export) renders a button
-   whose accessible name is `Back`; harness close path uses that name.
+   renders markup containing the shared session-id / attach-state attribute constants.
+2. **terminal-detached** — post-release dashboard markup extracts to facts that make
+   `isTerminalDetached(...)` true; mounted terminal markup extracts to facts that make it
+   false. Unit side uses shared constants + decision on string/fact extraction; harness
+   side uses the same constants + decision on live DOM extraction.
+3. **settings-back** — exported `PluginSettingsRoutePage` (see affected-files: export for
+   contract, no behavior change) renders a button whose accessible name is `Back`; harness
+   close path uses that name. Assert via rendered markup
+   (`assert.match` / role text in HTML), not by grepping harness source alone.
 4. **schema-presentation-neutral** — Hub General / diagnostic render includes
    `data-diagnostic-id="schema-version"` with neutral Info/server framing (not
    Blocked/mismatch); aligns with existing schema presentation intent.
 5. **schema-floor-in-harness** — the live compatibility check remains a floor
-   (`schema_version < 3`), not equality — still unit-pinned against the harness module
-   text *only as a secondary pin*; the product diagnostic remains rendered-output based.
+   (`schema_version < 3`), not equality — may keep a **secondary** harness-source pin; the
+   product diagnostic remains rendered-output based.
 
 **Already-repaired oracles** stay in the inventory so they cannot regress silently.
 
@@ -241,32 +283,40 @@ Implement adds a **named inventory** in `scripts/live-packaged-protocol-helpers.
 
 ### C. Structural prevention — rendered-output contracts, not source greps
 
-**Rejected (r1):** “source-backed product DOM contracts” and absence-pins on the one
-known-dead selector. That is the mechanism that already failed:
-`assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/)` is green today while
-the helper waits for a selector no product file emits.
+**Rejected (r1):** grepping **source text of the harness or product files** as the sole
+anti-drift proof, and absence-pins on the one known-dead selector. That is the mechanism
+that already failed: `assert.match(liveProtocolHarnessScript, /waitForTerminalDetached/)`
+is green today while the helper waits for a selector no product file emits.
 
-**Required (r2):**
+**Required (r3) — distinguish three different “string” practices:**
 
-1. Every anti-drift host-chrome contract **evaluates the harness’s own predicate** (or the
-   inventory predicate the harness imports) against markup from
-   `renderToStaticMarkup` of the **real** product component.
-2. Export predicates from `scripts/live-packaged-protocol-helpers.mjs`; import them in
-   `src/App.test.mjs` (existing pattern at line 51) **and** use them from the harness.
-3. `source-backed` greps are allowed only as **secondary** pins (e.g. script wiring,
-   package.json command strings), never as the sole anti-drift proof for a chrome oracle.
+| Practice | Allowed? | Role |
+| --- | --- | --- |
+| Grep harness/product **source text** as the only chrome contract | **No** (anti-drift) | Secondary pins only (script wiring, package.json command names) |
+| Assert against **rendered markup** from `renderToStaticMarkup` of a real component | **Yes** | Primary unit anti-drift for host chrome (existing suite pattern) |
+| Shared **constants + pure decision** used by harness (DOM extract) and unit (markup/fact extract) | **Yes** | One vocabulary and success rule; two extraction paths, honestly labelled |
+
+Concrete requirements:
+
+1. Every anti-drift host-chrome contract proves the product still emits the shared
+   constants in **rendered** markup of the real component, and where a decision exists
+   (detach), applies the **shared** `isTerminalDetached` (or equivalent) to facts derived
+   from that markup — not a second private success rule.
+2. Export constants + decisions from `scripts/live-packaged-protocol-helpers.mjs`; import
+   in `src/App.test.mjs` and use from the harness.
+3. **No new DOM-parser dependency** and no Chromium under `npm test` for this mechanism
+   (option (a) above). Do not invent a second full string-matching “detach” implementation
+   that re-encodes different attribute names.
 4. Absence of the old `none` selector may remain as a **negative regression pin** but is
    not the structural fix by itself.
 5. Negative control ([[a regression test must be shown to go red with the fix reverted]]):
-   - Restoring the `none` wait (or breaking the shared detach predicate so mounted markup
-     still “passes”) must fail the unit contract that executes the predicate against
-     rendered markup.
-   - Ablating inventory entries for Back / schema presentation must fail their rendered
+   - Restoring the `none` wait (or diverging harness constants from the shared module) must
+     fail unit contracts that assert shared constants against rendered markup / decision.
+   - Ablating inventory entries for Back / schema presentation must fail those rendered
      contracts specifically ([[an ablation that reddens at the first assertion does not vouch for later ones]]).
 
-This is **not** a harness page-object framework. It is a small shared pure-function module
-plus a named inventory — the minimum that gives “covered by construction” for host chrome
-without abstracting Playwright.
+This is **not** a harness page-object framework and **not** a new HTML parser. It is
+shared constants + pure decision + named inventory + per-side extraction.
 
 ### D. Prove the runtime path — live is a hard gate
 
@@ -300,8 +350,8 @@ npm test
 npm run typecheck
 ```
 
-Unit suite must execute the host-chrome inventory against rendered markup and prove the
-shared detach predicate.
+Unit suite must execute the default-path host-chrome inventory against rendered markup and
+prove the shared detach **decision** (with shared constants), without a DOM parser.
 
 ### E. Artifact durability (Plan Review blocker)
 
@@ -321,9 +371,14 @@ shared detach predicate.
 - No shared-Hub driver rewrite; that mode returns before the broken wait.
 - No Project Pipelines package/plugin policy changes.
 - No Playwright page-object framework or broad harness rewrite.
+- No new DOM parser / jsdom / happy-dom dependency for unit contracts (option (a)).
+- No extending host-chrome inventory to non-default mode branches in this ticket (named
+  follow-up territory; see B.1 mode-branch table).
 - No new GitHub Actions live CI job in this ticket (unit inventory is the cheap gate;
   live remains the named smoke hard-required for this run’s detach proof).
 - No claim to unit-test dynamic `data-ui-node-id` plugin trees without Hub fixtures.
+- No product **behavior** changes for session release / settings; export-for-contract is
+  allowed (see affected files).
 
 ## Ownership boundaries and cross-repo dependencies
 
@@ -383,37 +438,42 @@ upstream missing surface, register a dependency then — not as a pre-emptive ca
 
 | Path | Expected change |
 | --- | --- |
-| `scripts/live-packaged-protocol-helpers.mjs` | Export shared detach predicate + host-chrome inventory / pure predicates |
-| `scripts/live-packaged-protocol-harness.mjs` | Use shared detach predicate; discriminating wait diagnostics; any inventory-driven chrome fixes |
-| `src/App.test.mjs` | Import predicates; `renderToStaticMarkup` contracts for inventory (real `TerminalViewHost`, settings Back, schema diagnostic, detach true/false pairs) |
-| `src/App.tsx` / `src/botster/TerminalViewHost.tsx` | Only if inventory proves product bug |
+| `scripts/live-packaged-protocol-helpers.mjs` | Export shared chrome **constants**, detach **decision** (`isTerminalDetached` over extracted facts), and default-path host-chrome inventory metadata |
+| `scripts/live-packaged-protocol-harness.mjs` | Extract live DOM facts with shared constants; apply shared decision; discriminating wait diagnostics; inventory-driven chrome fixes on default path |
+| `src/App.test.mjs` | Import constants/decision; `renderToStaticMarkup` contracts for inventory (real `TerminalViewHost`, settings Back, schema diagnostic, detach true/false fact pairs) |
+| `src/App.tsx` | **Export components required by inventory contracts** (e.g. `PluginSettingsRoutePage`), following existing `SessionListItem` / `SessionRouteView` / `AppListItem` precedent — **no behavior change**. Product behavior edits only if inventory proves a true product bug |
+| `src/botster/TerminalViewHost.tsx` | Only if inventory proves product bug |
+| `package.json` | **No change expected** — no DOM-parser dependency; no new npm script required |
 | `docs/plans/repair-live-protocol-harness-env-gate-drift.md` | This plan (committed + registered) |
 | `README.md` | Optional; skip unless live env invocation docs are wrong |
 
 ## Implementation sequence
 
-1. Commit/register plan artifact durability (Plan step).
-2. Add shared detach predicate + minimum inventory entries in helpers (tests fail first
-   where the harness still uses `none`).
-3. Point harness `waitForTerminalDetached` at the shared predicate; add exit-discrimination
-   diagnostics.
-4. Add rendered-output unit contracts for the inventory (real components).
-5. Run mechanical extraction of default-path host-chrome tokens; extend inventory or fix
-   harness until the report table has no silent static gaps.
+1. Keep plan artifact durability (committed + registered on each Plan return).
+2. Add shared constants + detach decision + minimum inventory entries in helpers (tests
+   fail first where the harness still uses `none`).
+3. Point harness `waitForTerminalDetached` at shared constants + decision; add
+   exit-discrimination diagnostics.
+4. Export `PluginSettingsRoutePage` (and any other inventory targets that are still local)
+   with no behavior change; add rendered-output unit contracts.
+5. Run mechanical extraction of **default-path** host-chrome tokens; extend inventory or
+   fix harness until the report table has no silent static gaps on that path.
 6. `npm test` + `npm run typecheck`.
 7. Hard live gate: `smoke:live-packaged-protocol` with release Hub/worker env vars.
-8. Attach implement evidence: inventory table, unit results, live success log, ablation
-   notes.
+8. Attach implement evidence: inventory table (default-path only; mode branches listed as
+   out of scope), unit results, live success log, ablation notes.
 
 ## Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| Vacuous detach wait | Shared predicate requires dashboard + absence of session host; call site still mounts first |
+| Vacuous detach wait | Shared decision requires dashboard + absence of session host; call site still mounts first |
 | Exit never emitted | Timeout diagnostics must report whether `exited` was observed |
 | Unit green / live hang | Live is hard gate for detach half |
-| Inventory under-coverage | Mechanical extraction + “static host chrome must join inventory” rule |
-| Overbuilding a page-object layer | Pure functions + named inventory only |
+| Dual detach implementations diverge | Shared constants + decision only; no private attribute renames on either side |
+| Inventory under-coverage on default path | Mechanical extraction + “static host chrome must join inventory” rule |
+| Overclaiming mode-branch coverage | Explicit B.1 mode table; claim is default-path only |
+| Overbuilding a page-object / DOM parser | Option (a) only; no new dependency |
 | Sibling edit-control contention | Documented; rebase if needed; do not absorb feature |
 | Weakening schema/Back | Forbidden; inventory keeps them green |
 
@@ -428,12 +488,14 @@ npm run typecheck
 
 Must show:
 
-- Shared detach predicate rejects mounted terminal markup and accepts post-release
-  dashboard markup.
-- Real `TerminalViewHost` render includes session id + attach-state attributes.
-- Settings Back + schema presentation contracts green via rendered markup.
-- Harness imports/uses the shared detach predicate (not a private `none` wait).
-- Inventory table items each have an executing unit evaluation.
+- Shared detach **decision** rejects facts from mounted terminal markup and accepts facts
+  from post-release dashboard markup (using shared constants).
+- Real `TerminalViewHost` render includes session id + attach-state attribute constants.
+- Settings Back + schema presentation contracts green via **rendered markup**
+  (export-for-contract allowed).
+- Harness uses shared constants + decision (not a private `none` wait).
+- Default-path inventory table items each have an executing unit evaluation.
+- No new DOM-parser dependency in `package.json`.
 
 ### Live (required hard gate for detach half)
 
@@ -469,33 +531,39 @@ single opaque “detach failed” string that collapses both failure modes.
 
 - Plan artifact path: `docs/plans/repair-live-protocol-harness-env-gate-drift.md`
 - Must be **git-committed** and **registered** as plan-kind via
-  `project_pipelines_add_artifact`
+  `project_pipelines_add_artifact` (re-register on each Plan revision)
 - Plan gate: `botster_stack_plan_gate`
-- Implement (later): inventory table, unit evidence, live evidence with env vars set,
-  production entrypoint explanation
-  (`TerminalViewHost` exited → `releaseTerminalSession` → dashboard → shared predicate)
+- Implement (later): default-path inventory table, unit evidence, live evidence with env
+  vars set, production entrypoint explanation
+  (`TerminalViewHost` exited → `releaseTerminalSession` → dashboard → shared decision)
 
 ## Vault gaps worth capturing
 
 After implement, capture only if still novel:
 
-1. **Env-gated live harnesses need shared predicates evaluated against rendered host chrome
-   under the default suite** — not source greps of harness text.
+1. **Env-gated live harnesses need shared chrome constants + decision, proven against
+   rendered host chrome under the default suite** — not source greps of harness text, and
+   not a dual private implementation.
 2. **Terminal detach after exit is unmount + dashboard, not a `none` placeholder.**
 3. Skip speculative CI policy until an in-repo CI surface exists.
+4. Optional follow-up: extend host-chrome inventory to non-default mode branches named in
+   B.1 (only if operators still rediscover mode-only drift).
 
 ## Product decision ledger
 
 | Item | Decision |
 | --- | --- |
-| Structural anti-drift | Shared pure predicates + host-chrome inventory evaluated on `renderToStaticMarkup` |
-| Source greps alone | Rejected as anti-drift mechanism |
-| Coverage claim | All default-path **static host chrome**; dynamic plugin/protocol remain live-only with explicit classification |
+| Shared artifact shape | **(a)** constants + pure decision + per-side extraction; **no** DOM parser |
+| Structural anti-drift | Shared constants/decision + default-path inventory on `renderToStaticMarkup` |
+| Grep harness/product **source** alone | Rejected as anti-drift |
+| Assert against **rendered markup** | Accepted primary unit proof |
+| Coverage claim | **Default-path** static host chrome only; modes listed in B.1 out of inventory |
 | Live smoke for detach | **Hard required** with release Hub/worker env |
 | Pre-authorized live skip | **Removed** |
 | Product `none` placeholder | Non-goal |
+| Export-for-contract (`PluginSettingsRoutePage` etc.) | **Allowed**; no behavior change |
 | Assertion weakening | Forbidden |
-| Full page-object framework | Non-goal |
+| Full page-object framework / DOM parser dep | Non-goal |
 | New CI live job | Non-goal this ticket |
 | Sibling edit-control ticket | Contention noted; not absorbed |
 
@@ -503,14 +571,22 @@ After implement, capture only if still novel:
 
 ## Plan Review response
 
-Review: `review_1786060819_237168` — **changes_required**. All findings accepted.
+### r1 — `review_1786060819_237168` (resolved in r2)
 
 | Finding | Severity | Response in r2 |
 | --- | --- | --- |
-| No registered plan artifact; untracked file | blocker | Commit plan on run branch; `project_pipelines_add_artifact` plan-kind registration |
-| Structural anti-drift uses source greps | high | Scope C rewritten: shared predicates from helpers evaluated against real component markup; source greps secondary only |
-| Absence-pins cannot catch next rename | high | Host-chrome inventory by construction; mechanical extraction forces static tokens into inventory or live-only classification with reason |
-| Scope B audit has no method | high | Audit = inventory + extraction procedure + required per-token report table |
-| Live proof pre-authorized skippable | medium | Live hard gate; skip caveat removed; env vars point at verified release binaries |
-| Load-bearing exited assumption unchecked | medium | Discriminating wait diagnostics: must report whether `exited` was observed |
-| Same-target sibling file contention | low | Documented `ticket_1786039279_917823` contention on `App.test.mjs` / harness; no inseparable overlap |
+| No registered plan artifact; untracked file | blocker | Commit + `project_pipelines_add_artifact` |
+| Structural anti-drift uses source greps | high | Rendered-output contracts; source greps secondary |
+| Absence-pins cannot catch next rename | high | Host-chrome inventory by construction |
+| Scope B audit has no method | high | Mechanical extraction + report table |
+| Live proof pre-authorized skippable | medium | Live hard gate |
+| Load-bearing exited assumption unchecked | medium | Discriminating wait diagnostics |
+| Same-target sibling file contention | low | `ticket_1786039279_917823` noted |
+
+### r2 — `review_1786061434_375617` (resolved in r3)
+
+| Finding | Severity | Response in r3 |
+| --- | --- | --- |
+| Shared predicate unit suite cannot execute (no DOM parser; package.json out of scope) | high | Chose option **(a)**: shared **constants + pure decision**, per-side extraction; no DOM parser; `package.json` explicitly no-change; C clarifies source-grep vs rendered-markup |
+| Inventory item 3 targets non-exported `PluginSettingsRoutePage` while file rule blocked export | low | Affected-files authorize **export-for-contract** with no behavior change (SessionListItem / SessionRouteView / AppListItem precedent) |
+| Mode-branch coverage boundary silent | medium | B.1 mode table names five env-gated scripts + shared-hub/surface flags as out of inventory; coverage claim is default-path only |
