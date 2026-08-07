@@ -31,6 +31,10 @@ export const HOST_CHROME = Object.freeze({
   sessionTypesViewTestId: "session-types-view",
   createSessionTypeTestId: "create-session-type",
   submitSessionTypeTestId: "submit-session-type",
+  sessionTypeFormTestId: "session-type-form",
+  sessionTypeFormErrorTestId: "session-type-form-error",
+  sessionTypeIdTestId: "session-type-id",
+  editSessionTypeTestIdPrefix: "edit-session-type-",
   deleteSessionTypeTestIdPrefix: "delete-session-type-",
   hubSettingsGeneralTestId: "hub-settings-general",
   hubSoftwareIdentityTestId: "hub-software-identity",
@@ -60,6 +64,10 @@ export const HOST_CHROME = Object.freeze({
 
 export function deleteSessionTypeTestId(sessionTypeId) {
   return `${HOST_CHROME.deleteSessionTypeTestIdPrefix}${sessionTypeId}`;
+}
+
+export function editSessionTypeTestId(sessionTypeId) {
+  return `${HOST_CHROME.editSessionTypeTestIdPrefix}${sessionTypeId}`;
 }
 
 /**
@@ -215,12 +223,16 @@ export const HOST_CHROME_CONTRACTS = Object.freeze([
   }),
   Object.freeze({
     id: "session-types-chrome",
-    harnessUse: "exerciseSessionTypes / createSessionTypeThroughRenderedForm",
+    harnessUse: "exerciseSessionTypes / createSessionTypeThroughRenderedForm / edit + read-back",
     render: "SessionTypesView + SessionTypesSurfaceNotices + SessionTypeListItem + SessionTypeSubmitButton",
     constants: [
       "sessionTypesViewTestId",
       "createSessionTypeTestId",
       "submitSessionTypeTestId",
+      "sessionTypeFormTestId",
+      "sessionTypeFormErrorTestId",
+      "sessionTypeIdTestId",
+      "editSessionTypeTestIdPrefix",
       "deleteSessionTypeTestIdPrefix"
     ],
     class: "host-chrome"
