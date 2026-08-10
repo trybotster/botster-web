@@ -3472,16 +3472,16 @@ async function exerciseNewSessionPickerListForTarget(page) {
     session_type_id: pickerDefinition.id
   });
 
-  // Dismiss any leftover New session / spawn-point modal so later stages can navigate.
-  const openModal = page.locator("ion-modal.show-modal").first();
-  if (await openModal.count() > 0) {
-    const closeButton = openModal.getByRole("button", { name: "Close", exact: true });
-    if (await closeButton.count() > 0) {
-      await closeButton.click();
-    } else {
-      await page.keyboard.press("Escape");
-    }
-    await page.locator("ion-modal.show-modal").waitFor({ state: "detached", timeout: 10_000 }).catch(() => {});
+  // Production submitSpawnSession clears spawnSessionForm on accepted spawn, which closes
+  // IonModal. Treat auto-dismiss as success; never require a stable Close click on a
+  // detaching overlay (that races and fails Verify's live smoke).
+  const openModals = page.locator("ion-modal.show-modal");
+  try {
+    await openModals.first().waitFor({ state: "detached", timeout: 10_000 });
+  } catch {
+    // If a modal remains (spawn-point form leftover), Escape is best-effort only.
+    await page.keyboard.press("Escape").catch(() => {});
+    await openModals.first().waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
   }
 
   return {
