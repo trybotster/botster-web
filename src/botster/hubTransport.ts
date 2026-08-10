@@ -1230,6 +1230,8 @@ async function dispatchDaemonAction(
     // Hub owns validation, admission, and precedence. Report its verdict verbatim and
     // publish no optimistic entity frame; the held subscription delivers the truth.
     // Authoring reads carry session_type_definition so the form can seed a lossless edit.
+    // Spawn-point lists carry session_types for the one-shot New session modal only — never
+    // written into the management entity catalog from this path.
     emit(actionResultFrame(request, !response.error, response.error?.message, {
       request_type: daemonRequest.type,
       kind: response.kind,
@@ -1237,6 +1239,9 @@ async function dispatchDaemonAction(
       diagnostics: responseDiagnostics(response),
       ...(response.session_type_definition
         ? { session_type_definition: response.session_type_definition }
+        : {}),
+      ...(Array.isArray(response.session_types)
+        ? { session_types: response.session_types }
         : {})
     }));
     return;
@@ -1435,6 +1440,14 @@ function sessionTypeRequestFromAction(action: ActionBinding): DaemonRequest | un
   if (!isRecord(request)) return undefined;
 
   const requestType = readConfigString(request.request_type);
+
+  // Spawn-point eligibility is Hub-owned. No mutation source; target scopes the list.
+  if (requestType === "list_session_types_for_target") {
+    const targetId = readConfigString(request.target_id);
+    return targetId
+      ? { type: "list_session_types_for_target", target_id: targetId }
+      : undefined;
+  }
 
   // Authoring read: composite session_type_id preferred. No mutation source on the wire.
   if (requestType === "show_session_type_definition") {

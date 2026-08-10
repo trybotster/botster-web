@@ -733,6 +733,15 @@ interface SpawnTargetFormState {
   metadata: string;
 }
 
+export type SpawnSessionListStatus = "loading" | "ready" | "error";
+
+/** One-shot Hub option for New session; not the management entity catalog row. */
+export interface SpawnSessionTypeOption {
+  sessionTypeId: string;
+  label: string;
+  available: boolean;
+}
+
 export interface SpawnSessionFormState {
   targetId: string;
   targetLabel: string;
@@ -740,34 +749,110 @@ export interface SpawnSessionFormState {
   prompt: string;
   submitting: boolean;
   error?: string;
+  /** Bumped on each open so late list responses for a prior open cannot apply. */
+  listGeneration: number;
+  listStatus: SpawnSessionListStatus;
+  options: SpawnSessionTypeOption[];
 }
 
 /**
- * Hub resolves a session type against exactly one spawn target, so filtering by the
- * Hub-provided target_id presents Hub's own eligibility rather than duplicating it.
- * Unavailable types are kept and rendered disabled; hiding them would enforce
- * eligibility invisibly on the client.
+ * Open New session with an empty one-shot list shell. Options come only from Hub
+ * `list_session_types_for_target` — never from the management entity catalog.
  */
-export function sessionTypesForSpawnTarget(
-  sessionTypes: Record<string, unknown>[],
-  targetId: string
-): Record<string, unknown>[] {
-  return sessionTypes.filter((sessionType) => stringValue(sessionType.target_id, "") === targetId);
-}
-
 export function spawnSessionFormForTarget(
   target: Record<string, unknown>,
-  sessionTypes: Record<string, unknown>[]
+  listGeneration: number
 ): SpawnSessionFormState {
   const targetId = stringValue(target.target_id, String(target.id));
-  const selectable = sessionTypesForSpawnTarget(sessionTypes, targetId)
-    .filter((sessionType) => sessionType.available !== false);
   return {
     targetId,
     targetLabel: stringValue(target.label, stringValue(target.title, targetId)),
-    sessionTypeId: selectable.length === 1 ? String(selectable[0].id) : "",
+    sessionTypeId: "",
     prompt: "",
-    submitting: false
+    submitting: false,
+    listGeneration,
+    listStatus: "loading",
+    options: []
+  };
+}
+
+export function listSessionTypesForTargetAction(targetId: string): ActionBinding {
+  return {
+    id: "botster.session_type.daemon_request",
+    target: targetId,
+    label: "List session types for spawn point",
+    params: {
+      daemon_request: {
+        request_type: "list_session_types_for_target",
+        target_id: targetId
+      }
+    }
+  };
+}
+
+/**
+ * Map Hub list rows to picker options using authoritative Hub `session_type_id` only.
+ * Returns undefined when the payload is missing, not an array, or contains a row without
+ * `session_type_id` — callers must treat that as error, not empty success.
+ * An empty array is a valid Hub empty list.
+ */
+export function spawnSessionOptionsFromHubList(sessionTypes: unknown): SpawnSessionTypeOption[] | undefined {
+  if (!Array.isArray(sessionTypes)) return undefined;
+  const options: SpawnSessionTypeOption[] = [];
+  for (const row of sessionTypes) {
+    const record = readRecord(row);
+    const sessionTypeId = typeof record.session_type_id === "string" ? record.session_type_id.trim() : "";
+    if (!sessionTypeId) return undefined;
+    options.push({
+      sessionTypeId,
+      label: stringValue(record.label, sessionTypeId),
+      available: record.available !== false
+    });
+  }
+  return options;
+}
+
+/**
+ * Apply a list response only when the modal is still open for the same target and
+ * generation. Returns undefined when the response is stale or the modal closed.
+ * Ready/empty success requires an accepted response with a real array of Hub rows.
+ */
+export function applySpawnSessionListResult(
+  form: SpawnSessionFormState | undefined,
+  identity: { targetId: string; listGeneration: number },
+  result: { accepted: boolean; reason?: string; sessionTypes?: unknown }
+): SpawnSessionFormState | undefined {
+  if (!form) return undefined;
+  if (form.targetId !== identity.targetId || form.listGeneration !== identity.listGeneration) {
+    return undefined;
+  }
+  if (!result.accepted) {
+    return {
+      ...form,
+      listStatus: "error",
+      options: [],
+      sessionTypeId: "",
+      error: result.reason ?? "Botster could not load session types for this spawn point."
+    };
+  }
+  const options = spawnSessionOptionsFromHubList(result.sessionTypes);
+  if (options === undefined) {
+    return {
+      ...form,
+      listStatus: "error",
+      options: [],
+      sessionTypeId: "",
+      error: result.reason
+        ?? "Botster returned an incomplete session type list for this spawn point."
+    };
+  }
+  const available = options.filter((option) => option.available);
+  return {
+    ...form,
+    listStatus: "ready",
+    options,
+    sessionTypeId: available.length === 1 ? available[0].sessionTypeId : "",
+    error: undefined
   };
 }
 
@@ -1817,6 +1902,7 @@ export default function App() {
   const [hubUpdate, setHubUpdate] = useState<HubUpdateOutcome | undefined>();
   const [selectedPluginSurface, setSelectedPluginSurface] = useState<SelectedPluginSurface | undefined>();
   const [uiPresentationState, setUiPresentationState] = useState<UiPresentationState>({});
+  const spawnSessionListGeneration = useRef(0);
   const lastPluginRouteRenderKey = useRef<string | undefined>(undefined);
   const packageSettingsReturnRoute = useRef<AppRoute>({ view: "apps" });
   const [, setFrameVersion] = useState(0);
@@ -2304,15 +2390,35 @@ export default function App() {
   const sessionTypeSourceGroups = groupSessionTypesBySource(sessionTypes);
   const sessionTypeSubscriptionsSupported = sessionTypeManagementSupported(hubStatus);
   const sessionTypeWritableSources = writableSessionTypeSources(spawnTargets);
-  const spawnSessionTypes = spawnSessionForm
-    ? sessionTypesForSpawnTarget(sessionTypes, spawnSessionForm.targetId)
-    : [];
   const openSpawnSession = useCallback((target: Record<string, unknown>) => {
-    setSpawnSessionForm(spawnSessionFormForTarget(
-      target,
-      runtimeClient.entities.list("session_type")
-    ));
-  }, [runtimeClient]);
+    spawnSessionListGeneration.current += 1;
+    const listGeneration = spawnSessionListGeneration.current;
+    const form = spawnSessionFormForTarget(target, listGeneration);
+    setSpawnSessionForm(form);
+    const action = listSessionTypesForTargetAction(form.targetId);
+    void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
+      recordDiagnostic(actionFailureDiagnostic(action, result));
+      const payload = readRecord(result.result);
+      setSpawnSessionForm((current) => applySpawnSessionListResult(
+        current,
+        { targetId: form.targetId, listGeneration },
+        {
+          accepted: result.accepted,
+          reason: result.reason,
+          sessionTypes: payload.session_types
+        }
+      ) ?? current);
+    }).catch((error: unknown) => {
+      setSpawnSessionForm((current) => applySpawnSessionListResult(
+        current,
+        { targetId: form.targetId, listGeneration },
+        {
+          accepted: false,
+          reason: error instanceof Error ? error.message : undefined
+        }
+      ) ?? current);
+    });
+  }, [recordDiagnostic, runtimeClient]);
   const submitSpawnSession = useCallback(() => {
     if (!spawnSessionForm || !spawnSessionForm.sessionTypeId || spawnSessionForm.submitting) return;
     const sessionId = crypto.randomUUID();
@@ -3215,13 +3321,15 @@ export default function App() {
                       <h2>{spawnSessionForm.targetLabel}</h2>
                       <p>Choose how this session should start. Botster will use the spawn point's folder and policy.</p>
                     </div>
-                    {entityLoadStatus.sessionType === "error" ? (
-                      <IonNote color="danger">Session types could not be loaded from Botster.</IonNote>
-                    ) : spawnSessionTypes.length === 0 ? (
+                    {spawnSessionForm.listStatus === "loading" ? (
+                      <IonNote color="medium">Loading session types…</IonNote>
+                    ) : spawnSessionForm.listStatus === "error" ? (
+                      <IonNote color="danger">
+                        {spawnSessionForm.error ?? "Botster could not load session types for this spawn point."}
+                      </IonNote>
+                    ) : spawnSessionForm.options.length === 0 ? (
                       <IonNote color="medium">
-                        {entityLoadStatus.sessionType === "loaded"
-                          ? "No session types are available for this spawn point."
-                          : "Loading session types…"}
+                        No session types are available for this spawn point.
                       </IonNote>
                     ) : (
                       <IonList lines="full" aria-label="New session form">
@@ -3238,13 +3346,13 @@ export default function App() {
                               error: undefined
                             } : current)}
                           >
-                            {spawnSessionTypes.map((sessionType) => (
+                            {spawnSessionForm.options.map((sessionType) => (
                               <IonSelectOption
-                                key={String(sessionType.id)}
-                                value={String(sessionType.id)}
-                                disabled={sessionType.available === false}
+                                key={sessionType.sessionTypeId}
+                                value={sessionType.sessionTypeId}
+                                disabled={!sessionType.available}
                               >
-                                {stringValue(sessionType.label, "")}
+                                {sessionType.label}
                               </IonSelectOption>
                             ))}
                           </IonSelect>
@@ -3267,7 +3375,9 @@ export default function App() {
                         </IonItem>
                       </IonList>
                     )}
-                    {spawnSessionForm.error ? <IonNote color="danger">{spawnSessionForm.error}</IonNote> : null}
+                    {spawnSessionForm.error && spawnSessionForm.listStatus !== "error" ? (
+                      <IonNote color="danger">{spawnSessionForm.error}</IonNote>
+                    ) : null}
                     <div className="modal-actions">
                       <IonButton
                         disabled={!spawnSessionForm.sessionTypeId || spawnSessionForm.submitting}

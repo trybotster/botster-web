@@ -1125,7 +1125,13 @@ assert.match(hubTransport, /const sessionTypeFamily = "session_type"/);
 assert.match(hubTransport, /ensureSessionTypeEntitySubscription/);
 assert.match(hubTransport, /bridge\.subscribeEntityFrames\(sessionTypeFamily/);
 assert.doesNotMatch(hubTransport, /botster-web\.session_template|botster-web\.session_type/);
-assert.doesNotMatch(hubTransport, /list_session_templates|list_session_types/);
+// Management catalog stays subscription-only. Bare list_session_types is banned; target-scoped
+// list_session_types_for_target is the New session picker authority.
+assert.doesNotMatch(hubTransport, /list_session_templates/);
+assert.doesNotMatch(hubTransport, /type: "list_session_types"/);
+assert.match(hubTransport, /type: "list_session_types_for_target"/);
+assert.match(hubTransport, /requestType === "list_session_types_for_target"/);
+assert.match(hubTransport, /session_types: response\.session_types/);
 assert.doesNotMatch(hubTransport, /humanizeIdentifier|sessionTemplateRecord/);
 assert.doesNotMatch(hubTransport, /"session_templates"/);
 assert.match(hubTransport, /type: "spawn_session_type"/);
@@ -1140,7 +1146,11 @@ assert.match(hubTransport, /type: "update_session_type"/);
 assert.match(hubTransport, /requestType === "update_session_type"/);
 assert.match(hubTransport, /requestType === "show_session_type_definition"/);
 assert.match(hubTransport, /session_type_definition: response\.session_type_definition/);
-assert.doesNotMatch(app, /botster-web\.session_template|list_session_templates|list_session_types/);
+assert.doesNotMatch(app, /botster-web\.session_template|list_session_templates/);
+assert.doesNotMatch(app, /type: "list_session_types"/);
+assert.doesNotMatch(app, /sessionTypesForSpawnTarget/);
+assert.match(app, /list_session_types_for_target/);
+assert.match(app, /listSessionTypesForTargetAction|applySpawnSessionListResult/);
 assert.match(app, /runtimeClient\.entities\.list\("session_type"\)/);
 assert.match(hubTransport, /const packageFamily = "botster-web\.package"/);
 assert.match(hubTransport, /const appFamily = "botster-web\.app"/);
@@ -1480,7 +1490,7 @@ const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name], hubTestSupportMetadata.ui_contract.package_version);
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.protocol_version, 6);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 32);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 33);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
@@ -3095,6 +3105,19 @@ const bridge = {
       return { kind: "session_types", session_types: [], sessions: [], events: [] };
     }
 
+    if (request.type === "list_session_types_for_target") {
+      return {
+        kind: "session_types",
+        session_types: authoritativeSessionTypeItems.map((item) => ({
+          ...item,
+          // List context target_id is the admitted spawn point, not storage provenance.
+          target_id: request.target_id
+        })),
+        sessions: [],
+        events: []
+      };
+    }
+
     if (request.type === "plugin_surface_render") {
       if (request.package_name === "botster-web") {
         const settings = request.surface_id === "production-settings";
@@ -4532,6 +4555,24 @@ await flushMicrotasks();
 await realTransport.send({
   kind: "action_request",
   payload: {
+    request_id: "real-list-session-types-for-target-1",
+    origin: "ui_node",
+    action: {
+      id: "botster.session_type.daemon_request",
+      target: "project-main",
+      params: {
+        daemon_request: {
+          request_type: "list_session_types_for_target",
+          target_id: "project-main"
+        }
+      }
+    }
+  }
+});
+await flushMicrotasks();
+await realTransport.send({
+  kind: "action_request",
+  payload: {
     request_id: "real-spawn-session-type-1",
     origin: "ui_node",
     action: {
@@ -4785,11 +4826,32 @@ assert.deepEqual(emittedSurfaceError.payload, {
   code: "entity_provider_frame_too_large",
   message: "session_type snapshot exceeded the frame budget"
 });
-// Terminal for the generation: nothing refetches and no list request is provoked.
+// Terminal for the generation: nothing refetches and no management list request is provoked.
 assert.equal(bridgeRequests.some((request) => request.type === "list_session_types"), false);
 
 assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "spawn"), false);
+// New session picker authority: target-scoped list through the real action → transport path.
+assert.deepEqual(
+  bridgeRequests.find((request) => request.type === "list_session_types_for_target"),
+  {
+    type: "list_session_types_for_target",
+    target_id: "project-main"
+  }
+);
+const listForTargetResult = realFrames.find(
+  (frame) =>
+    frame.kind === "action_result" &&
+    frame.payload?.request_id === "real-list-session-types-for-target-1"
+);
+assert.notEqual(listForTargetResult, undefined);
+assert.equal(listForTargetResult.payload.accepted, true);
+assert.equal(listForTargetResult.payload.result?.request_type, "list_session_types_for_target");
+assert.equal(Array.isArray(listForTargetResult.payload.result?.session_types), true);
+assert.equal(
+  listForTargetResult.payload.result.session_types.some((row) => row.session_type_id === "device/codex"),
+  true
+);
 assert.deepEqual(
   bridgeRequests.find((request) => request.type === "spawn_session_type"),
   {
@@ -4802,7 +4864,7 @@ assert.deepEqual(
     }
   }
 );
-// Cold cut: the legacy list-refresh path must be gone from the production transport.
+// Cold cut: the legacy management list-refresh path must stay gone.
 assert.equal(bridgeRequests.some((request) => request.type === "list_session_templates"), false);
 assert.equal(bridgeRequests.some((request) => request.type === "list_session_types"), false);
 assert.equal(bridgeRequests.some((request) => /workspace_id/.test(JSON.stringify(request))), false);
@@ -6261,7 +6323,7 @@ try {
       packageSettingsSurfaces,
       renderedPluginSurfaceState,
       rejectedSpawnSessionForm,
-      sessionTypesForSpawnTarget,
+      applySpawnSessionListResult,
       groupSessionTypesBySource,
       writableSessionTypeSources,
       sessionTypeMutationSourceFromRecord,
@@ -6273,8 +6335,10 @@ try {
       rejectedSessionTypeForm,
       entitySubscriptionErrorFromFrame,
       emptySessionTypeForm,
+      listSessionTypesForTargetAction,
       spawnSessionAction,
       spawnSessionFormForTarget,
+      spawnSessionOptionsFromHubList,
       surfaceLaunchAction,
       terminalDescriptorForSessionId,
       terminalReleaseToast
@@ -6996,55 +7060,169 @@ try {
   const packageJsonText = await readFile(new URL("../package.json", import.meta.url), "utf8");
   assert.doesNotMatch(packageJsonText, /"jsdom"|"happy-dom"|"linkedom"|"cheerio"|"parse5"|"domino"/);
 
-  const targetSessionTypes = [
-    { id: "codex", target_id: "project-main", available: true },
-    { id: "claude", target_id: "project-main", available: false },
-    { id: "other", target_id: "another-project", available: true }
-  ];
-  // Target-first filtering presents Hub's one-target-per-type eligibility. Ineligible
-  // types stay in the list so the UI can disable them rather than hide them.
-  assert.deepEqual(
-    sessionTypesForSpawnTarget(targetSessionTypes, "project-main"),
-    [targetSessionTypes[0], targetSessionTypes[1]]
-  );
+  // New session options come only from Hub list_session_types_for_target. Client-side
+  // target_id equality filtering is gone; device Global rows appear when Hub returns them.
   const preparedSpawnForm = spawnSessionFormForTarget(
     { id: "project-main", label: "Project main" },
-    targetSessionTypes
+    1
   );
   assert.deepEqual(preparedSpawnForm, {
     targetId: "project-main",
     targetLabel: "Project main",
-    sessionTypeId: "codex",
+    sessionTypeId: "",
     prompt: "",
-    submitting: false
+    submitting: false,
+    listGeneration: 1,
+    listStatus: "loading",
+    options: []
   });
-  assert.equal(spawnSessionFormForTarget(
-    { id: "project-main", label: "Project main" },
-    [...targetSessionTypes, { id: "shell", target_id: "project-main", available: true }]
-  ).sessionTypeId, "");
-  assert.deepEqual(spawnSessionAction(
-    { ...preparedSpawnForm, prompt: "  Review the changes  " },
-    "spawned-session"
-  ), {
+  assert.deepEqual(listSessionTypesForTargetAction("project-main"), {
+    id: "botster.session_type.daemon_request",
+    target: "project-main",
+    label: "List session types for spawn point",
+    params: {
+      daemon_request: {
+        request_type: "list_session_types_for_target",
+        target_id: "project-main"
+      }
+    }
+  });
+  const hubListForTarget = [
+    { session_type_id: "device/global-agent", id: "global-agent", label: "Global agent", available: true, target_id: "device:local" },
+    { session_type_id: "device/claude", id: "claude", label: "Claude", available: false, target_id: "device:local" },
+    { session_type_id: "project-main/shell", id: "shell", label: "Shell", available: true, target_id: "project-main" }
+  ];
+  const parsedHubList = spawnSessionOptionsFromHubList(hubListForTarget);
+  assert.deepEqual(parsedHubList, [
+    { sessionTypeId: "device/global-agent", label: "Global agent", available: true },
+    { sessionTypeId: "device/claude", label: "Claude", available: false },
+    { sessionTypeId: "project-main/shell", label: "Shell", available: true }
+  ]);
+  // Authoritative session_type_id only — bare id fallback is rejected as incomplete.
+  assert.equal(
+    spawnSessionOptionsFromHubList([{ id: "bare-only", label: "Bare", available: true }]),
+    undefined
+  );
+  assert.equal(spawnSessionOptionsFromHubList(undefined), undefined);
+  assert.equal(spawnSessionOptionsFromHubList({ not: "array" }), undefined);
+  // Multiple available options: no auto-select.
+  const multiOptionForm = applySpawnSessionListResult(
+    preparedSpawnForm,
+    { targetId: "project-main", listGeneration: 1 },
+    { accepted: true, sessionTypes: hubListForTarget }
+  );
+  assert.deepEqual(multiOptionForm, {
+    ...preparedSpawnForm,
+    listStatus: "ready",
+    options: parsedHubList,
+    sessionTypeId: "",
+    error: undefined
+  });
+  // Exactly one available option auto-selects presentation-only.
+  const singleAvailableForm = applySpawnSessionListResult(
+    preparedSpawnForm,
+    { targetId: "project-main", listGeneration: 1 },
+    {
+      accepted: true,
+      sessionTypes: [
+        { session_type_id: "device/global-agent", label: "Global agent", available: true },
+        { session_type_id: "device/claude", label: "Claude", available: false }
+      ]
+    }
+  );
+  assert.equal(singleAvailableForm?.sessionTypeId, "device/global-agent");
+  assert.equal(singleAvailableForm?.listStatus, "ready");
+  // Successful empty list is empty ready state, not loading or error.
+  const emptyListForm = applySpawnSessionListResult(
+    preparedSpawnForm,
+    { targetId: "project-main", listGeneration: 1 },
+    { accepted: true, sessionTypes: [] }
+  );
+  assert.deepEqual(emptyListForm, {
+    ...preparedSpawnForm,
+    listStatus: "ready",
+    options: [],
+    sessionTypeId: "",
+    error: undefined
+  });
+  // Missing or malformed Hub list is error, never empty-success copy.
+  for (const [label, sessionTypes] of [
+    ["missing", undefined],
+    ["non-array", { bogus: true }],
+    ["row missing session_type_id", [{ id: "device/global-agent", label: "Global", available: true }]],
+    ["empty session_type_id", [{ session_type_id: "  ", label: "Blank", available: true }]]
+  ]) {
+    const malformed = applySpawnSessionListResult(
+      preparedSpawnForm,
+      { targetId: "project-main", listGeneration: 1 },
+      { accepted: true, sessionTypes }
+    );
+    assert.equal(malformed?.listStatus, "error", `expected error for ${label}`);
+    assert.deepEqual(malformed?.options, [], `expected no options for ${label}`);
+    assert.match(String(malformed?.error ?? ""), /incomplete session type list|could not load/i);
+  }
+  // Hub/transport failure is error, not empty success copy.
+  const failedListForm = applySpawnSessionListResult(
+    preparedSpawnForm,
+    { targetId: "project-main", listGeneration: 1 },
+    { accepted: false, reason: "target is not admitted" }
+  );
+  assert.equal(failedListForm?.listStatus, "error");
+  assert.equal(failedListForm?.error, "target is not admitted");
+  assert.deepEqual(failedListForm?.options, []);
+  // Stale T1 response after T2 open must not replace T2 options.
+  const t2Open = spawnSessionFormForTarget({ id: "other-project", label: "Other" }, 2);
+  const t2Ready = applySpawnSessionListResult(
+    t2Open,
+    { targetId: "other-project", listGeneration: 2 },
+    {
+      accepted: true,
+      sessionTypes: [{ session_type_id: "other-project/shell", label: "Other shell", available: true }]
+    }
+  );
+  assert.equal(t2Ready?.options.length, 1);
+  assert.equal(
+    applySpawnSessionListResult(
+      t2Ready,
+      { targetId: "project-main", listGeneration: 1 },
+      { accepted: true, sessionTypes: hubListForTarget }
+    ),
+    undefined
+  );
+  // Closed modal discards late responses.
+  assert.equal(
+    applySpawnSessionListResult(
+      undefined,
+      { targetId: "project-main", listGeneration: 1 },
+      { accepted: true, sessionTypes: hubListForTarget }
+    ),
+    undefined
+  );
+  const selectedSpawnForm = {
+    ...multiOptionForm,
+    sessionTypeId: "device/global-agent",
+    prompt: "  Review the changes  "
+  };
+  assert.deepEqual(spawnSessionAction(selectedSpawnForm, "spawned-session"), {
     id: "botster.spawn_point.spawn_session",
     target: "project-main",
     label: "Start session",
     params: {
-      session_type_id: "codex",
+      session_type_id: "device/global-agent",
       session_id: "spawned-session",
       prompt: "Review the changes"
     }
   });
   assert.deepEqual(rejectedSpawnSessionForm(
-    { ...preparedSpawnForm, submitting: true },
+    { ...selectedSpawnForm, submitting: true },
     "Session type unavailable"
   ), {
-    ...preparedSpawnForm,
+    ...selectedSpawnForm,
     submitting: false,
     error: "Session type unavailable"
   });
   assert.equal(rejectedSpawnSessionForm(
-    { ...preparedSpawnForm, submitting: true },
+    { ...selectedSpawnForm, submitting: true },
     undefined
   ).error, "Botster could not start this session.");
 
