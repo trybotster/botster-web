@@ -3512,6 +3512,16 @@ async function setSessionTypeFormTextarea(page, label, value) {
   await textarea.fill(value);
 }
 
+async function setSessionTypeFormSelect(page, testId, optionLabel) {
+  const select = page.getByTestId(testId);
+  await select.waitFor();
+  await select.click();
+  // interface="popover" presents options in an ion-popover overlay.
+  const popover = page.locator("ion-popover").filter({ hasText: optionLabel }).last();
+  await popover.waitFor({ state: "visible" });
+  await popover.getByText(optionLabel, { exact: true }).click();
+}
+
 async function openSessionTypesView(page) {
   await page.locator("ion-menu.app-sidebar")
     .getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true })
@@ -3557,15 +3567,17 @@ async function createSessionTypeThroughRenderedForm(page) {
   const sinceIndex = await harnessEventCount(page);
   await page.getByTestId(HOST_CHROME.createSessionTypeTestId).click();
   await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor();
-  await setSessionTypeFormField(page, "Identifier", "web-authored-agent");
-  await setSessionTypeFormField(page, "Name", "Web authored agent");
-  await setSessionTypeFormField(page, "Role", "botster.agent");
-  await setSessionTypeFormField(page, "Interaction", "interactive");
-  await setSessionTypeFormField(page, "Lifecycle", "task");
+  // Create defaults to Agent preset. Name derives id (web-authored-agent).
+  await setSessionTypeFormField(page, "Name", "web-authored-agent");
+  // Command is a relative path under the session-type source root, not a PATH name.
   await setSessionTypeFormField(page, "Command", "sleep");
   // Ticket-critical fields: relative path + environment + context must survive edit.
-  await page.locator("details.advanced-session-type-options summary").click();
-  await setSessionTypeFormField(page, "Working directory policy", "relative");
+  // Advanced is closed on Agent create; open it for path/env/context.
+  const advancedCreate = page.locator("details.advanced-session-type-options");
+  if (!(await advancedCreate.evaluate((details) => details.open))) {
+    await advancedCreate.locator("summary").click();
+  }
+  await setSessionTypeFormSelect(page, "session-type-working-directory-policy", "Relative path under source root");
   await setSessionTypeFormField(page, "Working directory path", "agents/live");
   await setSessionTypeFormTextarea(page, "Environment", "LIVE_KEY=live-value");
   await setSessionTypeFormField(page, "Context keys", "prompt");
@@ -3631,6 +3643,7 @@ async function createSessionTypeThroughRenderedForm(page) {
     );
   }
   await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor();
+  // Edit opens Advanced by default so Role remains reachable.
   // Form promise pending/rejection: force Hub rejection with an invalid role, keep draft.
   await setSessionTypeFormField(page, "Role", "not a namespaced role");
   await page.getByTestId(HOST_CHROME.submitSessionTypeTestId).click();

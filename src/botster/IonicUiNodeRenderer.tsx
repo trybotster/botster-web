@@ -909,7 +909,14 @@ function renderCoreControl({
     ) : node.type === "checkbox" ? (
       <IonCheckbox checked={readBoolean(value)} disabled={disabled} onIonChange={(event) => setValue(event.detail.checked)} />
     ) : node.type === "select" ? (
-      <IonSelect value={value} disabled={disabled} onIonChange={(event) => setValue(event.detail.value)}>
+      <IonSelect
+        interface="popover"
+        label={labelText}
+        labelPlacement="stacked"
+        value={value}
+        disabled={disabled}
+        onIonChange={(event) => setValue(event.detail.value)}
+      >
         {selectOptions.map((option) => (
           <IonSelectOption disabled={option.disabled} key={option.key} value={option.value}>
             {option.label}
@@ -918,6 +925,8 @@ function renderCoreControl({
       </IonSelect>
     ) : (
       <IonInput
+        label={labelText}
+        labelPlacement="stacked"
         value={readString(value)}
         placeholder={readString(props.placeholder, undefined)}
         onIonInput={(event) => setValue(event.detail.value ?? "")}
@@ -926,8 +935,15 @@ function renderCoreControl({
     );
 
   return (
-    <IonItem key={node.id} className={error ? "uinode-field invalid" : "uinode-field"} data-ui-node-id={node.id}>
-      <IonLabel position="stacked">{labelText}</IonLabel>
+    <IonItem
+      lines="none"
+      key={node.id}
+      className={error ? "uinode-field invalid" : "uinode-field"}
+      data-ui-node-id={node.id}
+    >
+      {node.type === "textarea" || node.type === "checkbox" ? (
+        <IonLabel position="stacked">{labelText}</IonLabel>
+      ) : null}
       {control}
       {description ? <IonNote slot="helper">{description}</IonNote> : null}
       {error ? (
@@ -1444,24 +1460,40 @@ function renderNode(
         />
       );
     }
-    case "dialog":
+    case "dialog": {
+      // presentation: "overlay" | "auto" | "fullscreen" (package prop; default overlay card).
+      // IonModal only owns backdrop + placement. Do not put IonContent inside auto-height
+      // card modals — Ionic sizes ion-content against a fixed page height, so forms collapse
+      // into an empty white pane (the "full page replace" look operators reported).
+      const presentation = readString(props.presentation, "auto");
+      const fullscreen = presentation === "fullscreen" || presentation === "page";
+      const title = readString(props.title);
       return (
         <IonModal
           backdropDismiss={false}
-          className={`uinode-dialog presentation-${readString(props.presentation, "auto")}`}
+          className={[
+            "uinode-dialog",
+            fullscreen ? "uinode-dialog-fullscreen" : "uinode-dialog-overlay",
+            `presentation-${presentation || "auto"}`
+          ].join(" ")}
           data-ui-node-id={node.id}
           isOpen
           key={node.id}
         >
-          <IonToolbar>
-            <IonTitle>{readString(props.title)}</IonTitle>
-          </IonToolbar>
-          <div className="uinode-dialog-body">
-            {renderChildren(readSlot(node, "body"), store, options, row, form)}
-            {renderChildren(readChildren(node), store, options, row, form)}
+          <div className="uinode-dialog-sheet">
+            {title ? (
+              <header className="uinode-dialog-header">
+                <h2 className="uinode-dialog-title">{title}</h2>
+              </header>
+            ) : null}
+            <div className="uinode-dialog-body">
+              {renderChildren(readSlot(node, "body"), store, options, row, form)}
+              {renderChildren(readChildren(node), store, options, row, form)}
+            </div>
           </div>
         </IonModal>
       );
+    }
     default:
       return null;
   }

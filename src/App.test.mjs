@@ -6326,6 +6326,10 @@ try {
       applySpawnSessionListResult,
       groupSessionTypesBySource,
       writableSessionTypeSources,
+      enabledSpawnPointSessionTypeSources,
+      applySessionTypeHomeKind,
+      spawnPointSessionTypeSourceLabel,
+      SESSION_TYPE_SOURCE_GLOBAL_LABEL,
       sessionTypeMutationSourceFromRecord,
       sessionTypeManagementSupported,
       sessionTypeDefinitionFromForm,
@@ -6336,6 +6340,18 @@ try {
       entitySubscriptionErrorFromFrame,
       emptySessionTypeForm,
       listSessionTypesForTargetAction,
+      createSessionTypeForm,
+      applySessionTypePreset,
+      applySessionTypeName,
+      sessionTypeIdFromName,
+      inferSessionTypePreset,
+      sessionTypeSemanticsSummary,
+      sessionTypeFormHasAdvancedValues,
+      sessionTypeSourceGroupLabel,
+      workingDirectoryPolicyOptions,
+      SessionTypesEmptyState,
+      SpawnSessionTypesEmptyNotice,
+      SESSION_TYPE_PRESETS,
       spawnSessionAction,
       spawnSessionFormForTarget,
       spawnSessionOptionsFromHubList,
@@ -7238,17 +7254,62 @@ try {
     [["device", ["b", "d"]], ["package", ["c"]], ["repo", ["a"]]]
   );
 
-  // Create availability comes from Hub-projected writable sources, never from a row-only
-  // editable field. Disabled spawn targets are not offered.
+  // Create homes: Global + enabled spawn points only (Hub admission).
+  const sampleSpawnTargets = [
+    {
+      id: "project-main",
+      target_id: "project-main",
+      label: "Project main",
+      root: "/repos/project-main",
+      enabled: true
+    },
+    { id: "archived", target_id: "archived", label: "Archived", enabled: false },
+    { id: "hub-named", target_id: "hub-named", label: "Hub", root: "/repos/hub-cli", enabled: true }
+  ];
+  assert.equal(SESSION_TYPE_SOURCE_GLOBAL_LABEL, "Global");
   assert.deepEqual(
-    writableSessionTypeSources([
-      { id: "project-main", target_id: "project-main", label: "Project main", enabled: true },
-      { id: "archived", target_id: "archived", label: "Archived", enabled: false }
-    ]),
+    enabledSpawnPointSessionTypeSources(sampleSpawnTargets),
     [
-      { source: "device", targetId: "", label: "This device" },
-      { source: "repo", targetId: "project-main", label: "Project main" }
+      { targetId: "project-main", label: "Project main — /repos/project-main" },
+      { targetId: "hub-named", label: "Hub — /repos/hub-cli" }
     ]
+  );
+  assert.deepEqual(
+    writableSessionTypeSources(sampleSpawnTargets),
+    [
+      { source: "device", targetId: "", label: "Global" },
+      {
+        source: "repo",
+        targetId: "project-main",
+        label: "Project main — /repos/project-main"
+      },
+      {
+        source: "repo",
+        targetId: "hub-named",
+        label: "Hub — /repos/hub-cli"
+      }
+    ]
+  );
+  assert.equal(
+    spawnPointSessionTypeSourceLabel("botster-web", "/Users/me/Projects/botster-web", "tgt_1"),
+    "botster-web — /Users/me/Projects/botster-web"
+  );
+  // Two-step home: Global clears target; Spawn point auto-picks when only one remains.
+  const homeBase = { ...emptySessionTypeForm, id: "x", label: "X" };
+  assert.deepEqual(
+    applySessionTypeHomeKind(homeBase, "device", [{ targetId: "project-main" }]),
+    { ...homeBase, source: "device", sourceTargetId: "" }
+  );
+  assert.equal(
+    applySessionTypeHomeKind(homeBase, "repo", [{ targetId: "project-main" }]).sourceTargetId,
+    "project-main"
+  );
+  assert.equal(
+    applySessionTypeHomeKind(homeBase, "repo", [
+      { targetId: "project-main" },
+      { targetId: "hub-named" }
+    ]).sourceTargetId,
+    ""
   );
 
   assert.deepEqual(
@@ -7269,13 +7330,184 @@ try {
     role: "acme.unknown_role",
     interaction: "interactive",
     lifecycle: "task",
-    command: "codex"
+    command: "bin/codex.sh"
   };
   assert.equal(sessionTypeFormIsStructurallyComplete(completeSessionTypeForm), true);
   assert.equal(sessionTypeFormIsStructurallyComplete({ ...completeSessionTypeForm, command: "  " }), false);
   assert.equal(
     sessionTypeFormIsStructurallyComplete({ ...completeSessionTypeForm, source: "repo", sourceTargetId: "" }),
     false
+  );
+
+  // Presets fill semantics for the common cases without owning Hub validation.
+  const agentCreate = createSessionTypeForm("agent");
+  assert.equal(agentCreate.preset, "agent");
+  assert.equal(agentCreate.role, SESSION_TYPE_PRESETS.agent.role);
+  assert.equal(agentCreate.interaction, SESSION_TYPE_PRESETS.agent.interaction);
+  assert.equal(agentCreate.lifecycle, SESSION_TYPE_PRESETS.agent.lifecycle);
+  assert.equal(agentCreate.traits, SESSION_TYPE_PRESETS.agent.traits);
+  // Monorepo-style create: Name + Command only (id derived from name).
+  assert.equal(sessionTypeIdFromName("Web authored agent"), "web-authored-agent");
+  assert.equal(sessionTypeIdFromName("rails-server"), "rails-server");
+  assert.equal(sessionTypeIdFromName("Claude"), "claude");
+  const namedCreate = applySessionTypeName(agentCreate, "web-authored-agent");
+  assert.equal(namedCreate.label, "web-authored-agent");
+  assert.equal(namedCreate.id, "web-authored-agent");
+  assert.equal(namedCreate.idLocked, false);
+  assert.equal(sessionTypeFormIsStructurallyComplete({
+    ...namedCreate,
+    command: "bin/init.sh"
+  }), true);
+  // Manual Identifier lock stops Name from rewriting id.
+  const lockedId = applySessionTypeName(
+    { ...namedCreate, id: "custom-id", idLocked: true },
+    "renamed"
+  );
+  assert.equal(lockedId.label, "renamed");
+  assert.equal(lockedId.id, "custom-id");
+  assert.equal(sessionTypeFormHasAdvancedValues(namedCreate), false);
+  assert.equal(
+    sessionTypeFormHasAdvancedValues({ ...namedCreate, environment: "A=1" }),
+    true
+  );
+
+  const shellForm = applySessionTypePreset(agentCreate, "shell");
+  assert.equal(shellForm.preset, "shell");
+  assert.equal(shellForm.role, SESSION_TYPE_PRESETS.shell.role);
+  assert.equal(shellForm.interaction, SESSION_TYPE_PRESETS.shell.interaction);
+  assert.equal(shellForm.lifecycle, SESSION_TYPE_PRESETS.shell.lifecycle);
+  assert.equal(shellForm.traits, SESSION_TYPE_PRESETS.shell.traits);
+  assert.equal(shellForm.seededTraits, undefined);
+
+  // Custom keeps free-text values so progressive disclosure does not wipe advanced edits.
+  const customKept = applySessionTypePreset(shellForm, "custom");
+  assert.equal(customKept.preset, "custom");
+  assert.equal(customKept.role, SESSION_TYPE_PRESETS.shell.role);
+  assert.equal(customKept.lifecycle, SESSION_TYPE_PRESETS.shell.lifecycle);
+
+  assert.equal(inferSessionTypePreset(SESSION_TYPE_PRESETS.agent), "agent");
+  assert.equal(inferSessionTypePreset(SESSION_TYPE_PRESETS.shell), "shell");
+  // Traits do not force Custom when role/interaction/lifecycle match a named preset.
+  assert.equal(
+    inferSessionTypePreset({
+      role: "botster.agent",
+      interaction: "interactive",
+      lifecycle: "task",
+      traits: "terminal, companion"
+    }),
+    "agent"
+  );
+  // Empty traits still match (TUI-authored shell drafts).
+  assert.equal(
+    inferSessionTypePreset({
+      role: "botster.accessory",
+      interaction: "interactive",
+      lifecycle: "task",
+      traits: ""
+    }),
+    "shell"
+  );
+  assert.equal(
+    inferSessionTypePreset({
+      role: "acme.unknown_role",
+      interaction: "interactive",
+      lifecycle: "task",
+      traits: "terminal"
+    }),
+    "custom"
+  );
+
+  // Readable one-line summary so Agent/Shell create does not hide filled semantics.
+  assert.equal(
+    sessionTypeSemanticsSummary(createSessionTypeForm("agent")),
+    "botster.agent · interactive · task · terminal"
+  );
+  assert.equal(
+    sessionTypeSemanticsSummary(createSessionTypeForm("shell")),
+    "botster.accessory · interactive · task · terminal"
+  );
+  assert.equal(sessionTypeSemanticsSummary(emptySessionTypeForm), "");
+
+  // Group headings are operator-facing; unknown Hub source tokens stay verbatim.
+  assert.equal(sessionTypeSourceGroupLabel("device"), "Global");
+  assert.equal(sessionTypeSourceGroupLabel("repo"), "Spawn points");
+  assert.equal(sessionTypeSourceGroupLabel("package"), "Packages");
+  assert.equal(sessionTypeSourceGroupLabel("custom-source"), "custom-source");
+
+  const emptySupportedMarkup = renderToStaticMarkup(
+    createElement(SessionTypesEmptyState, {
+      supported: true,
+      onCreate: () => {}
+    })
+  );
+  assert.match(emptySupportedMarkup, /data-testid="session-types-empty"/);
+  assert.match(emptySupportedMarkup, /data-testid="session-types-empty-create"/);
+  assert.match(emptySupportedMarkup, /No session types yet/);
+  const emptyUnsupportedMarkup = renderToStaticMarkup(
+    createElement(SessionTypesEmptyState, {
+      supported: false,
+      onCreate: () => {}
+    })
+  );
+  assert.match(emptyUnsupportedMarkup, /data-testid="session-types-empty"/);
+  assert.doesNotMatch(emptyUnsupportedMarkup, /data-testid="session-types-empty-create"/);
+
+  const spawnEmptyMarkup = renderToStaticMarkup(
+    createElement(SpawnSessionTypesEmptyNotice, {
+      loading: false,
+      onManageSessionTypes: () => {}
+    })
+  );
+  assert.match(spawnEmptyMarkup, /data-testid="spawn-session-types-empty"/);
+  assert.match(spawnEmptyMarkup, /Manage session types/);
+  const spawnLoadingMarkup = renderToStaticMarkup(
+    createElement(SpawnSessionTypesEmptyNotice, {
+      loading: true,
+      onManageSessionTypes: () => {}
+    })
+  );
+  assert.match(spawnLoadingMarkup, /data-testid="spawn-session-types-loading"/);
+
+  // Hub only authors package_root | relative; unknown values stay selectable (lossless).
+  assert.deepEqual(workingDirectoryPolicyOptions(""), ["package_root", "relative"]);
+  assert.deepEqual(workingDirectoryPolicyOptions("relative"), ["package_root", "relative"]);
+  assert.deepEqual(
+    workingDirectoryPolicyOptions("spawn_target"),
+    ["package_root", "relative", "spawn_target"]
+  );
+
+  // Blank policy maps to Hub default package_root on the wire.
+  assert.deepEqual(
+    sessionTypeDefinitionFromForm({
+      ...emptySessionTypeForm,
+      id: "cwd-default",
+      label: "Cwd default",
+      role: "botster.agent",
+      interaction: "interactive",
+      lifecycle: "task",
+      command: "bin/init.sh",
+      workingDirectoryPolicy: ""
+    }).working_directory,
+    { policy: "package_root" }
+  );
+
+  // Named presets clear lossless trait seeds so submit uses the preset token list.
+  const presetOverSeed = applySessionTypePreset(
+    {
+      ...emptySessionTypeForm,
+      traits: "old-trait",
+      seededTraits: ["old-trait"]
+    },
+    "agent"
+  );
+  assert.deepEqual(
+    sessionTypeDefinitionFromForm({
+      ...presetOverSeed,
+      id: "seeded",
+      label: "Seeded",
+      command: "bin/init.sh"
+    }).traits,
+    ["terminal"]
   );
 
   // Permissive ONLY before Hub status arrives. Once a record exists it is authoritative, so a
@@ -7436,12 +7668,33 @@ try {
   assert.ok(seededForm);
   assert.equal(seededForm.mode, "edit");
   assert.equal(seededForm.id, "lossless-agent");
+  // Role/interaction/lifecycle match Agent; extra traits do not force Custom (TUI parity).
+  assert.equal(seededForm.preset, "agent");
   assert.equal(seededForm.workingDirectoryPolicy, "relative");
   assert.equal(seededForm.workingDirectoryPath, "agents/live");
   assert.equal(seededForm.definitionTargetId, "project-main");
   assert.equal(seededForm.source, "device");
   assert.deepEqual(seededForm.seededArgs, authoringEditable.definition.args);
   assert.deepEqual(seededForm.seededEnvironment, authoringEditable.definition.environment);
+
+  // Exact Agent semantics infer the Agent preset on lossless edit seed.
+  const agentEditable = {
+    session_type_id: "device/agent-preset",
+    source: { source: "device" },
+    definition: {
+      id: "agent-preset",
+      label: "Agent preset",
+      role: SESSION_TYPE_PRESETS.agent.role,
+      interaction: SESSION_TYPE_PRESETS.agent.interaction,
+      traits: ["terminal"],
+      lifecycle: SESSION_TYPE_PRESETS.agent.lifecycle,
+      command: "bin/init.sh"
+    }
+  };
+  const agentSeeded = sessionTypeFormFromAuthoringDefinition(agentEditable);
+  assert.ok(agentSeeded);
+  assert.equal(agentSeeded.preset, "agent");
+  assert.equal(agentSeeded.command, "bin/init.sh");
 
   const updatedDefinition = sessionTypeDefinitionFromForm({
     ...seededForm,
@@ -9569,6 +9822,15 @@ try {
   assert.match(presentedFixtureMarkup, /data-ui-node-id="create-ticket-dialog"/);
   assert.match(presentedFixtureMarkup, /Create ticket/);
   assert.match(presentedFixtureMarkup, /Selected workspace/);
+  // Dialogs render as IonModal + plain sheet (not IonContent — collapses on auto height).
+  assert.match(
+    presentedFixtureMarkup,
+    /<ion-modal[^>]*class="[^"]*uinode-dialog[^"]*uinode-dialog-overlay[^"]*"[^>]*data-ui-node-id="create-ticket-dialog"/
+  );
+  assert.match(presentedFixtureMarkup, /uinode-dialog-sheet/);
+  assert.match(presentedFixtureMarkup, /uinode-dialog-header/);
+  assert.match(presentedFixtureMarkup, /uinode-dialog-body/);
+  assert.doesNotMatch(presentedFixtureMarkup, /uinode-dialog-body[\s\S]*ion-content/);
 
   const contractRequest = uiContractConformanceFixtures.fixtures.request;
   const acceptedContractResult = uiContractConformanceFixtures.fixtures.accepted;

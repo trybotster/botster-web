@@ -688,6 +688,61 @@ export function SessionTypesSurfaceNotices({
   );
 }
 
+/**
+ * Empty session-types panel. Create stays surface-local (no second CTA path) when supported.
+ */
+export function SessionTypesEmptyState({
+  supported,
+  onCreate
+}: {
+  supported: boolean;
+  onCreate: () => void;
+}) {
+  return (
+    <div className="home-empty-state" data-testid="session-types-empty">
+      <h3>No session types yet</h3>
+      <p>
+        {supported
+          ? "Add a session type to define how sessions start at each spawn point."
+          : "This hub does not publish session types for management."}
+      </p>
+      {supported ? (
+        <IonButton fill="outline" size="small" onClick={onCreate} data-testid="session-types-empty-create">
+          Add session type
+        </IonButton>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Spawn modal empty types notice with a path to Hub session-type authoring.
+ */
+export function SpawnSessionTypesEmptyNotice({
+  loading,
+  onManageSessionTypes
+}: {
+  loading: boolean;
+  onManageSessionTypes: () => void;
+}) {
+  if (loading) {
+    return (
+      <IonNote color="medium" data-testid="spawn-session-types-loading">
+        Loading session types…
+      </IonNote>
+    );
+  }
+  return (
+    <div className="home-empty-state" data-testid="spawn-session-types-empty">
+      <h3>No session types for this spawn point</h3>
+      <p>Add a session type in Hub settings, or choose another spawn point.</p>
+      <IonButton fill="outline" size="small" onClick={onManageSessionTypes}>
+        Manage session types
+      </IonButton>
+    </div>
+  );
+}
+
 export function isEntitySnapshotFrameForFamily(
   frame: { kind: string; payload: unknown },
   family: string
@@ -890,7 +945,45 @@ export function rejectedSpawnSessionForm(
  * - `seededArgs` / `seededTraits` / `seededContext` / `seededAllowedEnvironmentOverrides`
  *   / `seededEnvironment` (text controls cannot losslessly encode whitespace, commas,
  *   multi-line values, or padding)
+ *
+ * Presets only fill UX convenience fields (role / interaction / lifecycle / traits).
+ * They are not a second template protocol and do not re-validate Hub policy.
  */
+export type SessionTypePresetId = "agent" | "shell" | "custom";
+
+export interface SessionTypePreset {
+  id: SessionTypePresetId;
+  label: string;
+  description: string;
+  role: string;
+  interaction: string;
+  lifecycle: string;
+  traits: string;
+}
+
+/** Named starting points for the common 80% shapes Hub already documents. */
+export const SESSION_TYPE_PRESETS: Record<Exclude<SessionTypePresetId, "custom">, SessionTypePreset> = {
+  agent: {
+    id: "agent",
+    label: "Agent",
+    description: "Interactive coding agent (task lifecycle, terminal trait)",
+    role: "botster.agent",
+    interaction: "interactive",
+    lifecycle: "task",
+    traits: "terminal"
+  },
+  shell: {
+    id: "shell",
+    label: "Shell",
+    description: "Interactive terminal accessory (botster.accessory, terminal trait)",
+    role: "botster.accessory",
+    interaction: "interactive",
+    // Match TUI Shell seed (`task`); Hub still owns lifecycle vocabulary.
+    lifecycle: "task",
+    traits: "terminal"
+  }
+};
+
 export interface SessionTypeFormState {
   mode: "create" | "edit";
   source: string;
@@ -902,6 +995,13 @@ export interface SessionTypeFormState {
   label: string;
   description: string;
   icon: string;
+  /**
+   * When false (create default), Name drives both label and id (slug).
+   * Set true when the operator edits Identifier in Advanced.
+   */
+  idLocked: boolean;
+  /** UX starting point only; wire fields remain role/interaction/lifecycle/traits. */
+  preset: SessionTypePresetId;
   role: string;
   interaction: string;
   traits: string;
@@ -932,19 +1032,171 @@ export const emptySessionTypeForm: SessionTypeFormState = {
   label: "",
   description: "",
   icon: "",
+  idLocked: false,
+  preset: "custom",
   role: "",
   interaction: "",
   traits: "",
   lifecycle: "",
   command: "",
   args: "",
-  workingDirectoryPolicy: "",
+  // Hub default when omitted is package_root (source root). Form starts explicit.
+  workingDirectoryPolicy: "package_root",
   workingDirectoryPath: "",
   environment: "",
   allowedEnvironmentOverrides: "",
   contextKeys: "",
   submitting: false
 };
+
+/**
+ * Product name → bare Hub definition id (monorepo style: "claude", "rails-server").
+ * Hub still requires a separate id on the wire; create derives it from Name.
+ */
+export function sessionTypeIdFromName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 128);
+}
+
+/**
+ * Primary Name field: sets display label; on create also sets id unless locked.
+ */
+export function applySessionTypeName(
+  form: SessionTypeFormState,
+  name: string
+): SessionTypeFormState {
+  if (form.mode === "create" && !form.idLocked) {
+    return {
+      ...form,
+      label: name,
+      id: sessionTypeIdFromName(name)
+    };
+  }
+  return { ...form, label: name };
+}
+
+/** Whether Advanced should open for non-default authored policy fields. */
+export function sessionTypeFormHasAdvancedValues(form: SessionTypeFormState): boolean {
+  return (
+    form.workingDirectoryPolicy === "relative" ||
+    Boolean(form.workingDirectoryPath.trim()) ||
+    Boolean(form.environment.trim()) ||
+    Boolean(form.allowedEnvironmentOverrides.trim()) ||
+    Boolean(form.contextKeys.trim()) ||
+    Boolean(form.description.trim()) ||
+    Boolean(form.args.trim()) ||
+    form.idLocked
+  );
+}
+
+/**
+ * Create form defaults to the Agent preset so the common case is not free-text
+ * role / interaction / lifecycle / traits entry.
+ */
+export function createSessionTypeForm(
+  preset: SessionTypePresetId = "agent"
+): SessionTypeFormState {
+  return applySessionTypePreset({ ...emptySessionTypeForm }, preset);
+}
+
+/**
+ * Apply a named preset onto form semantics. Custom keeps current free-text values
+ * so the operator can continue editing without a wipe.
+ *
+ * Clears `seededTraits` when a named preset writes traits text, so submit uses the
+ * new tokens rather than a prior lossless seed.
+ */
+export function applySessionTypePreset(
+  form: SessionTypeFormState,
+  presetId: SessionTypePresetId
+): SessionTypeFormState {
+  if (presetId === "custom") {
+    return { ...form, preset: "custom" };
+  }
+  const preset = SESSION_TYPE_PRESETS[presetId];
+  return {
+    ...form,
+    preset: presetId,
+    role: preset.role,
+    interaction: preset.interaction,
+    lifecycle: preset.lifecycle,
+    traits: preset.traits,
+    seededTraits: undefined
+  };
+}
+
+/**
+ * Match role / interaction / lifecycle to a named preset when they are exact.
+ * Traits stay free so extra tokens (or empty traits from a TUI-authored draft)
+ * do not force Custom — same rule as the TUI client.
+ */
+export function inferSessionTypePreset(
+  form: Pick<SessionTypeFormState, "role" | "interaction" | "lifecycle" | "traits">
+): SessionTypePresetId {
+  const role = form.role.trim();
+  const interaction = form.interaction.trim();
+  const lifecycle = form.lifecycle.trim();
+
+  for (const preset of Object.values(SESSION_TYPE_PRESETS)) {
+    if (
+      role === preset.role &&
+      interaction === preset.interaction &&
+      lifecycle === preset.lifecycle
+    ) {
+      return preset.id;
+    }
+  }
+  return "custom";
+}
+
+/**
+ * One-line scan of filled semantics so Agent/Shell create stays honest without
+ * opening Advanced. Empty when no tokens are set.
+ */
+export function sessionTypeSemanticsSummary(
+  form: Pick<SessionTypeFormState, "role" | "interaction" | "lifecycle" | "traits">
+): string {
+  return [form.role, form.interaction, form.lifecycle, form.traits]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/**
+ * Hub only authors package_root | relative. Empty form policy means Hub's default
+ * (package_root). Unknown values from lossless edit stay selectable.
+ */
+export function workingDirectoryPolicyOptions(current: string): string[] {
+  const known = ["package_root", "relative"];
+  const trimmed = current.trim();
+  if (trimmed && !known.includes(trimmed)) {
+    return [...known, trimmed];
+  }
+  return known;
+}
+
+/** Select value: blank means Hub default package_root. */
+export function workingDirectoryPolicySelectValue(policy: string): string {
+  return policy.trim() || "package_root";
+}
+
+export function workingDirectoryPolicyLabel(policy: string): string {
+  switch (policy) {
+    case "":
+    case "package_root":
+      // Wire token is package_root; for device/repo sources this is the source root,
+      // not only a package install tree.
+      return "Source root";
+    case "relative":
+      return "Relative path under source root";
+    default:
+      return policy;
+  }
+}
 
 /**
  * A mutation source for an existing row, read from Hub's own `source` and `target_id`.
@@ -958,26 +1210,80 @@ export function sessionTypeMutationSourceFromRecord(record: Record<string, unkno
     : { source };
 }
 
+/** Product label for wire source `device` (hub-wide session type storage). */
+export const SESSION_TYPE_SOURCE_GLOBAL_LABEL = "Global";
+
 /**
- * Writable sources are read from Hub-projected state only: the device source plus any
- * enabled admitted spawn target. Hub still owns admission and every semantic rejection.
+ * Operator-facing label for one spawn point in the session-type home picker.
+ * Pairs display name with root path (or target id) so targets stay distinguishable.
+ */
+export function spawnPointSessionTypeSourceLabel(
+  name: string,
+  root: string,
+  targetId: string
+): string {
+  const displayName = name.trim() || targetId.trim() || "Spawn point";
+  const path = root.trim() || targetId.trim();
+  return path ? `${displayName} — ${path}` : displayName;
+}
+
+/**
+ * Enabled admitted spawn targets that can host a project-scoped session type.
+ * Hub owns admission; wire source is `repo` + target_id.
+ */
+export function enabledSpawnPointSessionTypeSources(
+  spawnTargets: Record<string, unknown>[]
+): { targetId: string; label: string }[] {
+  return spawnTargets
+    .filter((target) => target.enabled !== false)
+    .map((target) => {
+      const targetId = stringValue(target.target_id, String(target.id));
+      const name = stringValue(target.label, stringValue(target.title, targetId));
+      const root = stringValue(target.root, "");
+      return {
+        targetId,
+        label: spawnPointSessionTypeSourceLabel(name, root, targetId)
+      };
+    });
+}
+
+/**
+ * Flat writable homes: Global plus each enabled spawn point.
+ * Prefer the two-step create UI (Global | Spawn point → pick target); this list remains
+ * for tests and any single-select consumer.
  */
 export function writableSessionTypeSources(
   spawnTargets: Record<string, unknown>[]
 ): { source: string; targetId: string; label: string }[] {
   return [
-    { source: "device", targetId: "", label: "This device" },
-    ...spawnTargets
-      .filter((target) => target.enabled !== false)
-      .map((target) => {
-        const targetId = stringValue(target.target_id, String(target.id));
-        return {
-          source: "repo",
-          targetId,
-          label: stringValue(target.label, stringValue(target.title, targetId))
-        };
-      })
+    { source: "device", targetId: "", label: SESSION_TYPE_SOURCE_GLOBAL_LABEL },
+    ...enabledSpawnPointSessionTypeSources(spawnTargets).map((point) => ({
+      source: "repo",
+      targetId: point.targetId,
+      label: point.label
+    }))
   ];
+}
+
+/**
+ * Apply Global vs Spawn point on create. Picking Spawn point auto-selects the only
+ * enabled target when there is exactly one.
+ */
+export function applySessionTypeHomeKind(
+  form: SessionTypeFormState,
+  kind: "device" | "repo",
+  spawnPoints: { targetId: string }[]
+): SessionTypeFormState {
+  if (kind === "device") {
+    return { ...form, source: "device", sourceTargetId: "" };
+  }
+  const stillValid = spawnPoints.some((point) => point.targetId === form.sourceTargetId);
+  const sourceTargetId = stillValid
+    ? form.sourceTargetId
+    : spawnPoints.length === 1
+      ? spawnPoints[0].targetId
+      : "";
+  return { ...form, source: "repo", sourceTargetId };
 }
 
 export function sessionTypeMutationSource(form: SessionTypeFormState): Record<string, unknown> {
@@ -1008,18 +1314,17 @@ export function sessionTypeDefinitionFromForm(form: SessionTypeFormState): Recor
     lifecycle: form.lifecycle.trim(),
     command: form.command.trim(),
     args: tokenListFromForm(form.args, form.seededArgs),
+    // Hub enum is package_root | relative. Blank means the same default as package_root.
     ...(workingDirectoryPolicy === "relative"
       ? { working_directory: { policy: "relative", path: workingDirectoryPath } }
-      : workingDirectoryPolicy === "package_root"
+      : workingDirectoryPolicy === "package_root" || !workingDirectoryPolicy
         ? { working_directory: { policy: "package_root" } }
-        : workingDirectoryPolicy
-          ? {
-              working_directory: {
-                policy: workingDirectoryPolicy,
-                ...(workingDirectoryPath ? { path: workingDirectoryPath } : {})
-              }
+        : {
+            working_directory: {
+              policy: workingDirectoryPolicy,
+              ...(workingDirectoryPath ? { path: workingDirectoryPath } : {})
             }
-          : {}),
+          }),
     environment: environmentFromForm(form.environment, form.seededEnvironment),
     allowed_environment_overrides: tokenListFromForm(
       form.allowedEnvironmentOverrides,
@@ -1052,6 +1357,11 @@ export function sessionTypeFormFromAuthoringDefinition(
   const seededAllowedEnvironmentOverrides = stringArray(definition.allowed_environment_overrides);
   const seededEnvironment = stringRecord(definition.environment);
 
+  const role = stringValue(definition.role, "");
+  const interaction = stringValue(definition.interaction, "");
+  const traits = joinTokenList(seededTraits);
+  const lifecycle = stringValue(definition.lifecycle, "");
+
   return {
     mode: "edit",
     source: sourceKind,
@@ -1062,13 +1372,17 @@ export function sessionTypeFormFromAuthoringDefinition(
     label: stringValue(definition.label, ""),
     description: stringValue(definition.description, ""),
     icon: stringValue(definition.icon, ""),
-    role: stringValue(definition.role, ""),
-    interaction: stringValue(definition.interaction, ""),
-    traits: joinTokenList(seededTraits),
-    lifecycle: stringValue(definition.lifecycle, ""),
+    // Edit never rewrites id from Name; id is fixed on create.
+    idLocked: true,
+    preset: inferSessionTypePreset({ role, interaction, lifecycle, traits }),
+    role,
+    interaction,
+    traits,
+    lifecycle,
     command: stringValue(definition.command, ""),
     args: joinTokenList(seededArgs),
-    workingDirectoryPolicy: stringValue(workingDirectory.policy, ""),
+    // Absent working_directory on the wire is Hub's package_root default.
+    workingDirectoryPolicy: stringValue(workingDirectory.policy, "package_root"),
     workingDirectoryPath: stringValue(workingDirectory.path, ""),
     environment: formatMetadata(seededEnvironment),
     allowedEnvironmentOverrides: joinTokenList(seededAllowedEnvironmentOverrides),
@@ -1138,6 +1452,25 @@ export function groupSessionTypesBySource(
   return Array.from(groups.entries())
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([source, rows]) => ({ source, rows }));
+}
+
+/**
+ * Operator-facing group heading for a Hub source token. Does not rewrite row fields —
+ * only the section title. Unknown tokens stay verbatim.
+ *
+ * Wire token `device` is hub-wide storage on this hub, not a separate machine from the hub.
+ */
+export function sessionTypeSourceGroupLabel(source: string): string {
+  switch (source) {
+    case "device":
+      return "Global";
+    case "repo":
+      return "Spawn points";
+    case "package":
+      return "Packages";
+    default:
+      return source;
+  }
 }
 
 function parseTokenList(input: string): string[] {
@@ -1682,6 +2015,280 @@ export function SessionTypeSubmitButton({
     >
       {submitting ? "Saving…" : mode === "edit" ? "Save" : "Create"}
     </IonButton>
+  );
+}
+
+/**
+ * Secondary fields. Create keeps this closed for Agent/Shell name+command.
+ * Opens for Custom, edit (Role still reachable), or when advanced values exist.
+ */
+export function SessionTypeAdvancedOptions({
+  form,
+  initiallyOpen,
+  onChange
+}: {
+  form: SessionTypeFormState;
+  initiallyOpen: boolean;
+  onChange: (updater: (current: SessionTypeFormState | undefined) => SessionTypeFormState | undefined) => void;
+}) {
+  const [open, setOpen] = useState(initiallyOpen);
+
+  useEffect(() => {
+    setOpen(initiallyOpen);
+  }, [initiallyOpen, form.mode, form.sessionTypeId, form.preset]);
+
+  const policyOptions = workingDirectoryPolicyOptions(form.workingDirectoryPolicy);
+
+  return (
+    <details
+      className="advanced-session-type-options"
+      open={open}
+      data-testid="session-type-advanced"
+      onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
+    >
+      <summary>Advanced options</summary>
+      <p className="session-type-advanced-lead">
+        Optional Hub fields. Most monorepo types only need Name and Command.
+      </p>
+      <IonList lines="full" aria-label="Advanced session type options">
+        <IonItem>
+          <IonInput
+            label="Identifier"
+            labelPlacement="stacked"
+            value={form.id}
+            placeholder="claude"
+            disabled={form.mode === "edit"}
+            data-testid="session-type-id"
+            onIonInput={(event) => onChange((current) => {
+              if (!current || current.mode === "edit") return current;
+              return {
+                ...current,
+                id: String(event.detail.value ?? ""),
+                idLocked: true
+              };
+            })}
+          />
+          <IonNote slot="helper" color="medium">
+            Bare Hub id. Derived from Name unless you set it here.
+          </IonNote>
+        </IonItem>
+        <IonItem>
+          <IonInput
+            label="Description"
+            labelPlacement="stacked"
+            value={form.description}
+            onIonInput={(event) => onChange((current) => current
+              ? { ...current, description: String(event.detail.value ?? "") }
+              : current)}
+          />
+        </IonItem>
+        <IonItem>
+          <IonInput
+            label="Arguments"
+            labelPlacement="stacked"
+            value={form.args}
+            placeholder="--flag value"
+            onIonInput={(event) => onChange((current) => current
+              ? { ...current, args: String(event.detail.value ?? "") }
+              : current)}
+          />
+          <IonNote slot="helper" color="medium">
+            Argv tokens, split on spaces or commas.
+          </IonNote>
+        </IonItem>
+        <IonItem>
+          <IonInput
+            label="Role"
+            labelPlacement="stacked"
+            value={form.role}
+            placeholder="botster.agent"
+            data-testid="session-type-role"
+            onIonInput={(event) => onChange((current) => {
+              if (!current) return current;
+              const role = String(event.detail.value ?? "");
+              return {
+                ...current,
+                role,
+                preset: inferSessionTypePreset({
+                  role,
+                  interaction: current.interaction,
+                  lifecycle: current.lifecycle,
+                  traits: current.traits
+                })
+              };
+            })}
+          />
+          <IonNote slot="helper" color="medium">
+            Namespaced token (must contain a dot), for example botster.agent.
+          </IonNote>
+        </IonItem>
+        <IonItem>
+          <IonInput
+            label="Interaction"
+            labelPlacement="stacked"
+            value={form.interaction}
+            placeholder="interactive"
+            data-testid="session-type-interaction"
+            onIonInput={(event) => onChange((current) => {
+              if (!current) return current;
+              const interaction = String(event.detail.value ?? "");
+              return {
+                ...current,
+                interaction,
+                preset: inferSessionTypePreset({
+                  role: current.role,
+                  interaction,
+                  lifecycle: current.lifecycle,
+                  traits: current.traits
+                })
+              };
+            })}
+          />
+          <IonNote slot="helper" color="medium">
+            How the session interacts (for example interactive or service). Not an enum; Hub checks shape.
+          </IonNote>
+        </IonItem>
+        <IonItem>
+          <IonInput
+            label="Lifecycle"
+            labelPlacement="stacked"
+            value={form.lifecycle}
+            placeholder="task"
+            data-testid="session-type-lifecycle"
+            onIonInput={(event) => onChange((current) => {
+              if (!current) return current;
+              const lifecycle = String(event.detail.value ?? "");
+              return {
+                ...current,
+                lifecycle,
+                preset: inferSessionTypePreset({
+                  role: current.role,
+                  interaction: current.interaction,
+                  lifecycle,
+                  traits: current.traits
+                })
+              };
+            })}
+          />
+          <IonNote slot="helper" color="medium">
+            How long the session is expected to live (for example task or persistent).
+          </IonNote>
+        </IonItem>
+        <IonItem>
+          <IonInput
+            label="Traits"
+            labelPlacement="stacked"
+            value={form.traits}
+            placeholder="terminal, companion"
+            data-testid="session-type-traits"
+            onIonInput={(event) => onChange((current) => {
+              if (!current) return current;
+              const traits = String(event.detail.value ?? "");
+              return {
+                ...current,
+                traits,
+                seededTraits: undefined,
+                preset: inferSessionTypePreset({
+                  role: current.role,
+                  interaction: current.interaction,
+                  lifecycle: current.lifecycle,
+                  traits
+                })
+              };
+            })}
+          />
+          <IonNote slot="helper" color="medium">
+            Unique tokens (for example terminal). Space- or comma-separated.
+          </IonNote>
+        </IonItem>
+        <IonItem>
+          <IonSelect
+            label="Working directory"
+            labelPlacement="stacked"
+            value={workingDirectoryPolicySelectValue(form.workingDirectoryPolicy)}
+            interface="popover"
+            data-testid="session-type-working-directory-policy"
+            onIonChange={(event) => onChange((current) => current
+              ? { ...current, workingDirectoryPolicy: String(event.detail.value ?? "package_root") }
+              : current)}
+          >
+            {policyOptions.map((policy) => (
+              <IonSelectOption key={policy} value={policy}>
+                {workingDirectoryPolicyLabel(policy)}
+              </IonSelectOption>
+            ))}
+          </IonSelect>
+          <IonNote slot="helper" color="medium">
+            Process cwd relative to this definition’s source root. Hub default is source root
+            (wire policy package_root).
+          </IonNote>
+        </IonItem>
+        <IonItem>
+          <IonInput
+            label="Working directory path"
+            labelPlacement="stacked"
+            value={form.workingDirectoryPath}
+            placeholder="relative/subdir"
+            data-testid="session-type-working-directory-path"
+            disabled={workingDirectoryPolicySelectValue(form.workingDirectoryPolicy) !== "relative"}
+            onIonInput={(event) => onChange((current) => current
+              ? { ...current, workingDirectoryPath: String(event.detail.value ?? "") }
+              : current)}
+          />
+          {workingDirectoryPolicySelectValue(form.workingDirectoryPolicy) === "relative" ? (
+            <IonNote slot="helper" color="medium">
+              Relative path under the source root. Required when Working directory is relative.
+            </IonNote>
+          ) : (
+            <IonNote slot="helper" color="medium">
+              Used only when Working directory is relative.
+            </IonNote>
+          )}
+        </IonItem>
+        <IonItem>
+          <IonTextarea
+            label="Environment"
+            labelPlacement="stacked"
+            value={form.environment}
+            autoGrow
+            placeholder={"KEY=value"}
+            onIonInput={(event) => onChange((current) => current
+              ? { ...current, environment: String(event.detail.value ?? "") }
+              : current)}
+          />
+          <IonNote slot="helper" color="medium">
+            Fixed KEY=value lines for the process. Names must be valid environment variable names.
+          </IonNote>
+        </IonItem>
+        <IonItem>
+          <IonInput
+            label="Allowed environment overrides"
+            labelPlacement="stacked"
+            value={form.allowedEnvironmentOverrides}
+            onIonInput={(event) => onChange((current) => current
+              ? { ...current, allowedEnvironmentOverrides: String(event.detail.value ?? "") }
+              : current)}
+          />
+          <IonNote slot="helper" color="medium">
+            Env names a spawn request may override. Other overrides are rejected by Hub.
+          </IonNote>
+        </IonItem>
+        <IonItem>
+          <IonInput
+            label="Context keys"
+            labelPlacement="stacked"
+            value={form.contextKeys}
+            placeholder="prompt"
+            onIonInput={(event) => onChange((current) => current
+              ? { ...current, contextKeys: String(event.detail.value ?? "") }
+              : current)}
+          />
+          <IonNote slot="helper" color="medium">
+            Context fields this type may consume at spawn (for example prompt). Space- or comma-separated.
+          </IonNote>
+        </IonItem>
+      </IonList>
+    </details>
   );
 }
 
@@ -2389,7 +2996,8 @@ export default function App() {
   const sessionTypes = runtimeClient.entities.list("session_type");
   const sessionTypeSourceGroups = groupSessionTypesBySource(sessionTypes);
   const sessionTypeSubscriptionsSupported = sessionTypeManagementSupported(hubStatus);
-  const sessionTypeWritableSources = writableSessionTypeSources(spawnTargets);
+  // Authoring homes only (Global vs admitted spawn points). New session options come from Hub list-for-target.
+  const sessionTypeSpawnPoints = enabledSpawnPointSessionTypeSources(spawnTargets);
   const openSpawnSession = useCallback((target: Record<string, unknown>) => {
     spawnSessionListGeneration.current += 1;
     const listGeneration = spawnSessionListGeneration.current;
@@ -2446,7 +3054,7 @@ export default function App() {
     });
   }, [navigateToView, recordDiagnostic, runtimeClient, spawnSessionForm, updateLocalState]);
   const openCreateSessionType = useCallback(() => {
-    setSessionTypeForm(emptySessionTypeForm);
+    setSessionTypeForm(createSessionTypeForm("agent"));
   }, []);
   const openEditSessionType = useCallback((sessionType: Record<string, unknown>) => {
     // Prefer Hub's composite session_type_id for the authoring read so Hub can disambiguate.
@@ -3019,10 +3627,12 @@ export default function App() {
                             Showing the last session types Botster sent.
                           </p>
                         ) : null}
-                        {sessionTypeSourceGroups.map((group) => (
+                        {sessionTypeSourceGroups.map((group) => {
+                          const groupLabel = sessionTypeSourceGroupLabel(group.source);
+                          return (
                           <div key={group.source} data-testid={`session-type-group-${group.source}`}>
-                            <h3>{group.source}</h3>
-                            <IonList lines="full" aria-label={`${group.source} session types`}>
+                            <h3>{groupLabel}</h3>
+                            <IonList lines="full" aria-label={`${groupLabel} session types`}>
                               {group.rows.map((sessionType) => (
                                 <SessionTypeListItem
                                   key={String(sessionType.id)}
@@ -3033,10 +3643,16 @@ export default function App() {
                               ))}
                             </IonList>
                           </div>
-                        ))}
+                          );
+                        })}
                       </>
+                    ) : entityLoadStatus.sessionType === "loading" || entityLoadStatus.sessionType === "not_loaded" ? (
+                      <p className="entity-empty" data-testid="session-types-loading">Loading session types…</p>
                     ) : (
-                      <p className="entity-empty">No session types are available yet.</p>
+                      <SessionTypesEmptyState
+                        supported={sessionTypeSubscriptionsSupported}
+                        onCreate={openCreateSessionType}
+                      />
                     )}
                   </SessionTypesView>
                 ) : null}
@@ -3322,15 +3938,19 @@ export default function App() {
                       <p>Choose how this session should start. Botster will use the spawn point's folder and policy.</p>
                     </div>
                     {spawnSessionForm.listStatus === "loading" ? (
-                      <IonNote color="medium">Loading session types…</IonNote>
+                      <SpawnSessionTypesEmptyNotice loading onManageSessionTypes={() => {}} />
                     ) : spawnSessionForm.listStatus === "error" ? (
-                      <IonNote color="danger">
+                      <IonNote color="danger" data-testid="spawn-session-types-error">
                         {spawnSessionForm.error ?? "Botster could not load session types for this spawn point."}
                       </IonNote>
                     ) : spawnSessionForm.options.length === 0 ? (
-                      <IonNote color="medium">
-                        No session types are available for this spawn point.
-                      </IonNote>
+                      <SpawnSessionTypesEmptyNotice
+                        loading={false}
+                        onManageSessionTypes={() => {
+                          setSpawnSessionForm(undefined);
+                          navigateToHubSettings("session-types");
+                        }}
+                      />
                     ) : (
                       <IonList lines="full" aria-label="New session form">
                         <IonItem>
@@ -3340,6 +3960,7 @@ export default function App() {
                             value={spawnSessionForm.sessionTypeId}
                             placeholder="Choose a session type"
                             disabled={spawnSessionForm.submitting}
+                            interface="popover"
                             onIonChange={(event) => setSpawnSessionForm((current) => current ? {
                               ...current,
                               sessionTypeId: String(event.detail.value ?? ""),
@@ -3378,15 +3999,17 @@ export default function App() {
                     {spawnSessionForm.error && spawnSessionForm.listStatus !== "error" ? (
                       <IonNote color="danger">{spawnSessionForm.error}</IonNote>
                     ) : null}
-                    <div className="modal-actions">
-                      <IonButton
-                        disabled={!spawnSessionForm.sessionTypeId || spawnSessionForm.submitting}
-                        onClick={submitSpawnSession}
-                      >
-                        <IonIcon icon={playOutline} slot="start" aria-hidden="true" />
-                        {spawnSessionForm.submitting ? "Starting…" : "Start session"}
-                      </IonButton>
-                    </div>
+                    {spawnSessionForm.listStatus === "ready" && spawnSessionForm.options.length > 0 ? (
+                      <div className="modal-actions">
+                        <IonButton
+                          disabled={!spawnSessionForm.sessionTypeId || spawnSessionForm.submitting}
+                          onClick={submitSpawnSession}
+                        >
+                          <IonIcon icon={playOutline} slot="start" aria-hidden="true" />
+                          {spawnSessionForm.submitting ? "Starting…" : "Start session"}
+                        </IonButton>
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
               </IonContent>
@@ -3405,163 +4028,137 @@ export default function App() {
               <IonContent className="ion-padding">
                 {sessionTypeForm ? (
                   <div className="session-type-form" data-testid="session-type-form">
+                    <div className="session-type-form-intro">
+                      <p>
+                        Name it and point at a launch script. Like monorepo agents: claude, codex,
+                        rails-server — not a full protocol form.
+                      </p>
+                    </div>
                     <IonList lines="full" aria-label="Session type form">
                       <IonItem>
                         <IonSelect
                           label="Where it lives"
                           labelPlacement="stacked"
-                          value={sessionTypeForm.source === "repo" ? `repo:${sessionTypeForm.sourceTargetId}` : sessionTypeForm.source}
+                          value={sessionTypeForm.source === "repo" ? "repo" : "device"}
                           data-testid="session-type-source"
                           disabled={sessionTypeForm.mode === "edit"}
+                          interface="popover"
                           onIonChange={(event) => {
-                            const selected = String(event.detail.value ?? "device");
-                            setSessionTypeForm((current) => current ? {
-                              ...current,
-                              source: selected.startsWith("repo:") ? "repo" : selected,
-                              sourceTargetId: selected.startsWith("repo:") ? selected.slice("repo:".length) : ""
-                            } : current);
+                            const kind = String(event.detail.value ?? "device") === "repo" ? "repo" : "device";
+                            setSessionTypeForm((current) => current
+                              ? applySessionTypeHomeKind(current, kind, sessionTypeSpawnPoints)
+                              : current);
                           }}
                         >
-                          {sessionTypeWritableSources.map((source) => (
-                            <IonSelectOption
-                              key={`${source.source}:${source.targetId}`}
-                              value={source.source === "repo" ? `repo:${source.targetId}` : source.source}
-                            >
-                              {source.label}
-                            </IonSelectOption>
-                          ))}
+                          <IonSelectOption value="device">{SESSION_TYPE_SOURCE_GLOBAL_LABEL}</IonSelectOption>
+                          <IonSelectOption value="repo" disabled={sessionTypeSpawnPoints.length === 0}>
+                            Spawn point
+                          </IonSelectOption>
                         </IonSelect>
+                        <IonNote slot="helper" color="medium" data-testid="session-type-source-note">
+                          {sessionTypeSpawnPoints.length === 0
+                            ? "Global only until you add a spawn point under Hub settings."
+                            : "Global is available at every spawn point. Spawn point limits the type to one path."}
+                        </IonNote>
                       </IonItem>
-                      <IonItem>
-                        <IonInput
-                          label="Identifier"
-                          labelPlacement="stacked"
-                          value={sessionTypeForm.id}
-                          placeholder="my-agent"
-                          disabled={sessionTypeForm.mode === "edit"}
-                          data-testid="session-type-id"
-                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, id: String(event.detail.value ?? "") } : current)}
-                        />
-                      </IonItem>
+                      {sessionTypeForm.source === "repo" ? (
+                        <IonItem>
+                          <IonSelect
+                            label="Spawn point"
+                            labelPlacement="stacked"
+                            value={sessionTypeForm.sourceTargetId}
+                            placeholder="Choose a spawn point"
+                            data-testid="session-type-spawn-point"
+                            disabled={sessionTypeForm.mode === "edit"}
+                            interface="popover"
+                            onIonChange={(event) => setSessionTypeForm((current) => current
+                              ? { ...current, sourceTargetId: String(event.detail.value ?? "") }
+                              : current)}
+                          >
+                            {sessionTypeSpawnPoints.map((point) => (
+                              <IonSelectOption key={point.targetId} value={point.targetId}>
+                                {point.label}
+                              </IonSelectOption>
+                            ))}
+                          </IonSelect>
+                          <IonNote slot="helper" color="medium">
+                            Definition is stored for this admitted path only.
+                          </IonNote>
+                        </IonItem>
+                      ) : null}
                       <IonItem>
                         <IonInput
                           label="Name"
                           labelPlacement="stacked"
                           value={sessionTypeForm.label}
-                          placeholder="My agent"
-                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, label: String(event.detail.value ?? "") } : current)}
+                          placeholder="claude"
+                          data-testid="session-type-name"
+                          onIonInput={(event) => setSessionTypeForm((current) => current
+                            ? applySessionTypeName(current, String(event.detail.value ?? ""))
+                            : current)}
                         />
-                      </IonItem>
-                      <IonItem>
-                        <IonInput
-                          label="Description"
-                          labelPlacement="stacked"
-                          value={sessionTypeForm.description}
-                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, description: String(event.detail.value ?? "") } : current)}
-                        />
-                      </IonItem>
-                      <IonItem>
-                        <IonInput
-                          label="Role"
-                          labelPlacement="stacked"
-                          value={sessionTypeForm.role}
-                          placeholder="botster.agent"
-                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, role: String(event.detail.value ?? "") } : current)}
-                        />
-                      </IonItem>
-                      <IonItem>
-                        <IonInput
-                          label="Interaction"
-                          labelPlacement="stacked"
-                          value={sessionTypeForm.interaction}
-                          placeholder="interactive"
-                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, interaction: String(event.detail.value ?? "") } : current)}
-                        />
-                      </IonItem>
-                      <IonItem>
-                        <IonInput
-                          label="Lifecycle"
-                          labelPlacement="stacked"
-                          value={sessionTypeForm.lifecycle}
-                          placeholder="task"
-                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, lifecycle: String(event.detail.value ?? "") } : current)}
-                        />
-                      </IonItem>
-                      <IonItem>
-                        <IonInput
-                          label="Traits"
-                          labelPlacement="stacked"
-                          value={sessionTypeForm.traits}
-                          placeholder="terminal, companion"
-                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, traits: String(event.detail.value ?? "") } : current)}
-                        />
+                        <IonNote slot="helper" color="medium" data-testid="session-type-name-note">
+                          Product name (claude, codex, rails-server). Sets the Hub id from this name.
+                        </IonNote>
                       </IonItem>
                       <IonItem>
                         <IonInput
                           label="Command"
                           labelPlacement="stacked"
                           value={sessionTypeForm.command}
-                          placeholder="claude"
+                          placeholder="bin/init.sh"
+                          data-testid="session-type-command"
                           onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, command: String(event.detail.value ?? "") } : current)}
                         />
+                        <IonNote slot="helper" color="medium" data-testid="session-type-command-note">
+                          Relative path under the source root. Not a PATH binary name.
+                        </IonNote>
                       </IonItem>
                       <IonItem>
-                        <IonInput
-                          label="Arguments"
+                        <IonSelect
+                          label="Kind"
                           labelPlacement="stacked"
-                          value={sessionTypeForm.args}
-                          onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, args: String(event.detail.value ?? "") } : current)}
-                        />
+                          value={sessionTypeForm.preset}
+                          data-testid="session-type-preset"
+                          interface="popover"
+                          onIonChange={(event) => {
+                            const selected = String(event.detail.value ?? "custom") as SessionTypePresetId;
+                            setSessionTypeForm((current) => current
+                              ? applySessionTypePreset(current, selected)
+                              : current);
+                          }}
+                        >
+                          <IonSelectOption value="agent">{SESSION_TYPE_PRESETS.agent.label}</IonSelectOption>
+                          <IonSelectOption value="shell">{SESSION_TYPE_PRESETS.shell.label}</IonSelectOption>
+                          <IonSelectOption value="custom">Custom</IonSelectOption>
+                        </IonSelect>
+                        <IonNote slot="helper" color="medium" data-testid="session-type-preset-note">
+                          {sessionTypeForm.preset === "custom"
+                            ? "Edit role and related fields under Advanced."
+                            : `${SESSION_TYPE_PRESETS[sessionTypeForm.preset].description}.`}
+                        </IonNote>
                       </IonItem>
+                      {sessionTypeSemanticsSummary(sessionTypeForm) ? (
+                        <IonItem lines="none" className="session-type-semantics-item">
+                          <IonNote
+                            color="medium"
+                            data-testid="session-type-semantics-summary"
+                            className="session-type-semantics-summary"
+                          >
+                            {sessionTypeSemanticsSummary(sessionTypeForm)}
+                          </IonNote>
+                        </IonItem>
+                      ) : null}
                     </IonList>
-                    <details className="advanced-session-type-options">
-                      <summary>Advanced options</summary>
-                      <IonList lines="full" aria-label="Advanced session type options">
-                        <IonItem>
-                          <IonInput
-                            label="Working directory policy"
-                            labelPlacement="stacked"
-                            value={sessionTypeForm.workingDirectoryPolicy}
-                            placeholder="package_root"
-                            onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, workingDirectoryPolicy: String(event.detail.value ?? "") } : current)}
-                          />
-                        </IonItem>
-                        <IonItem>
-                          <IonInput
-                            label="Working directory path"
-                            labelPlacement="stacked"
-                            value={sessionTypeForm.workingDirectoryPath}
-                            onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, workingDirectoryPath: String(event.detail.value ?? "") } : current)}
-                          />
-                        </IonItem>
-                        <IonItem>
-                          <IonTextarea
-                            label="Environment"
-                            labelPlacement="stacked"
-                            value={sessionTypeForm.environment}
-                            autoGrow
-                            placeholder={"KEY=value"}
-                            onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, environment: String(event.detail.value ?? "") } : current)}
-                          />
-                        </IonItem>
-                        <IonItem>
-                          <IonInput
-                            label="Allowed environment overrides"
-                            labelPlacement="stacked"
-                            value={sessionTypeForm.allowedEnvironmentOverrides}
-                            onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, allowedEnvironmentOverrides: String(event.detail.value ?? "") } : current)}
-                          />
-                        </IonItem>
-                        <IonItem>
-                          <IonInput
-                            label="Context keys"
-                            labelPlacement="stacked"
-                            value={sessionTypeForm.contextKeys}
-                            onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, contextKeys: String(event.detail.value ?? "") } : current)}
-                          />
-                        </IonItem>
-                      </IonList>
-                    </details>
+                    <SessionTypeAdvancedOptions
+                      form={sessionTypeForm}
+                      initiallyOpen={
+                        sessionTypeForm.preset === "custom" ||
+                        sessionTypeForm.mode === "edit" ||
+                        sessionTypeFormHasAdvancedValues(sessionTypeForm)
+                      }
+                      onChange={setSessionTypeForm}
+                    />
                     {sessionTypeForm.error ? (
                       <IonNote color="danger" data-testid="session-type-form-error">{sessionTypeForm.error}</IonNote>
                     ) : null}
