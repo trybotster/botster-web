@@ -29,6 +29,7 @@ export const HOST_CHROME = Object.freeze({
   pluginSettingsRouteTestId: "plugin-settings-route",
   selectedAppSurfaceTestId: "selected-app-surface",
   sessionTypesViewTestId: "session-types-view",
+  spawnPointsViewTestId: "spawn-points-view",
   createSessionTypeTestId: "create-session-type",
   submitSessionTypeTestId: "submit-session-type",
   sessionTypeFormTestId: "session-type-form",
@@ -53,12 +54,15 @@ export const HOST_CHROME = Object.freeze({
   appsNavButtonName: "Apps",
   hubSettingsNavButtonName: "Hub settings",
   sessionTypesSectionLabel: "Session types",
+  spawnPointsSectionLabel: "Spawn points",
   supportSectionLabel: "Support",
   openSessionButtonName: "Open",
   settingsBackButtonName: "Back",
   checkForUpdatesButtonName: "Check for updates",
   sessionsHeadingName: "Sessions",
   hubHeadingName: "Hub",
+  newSessionModalTitle: "New session",
+  newSessionSubmitName: "Start session",
   schemaFloorSourcePin: "status.schema_version < 3"
 });
 

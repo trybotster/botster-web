@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -271,6 +271,8 @@ try {
   // short-lived production session the terminal stages depend on.
   const sessionTypeProof = await exerciseSessionTypes(page);
   console.log(`session-type-live-proof ${JSON.stringify(sessionTypeProof)}`);
+  const newSessionPickerProof = await exerciseNewSessionPickerListForTarget(page);
+  console.log(`new-session-picker-live-proof ${JSON.stringify(newSessionPickerProof)}`);
 
   await openHomeView(page);
   if (durableStateMode) {
@@ -3234,6 +3236,7 @@ async function assertNoLegacySessionHydration(page) {
  * This asserts zero list_session_types requests across the entire span -- from before the
  * surface mounts through every mutation -- so a mount-time or pre-subscribe legacy request
  * could not hide behind an "after the initial subscribe" window.
+ * Target-scoped `list_session_types_for_target` (New session picker) is intentionally allowed.
  */
 async function assertNoSessionTypeListHydration(page) {
   const legacyRequests = await page.evaluate(() =>
@@ -3246,6 +3249,173 @@ async function assertNoSessionTypeListHydration(page) {
   if (legacyRequests.length > 0) {
     throw new Error(`session types used legacy list hydration: ${JSON.stringify(legacyRequests)}`);
   }
+}
+
+/**
+ * Production New session path: Spawn points → New session → list_session_types_for_target
+ * → option render → spawn_session_type. Hub owns eligibility; Web only presents and submits.
+ */
+async function exerciseNewSessionPickerListForTarget(page) {
+  if (!webrtcDataDir) throw new Error("new session picker proof requires a WebRTC hub data directory");
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  const pickerTargetId = "web-picker-target";
+  const pickerTargetRoot = join(webrtcDataDir, "web-picker-root");
+  await mkdir(pickerTargetRoot, { recursive: true });
+  await writeFile(join(pickerTargetRoot, ".keep"), "");
+
+  // Ensure a known device type with sleep command so spawn is cheap and always available.
+  const pickerDefinition = {
+    id: "web-picker-agent",
+    label: "Web picker agent",
+    role: "botster.agent",
+    interaction: "interactive",
+    traits: ["terminal"],
+    lifecycle: "task",
+    command: "sleep",
+    args: ["5"],
+    context: ["prompt"]
+  };
+  const createTypeResponse = await sendDaemonRequest(socketPath, {
+    type: "create_session_type",
+    source: { source: "device" },
+    definition: pickerDefinition
+  });
+  if (createTypeResponse.error) {
+    throw new Error(`picker fixture create failed: ${JSON.stringify(createTypeResponse.error)}`);
+  }
+
+  // Fresh hub data dirs have no admitted spawn points. Create one through the production UI
+  // so the pull-family entity snapshot updates (socket-only create would not re-pull the list).
+  await page.locator("ion-menu.app-sidebar")
+    .getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true })
+    .click();
+  await page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel)
+    .getByRole("button", { name: new RegExp(HOST_CHROME.spawnPointsSectionLabel) })
+    .click();
+  const spawnPointsView = page.getByTestId(HOST_CHROME.spawnPointsViewTestId);
+  await spawnPointsView.waitFor();
+
+  const createTargetSince = await harnessEventCount(page);
+  await spawnPointsView.getByRole("button", { name: /Add spawn point/ }).click();
+  const spawnTargetModal = page.locator("ion-modal.show-modal").filter({ hasText: "Add spawn point" }).first();
+  await spawnTargetModal.waitFor();
+  await spawnTargetModal.locator('ion-input:has-text("Spawn point name") input').first().fill("Web picker spawn point");
+  await spawnTargetModal.locator('ion-input:has-text("Folder") input').first().fill(pickerTargetRoot);
+  // Set deterministic identifier in advanced options when present.
+  const advanced = spawnTargetModal.locator("details.advanced-spawn-target-options");
+  if (await advanced.count() > 0) {
+    await advanced.locator("summary").click();
+    const idInput = spawnTargetModal.locator('ion-input:has-text("Identifier") input').first();
+    if (await idInput.count() > 0) {
+      await idInput.fill(pickerTargetId);
+    }
+  }
+  await spawnTargetModal.getByRole("button", { name: "Create", exact: true }).click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "create_spawn_target" },
+    "web-produced create_spawn_target for picker fixture",
+    createTargetSince
+  );
+  await spawnPointsView.getByText("Web picker spawn point").waitFor({ timeout: 15_000 });
+
+  const newSessionButton = spawnPointsView.getByRole("button", { name: /New session/ }).first();
+  await newSessionButton.waitFor();
+  const listSince = await harnessEventCount(page);
+  await newSessionButton.click();
+
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "list_session_types_for_target" },
+    "web-produced list_session_types_for_target request on New session open",
+    listSince
+  );
+  const listRequest = await latestHarnessRequest(page, "list_session_types_for_target", listSince);
+  if (typeof listRequest?.target_id !== "string" || listRequest.target_id.length === 0) {
+    throw new Error(`list_session_types_for_target missing target_id: ${JSON.stringify(listRequest)}`);
+  }
+  // Management bare list must not ride along.
+  await assertNoSessionTypeListHydration(page);
+
+  const modal = page.locator("ion-modal.show-modal").filter({ hasText: HOST_CHROME.newSessionModalTitle }).first();
+  await modal.waitFor();
+  // Wait until loading settles into the select form (Hub list ready with options).
+  const sessionTypeSelect = modal.locator("ion-select").first();
+  try {
+    await sessionTypeSelect.waitFor({ timeout: 15_000 });
+  } catch {
+    const modalText = await modal.innerText();
+    throw new Error(`New session list failed or empty after Hub fixture: ${modalText}`);
+  }
+  const optionValues = await sessionTypeSelect.locator("ion-select-option").evaluateAll((options) =>
+    options.map((option) => ({
+      value: option.value ?? option.getAttribute("value"),
+      disabled: option.disabled === true || option.getAttribute("disabled") != null,
+      label: (option.textContent ?? "").trim()
+    }))
+  );
+  if (optionValues.length === 0) {
+    throw new Error("New session modal rendered no Hub list options");
+  }
+  // Device fixture must appear by effective id when Hub admits it for the spawn point.
+  const expectedEffectiveId = `device/${pickerDefinition.id}`;
+  const deviceOption = optionValues.find((option) => option.value === expectedEffectiveId);
+  if (!deviceOption) {
+    throw new Error(
+      `Hub list for target ${listRequest.target_id} missing device option ${expectedEffectiveId}: ${JSON.stringify(optionValues)}`
+    );
+  }
+  if (deviceOption.disabled) {
+    throw new Error(`device option ${expectedEffectiveId} rendered unavailable: ${JSON.stringify(deviceOption)}`);
+  }
+
+  await setUiNodeSelectValue(sessionTypeSelect, expectedEffectiveId);
+  const spawnSince = await harnessEventCount(page);
+  await modal.getByRole("button", { name: HOST_CHROME.newSessionSubmitName, exact: true }).click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "spawn_session_type" },
+    "web-produced spawn_session_type from New session modal",
+    spawnSince
+  );
+  const spawnRequest = await latestHarnessRequest(page, "spawn_session_type", spawnSince);
+  if (spawnRequest?.session_type_id !== expectedEffectiveId) {
+    throw new Error(
+      `spawn_session_type session_type_id was ${JSON.stringify(spawnRequest?.session_type_id)}, expected ${expectedEffectiveId}`
+    );
+  }
+  if (spawnRequest?.request?.target_id !== listRequest.target_id) {
+    throw new Error(
+      `spawn_session_type target was ${JSON.stringify(spawnRequest?.request?.target_id)}, expected ${listRequest.target_id}`
+    );
+  }
+
+  // Clean up the fixture definition so later stages are not polluted.
+  await sendDaemonRequest(socketPath, {
+    type: "delete_session_type",
+    source: { source: "device" },
+    session_type_id: pickerDefinition.id
+  });
+
+  // Dismiss any leftover New session / spawn-point modal so later stages can navigate.
+  const openModal = page.locator("ion-modal.show-modal").first();
+  if (await openModal.count() > 0) {
+    const closeButton = openModal.getByRole("button", { name: "Close", exact: true });
+    if (await closeButton.count() > 0) {
+      await closeButton.click();
+    } else {
+      await page.keyboard.press("Escape");
+    }
+    await page.locator("ion-modal.show-modal").waitFor({ state: "detached", timeout: 10_000 }).catch(() => {});
+  }
+
+  return {
+    list_target_id: listRequest.target_id,
+    list_option_count: optionValues.length,
+    device_option_id: expectedEffectiveId,
+    spawn_session_type_id: spawnRequest.session_type_id,
+    spawn_target_id: spawnRequest.request.target_id
+  };
 }
 
 /**
@@ -3386,7 +3556,6 @@ async function createSessionTypeThroughRenderedForm(page) {
   await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor();
   // Form promise pending/rejection: force Hub rejection with an invalid role, keep draft.
   await setSessionTypeFormField(page, "Role", "not a namespaced role");
-  const rejectSince = await harnessEventCount(page);
   await page.getByTestId(HOST_CHROME.submitSessionTypeTestId).click();
   await page.getByTestId(HOST_CHROME.sessionTypeFormErrorTestId).waitFor();
   const formStillOpen = await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).count();
