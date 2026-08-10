@@ -1,10 +1,15 @@
 # Web: skinny New session picker — Hub list only, no client eligibility filter
 
-**Plan revision:** 2 (addresses Plan Review `review_1786394913_313718` / `changes_required`)  
-**Ticket:** `ticket_1786387865_686375`  
-**Run:** `run_1786394076_567237`  
-**Step:** `botster_stack_plan` (sequence 3)  
-**Durable artifact (rev1):** `artifact_1786394337_903734` — same URI; this revision updates the plan body in place.  
+**Plan revision:** 2 (addresses Plan Review `review_1786394913_313718` / `changes_required`)
+
+**Ticket:** `ticket_1786387865_686375`
+
+**Run:** `run_1786394076_567237`
+
+**Step:** `botster_stack_plan` (sequence 3)
+
+**Durable artifact (rev1):** `artifact_1786394337_903734` — same URI; this revision updates the plan body in place.
+
 **Runtime-teardown class:** **Does not apply** (ordinary SPA UI + daemon list/spawn presentation; no WebRTC/peer lifecycle ownership change).
 
 ### Plan Review findings closed by this revision
@@ -206,7 +211,7 @@ Loaded: [[botster web request caches belong in react query not zustand or hub se
 5. Existing empty copy string can stay if and only if it is gated on Hub empty list success; loading/error copy must not collapse into that empty success state.
 6. Dual README/architecture pin claims stay in sync for the 0.1.26 / revision-33 bump (claims currently present).
 7. Hub typed rejects for disabled/missing targets surface Hub’s `error.message` verbatim (charter: report Hub verdict).
-8. Implement can rebuild Hub from `cb93df53d6+` in the agent/CI environment (local path example observed: `~/Projects/botster-hub` may still be an older binary — **rebuild required**).
+8. Implement can rebuild Hub from `cb93df53d6+` in the agent/CI environment (the authoritative Hub checkout may still hold an older binary — **rebuild required**).
 
 ### Unknowns (resolved by Implement execution, not by residual waiver)
 

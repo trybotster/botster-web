@@ -791,29 +791,31 @@ export function listSessionTypesForTargetAction(targetId: string): ActionBinding
 }
 
 /**
- * Map Hub list rows to picker options. Prefer Hub effective `session_type_id`; fall back
- * to store-style `id` only when the list row already carries the composite.
+ * Map Hub list rows to picker options using authoritative Hub `session_type_id` only.
+ * Returns undefined when the payload is missing, not an array, or contains a row without
+ * `session_type_id` — callers must treat that as error, not empty success.
+ * An empty array is a valid Hub empty list.
  */
-export function spawnSessionOptionsFromHubList(sessionTypes: unknown): SpawnSessionTypeOption[] {
-  if (!Array.isArray(sessionTypes)) return [];
-  return sessionTypes.flatMap((row) => {
+export function spawnSessionOptionsFromHubList(sessionTypes: unknown): SpawnSessionTypeOption[] | undefined {
+  if (!Array.isArray(sessionTypes)) return undefined;
+  const options: SpawnSessionTypeOption[] = [];
+  for (const row of sessionTypes) {
     const record = readRecord(row);
-    const sessionTypeId = stringValue(
-      record.session_type_id,
-      stringValue(record.id, "")
-    );
-    if (!sessionTypeId) return [];
-    return [{
+    const sessionTypeId = typeof record.session_type_id === "string" ? record.session_type_id.trim() : "";
+    if (!sessionTypeId) return undefined;
+    options.push({
       sessionTypeId,
       label: stringValue(record.label, sessionTypeId),
       available: record.available !== false
-    }];
-  });
+    });
+  }
+  return options;
 }
 
 /**
  * Apply a list response only when the modal is still open for the same target and
  * generation. Returns undefined when the response is stale or the modal closed.
+ * Ready/empty success requires an accepted response with a real array of Hub rows.
  */
 export function applySpawnSessionListResult(
   form: SpawnSessionFormState | undefined,
@@ -834,6 +836,16 @@ export function applySpawnSessionListResult(
     };
   }
   const options = spawnSessionOptionsFromHubList(result.sessionTypes);
+  if (options === undefined) {
+    return {
+      ...form,
+      listStatus: "error",
+      options: [],
+      sessionTypeId: "",
+      error: result.reason
+        ?? "Botster returned an incomplete session type list for this spawn point."
+    };
+  }
   const available = options.filter((option) => option.available);
   return {
     ...form,

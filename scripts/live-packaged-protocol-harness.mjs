@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -3263,7 +3263,17 @@ async function exerciseNewSessionPickerListForTarget(page) {
   await mkdir(pickerTargetRoot, { recursive: true });
   await writeFile(join(pickerTargetRoot, ".keep"), "");
 
-  // Ensure a known device type with sleep command so spawn is cheap and always available.
+  // Device session-type commands resolve under Hub's device session-types root
+  // (`<data-dir>/session-types`), not PATH and not absolute paths (those are rejected).
+  const deviceSessionTypesRoot = join(webrtcDataDir, "session-types");
+  const deviceBinDir = join(deviceSessionTypesRoot, "bin");
+  await mkdir(deviceBinDir, { recursive: true });
+  const pickerScript = join(deviceBinDir, "picker-agent.sh");
+  await writeFile(
+    pickerScript,
+    "#!/bin/sh\nprintf 'picker-spawned:%s\\n' \"$BOTSTER_SESSION_ID\"\nsleep 30\n"
+  );
+  await chmod(pickerScript, 0o755);
   const pickerDefinition = {
     id: "web-picker-agent",
     label: "Web picker agent",
@@ -3271,8 +3281,9 @@ async function exerciseNewSessionPickerListForTarget(page) {
     interaction: "interactive",
     traits: ["terminal"],
     lifecycle: "task",
-    command: "sleep",
-    args: ["5"],
+    command: "bin/picker-agent.sh",
+    args: [],
+    working_directory: { policy: "package_root" },
     context: ["prompt"]
   };
   const createTypeResponse = await sendDaemonRequest(socketPath, {
@@ -3390,6 +3401,70 @@ async function exerciseNewSessionPickerListForTarget(page) {
     );
   }
 
+  // Ticket success requires Hub acceptance, not only request emission.
+  const acceptedSpawn = await page.waitForFunction(
+    ({ since, sessionTypeId, targetId }) => {
+      const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since);
+      for (const entry of events) {
+        if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") continue;
+        const payload = entry.payload?.payload ?? {};
+        const result = payload.result ?? {};
+        if (
+          payload.accepted === true &&
+          result.request_type === "spawn_session_type" &&
+          result.session_type_id === sessionTypeId &&
+          result.target_id === targetId &&
+          typeof result.session_id === "string" &&
+          result.session_id.length > 0
+        ) {
+          return { session_id: result.session_id, request_id: payload.request_id ?? null };
+        }
+      }
+      return null;
+    },
+    {
+      since: spawnSince,
+      sessionTypeId: expectedEffectiveId,
+      targetId: listRequest.target_id
+    },
+    { timeout: 15_000 }
+  ).then((handle) => handle.jsonValue()).catch(async (error) => {
+    const observed = await page.evaluate((since) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since)
+        .filter((entry) =>
+          entry.kind === "hub_frame" && entry.payload?.kind === "action_result"),
+    spawnSince);
+    throw new Error(
+      `New session spawn was not accepted by Hub: ${JSON.stringify(observed)}: ${error.message}`
+    );
+  });
+  if (!acceptedSpawn?.session_id) {
+    throw new Error(`accepted spawn missing session_id: ${JSON.stringify(acceptedSpawn)}`);
+  }
+
+  // Observe the authoritative session entity for the spawned id before cleanup.
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "session", id: acceptedSpawn.session_id },
+    `session entity for accepted spawn ${acceptedSpawn.session_id}`,
+    spawnSince
+  ).catch(async () => {
+    // Some paths publish the session only on the sessions array of the daemon response;
+    // require at least one daemon response carrying the spawned session id.
+    const daemonHasSession = await page.evaluate(({ since, sessionId }) => {
+      return (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).some((entry) => {
+        if (entry.kind !== "daemon_response") return false;
+        const sessions = entry.payload?.sessions ?? [];
+        return sessions.some((session) => session?.session_id === sessionId);
+      });
+    }, { since: spawnSince, sessionId: acceptedSpawn.session_id });
+    if (!daemonHasSession) {
+      throw new Error(
+        `accepted spawn ${acceptedSpawn.session_id} never appeared as a session entity or daemon sessions row`
+      );
+    }
+  });
+
   // Clean up the fixture definition so later stages are not polluted.
   await sendDaemonRequest(socketPath, {
     type: "delete_session_type",
@@ -3414,7 +3489,9 @@ async function exerciseNewSessionPickerListForTarget(page) {
     list_option_count: optionValues.length,
     device_option_id: expectedEffectiveId,
     spawn_session_type_id: spawnRequest.session_type_id,
-    spawn_target_id: spawnRequest.request.target_id
+    spawn_target_id: spawnRequest.request.target_id,
+    spawn_accepted: true,
+    spawned_session_id: acceptedSpawn.session_id
   };
 }
 

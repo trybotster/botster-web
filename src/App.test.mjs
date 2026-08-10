@@ -7092,11 +7092,19 @@ try {
     { session_type_id: "device/claude", id: "claude", label: "Claude", available: false, target_id: "device:local" },
     { session_type_id: "project-main/shell", id: "shell", label: "Shell", available: true, target_id: "project-main" }
   ];
-  assert.deepEqual(spawnSessionOptionsFromHubList(hubListForTarget), [
+  const parsedHubList = spawnSessionOptionsFromHubList(hubListForTarget);
+  assert.deepEqual(parsedHubList, [
     { sessionTypeId: "device/global-agent", label: "Global agent", available: true },
     { sessionTypeId: "device/claude", label: "Claude", available: false },
     { sessionTypeId: "project-main/shell", label: "Shell", available: true }
   ]);
+  // Authoritative session_type_id only — bare id fallback is rejected as incomplete.
+  assert.equal(
+    spawnSessionOptionsFromHubList([{ id: "bare-only", label: "Bare", available: true }]),
+    undefined
+  );
+  assert.equal(spawnSessionOptionsFromHubList(undefined), undefined);
+  assert.equal(spawnSessionOptionsFromHubList({ not: "array" }), undefined);
   // Multiple available options: no auto-select.
   const multiOptionForm = applySpawnSessionListResult(
     preparedSpawnForm,
@@ -7106,7 +7114,7 @@ try {
   assert.deepEqual(multiOptionForm, {
     ...preparedSpawnForm,
     listStatus: "ready",
-    options: spawnSessionOptionsFromHubList(hubListForTarget),
+    options: parsedHubList,
     sessionTypeId: "",
     error: undefined
   });
@@ -7137,6 +7145,22 @@ try {
     sessionTypeId: "",
     error: undefined
   });
+  // Missing or malformed Hub list is error, never empty-success copy.
+  for (const [label, sessionTypes] of [
+    ["missing", undefined],
+    ["non-array", { bogus: true }],
+    ["row missing session_type_id", [{ id: "device/global-agent", label: "Global", available: true }]],
+    ["empty session_type_id", [{ session_type_id: "  ", label: "Blank", available: true }]]
+  ]) {
+    const malformed = applySpawnSessionListResult(
+      preparedSpawnForm,
+      { targetId: "project-main", listGeneration: 1 },
+      { accepted: true, sessionTypes }
+    );
+    assert.equal(malformed?.listStatus, "error", `expected error for ${label}`);
+    assert.deepEqual(malformed?.options, [], `expected no options for ${label}`);
+    assert.match(String(malformed?.error ?? ""), /incomplete session type list|could not load/i);
+  }
   // Hub/transport failure is error, not empty success copy.
   const failedListForm = applySpawnSessionListResult(
     preparedSpawnForm,
