@@ -25,7 +25,8 @@ import {
 import { realizeBindListDescendantId } from "@trybotster/ui-contract";
 import ts from "typescript";
 import { createServer } from "vite";
-import { createElement } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { decodeHubConnection, HubConnectionError } from "../scripts/hubConnection.mjs";
 import {
@@ -904,13 +905,36 @@ const appFeatureSources = await Promise.all([
   readFile(new URL("./app/spawnTargetUi.tsx", import.meta.url), "utf8"),
   readFile(new URL("./app/spawnTargets.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/terminalChrome.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/useAppNavigation.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/useHubActions.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/usePackageInstall.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/pluginRouteState.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/usePluginRouteState.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/usePluginSurfaceDispatch.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/usePackageOpenControls.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/AppsRouteView.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/HubSettingsRouteView.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/WorkbenchDialogs.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/dialogs/AddPackageDialog.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/dialogs/SpawnSessionDialog.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/dialogs/SessionTypeDialog.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/dialogs/SpawnTargetDialog.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/dialogs/WorkbenchNotifications.tsx", import.meta.url), "utf8"),
   readFile(new URL("./app/useProductionHubConnection.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/useSessionTypeControl.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/useSpawnControl.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/WorkbenchShell.tsx", import.meta.url), "utf8"),
   readFile(new URL("./app/values.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/workbench.tsx", import.meta.url), "utf8")
 ]);
 // Product corpus for anti-drift checks after componentization. App.tsx is composition only.
 const appShell = appShellSource;
-const app = [appShell, ...appFeatureSources].join("\n");
+// Normalize feature-module relative botster imports so product anti-drift checks stay path-agnostic.
+const app = [appShell, ...appFeatureSources]
+  .map((source) => source
+    .replaceAll('from "../botster/', 'from "./botster/')
+    .replaceAll("from '../botster/", "from './botster/"))
+  .join("\n");
 assert.match(appShell, /currentDashboardSessions\(/);
 assert.match(appFeatureSources.join("\n"), /export function currentDashboardSessions/);
 assert.match(appShell, /from "\.\/app\/dashboardSessions"/);
@@ -921,28 +945,531 @@ assert.doesNotMatch(appShell, /export function SessionTypeAdvancedOptions/);
 
 // App shell must import and call feature modules (corpus alone can hide wiring regressions).
 assert.match(appShell, /from "\.\/app\/dashboardSessions"/);
+assert.match(appShell, /from "\.\/app\/WorkbenchShell"/);
 assert.match(appShell, /from "\.\/app\/dashboard"/);
-assert.match(appShell, /from "\.\/app\/routing"/);
+assert.match(appShell, /from "\.\/app\/useAppNavigation"/);
+assert.match(appFeatureSources.join("\n"), /export function appRouteFromPathname/);
 assert.match(appShell, /from "\.\/app\/hubLifecycle"/);
-assert.match(appShell, /from "\.\/app\/hubSettings"/);
-assert.match(appShell, /from "\.\/app\/workbench"/);
-assert.match(appShell, /from "\.\/app\/pluginNavigation"/);
-assert.match(appShell, /from "\.\/app\/pluginRoutes"/);
-assert.match(appShell, /from "\.\/app\/sessionTypes"/);
-assert.match(appShell, /from "\.\/app\/sessionTypeUi"/);
-assert.match(appShell, /from "\.\/app\/spawnSession"/);
+assert.match(appFeatureSources.join("\n"), /HubGeneralSection/);
+assert.match(appFeatureSources.join("\n"), /from "\.\/workbench"/);
+assert.match(appFeatureSources.join("\n"), /PluginNavigationShortcuts/);
+assert.match(appFeatureSources.join("\n"), /PluginSurfaceRoutePage/);
+assert.match(appShell, /from "\.\/app\/useSessionTypeControl"/);
+assert.match(appFeatureSources.join("\n"), /SessionTypeAdvancedOptions/);
+assert.match(appShell, /from "\.\/app\/useSpawnControl"/);
 assert.match(appShell, /from "\.\/app\/spawnTargets"/);
 assert.match(appShell, /from "\.\/app\/useProductionHubConnection"/);
+assert.match(appShell, /from "\.\/app\/useAppNavigation"/);
+assert.match(appShell, /from "\.\/app\/useHubActions"/);
+assert.match(appShell, /from "\.\/app\/usePluginRouteState"/);
+assert.match(appShell, /from "\.\/app\/usePluginSurfaceDispatch"/);
+assert.match(appShell, /from "\.\/app\/usePackageOpenControls"/);
+assert.match(appShell, /from "\.\/app\/useSpawnControl"/);
+assert.match(appShell, /from "\.\/app\/useSessionTypeControl"/);
+assert.match(appShell, /from "\.\/app\/WorkbenchShell"/);
+assert.match(appShell, /useAppNavigation\(/);
+assert.match(appShell, /useHubActions\(/);
+assert.match(appShell, /usePluginRouteState\(/);
+assert.match(appShell, /usePluginSurfaceDispatch\(/);
+assert.match(appShell, /usePackageOpenControls\(/);
+assert.match(appShell, /useSpawnControl\(/);
+assert.match(appShell, /useSessionTypeControl\(/);
+assert.match(appShell, /<WorkbenchShell/);
+assert.doesNotMatch(appShell, /export function DashboardView/);
+assert.doesNotMatch(appShell, /export function usePluginControl/);
+assert.match(appShell, /navigation=\{\{/);
+assert.match(appShell, /main=\{main\}/);
+assert.match(appShell, /dialogs=\{dialogs\}/);
+
 assert.match(appShell, /useProductionHubConnection\(\{/);
 assert.match(appFeatureSources.join("\n"), /pullProductionEntity\("session", \{ family: "session" \}\)/);
 assert.match(appShell, /currentDashboardSessions\(runtimeClient\.entities\.list\("session"\)\)/);
 assert.match(appShell, /<DashboardView[\s\S]*sessions=\{sessions\}/);
-assert.match(appShell, /<WorkbenchNav[\s\S]*onNavigate=\{navigateToView\}/);
-assert.match(appShell, /<PluginNavigationShortcuts[\s\S]*onOpen=\{openPackageNavigation\}/);
+assert.match(appShell, /sessions=\{sessions\}/);
+assert.match(appShell, /main=\{main\}/);
+assert.match(appFeatureSources.join("\n"), /<WorkbenchNav[\s\S]*onNavigate=\{navigateToView\}/);
+assert.match(appFeatureSources.join("\n"), /<PluginNavigationShortcuts[\s\S]*onOpen=\{onOpenPackageNavigation\}/);
 assert.match(appShell, /replayHubStatusOnLifecycleEvent\(detail, runtimeClient\.entities\)/);
-assert.match(appShell, /hubUpdateOutcomeFromResult\(result\)/);
+assert.match(appFeatureSources.join("\n"), /hubUpdateOutcomeFromResult\(result\)/);
 
 
+
+
+// Focused controller behavior (executable — not source-corpus substitutes).
+{
+  const pureVite = await createServer({
+    configFile: false,
+    optimizeDeps: { noDiscovery: true },
+    server: { middlewareMode: true },
+    appType: "custom",
+    logLevel: "error"
+  });
+  try {
+    const {
+      claimPluginRouteRender,
+      applyPluginRouteCompletionIfCurrent,
+      projectPluginAppRoute,
+      projectPluginSettingsRoute
+    } = await pureVite.ssrLoadModule("/src/app/pluginRouteState.ts");
+    const {
+      applySpawnSessionListResult,
+      spawnSessionFormForTarget
+    } = await pureVite.ssrLoadModule("/src/app/spawnSession.ts");
+    const {
+      sessionTypeFormIsStructurallyComplete,
+      createSessionTypeForm,
+      rejectedSessionTypeForm,
+      applySessionTypeName
+    } = await pureVite.ssrLoadModule("/src/app/sessionTypes.ts");
+    const {
+      packageActionFeedback
+    } = await pureVite.ssrLoadModule("/src/app/actionFeedback.ts");
+    const {
+      clearPresentationValue
+    } = await pureVite.ssrLoadModule("/src/botster/uiPresentation.ts");
+
+    // Claim race: same key not reclaimed; new key claims.
+    assert.deepEqual(claimPluginRouteRender(undefined, "pkg/a"), { claim: true, nextLastKey: "pkg/a" });
+    assert.deepEqual(claimPluginRouteRender("pkg/a", "pkg/a"), { claim: false, nextLastKey: "pkg/a" });
+    assert.deepEqual(claimPluginRouteRender("pkg/a", "pkg/b"), { claim: true, nextLastKey: "pkg/b" });
+
+    // Out-of-order completion with de    // Mounted production usePluginRouteState: deferred A must not overwrite B.
+    {
+      const { PluginRouteStateHarness } = await pureVite.ssrLoadModule(
+        "/src/app/__fixtures__/pluginRouteStateHarness.tsx"
+      );
+
+      function installMinimalDom() {
+        if (globalThis.document?.__botsterMinimalDom) return;
+        class Node {
+          constructor() {
+            this.childNodes = [];
+            this.parentNode = null;
+            this.ownerDocument = null;
+            this._listeners = new Map();
+          }
+          appendChild(child) {
+            this.childNodes.push(child);
+            child.parentNode = this;
+            return child;
+          }
+          removeChild(child) {
+            const i = this.childNodes.indexOf(child);
+            if (i >= 0) this.childNodes.splice(i, 1);
+            child.parentNode = null;
+            return child;
+          }
+          insertBefore(child, ref) {
+            if (!ref) return this.appendChild(child);
+            const i = this.childNodes.indexOf(ref);
+            this.childNodes.splice(i < 0 ? this.childNodes.length : i, 0, child);
+            child.parentNode = this;
+            return child;
+          }
+          addEventListener(type, fn) {
+            if (!this._listeners.has(type)) this._listeners.set(type, new Set());
+            this._listeners.get(type).add(fn);
+          }
+          removeEventListener(type, fn) {
+            this._listeners.get(type)?.delete(fn);
+          }
+          dispatchEvent() { return true; }
+        }
+        class Element extends Node {
+          constructor(tagName) {
+            super();
+            this.nodeType = 1;
+            this.tagName = String(tagName).toUpperCase();
+            this.style = {};
+            this.attributes = {};
+            this.namespaceURI = "http://www.w3.org/1999/xhtml";
+            this.textContent = "";
+            this.innerHTML = "";
+            this.className = "";
+            this.id = "";
+          }
+          setAttribute(k, v) { this.attributes[k] = String(v); }
+          getAttribute(k) { return Object.hasOwn(this.attributes, k) ? this.attributes[k] : null; }
+          removeAttribute(k) { delete this.attributes[k]; }
+          hasAttribute(k) { return Object.hasOwn(this.attributes, k); }
+          focus() {}
+          blur() {}
+          remove() {
+            if (this.parentNode) this.parentNode.removeChild(this);
+          }
+          get firstChild() { return this.childNodes[0] ?? null; }
+          get lastChild() { return this.childNodes[this.childNodes.length - 1] ?? null; }
+          get nextSibling() { return null; }
+          get previousSibling() { return null; }
+        }
+        class HTMLIFrameElement extends Element {}
+        class HTMLElement extends Element {}
+        class SVGElement extends Element {
+          constructor(tag) {
+            super(tag);
+            this.namespaceURI = "http://www.w3.org/2000/svg";
+          }
+        }
+        const document = Object.assign(new Node(), {
+          __botsterMinimalDom: true,
+          nodeType: 9,
+          documentElement: null,
+          body: null,
+          head: null,
+          HTMLIFrameElement,
+          HTMLElement,
+          SVGElement,
+          Element,
+          Node,
+          createElement(tag) {
+            const el = tag === "iframe" ? new HTMLIFrameElement(tag) : new HTMLElement(tag);
+            el.ownerDocument = document;
+            return el;
+          },
+          createElementNS(ns, tag) {
+            const el = ns?.includes("svg") ? new SVGElement(tag) : document.createElement(tag);
+            el.namespaceURI = ns;
+            el.ownerDocument = document;
+            return el;
+          },
+          createTextNode(text) {
+            return { nodeType: 3, textContent: String(text), ownerDocument: document, parentNode: null, childNodes: [], addEventListener() {}, removeEventListener() {} };
+          },
+          createComment(text) {
+            return { nodeType: 8, textContent: String(text), ownerDocument: document, parentNode: null, childNodes: [], addEventListener() {}, removeEventListener() {} };
+          },
+          createDocumentFragment() {
+            const frag = new Element("#document-fragment");
+            frag.nodeType = 11;
+            frag.ownerDocument = document;
+            return frag;
+          },
+          querySelector() { return null; },
+          querySelectorAll() { return []; },
+          getElementById() { return null; },
+          getElementsByTagName() { return []; },
+          activeElement: null
+        });
+        document.body = document.createElement("body");
+        document.head = document.createElement("head");
+        document.documentElement = document.createElement("html");
+        document.documentElement.appendChild(document.head);
+        document.documentElement.appendChild(document.body);
+        document.activeElement = document.body;
+        globalThis.document = document;
+        globalThis.Element = Element;
+        globalThis.HTMLElement = HTMLElement;
+        globalThis.HTMLIFrameElement = HTMLIFrameElement;
+        globalThis.SVGElement = SVGElement;
+        globalThis.Node = Object.assign(Node, {
+          ELEMENT_NODE: 1,
+          TEXT_NODE: 3,
+          COMMENT_NODE: 8,
+          DOCUMENT_FRAGMENT_NODE: 11
+        });
+        globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+        if (!globalThis.window) globalThis.window = globalThis;
+        globalThis.getComputedStyle = () => new Proxy({}, { get: () => "" });
+        globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+        globalThis.cancelAnimationFrame = (id) => clearTimeout(id);
+      }
+
+      installMinimalDom();
+
+      function surfacePackage(packageName, surfaceId, title, actionId, kind = "app") {
+        const surface = {
+          id: surfaceId,
+          surface_id: surfaceId,
+          title,
+          launch_action: { id: actionId, label: `Render ${title}` }
+        };
+        return {
+          id: packageName,
+          package_name: packageName,
+          ...(kind === "app"
+            ? { app_surfaces: [surface] }
+            : { settings_surfaces: [surface] })
+        };
+      }
+
+      function successResult(packageName, surfaceId) {
+        return {
+          accepted: true,
+          result: {
+            plugin_surface: {
+              package_name: packageName,
+              surface_id: surfaceId,
+              body: "ok",
+              ui_tree_snapshot: {
+                package_name: packageName,
+                surface_id: surfaceId,
+                body: {
+                  id: `${packageName}-root`,
+                  type: "section",
+                  props: { title: packageName }
+                }
+              }
+            }
+          }
+        };
+      }
+
+      function createDeferredDispatcher() {
+        const pending = new Map();
+        return {
+          runtimeClient: {
+            actions: {
+              async dispatch({ action }) {
+                return new Promise((resolve) => {
+                  pending.set(action.id, resolve);
+                });
+              }
+            }
+          },
+          resolve(actionId, result) {
+            const resolve = pending.get(actionId);
+            assert.ok(resolve, `missing deferred dispatch for ${actionId}`);
+            pending.delete(actionId);
+            resolve(result);
+          },
+          pendingCount() {
+            return pending.size;
+          }
+        };
+      }
+
+      async function mountProbe(dispatcher, props) {
+        let selected;
+        const onSelected = (next) => { selected = next; };
+        const rootEl = globalThis.document.createElement("div");
+        globalThis.document.body.appendChild(rootEl);
+        const root = createRoot(rootEl);
+        await act(async () => {
+          root.render(createElement(PluginRouteStateHarness, {
+            packages: props.packages,
+            availablePackages: props.availablePackages ?? [],
+            routePluginSurface: props.routePluginSurface,
+            routeSettingsPackageName: props.routeSettingsPackageName,
+            routeSettingsSurfaceId: props.routeSettingsSurfaceId,
+            runtimeClient: dispatcher.runtimeClient,
+            onSelected
+          }));
+        });
+        return {
+          get selected() { return selected; },
+          async setProps(next) {
+            await act(async () => {
+              root.render(createElement(PluginRouteStateHarness, {
+                packages: next.packages ?? props.packages,
+                availablePackages: next.availablePackages ?? props.availablePackages ?? [],
+                routePluginSurface: next.routePluginSurface,
+                routeSettingsPackageName: next.routeSettingsPackageName,
+                routeSettingsSurfaceId: next.routeSettingsSurfaceId,
+                runtimeClient: dispatcher.runtimeClient,
+                onSelected
+              }));
+            });
+          },
+          async resolve(actionId, packageName, surfaceId) {
+            await act(async () => {
+              dispatcher.resolve(actionId, successResult(packageName, surfaceId));
+              await Promise.resolve();
+              await Promise.resolve();
+            });
+          },
+          async unmount() {
+            await act(async () => {
+              root.unmount();
+            });
+            if (rootEl.parentNode) rootEl.parentNode.removeChild(rootEl);
+          }
+        };
+      }
+
+      // App route A -> app route B: late A must not replace B.
+      {
+        const packages = [
+          surfacePackage("pkg-a", "home", "A", "render-a"),
+          surfacePackage("pkg-b", "home", "B", "render-b")
+        ];
+        const dispatcher = createDeferredDispatcher();
+        const probe = await mountProbe(dispatcher, {
+          packages,
+          routePluginSurface: { packageName: "pkg-a", surfaceId: "home" }
+        });
+        assert.equal(probe.selected?.routeKey, "pkg-a/home");
+        assert.equal(probe.selected?.phase, "rendering");
+
+        await probe.setProps({
+          packages,
+          routePluginSurface: { packageName: "pkg-b", surfaceId: "home" }
+        });
+        assert.equal(probe.selected?.routeKey, "pkg-b/home");
+        assert.equal(probe.selected?.phase, "rendering");
+
+        await probe.resolve("render-b", "pkg-b", "home");
+        assert.equal(probe.selected?.routeKey, "pkg-b/home");
+        assert.equal(probe.selected?.phase, "rendered");
+        assert.equal(probe.selected?.snapshot?.root?.props?.title, "pkg-b");
+
+        await probe.resolve("render-a", "pkg-a", "home");
+        assert.equal(probe.selected?.routeKey, "pkg-b/home");
+        assert.equal(probe.selected?.phase, "rendered");
+        assert.equal(probe.selected?.snapshot?.root?.props?.title, "pkg-b");
+        await probe.unmount();
+      }
+
+      // Settings route A -> settings route B: late A must not replace B.
+      {
+        const packages = [
+          surfacePackage("cfg-a", "prefs", "SA", "render-sa", "settings"),
+          surfacePackage("cfg-b", "prefs", "SB", "render-sb", "settings")
+        ];
+        const dispatcher = createDeferredDispatcher();
+        const probe = await mountProbe(dispatcher, {
+          packages,
+          routeSettingsPackageName: "cfg-a",
+          routeSettingsSurfaceId: "prefs"
+        });
+        assert.equal(probe.selected?.routeKey, "cfg-a/settings/prefs");
+        assert.equal(probe.selected?.phase, "rendering");
+
+        await probe.setProps({
+          packages,
+          routeSettingsPackageName: "cfg-b",
+          routeSettingsSurfaceId: "prefs"
+        });
+        assert.equal(probe.selected?.routeKey, "cfg-b/settings/prefs");
+
+        await probe.resolve("render-sb", "cfg-b", "prefs");
+        assert.equal(probe.selected?.routeKey, "cfg-b/settings/prefs");
+        assert.equal(probe.selected?.phase, "rendered");
+
+        await probe.resolve("render-sa", "cfg-a", "prefs");
+        assert.equal(probe.selected?.routeKey, "cfg-b/settings/prefs");
+        assert.equal(probe.selected?.phase, "rendered");
+        assert.equal(probe.selected?.snapshot?.root?.props?.title, "cfg-b");
+        await probe.unmount();
+      }
+
+      // App route A -> settings route B: late app A must not replace settings B.
+      {
+        const packages = [
+          surfacePackage("pkg-a", "home", "A", "render-app-a"),
+          surfacePackage("cfg-b", "prefs", "SB", "render-set-b", "settings")
+        ];
+        const dispatcher = createDeferredDispatcher();
+        const probe = await mountProbe(dispatcher, {
+          packages,
+          routePluginSurface: { packageName: "pkg-a", surfaceId: "home" }
+        });
+        assert.equal(probe.selected?.routeKey, "pkg-a/home");
+
+        await probe.setProps({
+          packages,
+          routePluginSurface: undefined,
+          routeSettingsPackageName: "cfg-b",
+          routeSettingsSurfaceId: "prefs"
+        });
+        assert.equal(probe.selected?.routeKey, "cfg-b/settings/prefs");
+
+        await probe.resolve("render-set-b", "cfg-b", "prefs");
+        assert.equal(probe.selected?.routeKey, "cfg-b/settings/prefs");
+        assert.equal(probe.selected?.phase, "rendered");
+
+        await probe.resolve("render-app-a", "pkg-a", "home");
+        assert.equal(probe.selected?.routeKey, "cfg-b/settings/prefs");
+        assert.equal(probe.selected?.phase, "rendered");
+        assert.equal(probe.selected?.snapshot?.root?.props?.title, "cfg-b");
+        await probe.unmount();
+      }
+    }
+
+    // Stale completion helper rejects mismatched keys without running apply.
+    let ran = false;
+    assert.equal(applyPluginRouteCompletionIfCurrent("current", "stale", () => { ran = true; }), false);
+    assert.equal(ran, false);
+    assert.equal(applyPluginRouteCompletionIfCurrent("current", "current", () => { ran = true; }), true);
+    assert.equal(ran, true);
+
+    // Route projection diagnostics from Hub package rows only.
+    const missing = projectPluginAppRoute({
+      packages: [],
+      entityLoadStatus: { package: "loaded" },
+      routePluginSurface: { packageName: "missing", surfaceId: "home" }
+    });
+    assert.match(missing.routePluginSurfaceDiagnostic, /No package named missing/);
+
+    const settingsMissing = projectPluginSettingsRoute({
+      packages: [],
+      availablePackages: [],
+      entityLoadStatus: { package: "loaded" },
+      routeSettingsPackageName: "missing",
+      routeSettingsSurfaceId: "cfg"
+    });
+    assert.match(settingsMissing.routeSettingsSurfaceDiagnostic, /No package named missing/);
+
+    // Stale spawn list response ignored (generation/target mismatch).
+    const form = spawnSessionFormForTarget({ id: "t1", label: "T1" }, 1);
+    assert.equal(
+      applySpawnSessionListResult(form, { targetId: "t1", listGeneration: 2 }, {
+        accepted: true,
+        sessionTypes: [{ session_type_id: "a", label: "A", available: true }]
+      }),
+      undefined
+    );
+    const ready = applySpawnSessionListResult(form, { targetId: form.targetId, listGeneration: 1 }, {
+      accepted: true,
+      sessionTypes: [{ session_type_id: "agent", label: "Agent", available: true }]
+    });
+    assert.equal(ready.listStatus, "ready");
+    assert.equal(ready.sessionTypeId, "agent");
+    const rejectedSpawn = applySpawnSessionListResult(form, { targetId: form.targetId, listGeneration: 1 }, {
+      accepted: false,
+      reason: "spawn list failed"
+    });
+    assert.equal(rejectedSpawn.listStatus, "error");
+    assert.match(rejectedSpawn.error, /spawn list failed/);
+
+    // Session-type submit structural gate + rejection keeps draft.
+    assert.equal(sessionTypeFormIsStructurallyComplete(createSessionTypeForm("agent")), false);
+    const complete = { ...applySessionTypeName(createSessionTypeForm("agent"), "claude"), command: "bin/init.sh" };
+    assert.equal(sessionTypeFormIsStructurallyComplete(complete), true);
+    const rejectedType = rejectedSessionTypeForm(
+      { ...complete, submitting: true },
+      { accepted: false, reason: "Hub rejected" }
+    );
+    assert.equal(rejectedType.submitting, false);
+    assert.equal(rejectedType.error, "Hub rejected");
+    assert.equal(rejectedType.label, "claude");
+
+    // Package install feedback (success / rejection).
+    assert.equal(
+      packageActionFeedback({ accepted: false, reason: "install failed" }).color,
+      "danger"
+    );
+    const acceptedInstall = packageActionFeedback({
+      accepted: true,
+      result: {
+        request_type: "install_package_local_path",
+        package_decision: { package_name: "demo", action: "install", state: "installed" }
+      }
+    });
+    assert.equal(acceptedInstall.color, "success");
+    assert.match(acceptedInstall.message, /demo/);
+
+    // Presentation dismissal clears only the targeted key.
+    const scopeKey = JSON.stringify(["local", "pkg", "surf"]);
+    const dismissed = clearPresentationValue(
+      { [scopeKey]: { dialog: true, other: true } },
+      { hubId: "local", packageName: "pkg", surfaceId: "surf" },
+      "dialog"
+    );
+    assert.deepEqual(dismissed[scopeKey], { other: true });
+  } finally {
+    await pureVite.close();
+  }
+}
 
 assert.match(main, /import App from "\.\/App"/);
 assert.match(main, /<App \/>/);
@@ -974,7 +1501,8 @@ assert.match(app, /openPackageNavigation/);
 assert.doesNotMatch(app, /installedApps\.slice\(0, 5\)/);
 assert.match(app, /window\.history\.pushState\(\{ botsterRoute: route \}/);
 assert.match(app, /window\.addEventListener\("popstate", syncViewFromLocation\)/);
-assert.match(app, /lastPluginRouteRenderKey/);
+assert.match(app, /claimedPluginRouteKey/);
+assert.match(app, /applyPluginRouteCompletionIfCurrent/);
 assert.match(app, /routePluginSurfaceDiagnostic/);
 assert.match(app, /data-testid="plugin-settings-route"/);
 assert.match(app, /IonModal/);
@@ -1002,20 +1530,20 @@ assert.match(app, /pullProductionEntity\("app", \{ family: "botster-web\.app" \}
 assert.match(app, /window\.open\(localUrl, "_blank", "noopener,noreferrer"\)/);
 assert.match(app, /export function AppListItem/);
 assert.match(app, /export function PluginNavigationShortcuts/);
-assert.match(app, /<PluginNavigationShortcuts\s+[\s\S]*entries=\{packageNavigationShortcuts\}[\s\S]*onOpen=\{openPackageNavigation\}/);
+assert.match(app, /<PluginNavigationShortcuts\s+[\s\S]*entries=\{packageNavigationShortcuts\}[\s\S]*onOpen=\{onOpenPackageNavigation\}/);
 assert.doesNotMatch(app, /packageNavigation(?:Shortcuts)?\.slice\(0,\s*8\)/);
 assert.match(app, /appSurfacePackages\.get\(stringValue\(app\.package_name, ""\)\)/);
 assert.match(app, /packageAppSurfaces\(app\)/);
 assert.match(app, /packageSettingsSurfaces\(app\)/);
 assert.match(app, /navigateToPluginSurface\(packageName, surfaceId\)/);
-assert.match(app, /runtimeClient\.actions\.dispatch\(\{ origin: "ui_node", action: routePluginLaunchAction \}\)/);
+assert.match(app, /runtimeClient\.actions\.dispatch\(\{ origin: "ui_node", action: launchAction \}\)/);
 assert.match(app, /surfaceLaunchAction\(surface\)/);
-assert.match(app, /const routePluginCanonicalSurfaceRecord = routePluginPackage && routePluginSurface && !routePluginRequestedSurfaceRecord/);
+assert.match(app, /const routePluginCanonicalSurfaceRecord = routePluginPackage && !routePluginRequestedSurfaceRecord/);
 assert.match(app, /const routePluginSurfaceRecord = routePluginRequestedSurfaceRecord \?\? routePluginCanonicalSurfaceRecord/);
-assert.match(app, /surfaceId: routePluginEffectiveSurfaceId \?\? routePluginSurface\.surfaceId/);
+assert.match(app, /surfaceId: appRoute\.routePluginEffectiveSurfaceId \?\? routePluginSurface\.surfaceId/);
 assert.doesNotMatch(app, /const packagesWithUi|const packagesWithoutUi/);
 assert.match(app, /aria-label="Rendered app surface"/);
-assert.match(app, /routePluginSurface \? \(\s*<PluginSurfaceRoutePage/);
+assert.match(app, /if \(routePluginSurface\) \{[\s\S]*<PluginSurfaceRoutePage/);
 assert.match(app, /const pluginAppRouteActive = activeView === "apps" && Boolean\(routePluginSurface\)/);
 assert.doesNotMatch(app, /terminal-session-back|aria-label="Back to sessions"/);
 assert.match(app, /aria-label="Back to Apps"/);
