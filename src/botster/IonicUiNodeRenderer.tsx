@@ -22,7 +22,11 @@ import {
   IonTitle,
   IonToolbar
 } from "@ionic/react";
-import { realizeBindListDescendantId } from "@trybotster/ui-contract";
+import {
+  projectEntityOptions,
+  realizeBindListDescendantId,
+  type UiEntityOptionsSource
+} from "@trybotster/ui-contract";
 import { Fragment, useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 
 import { defaultUiCapabilitySet } from "./capabilities";
@@ -663,6 +667,9 @@ type FormRenderState = {
   draft: Record<string, unknown>;
   setDraft: (update: (current: Record<string, unknown>) => Record<string, unknown>) => void;
   actionResult?: UiNodeRenderOptions["actionResult"];
+  store: EntityFrameStore;
+  renderOptions: UiNodeRenderOptions;
+  row?: RowContext;
 };
 
 type SelectOption = {
@@ -670,7 +677,106 @@ type SelectOption = {
   value: unknown;
   label: string;
   disabled: boolean;
+  metadata?: Record<string, string>;
 };
+
+function isEntityOptionsSource(value: unknown): value is UiEntityOptionsSource {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.$kind === "entity_options" && typeof record.source === "string" && typeof record.value_field === "string";
+}
+
+function entityFamilyFromAuthoredPath(path: string): string | undefined {
+  if (!path.startsWith("/")) return undefined;
+  const rest = path.slice(1);
+  if (!rest || rest.includes("/")) return undefined;
+  return rest;
+}
+
+function recordsById(store: EntityFrameStore, family: string): Record<string, JsonObject> {
+  const map: Record<string, JsonObject> = {};
+  for (const record of store.list(family)) {
+    map[record.id] = record as JsonObject;
+  }
+  return map;
+}
+
+function projectEntitySelectOptions(
+  store: EntityFrameStore,
+  descriptor: UiEntityOptionsSource,
+  selection: unknown
+): { options: SelectOption[]; selectionValid: boolean } {
+  const sourceFamily = entityFamilyFromAuthoredPath(descriptor.source);
+  const excludeFamily = descriptor.exclude
+    ? entityFamilyFromAuthoredPath(descriptor.exclude.source)
+    : undefined;
+  const sourceRecords = sourceFamily ? recordsById(store, sourceFamily) : {};
+  const excludeRecords = excludeFamily ? recordsById(store, excludeFamily) : {};
+  const selectionValue = typeof selection === "string" ? selection : null;
+  const projection = projectEntityOptions(descriptor, sourceRecords, excludeRecords, selectionValue);
+  return {
+    selectionValid: projection.selection_valid,
+    options: projection.options.map((option) => ({
+      key: option.value,
+      value: option.value,
+      label: formatEntityOptionLabel(option.label, option.metadata),
+      disabled: false,
+      metadata: option.metadata
+    }))
+  };
+}
+
+function formatEntityOptionLabel(label: string, metadata?: Record<string, string>): string {
+  if (!metadata) return label;
+  const extras = Object.entries(metadata)
+    .filter(([field, text]) => field !== Object.keys(metadata)[0] && text && text !== label)
+    .map(([, text]) => text);
+  // First display_field is already the primary label; remaining metadata is secondary copy.
+  const uniqueExtras = extras.filter((text, index) => extras.indexOf(text) === index && text !== label);
+  return uniqueExtras.length > 0 ? `${label} · ${uniqueExtras.join(" · ")}` : label;
+}
+
+function entitySelectSelectionInvalid(
+  store: EntityFrameStore,
+  props: Record<string, unknown>,
+  value: unknown
+): boolean {
+  if (!isEntityOptionsSource(props.options_source)) return false;
+  if (typeof value !== "string" || value.length === 0) return false;
+  return !projectEntitySelectOptions(store, props.options_source, value).selectionValid;
+}
+
+function formHasInvalidEntitySelects(
+  children: UiChild[],
+  store: EntityFrameStore,
+  options: UiNodeRenderOptions,
+  draft: Record<string, unknown>,
+  row?: RowContext
+): boolean {
+  let invalid = false;
+  const visit = (node: RealizedUiNode, currentRow?: RowContext) => {
+    if (invalid) return;
+    const props = resolvedProps(node, store, options, currentRow);
+    if (node.type === "select") {
+      const name = coreControlName(node, props);
+      if (entitySelectSelectionInvalid(store, props, draft[name])) {
+        invalid = true;
+        return;
+      }
+    }
+    for (const child of [...(node.children ?? []), ...Object.values(node.slots ?? {}).flat()]) {
+      for (const resolved of resolveChild(child, store, options, currentRow)) {
+        visit(resolved.node, resolved.row);
+      }
+    }
+  };
+  for (const child of children) {
+    for (const resolved of resolveChild(child, store, options, row)) {
+      visit(resolved.node, resolved.row);
+    }
+  }
+  return invalid;
+}
 
 function uiNodeGap(value: unknown): string | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -887,18 +993,19 @@ function renderCoreControl({
   node,
   props,
   form,
+  store,
   optionNodes = []
 }: {
   node: RealizedUiNode;
   props: Record<string, unknown>;
   form?: FormRenderState;
+  store?: EntityFrameStore;
   optionNodes?: RealizedUiNode[];
 }): ReactNode {
   const name = coreControlName(node, props);
   const label = readString(props.label, name);
   const description = readString(props.description, undefined);
   const fieldErrors = node.id ? form?.actionResult?.field_errors?.[node.id] ?? [] : [];
-  const error = fieldErrors[0] ?? readString(props.error, undefined);
   const required = readBoolean(props.required);
   const disabled = readBoolean(props.disabled) || !form;
   const value = form ? form.draft[name] : coreControlInitialValue(node, props);
@@ -906,7 +1013,25 @@ function renderCoreControl({
   const setValue = (nextValue: unknown) => {
     form?.setDraft((current) => ({ ...current, [name]: nextValue }));
   };
-  const selectOptions = node.type === "select" ? readSelectOptions(props, optionNodes) : [];
+
+  let selectOptions: SelectOption[] = [];
+  let selectionInvalid = false;
+  let selectionInvalidMessage: string | undefined;
+  if (node.type === "select") {
+    const optionsSource = props.options_source;
+    if (isEntityOptionsSource(optionsSource) && store) {
+      const projected = projectEntitySelectOptions(store, optionsSource, value);
+      selectOptions = projected.options;
+      selectionInvalid = entitySelectSelectionInvalid(store, props, value);
+      if (selectionInvalid) {
+        selectionInvalidMessage = "Selected option is no longer available";
+      }
+    } else {
+      selectOptions = readSelectOptions(props, optionNodes);
+    }
+  }
+
+  const error = fieldErrors[0] ?? selectionInvalidMessage ?? readString(props.error, undefined);
 
   const control =
     node.type === "textarea" ? (
@@ -926,6 +1051,7 @@ function renderCoreControl({
         value={value}
         disabled={disabled}
         onIonChange={(event) => setValue(event.detail.value)}
+        data-selection-invalid={selectionInvalid ? "true" : "false"}
       >
         {selectOptions.map((option) => (
           <IonSelectOption disabled={option.disabled} key={option.key} value={option.value}>
@@ -950,6 +1076,7 @@ function renderCoreControl({
       key={node.id}
       className={error ? "uinode-field invalid" : "uinode-field"}
       data-ui-node-id={node.id}
+      data-selection-invalid={selectionInvalid ? "true" : undefined}
     >
       {node.type === "textarea" || node.type === "checkbox" ? (
         <IonLabel position="stacked">{labelText}</IonLabel>
@@ -957,7 +1084,7 @@ function renderCoreControl({
       {control}
       {description ? <IonNote slot="helper">{description}</IonNote> : null}
       {error ? (
-        <IonNote className="uinode-field-error" color="danger">
+        <IonNote className="uinode-field-error" color="danger" data-testid={selectionInvalid ? "entity-options-invalid" : undefined}>
           {error}
         </IonNote>
       ) : null}
@@ -996,6 +1123,8 @@ function UiNodeForm({
       setDraft((current) => ({ ...current, ...actionResult.normalized_values }));
     }
   }
+  // Re-project on every render so entity frame updates invalidate without a surface refresh.
+  const hasInvalidControl = formHasInvalidEntitySelects(children, store, options, draft, row);
   const submitDispatch: UiNodeActionDispatch = {
     action: submitAction,
     node,
@@ -1005,16 +1134,28 @@ function UiNodeForm({
   options.collectAction?.(submitDispatch);
 
   return (
-    <form className="uinode-form" data-ui-node-id={node.id}>
-      {renderChildren(children, store, options, row, { draft, setDraft, actionResult })}
+    <form className="uinode-form" data-ui-node-id={node.id} data-form-invalid={hasInvalidControl ? "true" : "false"}>
+      {renderChildren(children, store, options, row, {
+        draft,
+        setDraft,
+        actionResult,
+        store,
+        renderOptions: options,
+        row
+      })}
       {actionResult?.form_errors?.map((error) => (
         <IonNote color="danger" className="uinode-form-error" key={error}>{error}</IonNote>
       ))}
       <IonButton
         data-action-id={submitAction.id}
-        disabled={submitAction.disabled}
+        disabled={submitAction.disabled || hasInvalidControl}
         type="button"
-        onClick={() => options.dispatchAction?.({ ...submitDispatch, values: draft as UiNodeActionDispatch["values"] })}
+        onClick={() => {
+          // Fail closed at click time too: entity frames may have landed after last paint.
+          if (submitAction.disabled) return;
+          if (formHasInvalidEntitySelects(children, store, options, draft, row)) return;
+          options.dispatchAction?.({ ...submitDispatch, values: draft as UiNodeActionDispatch["values"] });
+        }}
       >
         {readString(props.submit_label, "Submit")}
       </IonButton>
@@ -1442,6 +1583,7 @@ function renderNode(
         node,
         props,
         form,
+        store,
         optionNodes: readSlot(node, "options").flatMap((child) =>
           resolveChild(child, store, options, row).map((resolved) => resolved.node)
         )

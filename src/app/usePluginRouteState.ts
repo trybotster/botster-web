@@ -1,11 +1,16 @@
 /** Plugin app/settings route projection and Hub-driven surface render effects. */
 
-import { useEffect, useRef, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } from "react";
 
 import { actionFailureDiagnostic, type ConnectionDiagnostic } from "../botster/connectionDiagnostics";
 import type { createBotsterWebClient } from "../botster/client";
 import type { HubEntityLoadStatus } from "../botster/LocalHubFirstScreen";
 import type { HubEntityLoadKey } from "./hubLifecycle";
+import {
+  collectSurfaceEntityOptionFamilies,
+  diffEntityOptionsDemand,
+  releaseEntityOptionsDemand
+} from "./entityOptionsDemand";
 import { surfaceTitle } from "./packageSurfaces";
 import type { SelectedPluginSurface } from "./pluginSurfaceState";
 import {
@@ -29,6 +34,7 @@ export function usePluginRouteState(options: {
   routePluginSurface?: PluginRouteTarget;
   routeSettingsPackageName?: string;
   routeSettingsSurfaceId?: string;
+  selectedPluginSurface?: SelectedPluginSurface;
   recordDiagnostic: (diagnostic: ConnectionDiagnostic | undefined) => void;
   updateLocalState: (patch: Record<string, unknown>) => void;
   setSelectedPluginSurface: Dispatch<SetStateAction<SelectedPluginSurface | undefined>>;
@@ -41,6 +47,7 @@ export function usePluginRouteState(options: {
     routePluginSurface,
     routeSettingsPackageName,
     routeSettingsSurfaceId,
+    selectedPluginSurface,
     recordDiagnostic,
     updateLocalState,
     setSelectedPluginSurface
@@ -48,6 +55,48 @@ export function usePluginRouteState(options: {
 
   /** Authoritative claim for in-flight/app-visible plugin route render. */
   const claimedPluginRouteKey = useRef<string | undefined>(undefined);
+  /** Families demanded for the current claim (surface-scoped + process-wide session chrome). */
+  const demandedFamiliesRef = useRef<{ routeKey?: string; families: Set<string> }>({
+    families: new Set()
+  });
+
+  const demandEntityFamily = useCallback((family: string) => {
+    void runtimeClient.entities.pull({ family }).catch(() => undefined);
+  }, [runtimeClient]);
+
+  const releaseEntityFamily = useCallback((family: string) => {
+    void runtimeClient.hub.send({ kind: "entity_release", payload: { family } }).catch(() => undefined);
+  }, [runtimeClient]);
+
+  const syncEntityOptionsDemand = useCallback((routeKey: string | undefined, root: unknown) => {
+    const desired = routeKey ? collectSurfaceEntityOptionFamilies(root) : [];
+    const previous = demandedFamiliesRef.current;
+
+    if (previous.routeKey !== routeKey) {
+      for (const family of releaseEntityOptionsDemand(previous.families)) {
+        releaseEntityFamily(family);
+      }
+      demandedFamiliesRef.current = { routeKey, families: new Set() };
+    }
+
+    if (!routeKey) {
+      demandedFamiliesRef.current = { families: new Set() };
+      return;
+    }
+
+    const held = demandedFamiliesRef.current.families;
+    const diff = diffEntityOptionsDemand(desired, held);
+    for (const family of diff.demand) {
+      demandEntityFamily(family);
+    }
+    for (const family of diff.release) {
+      releaseEntityFamily(family);
+    }
+    demandedFamiliesRef.current = {
+      routeKey,
+      families: new Set(diff.nextHeld)
+    };
+  }, [demandEntityFamily, releaseEntityFamily]);
 
   const appRoute = projectPluginAppRoute({
     packages,
@@ -65,8 +114,9 @@ export function usePluginRouteState(options: {
   useEffect(() => {
     if (!appRoute.routePluginSurfaceKey && !settingsRoute.routeSettingsSurfaceKey) {
       claimedPluginRouteKey.current = undefined;
+      syncEntityOptionsDemand(undefined, undefined);
     }
-  }, [appRoute.routePluginSurfaceKey, settingsRoute.routeSettingsSurfaceKey]);
+  }, [appRoute.routePluginSurfaceKey, settingsRoute.routeSettingsSurfaceKey, syncEntityOptionsDemand]);
 
   useEffect(() => {
     if (appRoute.routePluginSurfaceDiagnostic) return;
@@ -89,7 +139,11 @@ export function usePluginRouteState(options: {
     applyPluginRouteCompletionIfCurrent(
       claimedPluginRouteKey.current,
       routeKey,
-      () => setSelectedPluginSurface(pluginRouteRenderStarted(surfaceRecord, routeKey))
+      () => {
+        setSelectedPluginSurface(pluginRouteRenderStarted(surfaceRecord, routeKey));
+        // Clear surface-scoped demand while the new claim is loading.
+        syncEntityOptionsDemand(routeKey, undefined);
+      }
     );
 
     void runtimeClient.actions.dispatch({ origin: "ui_node", action: launchAction }).then((result) => {
@@ -104,6 +158,9 @@ export function usePluginRouteState(options: {
         setSelectedPluginSurface(renderedSurface);
         updateLocalState(pluginSurfaceStatusLocalState(renderedSurface));
         recordDiagnostic(actionFailureDiagnostic(launchAction, result));
+        if (renderedSurface.phase === "rendered" && renderedSurface.snapshot?.root) {
+          syncEntityOptionsDemand(routeKey, renderedSurface.snapshot.root);
+        }
       });
     });
   }, [
@@ -116,6 +173,7 @@ export function usePluginRouteState(options: {
     routePluginSurface,
     runtimeClient,
     setSelectedPluginSurface,
+    syncEntityOptionsDemand,
     updateLocalState
   ]);
 
@@ -139,7 +197,10 @@ export function usePluginRouteState(options: {
     applyPluginRouteCompletionIfCurrent(
       claimedPluginRouteKey.current,
       routeKey,
-      () => setSelectedPluginSurface(pluginRouteRenderStarted(surfaceRecord, routeKey))
+      () => {
+        setSelectedPluginSurface(pluginRouteRenderStarted(surfaceRecord, routeKey));
+        syncEntityOptionsDemand(routeKey, undefined);
+      }
     );
 
     void runtimeClient.actions.dispatch({ origin: "ui_node", action: launchAction }).then((result) => {
@@ -153,6 +214,9 @@ export function usePluginRouteState(options: {
         setSelectedPluginSurface(renderedSurface);
         updateLocalState(pluginSurfaceStatusLocalState(renderedSurface));
         recordDiagnostic(actionFailureDiagnostic(launchAction, result));
+        if (renderedSurface.phase === "rendered" && renderedSurface.snapshot?.root) {
+          syncEntityOptionsDemand(routeKey, renderedSurface.snapshot.root);
+        }
       });
     });
   }, [
@@ -165,8 +229,20 @@ export function usePluginRouteState(options: {
     settingsRoute.routeSettingsSurfaceDiagnostic,
     settingsRoute.routeSettingsSurfaceKey,
     settingsRoute.routeSettingsSurfaceRecord,
+    syncEntityOptionsDemand,
     updateLocalState
   ]);
+
+  // Accepted action results may replace the surface root with new options_source families.
+  // Demand stays claim-scoped: only the current claim may apply or refresh demand.
+  useEffect(() => {
+    const routeKey = selectedPluginSurface?.routeKey;
+    if (!routeKey) return;
+    if (selectedPluginSurface?.phase !== "rendered" || !selectedPluginSurface.snapshot?.root) return;
+    applyPluginRouteCompletionIfCurrent(claimedPluginRouteKey.current, routeKey, () => {
+      syncEntityOptionsDemand(routeKey, selectedPluginSurface.snapshot?.root);
+    });
+  }, [selectedPluginSurface, syncEntityOptionsDemand]);
 
   return {
     routePluginSurfaceKey: appRoute.routePluginSurfaceKey,

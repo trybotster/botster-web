@@ -100,6 +100,15 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
   let daemonEventSubscription: { unsubscribe(): void } | undefined;
   let sessionEntitySubscription: { ready: Promise<void>; unsubscribe(): void } | undefined;
   let sessionTypeEntitySubscription: { ready: Promise<void>; unsubscribe(): void } | undefined;
+  /**
+   * Held generic entity-frame subscriptions for entity-options (and similar) demand.
+   * Refcounted so claim-scoped demand can release without tearing down process-wide chrome.
+   * Reconnect re-issues these via the WebRTC held-subscribe path, not entity_pull replay.
+   */
+  const genericEntitySubscriptions = new Map<
+    string,
+    { refCount: number; subscription: { ready: Promise<void>; unsubscribe(): void } }
+  >();
   const ensureSessionEntitySubscription = () => {
     if (!sessionEntitySubscription) {
       if (!bridge.subscribeEntityFrames) {
@@ -117,6 +126,37 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
       sessionTypeEntitySubscription = bridge.subscribeEntityFrames(sessionTypeFamily, emitEntityFrame);
     }
     return sessionTypeEntitySubscription.ready;
+  };
+  const ensureGenericEntitySubscription = (entityType: string) => {
+    if (entityType === sessionFamily) {
+      return ensureSessionEntitySubscription();
+    }
+    if (entityType === sessionTypeFamily) {
+      return ensureSessionTypeEntitySubscription();
+    }
+    const existing = genericEntitySubscriptions.get(entityType);
+    if (existing) {
+      existing.refCount += 1;
+      return existing.subscription.ready;
+    }
+    if (!bridge.subscribeEntityFrames) {
+      throw new Error(`entity subscription for ${entityType} requires the WebRTC entity-frame delivery path`);
+    }
+    const subscription = bridge.subscribeEntityFrames(entityType, emitEntityFrame);
+    genericEntitySubscriptions.set(entityType, { refCount: 1, subscription });
+    return subscription.ready;
+  };
+  const releaseGenericEntitySubscription = (entityType: string) => {
+    // Session chrome stays process-wide; entity-options demand must not unsubscribe it.
+    if (entityType === sessionFamily || entityType === sessionTypeFamily) {
+      return;
+    }
+    const existing = genericEntitySubscriptions.get(entityType);
+    if (!existing) return;
+    existing.refCount -= 1;
+    if (existing.refCount > 0) return;
+    existing.subscription.unsubscribe();
+    genericEntitySubscriptions.delete(entityType);
   };
 
   return {
@@ -138,6 +178,10 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
       sessionEntitySubscription = undefined;
       sessionTypeEntitySubscription?.unsubscribe();
       sessionTypeEntitySubscription = undefined;
+      for (const entry of genericEntitySubscriptions.values()) {
+        entry.subscription.unsubscribe();
+      }
+      genericEntitySubscriptions.clear();
       ingress = undefined;
       bridge.disconnect?.();
     },
@@ -178,6 +222,17 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
               } satisfies EntityFrame
             });
           }
+        } else if (typeof request.family === "string" && request.family.length > 0) {
+          // Entity-options (and similar) demand: held subscribe for arbitrary admitted families.
+          await ensureGenericEntitySubscription(request.family);
+        }
+        return;
+      }
+
+      if (frame.kind === "entity_release") {
+        const request = frame.payload as { family?: unknown };
+        if (typeof request.family === "string" && request.family.length > 0) {
+          releaseGenericEntitySubscription(request.family);
         }
         return;
       }
@@ -340,7 +395,7 @@ interface CanonicalEntityProjection {
   record(value: unknown): (Record<string, unknown> & { id: string }) | undefined;
 }
 
-function canonicalEntityProjection(entityType: string): CanonicalEntityProjection | undefined {
+function canonicalEntityProjection(entityType: string): CanonicalEntityProjection {
   if (entityType === sessionFamily) {
     return {
       family: sessionFamily,
@@ -355,7 +410,18 @@ function canonicalEntityProjection(entityType: string): CanonicalEntityProjectio
     };
   }
 
-  return undefined;
+  // Plugin and other admitted families land as generic records so entity-options
+  // source/exclude maps can project through the shared store without a second cache.
+  return {
+    family: entityType,
+    record: (value) => genericPluginEntityRecord(value)
+  };
+}
+
+function genericPluginEntityRecord(value: unknown): (Record<string, unknown> & { id: string }) | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.id !== "string" || value.id.length === 0) return undefined;
+  return { ...value, id: value.id };
 }
 
 /**
@@ -377,7 +443,6 @@ export function entitySubscriptionDiagnosticFrame(frame: DaemonEntityFrame): Hub
 
 export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | undefined {
   const projection = canonicalEntityProjection(frame.entity_type);
-  if (!projection) return undefined;
 
   if (frame.type === "entity_snapshot") {
     return {
@@ -387,6 +452,16 @@ export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | u
         family: projection.family,
         sequence: frame.snapshot_seq,
         records: frame.items.flatMap((item) => {
+          // Specialized families validate strictly; generic items need a string id.
+          // Upsert injects frame.id when the entity body omits id (below).
+          if (projection.family !== sessionFamily && projection.family !== sessionTypeFamily && isRecord(item)) {
+            const withId =
+              typeof item.id === "string" && item.id.length > 0
+                ? item
+                : undefined;
+            const record = withId ? projection.record(withId) : undefined;
+            return record ? [record] : [];
+          }
           const record = projection.record(item);
           return record ? [record] : [];
         })
@@ -406,7 +481,17 @@ export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | u
   }
 
   if (frame.type === "entity_upsert") {
-    const record = projection.record(frame.entity);
+    let record = projection.record(frame.entity);
+    if (
+      !record &&
+      projection.family !== sessionFamily &&
+      projection.family !== sessionTypeFamily &&
+      isRecord(frame.entity) &&
+      typeof frame.id === "string" &&
+      frame.id.length > 0
+    ) {
+      record = { ...frame.entity, id: frame.id };
+    }
     if (!record) return undefined;
 
     return {

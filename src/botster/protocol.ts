@@ -5,6 +5,7 @@ export type HubControlFrameKind =
   | "hello_ack"
   | "subscribe"
   | "entity_pull"
+  | "entity_release"
   | "surface_subscribe"
   | "route_registry"
   | "ui_tree_snapshot"

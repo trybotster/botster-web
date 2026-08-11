@@ -79,6 +79,18 @@ const payloadContractPackageName = "botster.plugin-payload-contract";
 const payloadContractPackagePath = payloadContractMode
   ? resolvePayloadContractPackagePath()
   : undefined;
+const entityOptionsMode = process.env.BOTSTER_LIVE_ENTITY_OPTIONS === "1";
+const entityOptionsPackageName = "entity-options-reactive";
+const entityOptionsPackagePath = entityOptionsMode
+  ? resolveRequiredPackagePath(
+      [
+        process.env.BOTSTER_ENTITY_OPTIONS_PACKAGE_PATH,
+        join(packageRoot, "fixtures/entity-options-reactive")
+      ],
+      entityOptionsPackageName,
+      "BOTSTER_ENTITY_OPTIONS_PACKAGE_PATH"
+    )
+  : undefined;
 const echoProbe = "keys";
 const attachProbe = "botster-web-production-attach-probe";
 const productionSessionId = "web-prod";
@@ -240,6 +252,14 @@ try {
   }
   await openAppsView(page);
   await assertRemoteAccessSettingsDispatch(page, originalRemoteAccessValue);
+  if (entityOptionsMode) {
+    await exerciseEntityOptionsReactive(page);
+    assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+    assertRequiredWorkspacesProof();
+    await requestDaemonShutdown();
+    console.log("entity-options reactive live proof passed (webrtc)");
+    process.exit(0);
+  }
   if (contractMatrixMode) {
     await exercisePluginContractMatrix(page);
     if (payloadContractMode) {
@@ -1377,6 +1397,154 @@ async function waitForPluginSurfaceRequest(page, { packageName, surfaceId, actio
     { packageName, surfaceId, actionId, nodeId, values, payload },
     { timeout: 15_000 }
   );
+}
+
+async function exerciseEntityOptionsReactive(page) {
+  const packageName = entityOptionsPackageName;
+  const surfaceId = "entity-options-reactive.picker";
+  const itemFamily = "entity-options-reactive.item";
+  const excludeFamily = "entity-options-reactive.exclude";
+
+  await page.goto(new URL(`/packages/${packageName}/surfaces/${surfaceId}`, appUrl).toString(), {
+    waitUntil: "domcontentloaded"
+  });
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_render", package_name: packageName, surface_id: surfaceId },
+    "entity-options plugin_surface_render request"
+  );
+  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).waitFor({ timeout: 30_000 });
+  await page.locator("[data-ui-node-id='entity-options-select']").waitFor({ timeout: 30_000 });
+
+  // Demand path must subscribe both source and exclude families (held subscribe_entities).
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "subscribe_entities", entity_type: itemFamily },
+    "entity-options source family subscribe_entities"
+  );
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "subscribe_entities", entity_type: excludeFamily },
+    "entity-options exclude family subscribe_entities"
+  );
+
+  const select = page.locator("[data-ui-node-id='entity-options-select'] ion-select");
+  await page.waitForFunction(() => {
+    const options = [...globalThis.document.querySelectorAll("[data-ui-node-id='entity-options-select'] ion-select-option")];
+    return options.some((option) => (option.value ?? option.getAttribute("value")) === "opt-alpha");
+  }, undefined, { timeout: 30_000 }).catch((error) => {
+    throw new Error(`entity-options options never projected from snapshots: ${error.message}`);
+  });
+
+  const initialOptions = await readUiNodeSelectOptionValues(select);
+  if (!initialOptions.includes("opt-alpha") || !initialOptions.includes("opt-bravo")) {
+    throw new Error(`entity-options missing expected options: ${JSON.stringify(initialOptions)}`);
+  }
+
+  // Select a concrete option value in the real Ionic control.
+  await setUiNodeSelectValue(select, "opt-alpha");
+
+  // While the form remains open, remove that value via package action + held-subscribe reconnect.
+  const openEventsBeforeRemove = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length
+  );
+  await page.locator("[data-action-id='entity-options.remove']").click();
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_action", package_name: packageName, surface_id: surfaceId },
+    "entity-options.remove plugin_surface_action request"
+  );
+
+  const closed = await page.evaluate(
+    () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
+  );
+  if (!closed) {
+    throw new Error("entity-options live proof could not close the live WebRTC data channel for resubscribe");
+  }
+  await page.waitForFunction(
+    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before,
+    { before: openEventsBeforeRemove },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(`entity-options reconnect never reopened the data channel: ${error.message}`);
+  });
+
+  // Fresh snapshot must drop opt-alpha and mark the draft selection invalid without surface re-render.
+  await page.waitForFunction(() => {
+    const form = globalThis.document.querySelector("[data-ui-node-id='entity-options-form']");
+    const field = globalThis.document.querySelector("[data-ui-node-id='entity-options-select']");
+    return form?.getAttribute("data-form-invalid") === "true"
+      || field?.getAttribute("data-selection-invalid") === "true"
+      || !!globalThis.document.querySelector("[data-testid='entity-options-invalid']");
+  }, undefined, { timeout: 30_000 }).catch((error) => {
+    throw new Error(`entity-options invalid selection UI never appeared after remove+reconnect: ${error.message}`);
+  });
+
+  const optionsAfterRemove = await readUiNodeSelectOptionValues(select);
+  if (optionsAfterRemove.includes("opt-alpha")) {
+    throw new Error(`entity-options still lists removed value: ${JSON.stringify(optionsAfterRemove)}`);
+  }
+
+  // Stale submit must not produce a successful plugin_surface_action with the dead value.
+  const eventsBeforeStale = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length
+  );
+  await page.locator("[data-action-id='entity-options.submit']").click({ force: true });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const staleSubmit = await page.evaluate(({ before, packageName }) => {
+    const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(before);
+    return entries.filter((entry) =>
+      entry.kind === "daemon_request"
+      && entry.payload?.type === "plugin_surface_action"
+      && entry.payload?.package_name === packageName
+      && entry.payload?.request?.action_id === "entity-options.submit"
+      && entry.payload?.request?.values?.option === "opt-alpha"
+    );
+  }, { before: eventsBeforeStale, packageName });
+  if (staleSubmit.length > 0) {
+    throw new Error(`entity-options dispatched stale submit with dead value: ${JSON.stringify(staleSubmit)}`);
+  }
+
+  // Choose a valid replacement and submit exact value.
+  await setUiNodeSelectValue(select, "opt-charlie");
+  await page.waitForFunction(() => {
+    const form = globalThis.document.querySelector("[data-ui-node-id='entity-options-form']");
+    return form?.getAttribute("data-form-invalid") !== "true";
+  }, undefined, { timeout: 10_000 });
+
+  const eventsBeforeValid = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length
+  );
+  await page.locator("[data-action-id='entity-options.submit']").click();
+  const validSubmit = await page.waitForFunction(({ before, packageName }) => {
+    const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(before);
+    return entries.find((entry) =>
+      entry.kind === "daemon_request"
+      && entry.payload?.type === "plugin_surface_action"
+      && entry.payload?.package_name === packageName
+      && entry.payload?.request?.action_id === "entity-options.submit"
+      && entry.payload?.request?.values?.option === "opt-charlie"
+    ) ?? null;
+  }, { before: eventsBeforeValid, packageName }, { timeout: 15_000 }).then((handle) => handle.jsonValue());
+
+  const requestValues = validSubmit?.payload?.request?.values;
+  if (requestValues?.option !== "opt-charlie") {
+    throw new Error(
+      `entity-options valid submit missing exact values.option=opt-charlie: ${JSON.stringify(validSubmit)}`
+    );
+  }
+
+  console.log(`entity-options-live-proof ${JSON.stringify({
+    package_name: packageName,
+    surface_id: surfaceId,
+    subscribed_families: [itemFamily, excludeFamily],
+    initial_options: initialOptions,
+    options_after_remove: optionsAfterRemove,
+    stale_submit_blocked: true,
+    submitted_value: requestValues.option
+  })}`);
 }
 
 async function exercisePayloadContract(page) {
@@ -5378,6 +5546,9 @@ async function startWebrtcPackageRuntime() {
   }
   if (payloadContractMode && payloadContractPackagePath) {
     await ensurePackageEnabled(payloadContractPackageName, payloadContractPackagePath);
+  }
+  if (entityOptionsMode && entityOptionsPackagePath) {
+    await ensurePackageEnabled(entityOptionsPackageName, entityOptionsPackagePath);
   }
   if (durableStateMode) {
     await seedDurableExitedSessions();

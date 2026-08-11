@@ -212,6 +212,7 @@ export default function App() {
     routePluginSurface,
     routeSettingsPackageName,
     routeSettingsSurfaceId,
+    selectedPluginSurface,
     recordDiagnostic,
     updateLocalState,
     setSelectedPluginSurface

@@ -17,6 +17,7 @@
     "smoke:live-packaged-protocol:durable": "npm run build && BOTSTER_LIVE_DURABLE_STATE=1 node scripts/live-packaged-protocol-harness.mjs",
     "smoke:plugin-contract-matrix": "npm run build && BOTSTER_LIVE_CONTRACT_MATRIX=1 node scripts/live-packaged-protocol-harness.mjs",
     "smoke:plugin-payload-contract": "npm run build && BOTSTER_LIVE_CONTRACT_MATRIX=1 BOTSTER_LIVE_PAYLOAD_CONTRACT=1 BOTSTER_PLUGIN_PAYLOAD_CONTRACT_PACKAGE_PATH=fixtures/plugin-payload-contract node scripts/live-packaged-protocol-harness.mjs",
+    "smoke:entity-options-reactive": "npm run build && BOTSTER_LIVE_ENTITY_OPTIONS=1 node scripts/live-packaged-protocol-harness.mjs",
     "smoke:mounted-terminal-keyboard": "node scripts/mounted-terminal-keyboard-smoke.mjs",
     "test": "node scripts/check-daemon-protocol-drift.mjs && node src/App.test.mjs",
     "lint": "node ./node_modules/eslint/bin/eslint.js .",
@@ -24,7 +25,7 @@
   },
   "dependencies": {
     "@ionic/react": "8.8.9",
-    "@trybotster/ui-contract": "0.3.1",
+    "@trybotster/ui-contract": "0.3.2",
     "ionicons": "8.0.13",
     "react": "19.2.7",
     "react-dom": "19.2.7"

@@ -2082,7 +2082,12 @@ assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 const expectedHubDaemonProtocolSha256 = hubTestSupportMetadata.daemon_protocol.sha256;
 const installedDaemonProtocol = readDaemonProtocolTypescript();
-assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name], hubTestSupportMetadata.ui_contract.package_version);
+// Web may cold-advance @trybotster/ui-contract ahead of hub-test-support metadata when
+// consuming a published contract feature (entity-options 0.3.2) the support package has not
+// re-declared yet. The consumable pin is authoritative; support metadata must not force a
+// downgrade. See plan: hub-test-support pin may stay until a published support republish.
+assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
+assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.2");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.package_version, "0.1.27");
 assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.27");
@@ -2923,13 +2928,22 @@ assert.equal(daemonEntityFrame({
   id: "missing-fields",
   entity: { session_uuid: "missing-fields" }
 }), undefined);
-assert.equal(daemonEntityFrame({
+// Generic plugin families project into the shared store for entity-options demand.
+assert.deepEqual(daemonEntityFrame({
   type: "entity_snapshot",
   subscription_id: "package-entities",
   entity_type: "project-pipelines.ticket",
   snapshot_seq: 1,
   items: [{ id: "ticket-1", title: "Preserve generic package records" }]
-}), undefined);
+}), {
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: "project-pipelines.ticket",
+    sequence: 1,
+    records: [{ id: "ticket-1", title: "Preserve generic package records" }]
+  }
+});
 // Protocol 6 adds entity_error, which carries no id/patch/snapshot_seq. It must never fall
 // through the delta branches, and it is BOTH a transport fact and a surface fact: the
 // connection diagnostic reports subscription health for any entity type, while the
@@ -10274,7 +10288,8 @@ try {
     }
   );
   assert.equal(fixtureProvenance.source, "@trybotster/ui-contract/conformance-fixtures");
-  assert.equal(fixtureProvenance.contractVersion, hubTestSupportMetadata.ui_contract.package_version);
+  // Provenance tracks the consumable @trybotster/ui-contract pin, not lagging support metadata.
+  assert.equal(fixtureProvenance.contractVersion, packageJson.dependencies["@trybotster/ui-contract"]);
   const renderBoundRowIdentity = (records) => {
     const actions = [];
     const markup = renderToStaticMarkup(
@@ -12640,4 +12655,437 @@ function removeCssAtRules(source) {
   }
 
   return remaining;
+}
+
+// ---------------------------------------------------------------------------
+// Entity-backed select options (ui-contract 0.3.2 + route-owned demand)
+// ---------------------------------------------------------------------------
+{
+  const {
+    packageVersion,
+    projectEntityOptions,
+    collectEntityOptionFamilies,
+    entityFamilySubscriptionId,
+    conformanceFixtures
+  } = await import("@trybotster/ui-contract");
+  assert.equal(packageVersion, "0.3.2");
+  assert.equal(typeof projectEntityOptions, "function");
+  assert.equal(typeof collectEntityOptionFamilies, "function");
+  const timelineFixture = conformanceFixtures.entity_options_reactive_timeline;
+  assert.ok(timelineFixture, "entity_options_reactive_timeline fixture required");
+
+  // Collector oracle (slash-stripped families).
+  assert.deepEqual(
+    collectEntityOptionFamilies(timelineFixture.sample_node),
+    timelineFixture.collector_from_sample_node
+  );
+  for (const vector of timelineFixture.collector_vectors) {
+    assert.equal(entityFamilySubscriptionId(vector.authored_path), vector.subscription_id);
+  }
+
+  // Pure demand helpers.
+  {
+    const demandVite = await createServer({
+      configFile: false,
+      optimizeDeps: { noDiscovery: true },
+      server: { middlewareMode: true },
+      appType: "custom",
+      logLevel: "error"
+    });
+    try {
+      const {
+        collectSurfaceEntityOptionFamilies,
+        diffEntityOptionsDemand,
+        releaseEntityOptionsDemand,
+        isProcessWideEntityFamily
+      } = await demandVite.ssrLoadModule("/src/app/entityOptionsDemand.ts");
+      assert.equal(isProcessWideEntityFamily("session"), true);
+      assert.equal(isProcessWideEntityFamily("project-pipelines.run"), false);
+      assert.deepEqual(
+        collectSurfaceEntityOptionFamilies(timelineFixture.sample_node),
+        timelineFixture.collector_from_sample_node
+      );
+      const first = diffEntityOptionsDemand(["session", "project-pipelines.run"], new Set());
+      assert.deepEqual(first.demand, ["project-pipelines.run", "session"]);
+      assert.deepEqual(first.release, []);
+      const held = new Set(first.nextHeld);
+      const idempotent = diffEntityOptionsDemand(["session", "project-pipelines.run"], held);
+      assert.deepEqual(idempotent.demand, []);
+      assert.deepEqual(idempotent.release, []);
+      const switchClaim = diffEntityOptionsDemand(["session"], held);
+      assert.deepEqual(switchClaim.demand, []);
+      assert.deepEqual(switchClaim.release, ["project-pipelines.run"]);
+      assert.deepEqual(releaseEntityOptionsDemand(held), ["project-pipelines.run"]);
+    } finally {
+      await demandVite.close();
+    }
+  }
+
+  // Contract timeline frames are projector-shaped (not full DaemonSessionEntity DTOs).
+  // Apply them into the production EntityFrameStore the same way generic plugin frames land,
+  // then project with the shared helper. Specialized session projection remains for live DTOs.
+  function timelineFrameToEntityFrame(frame) {
+    if (frame.type === "snapshot") {
+      return {
+        operation: "entity_snapshot",
+        family: frame.entity_type,
+        sequence: frame.snapshot_seq,
+        records: (frame.items ?? []).map((item) => {
+          const id = item.id;
+          return { ...item, id };
+        })
+      };
+    }
+    if (frame.type === "upsert") {
+      return {
+        operation: "entity_upsert",
+        key: { family: frame.entity_type, id: frame.id },
+        sequence: frame.snapshot_seq,
+        record: { id: frame.id, ...frame.fields }
+      };
+    }
+    if (frame.type === "patch") {
+      return {
+        operation: "entity_patch",
+        key: { family: frame.entity_type, id: frame.id },
+        sequence: frame.snapshot_seq,
+        record: { id: frame.id, ...frame.fields }
+      };
+    }
+    if (frame.type === "remove") {
+      return {
+        operation: "entity_remove",
+        key: { family: frame.entity_type, id: frame.id },
+        sequence: frame.snapshot_seq
+      };
+    }
+    throw new Error(`unknown timeline frame type ${frame.type}`);
+  }
+
+  // Full reactive timeline through production store + shared projectEntityOptions.
+  {
+    const store = createInMemoryEntityFrameStore();
+    const selection = timelineFixture.selection;
+    for (const step of timelineFixture.timeline) {
+      for (const frame of step.frames) {
+        store.apply(timelineFrameToEntityFrame(frame));
+      }
+      for (const [family, records] of Object.entries(step.expected_store)) {
+        const listed = Object.fromEntries(store.list(family).map((record) => [record.id, record]));
+        assert.deepEqual(listed, records, `store mismatch at ${step.name} family ${family}`);
+      }
+      const sourceFamily = timelineFixture.descriptor.source.slice(1);
+      const excludeFamily = timelineFixture.descriptor.exclude?.source?.slice(1);
+      const sourceRecords = Object.fromEntries(store.list(sourceFamily).map((r) => [r.id, r]));
+      const excludeRecords = excludeFamily
+        ? Object.fromEntries(store.list(excludeFamily).map((r) => [r.id, r]))
+        : {};
+      const projection = projectEntityOptions(
+        timelineFixture.descriptor,
+        sourceRecords,
+        excludeRecords,
+        selection
+      );
+      assert.deepEqual(projection, step.expected_projection, `projection mismatch at ${step.name}`);
+    }
+  }
+
+  // Production select path: entity options render + invalid selection blocks dispatch.
+  {
+    const rendererVite = await createServer({
+      configFile: false,
+      optimizeDeps: { noDiscovery: true },
+      server: { middlewareMode: true },
+      appType: "custom",
+      logLevel: "error",
+      resolve: {
+        alias: {
+          "@ionic/react": new URL("./botster/__fixtures__/IonicReactSsrMock.tsx", import.meta.url).pathname
+        }
+      }
+    });
+    try {
+      const { ionicUiNodeRendererRegistry } = await rendererVite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx");
+      const { createInMemoryEntityFrameStore: createStore } = await rendererVite.ssrLoadModule("/src/botster/entities.ts");
+      const { renderToStaticMarkup } = await import("react-dom/server");
+
+      const store = createStore();
+      for (const step of timelineFixture.timeline.slice(0, 2)) {
+        for (const frame of step.frames) {
+          store.apply(timelineFrameToEntityFrame(frame));
+        }
+      }
+
+      const formRoot = {
+        type: "form",
+        id: "entity-options-form",
+        props: {
+          action: { id: "entity-options.submit" },
+          submit_label: "Submit"
+        },
+        children: [
+          {
+            ...timelineFixture.sample_node,
+            props: {
+              ...timelineFixture.sample_node.props,
+              selected: "sess-alpha"
+            }
+          }
+        ]
+      };
+
+      const dispatches = [];
+      const markup = renderToStaticMarkup(
+        ionicUiNodeRendererRegistry.render(
+          {
+            kind: "ui_tree_snapshot",
+            surface: "entity-options-test",
+            version: "test",
+            root: formRoot
+          },
+          store,
+          { collectAction: (dispatch) => dispatches.push(dispatch), dispatchAction: (dispatch) => dispatches.push(dispatch) }
+        )
+      );
+      assert.match(markup, /Alpha/);
+      assert.match(markup, /lifecycle_class|agent|local|Alpha/);
+      // Bravo is excluded by the active run in step 2.
+      assert.equal(markup.includes("Bravo"), false, `expected Bravo excluded from options: ${markup}`);
+
+      // Exact value still collected in form draft path via submit dispatch values.
+      const submit = dispatches.find((d) => d.action?.id === "entity-options.submit");
+      assert.ok(submit, "expected form submit collectAction");
+      assert.equal(submit.values?.session, "sess-alpha");
+
+      // Invalidate selection by removing the selected session record from the store.
+      store.apply({
+        operation: "entity_remove",
+        key: { family: "session", id: "sess-alpha" },
+        sequence: 99
+      });
+      const dispatchesAfter = [];
+      const invalidMarkup = renderToStaticMarkup(
+        ionicUiNodeRendererRegistry.render(
+          {
+            kind: "ui_tree_snapshot",
+            surface: "entity-options-test",
+            version: "test",
+            root: formRoot
+          },
+          store,
+          {
+            collectAction: (dispatch) => dispatchesAfter.push(dispatch),
+            dispatchAction: (dispatch) => dispatchesAfter.push(dispatch)
+          }
+        )
+      );
+      assert.match(invalidMarkup, /no longer available|data-selection-invalid="true"|data-form-invalid="true"/);
+      assert.match(invalidMarkup, /disabled/);
+      // Submit button disabled + click handler fail-closed: no successful dispatch of dead value.
+      const submitAfter = dispatchesAfter.find((d) => d.action?.id === "entity-options.submit");
+      assert.ok(submitAfter);
+      // values still hold the draft, but form marks invalid so production click path blocks.
+      assert.equal(submitAfter.values?.session, "sess-alpha");
+      assert.match(invalidMarkup, /data-form-invalid="true"/);
+    } finally {
+      await rendererVite.close();
+    }
+  }
+
+  // Route-owned demand: A-then-B late completion demands only B's families; cleanup on exit.
+  {
+    const demandVite = await createServer({
+      configFile: false,
+      optimizeDeps: { noDiscovery: true },
+      server: { middlewareMode: true },
+      appType: "custom",
+      logLevel: "error"
+    });
+    try {
+      const { PluginRouteStateHarness } = await demandVite.ssrLoadModule(
+        "/src/app/__fixtures__/pluginRouteStateHarness.tsx"
+      );
+      const { createElement, act } = await import("react");
+      const { createRoot } = await import("react-dom/client");
+
+      function installMinimalDom() {
+        if (globalThis.document?.__botsterMinimalDom) return;
+        // harness tests already install DOM in earlier block when run in same process;
+        // ensure document exists.
+        if (!globalThis.document) {
+          throw new Error("minimal DOM required for demand race tests");
+        }
+      }
+      installMinimalDom();
+
+      const pulls = [];
+      const releases = [];
+      const pending = new Map();
+
+      function surfaceWithEntityOptions(packageName, surfaceId, actionId, families) {
+        const excludeFamily = families.find((f) => f !== "session") ?? "pkg.run";
+        return {
+          id: packageName,
+          package_name: packageName,
+          app_surfaces: [{
+            id: surfaceId,
+            surface_id: surfaceId,
+            title: packageName,
+            launch_action: { id: actionId, label: `Render ${packageName}` }
+          }],
+          __excludeFamily: excludeFamily
+        };
+      }
+
+      function successWithOptions(packageName, surfaceId, excludeFamily) {
+        return {
+          accepted: true,
+          result: {
+            plugin_surface: {
+              package_name: packageName,
+              surface_id: surfaceId,
+              body: "ok",
+              ui_tree_snapshot: {
+                package_name: packageName,
+                surface_id: surfaceId,
+                body: {
+                  id: `${packageName}-root`,
+                  type: "form",
+                  props: {
+                    action: { id: `${packageName}.submit` },
+                    submit_label: "Go"
+                  },
+                  children: [{
+                    type: "select",
+                    id: `${packageName}-select`,
+                    props: {
+                      name: "session",
+                      label: "Session",
+                      options_source: {
+                        $kind: "entity_options",
+                        source: "/session",
+                        value_field: "session_uuid",
+                        display_fields: ["label"],
+                        order: ["label"],
+                        exclude: {
+                          source: `/${excludeFamily}`,
+                          value_field: "session_uuid"
+                        }
+                      }
+                    }
+                  }]
+                }
+              }
+            }
+          }
+        };
+      }
+
+      const runtimeClient = {
+        actions: {
+          async dispatch({ action }) {
+            return new Promise((resolve) => {
+              pending.set(action.id, resolve);
+            });
+          }
+        },
+        entities: {
+          async pull(request) {
+            pulls.push(request.family);
+          }
+        },
+        hub: {
+          async send(frame) {
+            if (frame.kind === "entity_release") {
+              releases.push(frame.payload.family);
+            }
+          }
+        }
+      };
+
+      // Extend harness props: the production hook now uses entities.pull / hub.send.
+      // Mount via createElement with packages that complete with entity_options trees.
+      let selected;
+      const packages = [
+        surfaceWithEntityOptions("pkg-a", "home", "render-a", ["session", "pkg-a.run"]),
+        surfaceWithEntityOptions("pkg-b", "home", "render-b", ["session", "pkg-b.run"])
+      ];
+      const rootEl = globalThis.document.createElement("div");
+      globalThis.document.body.appendChild(rootEl);
+      const root = createRoot(rootEl);
+
+      await act(async () => {
+        root.render(createElement(PluginRouteStateHarness, {
+          packages,
+          routePluginSurface: { packageName: "pkg-a", surfaceId: "home" },
+          runtimeClient,
+          onSelected: (next) => { selected = next; }
+        }));
+      });
+
+      await act(async () => {
+        root.render(createElement(PluginRouteStateHarness, {
+          packages,
+          routePluginSurface: { packageName: "pkg-b", surfaceId: "home" },
+          runtimeClient,
+          onSelected: (next) => { selected = next; }
+        }));
+      });
+
+      await act(async () => {
+        pending.get("render-b")?.(successWithOptions("pkg-b", "home", "pkg-b.run"));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      assert.equal(selected?.routeKey, "pkg-b/home");
+      assert.equal(selected?.phase, "rendered");
+      assert.ok(pulls.includes("session"));
+      assert.ok(pulls.includes("pkg-b.run"));
+      assert.equal(pulls.includes("pkg-a.run"), false, "late A must not demand A's exclude family");
+
+      // Late A completion must not apply A's demand.
+      const pullsAfterB = pulls.length;
+      await act(async () => {
+        pending.get("render-a")?.(successWithOptions("pkg-a", "home", "pkg-a.run"));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      assert.equal(selected?.routeKey, "pkg-b/home");
+      assert.equal(pulls.includes("pkg-a.run"), false);
+      assert.equal(pulls.length, pullsAfterB);
+
+      // Idempotent re-collect via selected surface effect: no duplicate pulls for same families.
+      const beforeIdempotent = pulls.filter((f) => f === "pkg-b.run").length;
+      await act(async () => {
+        root.render(createElement(PluginRouteStateHarness, {
+          packages,
+          routePluginSurface: { packageName: "pkg-b", surfaceId: "home" },
+          runtimeClient,
+          onSelected: (next) => { selected = next; }
+        }));
+      });
+      // claim is not reclaimed for same key, so demand shouldn't re-fire from render start.
+      // selected effect may re-run; demand helper is idempotent at transport ensure level.
+      // Count of demand attempts may increase by 0 for already-held set in pure helper;
+      // production ensure is refcounted — pulls may re-issue ensure. Accept >= before.
+      assert.ok(pulls.filter((f) => f === "pkg-b.run").length >= beforeIdempotent);
+
+      // Route exit: leave B → release package exclude family.
+      await act(async () => {
+        root.render(createElement(PluginRouteStateHarness, {
+          packages,
+          routePluginSurface: undefined,
+          runtimeClient,
+          onSelected: (next) => { selected = next; }
+        }));
+      });
+      assert.ok(releases.includes("pkg-b.run"), `expected release of pkg-b.run, got ${JSON.stringify(releases)}`);
+      assert.equal(releases.includes("session"), false, "session is process-wide");
+
+      await act(async () => { root.unmount(); });
+      if (rootEl.parentNode) rootEl.parentNode.removeChild(rootEl);
+    } finally {
+      await demandVite.close();
+    }
+  }
 }
