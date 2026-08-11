@@ -3569,7 +3569,8 @@ async function createSessionTypeThroughRenderedForm(page) {
   await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor();
   // Create defaults to Agent preset. Name derives id (web-authored-agent).
   await setSessionTypeFormField(page, "Name", "web-authored-agent");
-  // Command is a relative path under the session-type source root, not a PATH name.
+  // Execution is independent from the semantic Agent preset and command text.
+  await setSessionTypeFormSelect(page, "session-type-execution", "Shell command");
   await setSessionTypeFormField(page, "Command", "sleep");
   // Ticket-critical fields: relative path + environment + context must survive edit.
   // Advanced is closed on Agent create; open it for path/env/context.
@@ -3579,6 +3580,7 @@ async function createSessionTypeThroughRenderedForm(page) {
   }
   await setSessionTypeFormSelect(page, "session-type-working-directory-policy", "Relative path under source root");
   await setSessionTypeFormField(page, "Working directory path", "agents/live");
+  await setSessionTypeFormField(page, "Arguments", "30 --verbose");
   await setSessionTypeFormTextarea(page, "Environment", "LIVE_KEY=live-value");
   await setSessionTypeFormField(page, "Context keys", "prompt");
   await page.getByTestId(HOST_CHROME.submitSessionTypeTestId).click();
@@ -3603,6 +3605,14 @@ async function createSessionTypeThroughRenderedForm(page) {
   }
   if (createRequest.source?.source !== "device") {
     throw new Error(`web create sent the wrong source: ${JSON.stringify(createRequest.source)}`);
+  }
+  if (createRequest.definition?.execution?.mode !== "shell_command") {
+    throw new Error(
+      `web create must author shell_command execution, sent ${JSON.stringify(createRequest.definition?.execution)}`
+    );
+  }
+  if (JSON.stringify(createRequest.definition?.args) !== JSON.stringify(["30", "--verbose"])) {
+    throw new Error(`web create must preserve args separately, sent ${JSON.stringify(createRequest.definition?.args)}`);
   }
   if (createRequest.definition?.working_directory?.policy !== "relative"
     || createRequest.definition?.working_directory?.path !== "agents/live") {
@@ -3672,6 +3682,14 @@ async function createSessionTypeThroughRenderedForm(page) {
   if (updateRequest?.definition?.label !== "Web authored agent renamed") {
     throw new Error(`web update missing renamed label: ${JSON.stringify(updateRequest?.definition?.label)}`);
   }
+  if (updateRequest?.definition?.execution?.mode !== "shell_command") {
+    throw new Error(
+      `web update dropped execution mode: ${JSON.stringify(updateRequest?.definition?.execution)}`
+    );
+  }
+  if (JSON.stringify(updateRequest?.definition?.args) !== JSON.stringify(["30", "--verbose"])) {
+    throw new Error(`web update merged or dropped args: ${JSON.stringify(updateRequest?.definition?.args)}`);
+  }
   if (updateRequest?.definition?.working_directory?.policy !== "relative"
     || updateRequest?.definition?.working_directory?.path !== "agents/live") {
     throw new Error(
@@ -3724,6 +3742,12 @@ async function createSessionTypeThroughRenderedForm(page) {
   if (readbackDefinition.label !== "Web authored agent renamed") {
     throw new Error(`read-back label mismatch: ${JSON.stringify(readbackDefinition.label)}`);
   }
+  if (readbackDefinition.execution?.mode !== "shell_command") {
+    throw new Error(`read-back execution mismatch: ${JSON.stringify(readbackDefinition.execution)}`);
+  }
+  if (JSON.stringify(readbackDefinition.args) !== JSON.stringify(["30", "--verbose"])) {
+    throw new Error(`read-back args mismatch: ${JSON.stringify(readbackDefinition.args)}`);
+  }
   // Close form without further mutation.
   await page.getByRole("button", { name: "Close", exact: true }).last().click();
   await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor({ state: "detached" });
@@ -3757,11 +3781,14 @@ async function createSessionTypeThroughRenderedForm(page) {
     web_delete_session_type_id: deleteRequest.session_type_id,
     web_show_session_type_id: showRequest.session_type_id,
     web_update_definition_id: updateRequest.definition.id,
+    web_update_execution: updateRequest.definition.execution,
+    web_update_args: updateRequest.definition.args,
     web_update_preserved_path: updateRequest.definition.working_directory.path,
     web_update_preserved_environment: updateRequest.definition.environment,
     web_update_preserved_context: updateRequest.definition.context,
     web_readback_path: readbackDefinition.working_directory.path,
     web_readback_environment: readbackDefinition.environment,
+    web_readback_execution: readbackDefinition.execution,
     form_rejection_kept_draft: true
   };
 }

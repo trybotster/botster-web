@@ -1103,6 +1103,8 @@ assert.match(generatedDaemonProtocol, /pid\?: number;/);
 assert.match(generatedDaemonProtocol, /diagnostics\?: DaemonDiagnostic\[\]/);
 assert.match(generatedDaemonProtocol, /mode_flags\?: DaemonModeFlags \| null;/);
 assert.match(generatedDaemonProtocol, /export interface DaemonModeFlags/);
+assert.match(generatedDaemonProtocol, /export type DaemonSessionTypeExecution/);
+assert.match(generatedDaemonProtocol, /execution\?: DaemonSessionTypeExecution;/);
 assert.match(generatedDaemonProtocol, /mouse_mode: number;/);
 assert.match(generatedDaemonProtocol, /\| "read_mode_flags"/);
 assert.match(generatedDaemonProtocol, /export type DaemonEvent/);
@@ -1152,6 +1154,9 @@ assert.doesNotMatch(app, /sessionTypesForSpawnTarget/);
 assert.match(app, /list_session_types_for_target/);
 assert.match(app, /listSessionTypesForTargetAction|applySpawnSessionListResult/);
 assert.match(app, /runtimeClient\.entities\.list\("session_type"\)/);
+assert.match(app, /data-testid="session-type-execution"/);
+assert.match(app, /value="relative_executable">Relative executable/);
+assert.match(app, /value="shell_command">Shell command/);
 assert.match(hubTransport, /const packageFamily = "botster-web\.package"/);
 assert.match(hubTransport, /const appFamily = "botster-web\.app"/);
 assert.match(hubTransport, /const packageNavigationFamily = "botster-web\.package_navigation"/);
@@ -1489,6 +1494,8 @@ const expectedHubDaemonProtocolSha256 = hubTestSupportMetadata.daemon_protocol.s
 const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name], hubTestSupportMetadata.ui_contract.package_version);
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
+assert.equal(hubTestSupportMetadata.package_version, "0.1.27");
+assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.27");
 assert.equal(hubTestSupportMetadata.protocol_version, 6);
 assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 33);
 const documentedContractClaims = [
@@ -4555,6 +4562,61 @@ await flushMicrotasks();
 await realTransport.send({
   kind: "action_request",
   payload: {
+    request_id: "real-create-session-type-default-execution",
+    origin: "ui_node",
+    action: {
+      id: "botster.session_type.daemon_request",
+      target: "default-execution",
+      params: {
+        daemon_request: {
+          request_type: "create_session_type",
+          source: { source: "device" },
+          definition: {
+            id: "default-execution",
+            label: "Default execution",
+            role: "botster.agent",
+            interaction: "interactive",
+            lifecycle: "task",
+            command: "bin/default",
+            args: ["--one", "two words"]
+          }
+        }
+      }
+    }
+  }
+});
+await flushMicrotasks();
+await realTransport.send({
+  kind: "action_request",
+  payload: {
+    request_id: "real-update-session-type-shell-execution",
+    origin: "ui_node",
+    action: {
+      id: "botster.session_type.daemon_request",
+      target: "shell-execution",
+      params: {
+        daemon_request: {
+          request_type: "update_session_type",
+          source: { source: "device" },
+          definition: {
+            id: "shell-execution",
+            label: "Shell execution",
+            role: "botster.accessory",
+            interaction: "interactive",
+            lifecycle: "task",
+            execution: { mode: "shell_command" },
+            command: "printf '%s\\n' \"$VALUE\"",
+            args: ["first arg", "&&", "second"]
+          }
+        }
+      }
+    }
+  }
+});
+await flushMicrotasks();
+await realTransport.send({
+  kind: "action_request",
+  payload: {
     request_id: "real-list-session-types-for-target-1",
     origin: "ui_node",
     action: {
@@ -4828,6 +4890,40 @@ assert.deepEqual(emittedSurfaceError.payload, {
 });
 // Terminal for the generation: nothing refetches and no management list request is provoked.
 assert.equal(bridgeRequests.some((request) => request.type === "list_session_types"), false);
+assert.deepEqual(
+  bridgeRequests.find((request) => request.type === "create_session_type"),
+  {
+    type: "create_session_type",
+    source: { source: "device" },
+    definition: {
+      id: "default-execution",
+      label: "Default execution",
+      role: "botster.agent",
+      interaction: "interactive",
+      lifecycle: "task",
+      execution: { mode: "relative_executable" },
+      command: "bin/default",
+      args: ["--one", "two words"]
+    }
+  }
+);
+assert.deepEqual(
+  bridgeRequests.find((request) => request.type === "update_session_type"),
+  {
+    type: "update_session_type",
+    source: { source: "device" },
+    definition: {
+      id: "shell-execution",
+      label: "Shell execution",
+      role: "botster.accessory",
+      interaction: "interactive",
+      lifecycle: "task",
+      execution: { mode: "shell_command" },
+      command: "printf '%s\\n' \"$VALUE\"",
+      args: ["first arg", "&&", "second"]
+    }
+  }
+);
 
 assert.equal(bridgeRequests.some((request) => request.type === "list_packages"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "spawn"), false);
@@ -6298,6 +6394,7 @@ try {
       SessionTypeListItem,
       SessionTypesSurfaceNotices,
       SessionTypesView,
+      SessionTypeExecutionControl,
       SessionTypeSubmitButton,
       SpawnTargetListItem,
       DashboardView,
@@ -7007,6 +7104,23 @@ try {
   assert.match(pendingSubmitMarkup, /Saving…/);
   assert.match(pendingSubmitMarkup, /disabled=""/);
   assert.equal(markupContainsTestId(pendingSubmitMarkup, HOST_CHROME.submitSessionTypeTestId), true);
+  const relativeExecutionMarkup = renderToStaticMarkup(
+    createElement(SessionTypeExecutionControl, {
+      mode: "relative_executable",
+      onChange: () => {}
+    })
+  );
+  assert.match(relativeExecutionMarkup, /data-testid="session-type-execution"/);
+  assert.match(relativeExecutionMarkup, /Relative executable/);
+  assert.match(relativeExecutionMarkup, /Shell command/);
+  assert.match(relativeExecutionMarkup, /Arguments stay separate/);
+  const shellExecutionMarkup = renderToStaticMarkup(
+    createElement(SessionTypeExecutionControl, {
+      mode: "shell_command",
+      onChange: () => {}
+    })
+  );
+  assert.match(shellExecutionMarkup, /Run Command through the platform shell/);
   markHostChromeContract("session-types-chrome");
 
   // package-settings-chrome
@@ -7346,6 +7460,7 @@ try {
   assert.equal(agentCreate.interaction, SESSION_TYPE_PRESETS.agent.interaction);
   assert.equal(agentCreate.lifecycle, SESSION_TYPE_PRESETS.agent.lifecycle);
   assert.equal(agentCreate.traits, SESSION_TYPE_PRESETS.agent.traits);
+  assert.equal(agentCreate.executionMode, "relative_executable");
   // Monorepo-style create: Name + Command only (id derived from name).
   assert.equal(sessionTypeIdFromName("Web authored agent"), "web-authored-agent");
   assert.equal(sessionTypeIdFromName("rails-server"), "rails-server");
@@ -7378,6 +7493,12 @@ try {
   assert.equal(shellForm.lifecycle, SESSION_TYPE_PRESETS.shell.lifecycle);
   assert.equal(shellForm.traits, SESSION_TYPE_PRESETS.shell.traits);
   assert.equal(shellForm.seededTraits, undefined);
+  // The semantic Shell preset does not select a process execution contract.
+  assert.equal(shellForm.executionMode, "relative_executable");
+  assert.equal(
+    applySessionTypePreset({ ...agentCreate, executionMode: "shell_command" }, "shell").executionMode,
+    "shell_command"
+  );
 
   // Custom keeps free-text values so progressive disclosure does not wipe advanced edits.
   const customKept = applySessionTypePreset(shellForm, "custom");
@@ -7624,6 +7745,7 @@ try {
   assert.deepEqual(createDefinition.traits, ["terminal", "companion"]);
   assert.deepEqual(createDefinition.args, ["--interactive", "--json"]);
   assert.deepEqual(createDefinition.context, ["prompt"]);
+  assert.deepEqual(createDefinition.execution, { mode: "relative_executable" });
   // Empty description/icon omit rather than forcing Some("").
   assert.equal(Object.hasOwn(createDefinition, "description"), false);
   assert.equal(Object.hasOwn(createDefinition, "icon"), false);
@@ -7651,6 +7773,7 @@ try {
       interaction: "interactive",
       traits: ["terminal", "acme.custom trait"],
       lifecycle: "task",
+      execution: { mode: "shell_command" },
       command: "sleep",
       args: ["--append-system-prompt", "You are a careful reviewer", "--fields", "a,b,c"],
       working_directory: { policy: "relative", path: "agents/live" },
@@ -7674,6 +7797,7 @@ try {
   assert.equal(seededForm.workingDirectoryPath, "agents/live");
   assert.equal(seededForm.definitionTargetId, "project-main");
   assert.equal(seededForm.source, "device");
+  assert.equal(seededForm.executionMode, "shell_command");
   assert.deepEqual(seededForm.seededArgs, authoringEditable.definition.args);
   assert.deepEqual(seededForm.seededEnvironment, authoringEditable.definition.environment);
 
@@ -7707,12 +7831,52 @@ try {
   assert.deepEqual(updatedDefinition.context, authoringEditable.definition.context);
   assert.deepEqual(updatedDefinition.args, authoringEditable.definition.args);
   assert.deepEqual(updatedDefinition.traits, authoringEditable.definition.traits);
+  assert.deepEqual(updatedDefinition.execution, { mode: "shell_command" });
   assert.deepEqual(
     updatedDefinition.allowed_environment_overrides,
     authoringEditable.definition.allowed_environment_overrides
   );
   assert.equal(updatedDefinition.target_id, "project-main");
   assert.equal(updatedDefinition.description, "Authored description");
+
+  // Omitted execution is the legacy/default relative executable contract. The default
+  // does not inspect command text, and args remain a separate array for both modes.
+  const omittedExecutionForm = sessionTypeFormFromAuthoringDefinition({
+    ...authoringEditable,
+    definition: {
+      ...authoringEditable.definition,
+      execution: undefined,
+      command: "echo one && echo two",
+      args: ["literal arg", "--flag"]
+    }
+  });
+  assert.ok(omittedExecutionForm);
+  assert.equal(omittedExecutionForm.executionMode, "relative_executable");
+  assert.deepEqual(
+    sessionTypeDefinitionFromForm(omittedExecutionForm).execution,
+    { mode: "relative_executable" }
+  );
+  assert.deepEqual(
+    sessionTypeDefinitionFromForm(omittedExecutionForm).args,
+    ["literal arg", "--flag"]
+  );
+
+  for (const mode of ["relative_executable", "shell_command"]) {
+    const roundTripForm = sessionTypeFormFromAuthoringDefinition({
+      ...authoringEditable,
+      definition: {
+        ...authoringEditable.definition,
+        execution: { mode },
+        command: "bin/tool --text-that-looks-like-shell",
+        args: ["first arg", "&&", "second"]
+      }
+    });
+    assert.ok(roundTripForm);
+    const roundTripDefinition = sessionTypeDefinitionFromForm(roundTripForm);
+    assert.deepEqual(roundTripDefinition.execution, { mode });
+    assert.equal(roundTripDefinition.command, "bin/tool --text-that-looks-like-shell");
+    assert.deepEqual(roundTripDefinition.args, ["first arg", "&&", "second"]);
+  }
 
   // Ablation: dropping definitionTargetId must fail the target_id oracle.
   const ablatedDefinition = sessionTypeDefinitionFromForm({

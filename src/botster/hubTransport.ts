@@ -1405,6 +1405,17 @@ function sessionTypeDefinition(value: unknown): DaemonSessionTypeDefinition | un
   const command = readConfigString(value.command);
   if (!id || !label || !role || !interaction || !lifecycle || !command) return undefined;
 
+  const authoredExecutionMode = readConfigString(
+    isRecord(value.execution) ? value.execution.mode : undefined,
+    ""
+  );
+  if (authoredExecutionMode && !["relative_executable", "shell_command"].includes(authoredExecutionMode)) {
+    return undefined;
+  }
+  const executionMode = authoredExecutionMode === "shell_command"
+    ? "shell_command" as const
+    : "relative_executable" as const;
+
   const workingDirectoryPath = readConfigString(isRecord(value.working_directory) ? value.working_directory.path : undefined);
   const workingDirectoryPolicy = readConfigString(isRecord(value.working_directory) ? value.working_directory.policy : undefined);
   const environment = stringRecord(value.environment);
@@ -1419,6 +1430,7 @@ function sessionTypeDefinition(value: unknown): DaemonSessionTypeDefinition | un
     interaction,
     ...(stringList(value.traits) ? { traits: stringList(value.traits) } : {}),
     lifecycle,
+    execution: { mode: executionMode },
     command,
     ...(stringList(value.args) ? { args: stringList(value.args) } : {}),
     ...(workingDirectoryPolicy === "relative" && workingDirectoryPath

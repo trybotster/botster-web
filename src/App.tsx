@@ -950,6 +950,7 @@ export function rejectedSpawnSessionForm(
  * They are not a second template protocol and do not re-validate Hub policy.
  */
 export type SessionTypePresetId = "agent" | "shell" | "custom";
+export type SessionTypeExecutionMode = "relative_executable" | "shell_command";
 
 export interface SessionTypePreset {
   id: SessionTypePresetId;
@@ -1006,6 +1007,7 @@ export interface SessionTypeFormState {
   interaction: string;
   traits: string;
   lifecycle: string;
+  executionMode: SessionTypeExecutionMode;
   command: string;
   args: string;
   workingDirectoryPolicy: string;
@@ -1038,6 +1040,7 @@ export const emptySessionTypeForm: SessionTypeFormState = {
   interaction: "",
   traits: "",
   lifecycle: "",
+  executionMode: "relative_executable",
   command: "",
   args: "",
   // Hub default when omitted is package_root (source root). Form starts explicit.
@@ -1312,6 +1315,7 @@ export function sessionTypeDefinitionFromForm(form: SessionTypeFormState): Recor
     interaction: form.interaction.trim(),
     traits: tokenListFromForm(form.traits, form.seededTraits),
     lifecycle: form.lifecycle.trim(),
+    execution: { mode: form.executionMode },
     command: form.command.trim(),
     args: tokenListFromForm(form.args, form.seededArgs),
     // Hub enum is package_root | relative. Blank means the same default as package_root.
@@ -1361,6 +1365,10 @@ export function sessionTypeFormFromAuthoringDefinition(
   const interaction = stringValue(definition.interaction, "");
   const traits = joinTokenList(seededTraits);
   const lifecycle = stringValue(definition.lifecycle, "");
+  const execution = readRecord(definition.execution);
+  const executionMode = stringValue(execution.mode, "relative_executable") === "shell_command"
+    ? "shell_command"
+    : "relative_executable";
 
   return {
     mode: "edit",
@@ -1379,6 +1387,7 @@ export function sessionTypeFormFromAuthoringDefinition(
     interaction,
     traits,
     lifecycle,
+    executionMode,
     command: stringValue(definition.command, ""),
     args: joinTokenList(seededArgs),
     // Absent working_directory on the wire is Hub's package_root default.
@@ -2018,6 +2027,39 @@ export function SessionTypeSubmitButton({
   );
 }
 
+export function SessionTypeExecutionControl({
+  mode,
+  onChange
+}: {
+  mode: SessionTypeExecutionMode;
+  onChange: (mode: SessionTypeExecutionMode) => void;
+}) {
+  return (
+    <IonItem>
+      <IonSelect
+        label="Execution"
+        labelPlacement="stacked"
+        value={mode}
+        data-testid="session-type-execution"
+        interface="popover"
+        onIonChange={(event) => onChange(
+          String(event.detail.value ?? "relative_executable") === "shell_command"
+            ? "shell_command"
+            : "relative_executable"
+        )}
+      >
+        <IonSelectOption value="relative_executable">Relative executable</IonSelectOption>
+        <IonSelectOption value="shell_command">Shell command</IonSelectOption>
+      </IonSelect>
+      <IonNote slot="helper" color="medium" data-testid="session-type-execution-note">
+        {mode === "shell_command"
+          ? "Run Command through the platform shell. Arguments stay separate."
+          : "Run Command as an executable path relative to the source root. Arguments stay separate."}
+      </IonNote>
+    </IonItem>
+  );
+}
+
 /**
  * Secondary fields. Create keeps this closed for Agent/Shell name+command.
  * Opens for Custom, edit (Role still reachable), or when advanced values exist.
@@ -2032,10 +2074,6 @@ export function SessionTypeAdvancedOptions({
   onChange: (updater: (current: SessionTypeFormState | undefined) => SessionTypeFormState | undefined) => void;
 }) {
   const [open, setOpen] = useState(initiallyOpen);
-
-  useEffect(() => {
-    setOpen(initiallyOpen);
-  }, [initiallyOpen, form.mode, form.sessionTypeId, form.preset]);
 
   const policyOptions = workingDirectoryPolicyOptions(form.workingDirectoryPolicy);
 
@@ -4101,6 +4139,12 @@ export default function App() {
                           Product name (claude, codex, rails-server). Sets the Hub id from this name.
                         </IonNote>
                       </IonItem>
+                      <SessionTypeExecutionControl
+                        mode={sessionTypeForm.executionMode}
+                        onChange={(executionMode) => setSessionTypeForm((current) => current
+                          ? { ...current, executionMode }
+                          : current)}
+                      />
                       <IonItem>
                         <IonInput
                           label="Command"
@@ -4111,7 +4155,9 @@ export default function App() {
                           onIonInput={(event) => setSessionTypeForm((current) => current ? { ...current, command: String(event.detail.value ?? "") } : current)}
                         />
                         <IonNote slot="helper" color="medium" data-testid="session-type-command-note">
-                          Relative path under the source root. Not a PATH binary name.
+                          {sessionTypeForm.executionMode === "shell_command"
+                            ? "Shell command text. Hub does not derive arguments from this text."
+                            : "Relative path under the source root. Not a PATH binary name."}
                         </IonNote>
                       </IonItem>
                       <IonItem>
@@ -4151,6 +4197,7 @@ export default function App() {
                       ) : null}
                     </IonList>
                     <SessionTypeAdvancedOptions
+                      key={`${sessionTypeForm.mode}:${sessionTypeForm.sessionTypeId ?? "new"}:${sessionTypeForm.preset}`}
                       form={sessionTypeForm}
                       initiallyOpen={
                         sessionTypeForm.preset === "custom" ||
