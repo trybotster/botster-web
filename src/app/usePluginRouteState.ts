@@ -60,8 +60,14 @@ export function usePluginRouteState(options: {
     families: new Set()
   });
 
+  /**
+   * Claim-scoped entity-options demand uses held subscribe via hub entity_pull/entity_release.
+   * Do not call entities.pull(): that registers the family in EntityFrameStore.activePulls, which
+   * would survive route-exit release and could be restored by replayActivePulls (no production
+   * caller today, but Hub Settings still surfaces the stale count).
+   */
   const demandEntityFamily = useCallback((family: string) => {
-    void runtimeClient.entities.pull({ family }).catch(() => undefined);
+    void runtimeClient.hub.send({ kind: "entity_pull", payload: { family } }).catch(() => undefined);
   }, [runtimeClient]);
 
   const releaseEntityFamily = useCallback((family: string) => {

@@ -12921,6 +12921,8 @@ function removeCssAtRules(source) {
       const pulls = [];
       const releases = [];
       const pending = new Map();
+      // Production demand sends hub entity_pull (not entities.pull) so activePulls stays empty.
+      const replayedPulls = [];
 
       function surfaceWithEntityOptions(packageName, surfaceId, actionId, families) {
         const excludeFamily = families.find((f) => f !== "session") ?? "pkg.run";
@@ -12990,12 +12992,26 @@ function removeCssAtRules(source) {
           }
         },
         entities: {
+          activePulls: new Map(),
           async pull(request) {
-            pulls.push(request.family);
+            // Must not be used for claim-scoped entity-options demand.
+            pulls.push(`entities.pull:${request.family}`);
+            this.activePulls.set(request.family, request);
+          },
+          activePullCount() {
+            return this.activePulls.size;
+          },
+          async replayActivePulls() {
+            for (const request of this.activePulls.values()) {
+              replayedPulls.push(request.family);
+            }
           }
         },
         hub: {
           async send(frame) {
+            if (frame.kind === "entity_pull") {
+              pulls.push(frame.payload.family);
+            }
             if (frame.kind === "entity_release") {
               releases.push(frame.payload.family);
             }
@@ -13003,7 +13019,7 @@ function removeCssAtRules(source) {
         }
       };
 
-      // Extend harness props: the production hook now uses entities.pull / hub.send.
+      // Production hook demands via hub entity_pull/entity_release (not entities.pull).
       // Mount via createElement with packages that complete with entity_options trees.
       let selected;
       const packages = [
@@ -13081,6 +13097,11 @@ function removeCssAtRules(source) {
       });
       assert.ok(releases.includes("pkg-b.run"), `expected release of pkg-b.run, got ${JSON.stringify(releases)}`);
       assert.equal(releases.includes("session"), false, "session is process-wide");
+      // Claim-scoped demand must never register abandoned families as active pulls.
+      assert.equal(runtimeClient.entities.activePullCount(), 0, "entity-options demand must not register activePulls");
+      assert.equal(pulls.some((f) => String(f).startsWith("entities.pull:")), false, "must not call entities.pull for options demand");
+      await runtimeClient.entities.replayActivePulls();
+      assert.deepEqual(replayedPulls, [], "replayActivePulls must not restore released route families");
 
       await act(async () => { root.unmount(); });
       if (rootEl.parentNode) rootEl.parentNode.removeChild(rootEl);
