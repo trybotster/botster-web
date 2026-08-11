@@ -14,7 +14,6 @@ import {
   IonItem,
   IonLabel,
   IonList,
-  IonModal,
   IonNote,
   IonRow,
   IonSelect,
@@ -28,6 +27,7 @@ import { Fragment, useMemo, useState, type CSSProperties, type KeyboardEvent, ty
 
 import { defaultUiCapabilitySet } from "./capabilities";
 import type { EntityFrameStore, EntityRecord } from "./entities";
+import { UiNodeDialog } from "./UiNodeDialog";
 import type {
   JsonValue,
   JsonObject,
@@ -46,7 +46,12 @@ const boundRowIdentity = Symbol("bound-row-identity");
 
 type RowContext = Record<string, unknown> & { [boundRowIdentity]?: string };
 
-type ResolvedChild = { node: RealizedUiNode; row?: RowContext; location: string };
+type ResolvedChild = {
+  node: RealizedUiNode;
+  row?: RowContext;
+  location: string;
+  dismissPresentationKey?: string;
+};
 
 type IdentityIssue = {
   kind: "duplicate-descendant-key" | "invalid-descendant-identity" | "duplicate-realized-identity";
@@ -320,9 +325,9 @@ function renderChildren(
   form?: FormRenderState
 ): ReactNode {
   return children.flatMap((child, index) =>
-    resolveChild(child, store, options, row, undefined, `child[${index}]`).map(({ node, row: childRow }, childIndex) => (
+    resolveChild(child, store, options, row, undefined, `child[${index}]`).map(({ node, row: childRow, dismissPresentationKey }, childIndex) => (
       <Fragment key={`${node.id ?? node.type}-${index}-${childIndex}`}>
-        {renderNode(node, store, options, childRow, form)}
+        {renderNode(node, store, options, childRow, form, dismissPresentationKey)}
       </Fragment>
     ))
   );
@@ -388,7 +393,12 @@ function resolveChild(
     const node = presentationMatches(child.predicate, options.presentation ?? {})
       ? realizedNodeIdentity(child.node, row, { issues, location: `${location}.node` })
       : undefined;
-    return node ? [{ node, row, location: `${location}.node` }] : [];
+    return node ? [{
+      node,
+      row,
+      location: `${location}.node`,
+      dismissPresentationKey: child.predicate.key
+    }] : [];
   }
 
   const matches =
@@ -1017,7 +1027,8 @@ function renderNode(
   store: EntityFrameStore,
   options: UiNodeRenderOptions,
   row?: RowContext,
-  form?: FormRenderState
+  form?: FormRenderState,
+  dismissPresentationKey?: string
 ): ReactNode {
   const missing = missingCapabilities(node, options);
 
@@ -1469,29 +1480,18 @@ function renderNode(
       const fullscreen = presentation === "fullscreen" || presentation === "page";
       const title = readString(props.title);
       return (
-        <IonModal
-          backdropDismiss={false}
-          className={[
-            "uinode-dialog",
-            fullscreen ? "uinode-dialog-fullscreen" : "uinode-dialog-overlay",
-            `presentation-${presentation || "auto"}`
-          ].join(" ")}
-          data-ui-node-id={node.id}
-          isOpen
-          key={node.id}
+        <UiNodeDialog
+          fullscreen={fullscreen}
+          nodeId={node.id}
+          onDismiss={dismissPresentationKey
+            ? () => options.dismissPresentation?.(dismissPresentationKey)
+            : undefined}
+          presentation={presentation}
+          title={title}
         >
-          <div className="uinode-dialog-sheet">
-            {title ? (
-              <header className="uinode-dialog-header">
-                <h2 className="uinode-dialog-title">{title}</h2>
-              </header>
-            ) : null}
-            <div className="uinode-dialog-body">
-              {renderChildren(readSlot(node, "body"), store, options, row, form)}
-              {renderChildren(readChildren(node), store, options, row, form)}
-            </div>
-          </div>
-        </IonModal>
+          {renderChildren(readSlot(node, "body"), store, options, row, form)}
+          {renderChildren(readChildren(node), store, options, row, form)}
+        </UiNodeDialog>
       );
     }
     default:

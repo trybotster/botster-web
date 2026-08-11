@@ -41,6 +41,20 @@ export function applyAcceptedPresentation(
   return { ...state, [scopeKey]: nextValues };
 }
 
+export function clearPresentationValue(
+  state: UiPresentationState,
+  scope: UiPresentationScope,
+  key: string
+): UiPresentationState {
+  const scopeKey = uiPresentationScopeKey(scope);
+  const currentValues = state[scopeKey];
+  if (!currentValues || !Object.hasOwn(currentValues, key)) return state;
+
+  const nextValues = { ...currentValues };
+  delete nextValues[key];
+  return { ...state, [scopeKey]: nextValues };
+}
+
 export function acceptedResultMatches(request: UiActionRequest, result: UiActionResult): boolean {
   return (
     result.state === "accepted" &&

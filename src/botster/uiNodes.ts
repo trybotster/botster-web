@@ -76,4 +76,5 @@ export interface UiNodeRenderOptions {
   actionResult?: UiActionResult;
   collectAction?: (dispatch: UiNodeActionDispatch) => void;
   dispatchAction?: (dispatch: UiNodeActionDispatch) => void;
+  dismissPresentation?: (key: string) => void;
 }

@@ -806,7 +806,7 @@ for (const invalid of [
 
 const [
   main,
-  app,
+  appShellSource,
   client,
   hubRuntimeSource,
   realHubDaemonDto,
@@ -881,6 +881,68 @@ const [
   readFile(new URL("./theme/variables.css", import.meta.url), "utf8"),
   readFile(new URL("./vendor/restty/README.md", import.meta.url), "utf8")
 ]);
+
+const appFeatureSources = await Promise.all([
+  readFile(new URL("./app/actionFeedback.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/apps.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/dashboard.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/dashboardSessions.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/entitySubscription.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/hubLifecycle.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/hubSettings.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/packageSettings.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/packageSurfaces.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/pluginNavigation.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/pluginNavigationModel.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/pluginRoutes.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/pluginSurfaceState.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/routing.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/sessionRoute.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/sessionTypeUi.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/sessionTypes.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/spawnSession.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/spawnTargetUi.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/spawnTargets.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/terminalChrome.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/useProductionHubConnection.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/values.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/workbench.tsx", import.meta.url), "utf8")
+]);
+// Product corpus for anti-drift checks after componentization. App.tsx is composition only.
+const appShell = appShellSource;
+const app = [appShell, ...appFeatureSources].join("\n");
+assert.match(appShell, /currentDashboardSessions\(/);
+assert.match(appFeatureSources.join("\n"), /export function currentDashboardSessions/);
+assert.match(appShell, /from "\.\/app\/dashboardSessions"/);
+assert.match(appFeatureSources.join("\n"), /lifecycle_class === "current"/);
+assert.doesNotMatch(appShell, /export function appRouteFromPathname/);
+assert.doesNotMatch(appShell, /export function DashboardView/);
+assert.doesNotMatch(appShell, /export function SessionTypeAdvancedOptions/);
+
+// App shell must import and call feature modules (corpus alone can hide wiring regressions).
+assert.match(appShell, /from "\.\/app\/dashboardSessions"/);
+assert.match(appShell, /from "\.\/app\/dashboard"/);
+assert.match(appShell, /from "\.\/app\/routing"/);
+assert.match(appShell, /from "\.\/app\/hubLifecycle"/);
+assert.match(appShell, /from "\.\/app\/hubSettings"/);
+assert.match(appShell, /from "\.\/app\/workbench"/);
+assert.match(appShell, /from "\.\/app\/pluginNavigation"/);
+assert.match(appShell, /from "\.\/app\/pluginRoutes"/);
+assert.match(appShell, /from "\.\/app\/sessionTypes"/);
+assert.match(appShell, /from "\.\/app\/sessionTypeUi"/);
+assert.match(appShell, /from "\.\/app\/spawnSession"/);
+assert.match(appShell, /from "\.\/app\/spawnTargets"/);
+assert.match(appShell, /from "\.\/app\/useProductionHubConnection"/);
+assert.match(appShell, /useProductionHubConnection\(\{/);
+assert.match(appFeatureSources.join("\n"), /pullProductionEntity\("session", \{ family: "session" \}\)/);
+assert.match(appShell, /currentDashboardSessions\(runtimeClient\.entities\.list\("session"\)\)/);
+assert.match(appShell, /<DashboardView[\s\S]*sessions=\{sessions\}/);
+assert.match(appShell, /<WorkbenchNav[\s\S]*onNavigate=\{navigateToView\}/);
+assert.match(appShell, /<PluginNavigationShortcuts[\s\S]*onOpen=\{openPackageNavigation\}/);
+assert.match(appShell, /replayHubStatusOnLifecycleEvent\(detail, runtimeClient\.entities\)/);
+assert.match(appShell, /hubUpdateOutcomeFromResult\(result\)/);
+
+
 
 assert.match(main, /import App from "\.\/App"/);
 assert.match(main, /<App \/>/);
@@ -6373,6 +6435,7 @@ try {
     {
       acceptedResultMatches,
       applyAcceptedPresentation,
+      clearPresentationValue,
       presentationValues,
       replaceAcceptedSurface
     },
@@ -6382,80 +6445,23 @@ try {
     { sessionBindingVariantSnapshot },
     { pluginSurfaceActionRequest },
     { TerminalViewHost },
-    {
-      AppListItem,
-      AppsView,
-      PackageNavigationShortcutButton,
-      PluginNavigationShortcuts,
-      PluginListItem,
-      HubGeneralSection,
-      SessionListItem,
-      SessionRouteView,
-      SessionTypeListItem,
-      SessionTypesSurfaceNotices,
-      SessionTypesView,
-      SessionTypeExecutionControl,
-      SessionTypeSubmitButton,
-      SpawnTargetListItem,
-      DashboardView,
-      DiagnosticsView,
-      HubSettingsSectionsNav,
-      WorkbenchNav,
-      hubUpdateCheckAction,
-      hubUpdateCheckActionId,
-      hubUpdateOutcomeFromResult,
-      hubUpdateOutcomeSummary,
-      replayHubStatusOnLifecycleEvent,
-      PluginSurfaceRoutePage,
-      PluginSettingsRoutePage,
-      PluginSettingsPanel,
-      RemoteAccessConfigurationItem,
-      entityFamilyRecordLimit,
-      appRouteFromPathname,
-      appRoutePath,
-      compareSpawnTargetRows,
-      compareInstalledPackageRows,
-      packageAppSurfaces,
-      packageNavigationShortcut,
-      packageSettingsSurfaces,
-      renderedPluginSurfaceState,
-      rejectedSpawnSessionForm,
-      applySpawnSessionListResult,
-      groupSessionTypesBySource,
-      writableSessionTypeSources,
-      enabledSpawnPointSessionTypeSources,
-      applySessionTypeHomeKind,
-      spawnPointSessionTypeSourceLabel,
-      SESSION_TYPE_SOURCE_GLOBAL_LABEL,
-      sessionTypeMutationSourceFromRecord,
-      sessionTypeManagementSupported,
-      sessionTypeDefinitionFromForm,
-      sessionTypeFormFromAuthoringDefinition,
-      sessionTypeFormIsStructurallyComplete,
-      sessionTypeMutationSource,
-      rejectedSessionTypeForm,
-      entitySubscriptionErrorFromFrame,
-      emptySessionTypeForm,
-      listSessionTypesForTargetAction,
-      createSessionTypeForm,
-      applySessionTypePreset,
-      applySessionTypeName,
-      sessionTypeIdFromName,
-      inferSessionTypePreset,
-      sessionTypeSemanticsSummary,
-      sessionTypeFormHasAdvancedValues,
-      sessionTypeSourceGroupLabel,
-      workingDirectoryPolicyOptions,
-      SessionTypesEmptyState,
-      SpawnSessionTypesEmptyNotice,
-      SESSION_TYPE_PRESETS,
-      spawnSessionAction,
-      spawnSessionFormForTarget,
-      spawnSessionOptionsFromHubList,
-      surfaceLaunchAction,
-      terminalDescriptorForSessionId,
-      terminalReleaseToast
-    }
+    appsModule,
+    dashboardModule,
+    entitySubscriptionModule,
+    hubSettingsModule,
+    packageSettingsModule,
+    packageSurfacesModule,
+    pluginNavigationModule,
+    pluginRoutesModule,
+    pluginSurfaceStateModule,
+    routingModule,
+    sessionRouteModule,
+    sessionTypeUiModule,
+    sessionTypesModule,
+    spawnSessionModule,
+    spawnTargetUiModule,
+    spawnTargetsModule,
+    terminalChromeModule
   ] = await Promise.all([
     vite.ssrLoadModule("/src/botster/IonicUiNodeRenderer.tsx"),
     vite.ssrLoadModule("/src/botster/__fixtures__/uiNodeConformance.ts"),
@@ -6471,8 +6477,151 @@ try {
     vite.ssrLoadModule("/src/botster/__fixtures__/sessionBindingUiChildren.ts"),
     vite.ssrLoadModule("/src/botster/uiNodes.ts"),
     vite.ssrLoadModule("/src/botster/TerminalViewHost.tsx"),
-    vite.ssrLoadModule("/src/App.tsx")
+    vite.ssrLoadModule("/src/app/apps.tsx"),
+    vite.ssrLoadModule("/src/app/dashboard.tsx"),
+    vite.ssrLoadModule("/src/app/entitySubscription.ts"),
+    vite.ssrLoadModule("/src/app/hubSettings.tsx"),
+    vite.ssrLoadModule("/src/app/packageSettings.tsx"),
+    vite.ssrLoadModule("/src/app/packageSurfaces.ts"),
+    vite.ssrLoadModule("/src/app/pluginNavigation.tsx"),
+    vite.ssrLoadModule("/src/app/pluginRoutes.tsx"),
+    vite.ssrLoadModule("/src/app/pluginSurfaceState.ts"),
+    vite.ssrLoadModule("/src/app/routing.ts"),
+    vite.ssrLoadModule("/src/app/sessionRoute.tsx"),
+    vite.ssrLoadModule("/src/app/sessionTypeUi.tsx"),
+    vite.ssrLoadModule("/src/app/sessionTypes.ts"),
+    vite.ssrLoadModule("/src/app/spawnSession.ts"),
+    vite.ssrLoadModule("/src/app/spawnTargetUi.tsx"),
+    vite.ssrLoadModule("/src/app/spawnTargets.ts"),
+    vite.ssrLoadModule("/src/app/terminalChrome.ts")
   ]);
+
+  const {
+    AppListItem,
+    AppsView,
+    PluginListItem
+  } = appsModule;
+  const {
+    DashboardView,
+    SessionListItem
+  } = dashboardModule;
+  const { currentDashboardSessions } = await vite.ssrLoadModule("/src/app/dashboardSessions.ts");
+  const {
+    entitySubscriptionErrorFromFrame
+  } = entitySubscriptionModule;
+  const {
+    DiagnosticsView,
+    HubGeneralSection,
+    HubSettingsSectionsNav
+  } = hubSettingsModule;
+  const {
+    entityFamilyRecordLimit,
+    hubUpdateCheckAction,
+    hubUpdateCheckActionId,
+    hubUpdateOutcomeFromResult,
+    hubUpdateOutcomeSummary,
+    replayHubStatusOnLifecycleEvent
+  } = await vite.ssrLoadModule("/src/app/hubLifecycle.ts");
+  const {
+    PluginSettingsPanel,
+    RemoteAccessConfigurationItem
+  } = packageSettingsModule;
+  const {
+    compareInstalledPackageRows,
+    packageAppSurfaces,
+    packageSettingsSurfaces,
+    surfaceLaunchAction
+  } = packageSurfacesModule;
+  const {
+    PackageNavigationShortcutButton,
+    PluginNavigationShortcuts
+  } = pluginNavigationModule;
+  const {
+    packageNavigationShortcut
+  } = await vite.ssrLoadModule("/src/app/pluginNavigationModel.ts");
+  const {
+    PluginSettingsRoutePage,
+    PluginSurfaceRoutePage
+  } = pluginRoutesModule;
+  const {
+    renderedPluginSurfaceState
+  } = pluginSurfaceStateModule;
+  const {
+    appRouteFromPathname,
+    appRoutePath
+  } = routingModule;
+  const {
+    SessionRouteView
+  } = sessionRouteModule;
+  const {
+    SessionTypeExecutionControl,
+    SessionTypeListItem,
+    SessionTypeSubmitButton,
+    SessionTypesEmptyState,
+    SessionTypesSurfaceNotices,
+    SessionTypesView,
+    SpawnSessionTypesEmptyNotice
+  } = sessionTypeUiModule;
+  const {
+    applySessionTypeHomeKind,
+    applySessionTypeName,
+    applySessionTypePreset,
+    createSessionTypeForm,
+    emptySessionTypeForm,
+    enabledSpawnPointSessionTypeSources,
+    groupSessionTypesBySource,
+    inferSessionTypePreset,
+    rejectedSessionTypeForm,
+    SESSION_TYPE_PRESETS,
+    SESSION_TYPE_SOURCE_GLOBAL_LABEL,
+    sessionTypeDefinitionFromForm,
+    sessionTypeFormFromAuthoringDefinition,
+    sessionTypeFormHasAdvancedValues,
+    sessionTypeFormIsStructurallyComplete,
+    sessionTypeIdFromName,
+    sessionTypeManagementSupported,
+    sessionTypeMutationSource,
+    sessionTypeMutationSourceFromRecord,
+    sessionTypeSemanticsSummary,
+    sessionTypeSourceGroupLabel,
+    spawnPointSessionTypeSourceLabel,
+    workingDirectoryPolicyOptions,
+    writableSessionTypeSources
+  } = sessionTypesModule;
+  const {
+    applySpawnSessionListResult,
+    listSessionTypesForTargetAction,
+    rejectedSpawnSessionForm,
+    spawnSessionAction,
+    spawnSessionFormForTarget,
+    spawnSessionOptionsFromHubList
+  } = spawnSessionModule;
+  const {
+    SpawnTargetListItem
+  } = spawnTargetUiModule;
+  const {
+    compareSpawnTargetRows
+  } = spawnTargetsModule;
+  const {
+    terminalDescriptorForSessionId,
+    terminalReleaseToast
+  } = terminalChromeModule;
+  const { WorkbenchNav } = await vite.ssrLoadModule("/src/app/workbench.tsx");
+
+  assert.deepEqual(
+    currentDashboardSessions([
+      { id: "current-a", lifecycle_class: "current" },
+      { id: "ended-b", lifecycle_class: "ended" },
+      { id: "indeterminate-c", lifecycle_class: "indeterminate" },
+      { id: "current-d", lifecycle_class: "current" },
+      { id: "missing-class" }
+    ]).map((row) => row.id),
+    ["current-a", "current-d"]
+  );
+  assert.equal(
+    currentDashboardSessions([{ id: "ended-only", lifecycle_class: "ended" }]).length,
+    0
+  );
 
   const runningTerminalSession = {
     id: activeHubSessionId,
@@ -9991,8 +10140,13 @@ try {
     presentedFixtureMarkup,
     /<ion-modal[^>]*class="[^"]*uinode-dialog[^"]*uinode-dialog-overlay[^"]*"[^>]*data-ui-node-id="create-ticket-dialog"/
   );
+  assert.match(presentedFixtureMarkup, /<ion-modal[^>]*backdropDismiss=""/);
+  assert.match(presentedFixtureMarkup, /<ion-modal[^>]*canDismiss=""/);
   assert.match(presentedFixtureMarkup, /uinode-dialog-sheet/);
   assert.match(presentedFixtureMarkup, /uinode-dialog-header/);
+  assert.match(presentedFixtureMarkup, /class="uinode-dialog-close"/);
+  assert.match(presentedFixtureMarkup, /aria-label="Close dialog"/);
+  assert.match(presentedFixtureMarkup, />Close<\/ion-button>/);
   assert.match(presentedFixtureMarkup, /uinode-dialog-body/);
   assert.doesNotMatch(presentedFixtureMarkup, /uinode-dialog-body[\s\S]*ion-content/);
 
@@ -10063,6 +10217,20 @@ try {
     presentation: [{ kind: "clear", key: "create-ticket-dialog" }]
   });
   assert.equal(Object.hasOwn(presentationValues(dialogClearedState, presentationScope), "create-ticket-dialog"), false);
+  const locallyDismissedState = clearPresentationValue(
+    dialogSetState,
+    presentationScope,
+    "create-ticket-dialog"
+  );
+  assert.equal(Object.hasOwn(
+    presentationValues(locallyDismissedState, presentationScope),
+    "create-ticket-dialog"
+  ), false);
+  assert.equal(presentationValues(locallyDismissedState, presentationScope).details, true);
+  assert.equal(
+    clearPresentationValue(locallyDismissedState, presentationScope, "create-ticket-dialog"),
+    locallyDismissedState
+  );
   const dialogSetMarkup = renderToStaticMarkup(
     ionicUiNodeRendererRegistry.render(
       uiNodeConformanceSnapshot,

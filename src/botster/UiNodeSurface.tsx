@@ -16,6 +16,7 @@ interface UiNodeSurfaceProps {
   presentation?: Record<string, JsonValue>;
   actionResult?: UiActionResult;
   onAction?: (dispatch: UiNodeActionDispatch) => void;
+  onDismissPresentation?: (key: string) => void;
 }
 
 export function UiNodeSurface({
@@ -26,12 +27,14 @@ export function UiNodeSurface({
   localState,
   presentation,
   actionResult,
-  onAction
+  onAction,
+  onDismissPresentation
 }: UiNodeSurfaceProps) {
   const renderedTree = ionicUiNodeRendererRegistry.render(snapshot, entities, {
     actionResult,
     capabilities,
     dispatchAction: onAction,
+    dismissPresentation: onDismissPresentation,
     localState,
     presentation
   }) as ReactNode;

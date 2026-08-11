@@ -1653,10 +1653,13 @@ async function loadProductionAppRouteFromPathname() {
     logLevel: "error"
   });
   try {
-    const appModule = await vite.ssrLoadModule("/src/App.tsx");
+    const [routingModule, hubLifecycleModule] = await Promise.all([
+      vite.ssrLoadModule("/src/app/routing.ts"),
+      vite.ssrLoadModule("/src/app/hubLifecycle.ts")
+    ]);
     return {
-      appRouteFromPathname: appModule.appRouteFromPathname,
-      entityFamilyRecordLimit: appModule.entityFamilyRecordLimit
+      appRouteFromPathname: routingModule.appRouteFromPathname,
+      entityFamilyRecordLimit: hubLifecycleModule.entityFamilyRecordLimit
     };
   } finally {
     await vite.close();

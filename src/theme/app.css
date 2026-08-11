@@ -1414,9 +1414,18 @@ ion-modal.uinode-dialog.presentation-overlay .ion-page {
 }
 
 .uinode-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   flex: 0 0 auto;
   padding: 16px 20px 12px;
   border-bottom: 1px solid var(--app-border-color);
+}
+
+.uinode-dialog-close {
+  flex: 0 0 auto;
+  margin: -8px -8px -8px 0;
 }
 
 .uinode-dialog-title {
