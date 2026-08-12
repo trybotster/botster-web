@@ -81,9 +81,18 @@ export type InputHandlerOptions = {
      */
     getCursorPosition?: () => CursorPosition;
     /**
-     * Sink for output replies (CPR/DA/mouse).
+     * Sink for user-input encodings that leave Restty (mouse reports) and, unless
+     * {@link suppressQueryReplies} is set, for terminal query replies (CPR/DA/OSC).
      */
     sendReply?: (data: string) => void;
+    /**
+     * When true, OutputFilter query replies (OSC color, DA, DSR/CPR, XTVERSION,
+     * etc.) are discarded. Mouse report encodings still use {@link sendReply}.
+     *
+     * Use this for Botster-style pure renderers where Core owns PTY query replies
+     * but the client still encodes keyboard and mouse input.
+     */
+    suppressQueryReplies?: boolean;
     /**
      * Map pointer events to cell coordinates.
      */

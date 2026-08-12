@@ -1,10 +1,11 @@
 # Vendored Restty
 
-Built from `trybotster/restty` commit `79f633189adc73b8cf5ed4f7c7be1be4a7da35bf` (full `build:wasm` + `build` after GHOSTSNP renderer work).
+Built from `trybotster/restty` commit `448497041a4d0e8617662c568ae73f246b3a805f` (full `build:wasm` + `build`).
 
-Minimum plan pin: `448497041a4d0e8617662c568ae73f246b3a805f` (GHOSTSNP import,
-`readOnly` query mute, mouse/Kitty rehydrate). This vendor is at or after that
-floor.
+This commit is at or after the plan floor
+`448497041a4d0e8617662c568ae73f246b3a805f` and includes GHOSTSNP-only
+`loadBinarySnapshot`, `appOptions.readOnly` query mute (WASM drain +
+`suppressQueryReplies` for OSC 10/11/12 / DA / DSR), and mouse/Kitty rehydrate.
 
 The fork package points at `dist/` but does not commit that directory or define an
 npm `prepare` script, so this repo vendors the built distributable files together.

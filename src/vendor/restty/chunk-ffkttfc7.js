@@ -15317,18 +15317,20 @@ class OutputFilter {
 function createInputHandler(options = {}) {
   const config = options.config || {};
   const cursorProvider = options.getCursorPosition || (() => ({ row: 1, col: 1 }));
-  const replySink = options.sendReply || (() => {
+  const inputSink = options.sendReply || (() => {
   });
+  const querySink = options.suppressQueryReplies ? () => {
+  } : inputSink;
   const positionToCell = options.positionToCell || (() => ({ row: 0, col: 0 }));
   const positionToPixel = options.positionToPixel || null;
   const mouse = new MouseController({
-    sendReply: replySink,
+    sendReply: inputSink,
     positionToCell,
     positionToPixel: positionToPixel ?? undefined
   });
   const filter = new OutputFilter({
     getCursorPosition: cursorProvider,
-    sendReply: replySink,
+    sendReply: querySink,
     mouse,
     getDefaultColors: options.getDefaultColors,
     onClipboardRead: options.onClipboardRead,
@@ -15346,7 +15348,9 @@ function createInputHandler(options = {}) {
     filterOutputBytes: (output) => filter.filterBytes(output),
     setReplySink: (fn) => {
       mouse.setReplySink(fn);
-      filter.setReplySink(fn);
+      if (!options.suppressQueryReplies) {
+        filter.setReplySink(fn);
+      }
     },
     setCursorProvider: (fn) => {
       filter.setCursorProvider(fn);
@@ -67193,6 +67197,7 @@ function createResttyApp(options) {
     sendReply: (data) => {
       ptyTransport.sendInput(data);
     },
+    suppressQueryReplies: options.readOnly === true,
     positionToCell: positionToCell2,
     positionToPixel,
     getDefaultColors: () => ({
