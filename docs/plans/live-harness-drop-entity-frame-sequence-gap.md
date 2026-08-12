@@ -6,6 +6,8 @@ description: Plan (Plan Review round-2) for a family-bound live-harness control 
 
 ## Plan Review disposition
 
+**Final accepted live contract (implement + later review revisits):** warmup claim **A** → drop claim **B** → gap claim **C** → mandatory cleanup **A/B/C**. Interim Plan Review visit rows below are historical; they must not be read as the current acceptance chronology.
+
 ### Visit 1 (`review_1786522688_298315`) — resolved
 
 | Finding | Severity | Fix |
@@ -15,17 +17,17 @@ description: Plan (Plan Review round-2) for a family-bound live-harness control 
 | `finding_1786522688_691906` Drop contract | high | Filter-bound arm/state contract |
 | `finding_1786522688_966081` Force-click / SPA request-state | high | Named force paths; normal-control + SPA oracles |
 
-### Visit 2 (`review_1786523105_798457`) — resolved
+### Visit 2 (`review_1786523105_798457`) — resolved (historical interim)
 
-| Finding | Severity | Fix |
-|---------|----------|-----|
-| `finding_1786523105_998789` Missing second real membership frame | high | Two-mutation chronology: drop claim **A**, claim **B** triggers `sequence_gap` |
+| Finding | Severity | Interim fix → **final** |
+|---------|----------|-------------------------|
+| `finding_1786523105_998789` Missing second real membership frame | high | Interim: two-mutation drop A / gap B. **Final:** warmup A + drop B + gap C (dual-client package-entity floor requires warmup before ordered deltas). |
 
-### Visit 3 (`review_1786523403_346173`) — this revision
+### Visit 3 (`review_1786523403_346173`) — resolved (historical interim)
 
-| Finding | Severity | Fix in this plan |
-|---------|----------|------------------|
-| `finding_1786523403_317329` Second-delta session B lacks mandatory lifecycle cleanup | medium | **Mandatory cleanup for both A and B** after D1/D2/gap/stale/ablation assertions: production membership remove when possible, then Hub `shutdown_session` + `remove_session` for both seeds; `finally`-safe path on early failure; assert neither membership nor session remains before later lifecycle stages. |
+| Finding | Severity | Interim fix → **final** |
+|---------|----------|-------------------------|
+| `finding_1786523403_317329` Second-delta session lacks mandatory lifecycle cleanup | medium | Interim: mandatory cleanup A+B. **Final:** mandatory cleanup **A+B+C** with production remove, hub shutdown/remove, and `listEntities` absence. |
 
 ## Target repository and routing
 
@@ -357,15 +359,16 @@ Do not broaden this run into Hub/Workspaces product code. Not a Hub session-type
 - Post-decrypt intercept of a filter-matched real frame satisfies “real Hub-produced entity frame on the WebRTC data channel path.”
 - Workspaces lifecycle membership stage is the correct held-open **entity_options** product surface for ticket item 4 (Available sessions Add form).
 - Parent pins Hub `de6b099` / Workspaces `7ab4d13` / Web ≥ `2a41220` are the claim-stack contracts this ticket must satisfy.
-- **A dropped claim for A does not update client membership; only the post-gap replacement snapshot (driven by a later real delta such as claim B) reconciles P1 to authoritative “A claimed” state.** Waiting after a single dropped frame is not a valid sequence_gap proof.
-- Second mutation is a **distinct** production membership claim for session **B**, not re-claim of A, not store injection, not channel close.
+- Dual-client membership subscribe advances Hub package-entity floor; the first claim after P2 opens Add is often `package_entity_resync`, so **warmup claim A** settles the floor before ordered deltas.
+- **A dropped claim for B does not update client membership for B; only the post-gap replacement snapshot (driven by later real delta claim C) reconciles P1 to authoritative claimed state for A/B/C.** Waiting after a single dropped frame is not a valid sequence_gap proof.
+- Ordered gap mutations are **distinct** production membership claims for sessions **B** (dropped) and **C** (gap trigger), not re-claim of A, not store injection, not channel close. Stale selection under test remains **A**.
 
 ### Unknowns (resolve in Implement with evidence — not silent waivers)
 
-1. Exact membership delta `frame_type` produced on P2 claim under Hub ≥ `de6b099` (`entity_upsert` vs `entity_patch`) — filter default includes all deltas.
+1. Exact membership delta `frame_type` produced on P2 claim under Hub ≥ `de6b099` (`entity_upsert` vs `entity_patch`) — filter default includes all deltas. *(Resolved live: `entity_upsert`.)*
 2. Whether membership sequence_gap resubscribe keeps the Add dialog open without extra `plugin_surface_render` (existing stage forbids render rise during claim exclusion; preserve after gap path).
-3. Whether non-forced click on a truly disabled Ionic button always yields settled `blocked_gate` without `force` — if Playwright cannot deliver a click to disabled controls, settle oracle must use production telemetry after a **non-forced** attempt and still prove zero outbound request (document the exact settled path used).
-4. Whether P2 can claim B while still holding UI state after claiming A without dismissing dialogs — Implement may open a fresh Add dialog on P2 for B; still production UI only.
+3. Whether non-forced click on a truly disabled Ionic button always yields settled `blocked_gate` without `force` — if Playwright cannot deliver a click to disabled controls, settle oracle must use production telemetry after a **non-forced** attempt and still prove zero outbound request (document the exact settled path used). *(Resolved live: `blocked_gate`.)*
+4. Whether P2 can open a fresh Add dialog for claim B and claim C after warmup claim A without breaking production-only UI — still production UI only.
 
 ## Affected surfaces / files
 
@@ -383,12 +386,12 @@ Likely touch points already on base (minimal, only as required by harness oracle
 ## Implementation sequence
 
 1. Confirm worktree at ≥ `aa19ffb`; restore `.gitignore` if wiped.
-2. Implement arm/drop/state + intercept + events in `webrtcDaemonClient.ts`.
-3. Deterministic tests for filter matching, arm vs drop results, sequence_gap chronology, no-harness fail-closed.
-4. Extend membership reactive stage: arm membership filter → P2 claim → harness_drop → sequence_gap → snapshot → selection reconcile.
-5. Replace both `force: true` stale-submit clicks; wire SPA request-state + ablation red-first proof.
-6. README pins + control docs for parent ticket.
-7. Run gates: `npm test`, `typecheck`, `build`, **`smoke:workspaces-lifecycle`** with exact pins (mandatory), plus default `smoke:live-packaged-protocol` if still green for non-Workspaces regressions.
+2. Implement arm/drop/state + intercept + events + bounded arm timeout in `webrtcDaemonClient.ts`.
+3. Deterministic tests for filter matching, arm vs drop results, two-frame sequence_gap chronology, arm `timed_out`, no-harness fail-closed.
+4. Extend membership reactive stage to **A/B/C chronology**: seed A+B+C → warmup claim A → arm → claim B harness_drop → claim C sequence_gap → snapshot reconcile → SPA stale-submit proof → cleanup A/B/C with `listEntities`.
+5. Replace both `force: true` stale-submit clicks; wire SPA `getActionRequestState` + outbound zero + ablation red-first proof.
+6. README pins + control docs for parent ticket (warmup A / drop B / gap C).
+7. Run gates: `npm test`, `typecheck`, `build`, **`smoke:workspaces-lifecycle`** with exact pins (mandatory). Lifecycle mode early-exits after lifecycle proof.
 
 ## Risks
 
@@ -396,9 +399,10 @@ Likely touch points already on base (minimal, only as required by harness oracle
 |------|------------|
 | Wrong-family drop on shared channel | Required `entity_type` filter; non-match pass-through |
 | Arm/drop result confusion | Arm returns arm only; drop only via state/events |
-| Force-click false green | Delete force on stale paths; require request count 0 + click phase |
-| **Single dropped claim never reaches sequence_gap** | **Mandatory mutation 2 (claim B) before gap oracles**; unit two-frame chronology; forbid using later remove_session-of-A as sole trigger |
-| Residual B poisons later lifecycle counts | **Mandatory A+B cleanup** after assertions; finally-safe; assert neither membership nor session remains |
+| Force-click false green | Delete force on stale paths; require request count 0 + click phase + SPA pending/result unchanged |
+| Dual-client first claim is resync not delta | **Warmup claim A** before arm; ordered drop is claim **B** |
+| **Single dropped claim never reaches sequence_gap** | **Mandatory ordered delta 2 (claim C) before gap oracles**; unit two-frame chronology; forbid using later remove_session as sole trigger |
+| Residual seeds poison later lifecycle counts | **Mandatory A+B+C cleanup** after assertions; finally-safe; `listEntities` absence for membership and session |
 | Using reconnect as gap | Separate oracles; forbid closeDataChannel in gap chronology |
 | Mixed event family breakage | Distinct `webrtc_entity_frame_harness_drop` kind; filter-kind readers |
 | Workspaces pin unavailable | Blocking dependency on Workspaces target — no skip |

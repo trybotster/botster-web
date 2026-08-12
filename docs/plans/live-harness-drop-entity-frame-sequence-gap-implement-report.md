@@ -140,6 +140,12 @@ Addressed open Review findings:
 |---------|-----|
 | Plan acceptance still taught obsolete seed A+B / drop A / gap B | Plan chronology table, cleanup contract, scope, acceptance checks, product ledger, and production-path blurb rewritten to warmup A / drop B / gap C / cleanup A+B+C; timed_out documented as always bounded; harness JSDoc + finally comment updated; source guards reject obsolete exact phrases |
 
+## Review revisit (sequence 15)
+
+| Finding | Fix |
+|---------|-----|
+| Plan still had obsolete A/B instructions outside repaired sections | Assumptions, unknowns, implementation sequence, risks, and Plan Review disposition history updated to final A/B/C (historical visit rows labeled interim→final); source guards reject remaining obsolete claim-A / mutation-2-B / A+B-cleanup active phrases |
+
 ## Unverified behavior or residual risk
 
 1. **Ablation** `BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1` not re-run in this Implement session (green path force-free + blocked_gate + SPA state proven live; ablation path still fails first at outbound/SPA oracles).

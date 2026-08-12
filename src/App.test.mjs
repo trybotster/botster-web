@@ -1958,7 +1958,9 @@ assert.match(webrtcDaemonClient, /state: "timed_out"/);
 assert.match(planArtifact, /Warmup claim \*\*A\*\*|warmup claim A/);
 assert.match(planArtifact, /drop claim \*\*B\*\*|claim B \(D1 harness-dropped\)|Ordered delta 1 — claim B/i);
 assert.match(planArtifact, /claim \*\*C\*\*|Ordered delta 2 — claim C/i);
-assert.match(planArtifact, /sessions A, B, and C|cleanup of A, B, and C|A\/B\/C/);
+assert.match(planArtifact, /sessions A, B, and C|cleanup of A, B, and C|A\/B\/C|A\+B\+C cleanup/);
+assert.match(planArtifact, /Final accepted live contract/);
+// Reject obsolete active-contract phrasing (not historical interim labels).
 assert.doesNotMatch(
   planArtifact,
   /seed A \+ B;\s*\n\s*- arm → P2 claim A → `webrtc_entity_frame_harness_drop`/
@@ -1966,6 +1968,34 @@ assert.doesNotMatch(
 assert.doesNotMatch(
   planArtifact,
   /only if implement adds optional client timer/
+);
+assert.doesNotMatch(
+  planArtifact,
+  /A dropped claim for A does not update client membership; only the post-gap replacement snapshot \(driven by a later real delta such as claim B\)/
+);
+assert.doesNotMatch(
+  planArtifact,
+  /Second mutation is a \*\*distinct\*\* production membership claim for session \*\*B\*\*, not re-claim of A/
+);
+assert.doesNotMatch(
+  planArtifact,
+  /Mandatory mutation 2 \(claim B\) before gap oracles/
+);
+assert.doesNotMatch(
+  planArtifact,
+  /\*\*Mandatory A\+B cleanup\*\* after assertions/
+);
+assert.doesNotMatch(
+  planArtifact,
+  /arm membership filter → P2 claim → harness_drop → sequence_gap/
+);
+assert.doesNotMatch(
+  planArtifact,
+  /Two-mutation chronology: drop claim \*\*A\*\*, claim \*\*B\*\* triggers/
+);
+assert.doesNotMatch(
+  planArtifact,
+  /\*\*Mandatory cleanup for both A and B\*\* after D1\/D2/
 );
 // Stale-submit green path must not force-click disabled controls.
 assert.doesNotMatch(liveProtocolHarnessScript, /\.click\(\{\s*force:\s*true\s*\}\)/);
