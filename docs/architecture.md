@@ -27,7 +27,7 @@ Session state uses a held entity subscription and canonical family `session`:
 
 There is no HTTP daemon client, SSE terminal stream, polling, `list_sessions` hydration, or lifecycle-event projection fallback.
 
-Terminal data stays outside `HubControlFrame`. The WebRTC client attaches and drains terminal events, while the Hub terminal data plane restores visible `read_screen` text before buffered live output. Snapshot/scrollback payloads remain opaque metadata and are never rendered as terminal text.
+Terminal data stays outside `HubControlFrame`. The WebRTC client attaches and drains terminal events. The Hub terminal data plane imports authoritative GHOSTSNP Snapshot bytes into Restty (H0–H5), buffers live output across install, reads mode flags for ModeGatedInput, and never imports Scrollback as renderer state. ReadScreen is an optional supplement only. Restty mounts as a pure renderer (`readOnly`) and does not answer OSC color queries in the browser.
 
 Hub identity is a `DaemonStatus` projection on family `botster-web.hub_status`, never a package row. `software`, `installation`, `host_id`, `schema_version`, and `compatibility` all come from the status response, and `check_hub_update` is the only Hub self-update read. The family is registered as an active pull and replayed when the data channel reopens, so protocol, conformance, and schema facts do not regress after reconnect. `DaemonHubUpdate` has exactly three states — `current`, `available`, `unavailable`. Offline and error are rejected-action-result outcomes, never a fourth state.
 
@@ -52,8 +52,8 @@ reads the generic entity store, including nested row context, while
 Bind-list identity has one materialization order. The direct item-template root
 retains its item-relative `$bind`; after that root becomes a nonblank literal,
 `bind_list_descendant_id` children call the runtime helper exported by
-`@trybotster/ui-contract@0.3.2`. The generated declarations and revision-33
-shared conformance fixtures come from `@trybotster/hub-test-support@0.1.27`.
+`@trybotster/ui-contract@0.3.2`. The generated declarations and revision-35
+shared conformance fixtures come from `@trybotster/hub-test-support@0.1.30`.
 Nested bind lists establish a new nearest-row context. Web never encodes,
 parses, normalizes, indexes, or repairs those identities.
 

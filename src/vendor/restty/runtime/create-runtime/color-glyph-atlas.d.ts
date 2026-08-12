@@ -7,5 +7,6 @@ type CreateColorGlyphAtlasHelpersOptions = {
 export declare function createColorGlyphAtlasHelpers(options: CreateColorGlyphAtlasHelpersOptions): {
     atlasBitmapToRGBA: (atlas: FontAtlas) => Uint8Array | null;
     buildColorEmojiAtlasWithCanvas: BuildColorEmojiAtlasWithCanvas;
+    destroy: () => void;
 };
 export {};

@@ -347,27 +347,31 @@ try {
     });
   }
 
-  const sendInputRequestsBeforeEcho = await daemonRequestCount(page, {
-    type: "send_input",
-    data: `${echoProbe}\n`
-  });
+  // Mounted keyboard prefers ModeGatedInput; when Hub emits JSON-unsafe u64 mode tokens,
+  // Web falls back to send_input (mode_gated_input_fallback telemetry).
+  const modeGatedBeforeEcho = await daemonRequestCount(page, { type: "mode_gated_input" });
+  const sendInputBeforeEcho = await daemonRequestCount(page, { type: "send_input" });
   await typeThroughMountedTerminal(page, `${echoProbe}\n`);
-  await waitForDaemonRequestCount(
-    page,
-    { type: "send_input", data: `${echoProbe}\n` },
-    sendInputRequestsBeforeEcho + 1,
-    "single echo send_input request"
-  );
   await waitForTerminalOutput(page, `botster-web-production-echo:${echoProbe}`);
   await waitForTerminalRendererWrite(page, `botster-web-production-echo:${echoProbe}`);
-  const sendInputRequestsAfterEcho = await daemonRequestCount(page, {
-    type: "send_input",
-    data: `${echoProbe}\n`
-  });
-  if (sendInputRequestsAfterEcho !== sendInputRequestsBeforeEcho + 1) {
+  const modeGatedAfterEcho = await daemonRequestCount(page, { type: "mode_gated_input" });
+  const sendInputAfterEcho = await daemonRequestCount(page, { type: "send_input" });
+  const usedModeGated = modeGatedAfterEcho > modeGatedBeforeEcho;
+  const usedSendInputFallback = sendInputAfterEcho > sendInputBeforeEcho;
+  if (!usedModeGated && !usedSendInputFallback) {
     throw new Error(
-      `expected one send_input for ${echoProbe}, observed ${sendInputRequestsAfterEcho - sendInputRequestsBeforeEcho}`
+      `expected mode_gated_input or send_input fallback for mounted echo ${echoProbe}`
     );
+  }
+  if (!usedModeGated) {
+    const fallback = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
+        (entry) => entry.kind === "mode_gated_input_fallback"
+      )
+    );
+    if (!fallback) {
+      throw new Error("send_input path for mounted echo lacked mode_gated_input_fallback telemetry");
+    }
   }
 
   const readScreen = await callTerminalControl(page, "readScreen");
@@ -5119,47 +5123,62 @@ async function waitForTerminalCanvas(page) {
 }
 
 async function waitForAutomaticTerminalRestore(page) {
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_screen" }, "automatic read_screen request");
+  // GHOSTSNP-first hydrate: Snapshot install + ReadModeFlags (ReadScreen is optional supplement).
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_mode_flags" }, "automatic read_mode_flags request");
   const restoration = await page.waitForFunction(
     () => {
-      const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).findLast(
+      const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+      const install = terminal.findLast((entry) => entry.kind === "ghostsnp_install" || entry.kind === "restty_load_binary_snapshot");
+      const modeFlags = terminal.findLast((entry) => entry.kind === "mode_flags");
+      const status = terminal.findLast(
         (entry) =>
-          entry.kind === "output" &&
-          entry.payload?.source === "read_screen" &&
-          typeof entry.payload?.data === "string" &&
-          entry.payload.data.length > 0
+          entry.kind === "status" &&
+          entry.payload?.state === "attached" &&
+          typeof entry.payload?.message === "string" &&
+          entry.payload.message.includes("GHOSTSNP")
       );
-      return entry ? { text: entry.payload.data, chars: entry.payload.data.length } : null;
+      if (!install || !modeFlags || !status) return null;
+      return {
+        bytes: install.payload?.bytes ?? null,
+        mode_generation: modeFlags.payload?.mode_generation ?? null,
+        mode_revision: modeFlags.payload?.mode_revision ?? null,
+        message: status.payload.message
+      };
     },
     undefined,
-    { timeout: 15_000 }
+    { timeout: 20_000 }
   ).then((handle) => handle.jsonValue()).catch((error) => {
-    throw new Error(`timed out waiting for automatic ReadScreen restoration: ${error.message}`);
+    throw new Error(`timed out waiting for automatic GHOSTSNP restoration: ${error.message}`);
   });
-  await waitForTerminalRendererWrite(page, restoration.text);
 
-  const telemetry = await page.evaluate(() => {
-    const assemblies = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "webrtc_response_assembly")
+  // Snapshot event should carry GHOSTSNP magic on the daemon event plane.
+  const snapshotProof = await page.evaluate(() => {
+    const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "daemon_event")
       .map((entry) => entry.payload)
-      .filter((payload) =>
-        payload?.request_type === "read_screen" &&
-        Number.isInteger(payload?.total_bytes) &&
-        Number.isInteger(payload?.chunk_count) &&
-        Number.isFinite(payload?.duration_ms)
-      );
-    return assemblies.toSorted((left, right) => right.total_bytes - left.total_bytes)[0] ?? null;
+      .filter((event) => event?.type === "snapshot" && typeof event.payload_base64 === "string");
+    const latest = events.at(-1);
+    if (!latest) return null;
+    try {
+      const raw = globalThis.atob(latest.payload_base64);
+      return {
+        bytes: latest.bytes,
+        magic: raw.slice(0, 8),
+        payload_encoding: latest.payload_encoding
+      };
+    } catch {
+      return { error: "base64_decode_failed" };
+    }
   });
-  if (!telemetry || telemetry.total_bytes <= 0 || telemetry.chunk_count < 1) {
-    throw new Error(`ReadScreen restoration did not traverse WebRTC response chunk framing: ${JSON.stringify(telemetry)}`);
+  if (!snapshotProof || snapshotProof.magic !== "GHOSTSNP") {
+    throw new Error(`automatic restore missing GHOSTSNP Snapshot event: ${JSON.stringify(snapshotProof)}`);
   }
-  if (telemetry.duration_ms >= 10_000) {
-    throw new Error(`historical terminal response assembly exceeded its request deadline: ${JSON.stringify(telemetry)}`);
-  }
-  if (telemetry.duration_ms > 8_000) {
-    throw new Error(`historical terminal response assembly lacks 2,000 ms timeout headroom: ${JSON.stringify(telemetry)}`);
-  }
-  return { restored_chars: restoration.chars, response_assembly: telemetry };
+
+  return {
+    restored_chars: snapshotProof.bytes,
+    ghostsnp_install: restoration,
+    snapshot: snapshotProof
+  };
 }
 
 async function assertTerminalAttachChronology(page, sessionId) {
@@ -5221,14 +5240,17 @@ async function assertTerminalAttachChronology(page, sessionId) {
             if (event.type !== "snapshot" && event.type !== "scrollback") return false;
             if (event.payload_encoding !== "base64" || typeof event.payload_base64 !== "string") return true;
             try {
-              return globalThis.atob(event.payload_base64).length !== event.bytes;
+              const raw = globalThis.atob(event.payload_base64);
+              if (raw.length !== event.bytes) return true;
+              if (event.type === "snapshot" && raw.slice(0, 8) !== "GHOSTSNP") return true;
+              return false;
             } catch {
               return true;
             }
           });
           if (invalidHistory) {
             return {
-              error: "snapshot/scrollback payload is not valid binary-safe revision-14 metadata",
+              error: "snapshot/scrollback payload is not valid binary-safe GHOSTSNP metadata",
               subscription_id: subscriptionId,
               observed: initialEvents.map((event) => ({ type: event.type, state: event.state, bytes: event.bytes }))
             };

@@ -7,14 +7,15 @@ export const hubStatusFamily = "botster-web.hub_status";
 export const hubCompatibilityDiagnosticId = "hub-compatibility";
 export const expectedDaemonProtocol = "botster-hub-daemon-v1";
 export const minimumDaemonProtocolVersion = 1;
-export const minimumConformanceFixtureRevision = 14;
+export const minimumConformanceFixtureRevision = 35;
 export const requiredDaemonFeatures = [
   "sessions",
   "terminal_streaming",
   "resize",
   "terminal_readback",
   "plugin_surface_render",
-  "plugin_surface_action"
+  "plugin_surface_action",
+  "mode_gated_input"
 ] as const;
 
 export type ConnectionDiagnosticSeverity = "info" | "success" | "warning" | "danger";

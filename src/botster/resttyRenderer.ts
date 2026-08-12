@@ -1,13 +1,15 @@
-import { Restty } from "../vendor/restty/internal.js";
+import { createInputHandler, Restty } from "../vendor/restty/internal.js";
 import type { PtyCallbacks, PtyConnectOptions, PtyTransport } from "../vendor/restty/pty/types";
 import type { ResttyFontSource } from "../vendor/restty/runtime/types";
 import type {
+  ModeDependentTerminalInput,
   TerminalDataPlaneAttachment,
   TerminalInput,
   TerminalRendererAdapter,
   TerminalSubscription,
   TerminalViewDescriptor
 } from "./terminal";
+import type { DaemonModeFlags } from "./realHubDaemonDto";
 
 const botsterResttyFontSources: ResttyFontSource[] = [
   {
@@ -17,12 +19,19 @@ const botsterResttyFontSources: ResttyFontSource[] = [
   }
 ];
 
+/**
+ * Kitty flag used when Hub reports kitty_enabled without bit-level detail.
+ * DisambiguateEscapeCodes (0x1) is the common baseline for protocol-enabled sessions.
+ */
+const kittyEnabledBaselineFlags = 0x1;
+
 export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   private readonly ptyTransport = new BotsterTerminalPtyTransport();
   private readonly inputListeners = new Set<(data: TerminalInput) => void>();
   private terminal?: Restty;
   private container?: HTMLElement;
-
+  private lastKeyEvent: KeyboardEvent | undefined;
+  private keyListener?: (event: KeyboardEvent) => void;
   constructor(readonly descriptor: TerminalViewDescriptor) {}
 
   mount(container: HTMLElement): void {
@@ -33,14 +42,27 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       }
       recordLiveHarnessTerminal("renderer_write", { data, sessionId: this.descriptor.sessionId });
     });
+    this.ptyTransport.setSemanticKeyProvider(() => this.lastKeyEvent);
+
+    this.keyListener = (event: KeyboardEvent) => {
+      this.lastKeyEvent = event;
+    };
+    container.addEventListener("keydown", this.keyListener, true);
+
     this.terminal = new Restty({
       root: container,
       createInitialPane: { focus: false },
       fontSources: botsterResttyFontSources,
       appOptions: {
+        // Pure renderer: session owns PTY queries including OSC color replies.
+        readOnly: true,
         ptyTransport: this.ptyTransport,
         beforeInput: ({ text, source }) => {
-          recordLiveHarnessTerminal("before_input", { text, source, sessionId: this.descriptor.sessionId });
+          recordLiveHarnessTerminal("before_input", {
+            text,
+            source,
+            sessionId: this.descriptor.sessionId
+          });
           if (source !== "pty" && text) {
             this.emitInput(text);
           }
@@ -50,7 +72,55 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     });
   }
 
+  async loadBinarySnapshot(data: Uint8Array): Promise<boolean> {
+    const terminal = this.terminal as Restty & {
+      loadBinarySnapshot?: (bytes: Uint8Array) => boolean;
+    } | undefined;
+    if (!terminal?.loadBinarySnapshot) {
+      recordLiveHarnessTerminal("ghostsnp_install_failed", {
+        reason: "restty_loadBinarySnapshot_missing",
+        sessionId: this.descriptor.sessionId
+      });
+      return false;
+    }
+
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+
+    // Pane construction starts Restty init without awaiting. GHOSTSNP import requires
+    // wasmReady + wasmHandle; poll until ready rather than re-entering init() (which is
+    // not idempotent for GPU backends).
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try {
+        const ok = terminal.loadBinarySnapshot(bytes);
+        if (ok) {
+          recordLiveHarnessTerminal("restty_load_binary_snapshot", {
+            ok: true,
+            bytes: bytes.byteLength,
+            attempt,
+            sessionId: this.descriptor.sessionId
+          });
+          return true;
+        }
+      } catch (error: unknown) {
+        recordLiveHarnessTerminal("restty_load_binary_snapshot_error", {
+          attempt,
+          message: error instanceof Error ? error.message : String(error),
+          sessionId: this.descriptor.sessionId
+        });
+      }
+      await delay(50);
+    }
+
+    recordLiveHarnessTerminal("restty_load_binary_snapshot", {
+      ok: false,
+      bytes: bytes.byteLength,
+      sessionId: this.descriptor.sessionId
+    });
+    return false;
+  }
+
   attachDataPlane(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription {
+    dataPlane.bindBinarySnapshotInstaller?.((bytes) => this.loadBinarySnapshot(bytes));
     const subscription = this.ptyTransport.attach(dataPlane);
     this.terminal?.connectPty();
     return subscription;
@@ -79,6 +149,11 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   destroy(): void {
+    if (this.container && this.keyListener) {
+      this.container.removeEventListener("keydown", this.keyListener, true);
+    }
+    this.keyListener = undefined;
+    this.lastKeyEvent = undefined;
     this.ptyTransport.destroy();
     this.inputListeners.clear();
     this.terminal?.destroy();
@@ -93,15 +168,26 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 class BotsterTerminalPtyTransport implements PtyTransport {
   private dataPlane?: TerminalDataPlaneAttachment;
   private callbacks?: PtyCallbacks;
   private outputSubscription?: TerminalSubscription;
   private onRender?: (data: string) => void;
+  private semanticKeyProvider?: () => KeyboardEvent | undefined;
   private connected = false;
 
   setRenderObserver(onRender: (data: string) => void): void {
     this.onRender = onRender;
+  }
+
+  setSemanticKeyProvider(provider: () => KeyboardEvent | undefined): void {
+    this.semanticKeyProvider = provider;
   }
 
   attach(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription {
@@ -143,6 +229,18 @@ class BotsterTerminalPtyTransport implements PtyTransport {
   sendInput(data: string): boolean {
     if (!this.dataPlane) return false;
     recordLiveHarnessTerminal("pty_send_input", { data, sessionId: this.dataPlane.sessionId });
+
+    if (this.dataPlane.writeModeGatedInput) {
+      const semantic = this.createModeDependentInput(data);
+      void Promise.resolve(this.dataPlane.writeModeGatedInput(semantic)).catch((error: unknown) => {
+        recordLiveHarnessTerminal("mode_gated_input_error", {
+          message: error instanceof Error ? error.message : String(error),
+          sessionId: this.dataPlane?.sessionId
+        });
+      });
+      return true;
+    }
+
     void this.dataPlane.writeInput(data);
     return true;
   }
@@ -160,6 +258,27 @@ class BotsterTerminalPtyTransport implements PtyTransport {
   destroy(): void {
     this.detach();
     this.callbacks = undefined;
+    this.semanticKeyProvider = undefined;
+  }
+
+  private createModeDependentInput(initialBytes: string): ModeDependentTerminalInput {
+    const keyEvent = this.semanticKeyProvider?.();
+    let kittyFlags = 0;
+    const inputHandler = createInputHandler({
+      getKittyKeyboardFlags: () => kittyFlags
+    });
+    return {
+      encode: (modes: DaemonModeFlags) => {
+        if (keyEvent) {
+          kittyFlags = kittyFlagsFromModeFlags(modes);
+          return inputHandler.encodeKeyEvent(keyEvent);
+        }
+        // Mouse / paste / non-key paths: retain last encoded bytes for the first
+        // attempt; re-encode is a no-op without a retained DOM event (unit tests
+        // inject encode functions directly on the data plane).
+        return initialBytes;
+      }
+    };
   }
 
   private detach(): void {
@@ -171,6 +290,10 @@ class BotsterTerminalPtyTransport implements PtyTransport {
     }
     this.dataPlane = undefined;
   }
+}
+
+function kittyFlagsFromModeFlags(modes: DaemonModeFlags): number {
+  return modes.kitty_enabled ? kittyEnabledBaselineFlags : 0;
 }
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {

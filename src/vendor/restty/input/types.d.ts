@@ -158,6 +158,11 @@ export type InputHandler = {
      * Filter PTY output and handle control queries (CPR/DA/mouse mode).
      */
     filterOutput: (output: string) => string;
+    /**
+     * Track PTY output side effects from raw bytes without relying on UTF-8
+     * decoding. Used by live binary transports.
+     */
+    filterOutputBytes?: (output: Uint8Array) => void;
     setReplySink: (fn: (data: string) => void) => void;
     setCursorProvider: (fn: () => CursorPosition) => void;
     setPositionToCell: (fn: (event: MouseEvent | PointerEvent | WheelEvent) => CellPosition) => void;
@@ -169,6 +174,11 @@ export type InputHandler = {
     setMouseMode: (mode: MouseMode) => void;
     getMouseStatus: () => MouseStatus;
     isMouseActive: () => boolean;
+    /**
+     * Rehydrate mouse tracking/format shadow state from Ghostty mode bits
+     * after binary snapshot import (no CSI replay required).
+     */
+    rehydrateMouseFromTrackingBits?: (bits: number) => void;
     isBracketedPaste: () => boolean;
     isFocusReporting: () => boolean;
     isAltScreen: () => boolean;

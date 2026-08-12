@@ -44,6 +44,7 @@ type RuntimePublicApiOptions = {
 };
 export type RuntimeAppApiRuntime = {
     sendInput: RuntimeSendInput;
+    sendInputBytes: (data: Uint8Array) => void;
     createPublicApi: (options: RuntimePublicApiOptions) => ResttyApp;
 };
 type LifecycleThemeRuntime = {
@@ -73,10 +74,12 @@ type CreateRuntimeAppApiOptions = {
     shouldSuppressWasmLog: (text: string) => boolean;
     runBeforeInputHook: (text: string, source: string) => string | null;
     runBeforeRenderOutputHook: (text: string, source: string) => string | null;
+    runBeforeRenderOutputBytesHook: (bytes: Uint8Array, source: string) => boolean;
     getSelectionText: () => string;
     initialPreferredRenderer: PreferredRenderer;
     maxScrollbackBytes?: number;
     maxScrollback?: number;
+    readOnly?: boolean;
     CURSOR_BLINK_MS: number;
     RESIZE_ACTIVE_MS: number;
     TARGET_RENDER_FPS: number;
@@ -105,6 +108,7 @@ type CreateRuntimeAppApiOptions = {
     destroyWebGPUStageTargets: () => void;
     clearWebGLShaderStages: (state?: WebGLState) => void;
     destroyWebGLStageTargets: (state?: WebGLState) => void;
+    destroyActiveRenderer?: (state: WebGPUState | WebGLState | null) => void;
     markSearchDirty: () => void;
     handleSearchWasmReset: () => void;
 };

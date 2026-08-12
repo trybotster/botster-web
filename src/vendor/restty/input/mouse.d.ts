@@ -38,6 +38,17 @@ export declare class MouseController {
     }): void;
     setMode(mode: MouseMode): void;
     handleModeSeq(seq: string): boolean;
+    /**
+     * Apply a single DEC private mode code (same semantics as CSI ? … h/l).
+     * Used by live CSI handling and post-GHOSTSNP rehydrate from Ghostty state.
+     */
+    applyPrivateMode(code: number, enabled: boolean): boolean;
+    /**
+     * Rehydrate mouse tracking/format from Ghostty mode bits after snapshot import.
+     * Bit layout matches `restty_mouse_tracking_bits` in wasm.
+     */
+    rehydrateFromTrackingBits(bits: number): void;
+    private recomputeEnabledFromFlags;
     isActive(): boolean;
     getStatus(): MouseStatus;
     sendMouseEvent(kind: "down" | "up" | "move" | "wheel", event: PointerEvent | WheelEvent): boolean;
@@ -46,3 +57,5 @@ export declare class MouseController {
     private modifiers;
     private sendMouse;
 }
+/** Signed wheel steps for app mouse reports. 0 means ignore. Cap avoids floods. */
+export declare function wheelReportSteps(event: WheelEvent, maxSteps?: number): number;

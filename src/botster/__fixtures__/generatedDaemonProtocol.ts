@@ -65,7 +65,15 @@ export const generatedModeFlagsResponseFixture = {
   sessions: [],
   mode_flags: {
     session_id: "mode-flags-fixture-session",
-    mouse_mode: 9
+    kitty_enabled: false,
+    cursor_visible: true,
+    bracketed_paste: false,
+    mouse_mode: 9,
+    alt_screen: false,
+    focus_reporting: false,
+    application_cursor: false,
+    mode_generation: 1,
+    mode_revision: 2
   },
   packages: [],
   package_decision: null,

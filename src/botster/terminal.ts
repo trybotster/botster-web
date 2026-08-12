@@ -1,4 +1,8 @@
-import type { DaemonCaptureSnapshot, DaemonReadScreen } from "./realHubDaemonDto";
+import type {
+  DaemonCaptureSnapshot,
+  DaemonModeFlags,
+  DaemonReadScreen
+} from "./realHubDaemonDto";
 
 export interface TerminalViewDescriptor {
   sessionId: string;
@@ -13,6 +17,15 @@ export interface TerminalViewMount {
 export type TerminalInput = string;
 export type TerminalOutput = string;
 
+/**
+ * Mode-dependent Kitty/mouse input retained as a semantic encoder until Hub admits.
+ * On ModeGatedInput stale reject, callers must discard prior bytes and re-encode
+ * under the fresh authoritative modes (never pair stale bytes with a new token).
+ */
+export interface ModeDependentTerminalInput {
+  encode(modes: DaemonModeFlags): string;
+}
+
 export interface TerminalSubscription {
   unsubscribe(): void;
 }
@@ -25,6 +38,17 @@ export interface TerminalAttachmentStatus {
 export interface TerminalDataPlaneAttachment {
   sessionId: string;
   writeInput(data: TerminalInput): void | Promise<void>;
+  /**
+   * Race-free mode-dependent input via ModeGatedInput + freshness tokens.
+   * Implementations re-encode the semantic event once after a stale reject.
+   */
+  writeModeGatedInput?(semantic: ModeDependentTerminalInput): void | Promise<void>;
+  /**
+   * Bind the Restty GHOSTSNP installer used during H0–H5 attach hydration.
+   */
+  bindBinarySnapshotInstaller?(
+    installer: (bytes: Uint8Array) => boolean | Promise<boolean>
+  ): void;
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription;
   subscribeStatus?(listener: (status: TerminalAttachmentStatus) => void): TerminalSubscription;
   resize?(rows: number, columns: number): void | Promise<void>;

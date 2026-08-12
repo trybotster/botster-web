@@ -26,6 +26,11 @@ export type ResttyPaneApi = {
     sendKeyInput: (text: string, source?: string) => void;
     clearScreen: () => void;
     loadBinarySnapshot: (data: Uint8Array) => boolean;
+    getColorForeground: () => number | null;
+    getColorBackground: () => number | null;
+    getColorCursor: () => number | null;
+    getPaletteColor: (index: number) => number | null;
+    getPalette: () => Uint8Array | null;
     connectPty: (url?: string) => void;
     disconnectPty: () => void;
     isPtyConnected: () => boolean;
@@ -74,6 +79,11 @@ export declare class ResttyPaneHandle implements ResttyPaneApi {
     sendKeyInput(text: string, source?: string): void;
     clearScreen(): void;
     loadBinarySnapshot(data: Uint8Array): boolean;
+    getColorForeground(): number | null;
+    getColorBackground(): number | null;
+    getColorCursor(): number | null;
+    getPaletteColor(index: number): number | null;
+    getPalette(): Uint8Array | null;
     connectPty(url?: string): void;
     disconnectPty(): void;
     isPtyConnected(): boolean;

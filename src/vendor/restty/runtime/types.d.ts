@@ -178,6 +178,11 @@ export type ResttyFontHintTarget = "auto" | "light" | "normal";
 export type ResttyAppInputPayload = {
     text: string;
     source: string;
+    /**
+     * Raw PTY bytes when the payload originated from a binary transport path.
+     * Present for live output hooks; absent for legacy string-only paths.
+     */
+    bytes?: Uint8Array;
 };
 /** Render-stage phase ordering. */
 export type ResttyShaderStageMode = "before-main" | "after-main" | "replace-main";
@@ -311,6 +316,13 @@ export type ResttyAppOptions = {
      * If both are set, maxScrollbackBytes takes precedence.
      */
     maxScrollback?: number;
+    /**
+     * When true, suppress terminal query responses (DA, DSR, kitty keyboard,
+     * kitty graphics) from being forwarded back to the PTY. Enable this when
+     * restty is used as a pure renderer alongside a session that already owns
+     * the PTY and handles terminal queries itself.
+     */
+    readOnly?: boolean;
 };
 /**
  * Public API for a terminal app instance.
@@ -346,6 +358,16 @@ export type ResttyApp = {
     clearScreen: () => void;
     /** Load a binary terminal snapshot into the active WASM instance. */
     loadBinarySnapshot: (data: Uint8Array) => boolean;
+    /** Get the active foreground color as 0x00RRGGBB, or null if unset. */
+    getColorForeground: () => number | null;
+    /** Get the active background color as 0x00RRGGBB, or null if unset. */
+    getColorBackground: () => number | null;
+    /** Get the active cursor color as 0x00RRGGBB, or null if unset. */
+    getColorCursor: () => number | null;
+    /** Get a single palette color as 0x00RRGGBB, or null for invalid index. */
+    getPaletteColor: (index: number) => number | null;
+    /** Get the full 256-color palette as RGB byte triplets (768 bytes). */
+    getPalette: () => Uint8Array | null;
     /** Open a PTY connection, optionally to a specific URL. */
     connectPty: (url?: string) => void;
     /** Close the active PTY connection. */
