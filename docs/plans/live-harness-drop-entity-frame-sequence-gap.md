@@ -493,6 +493,9 @@ No Plan-time vault capture required beyond this artifact.
 | Dual-client package-entity floor | Opening P2's Add dialog advances membership provider sequence without updating P1's `package_last_applied_seq`. The first claim after dual-client dialog open is often delivered as `package_entity_resync` (entity_snapshot), not an ordered delta. |
 | Live chronology | **Warmup claim A** (may resync; establishes applied floor + excludes A as stale selection) → **arm → claim B harness-drop** → **claim C sequence_gap**. Stale selection under test remains **A**. Seeds A+B+C; mandatory cleanup for all three. |
 | Lifecycle smoke exit | `BOTSTER_LIVE_WORKSPACES_LIFECYCLE=1` exits after lifecycle proof (mirrors entity-options reactive), and does not continue into session/terminal GHOSTSNP stages. |
+| Arm timeout | Bounded default arm timeout **30s** produces documented `timed_out` (cleared on drop/disarm/peer_reset). Optional `{ timeout_ms }` for tests. |
+| SPA request-state | Live stale-submit compares production `getActionRequestState()` pending + recent results before/after normal click, plus zero outbound daemon request. |
+| Cleanup proof | Fail on production membership remove errors; `listEntities("botster-workspaces.membership")` proves A/B/C absent; hub remove + session presence prove sessions absent. |
 
 ## Pipeline gates and artifacts
 

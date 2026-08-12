@@ -50,10 +50,13 @@ export function useProductionHubConnection(options: {
 
   // Live-protocol harness only: apply a real entity frame through the production store and
   // bump the same frame version used for hub-delivered frames. Does not alter validation policy.
+  // Also expose listEntities for authoritative cleanup/oracles (read-only).
   useEffect(() => {
     if (typeof window === "undefined") return;
     const harness = (window as typeof window & {
-      __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveProtocolHarnessEntityControl;
+      __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveProtocolHarnessEntityControl & {
+        listEntities?: (family: string) => Array<Record<string, unknown> & { id: string }>;
+      };
     }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
     if (!harness) return;
 
@@ -61,10 +64,16 @@ export function useProductionHubConnection(options: {
       runtimeClient.entities.apply(frame);
       setFrameVersion((version) => version + 1);
     };
+    const listEntities = (family: string) =>
+      runtimeClient.entities.list(family).map((record) => ({ ...record }));
     harness.applyEntityFrame = applyEntityFrame;
+    harness.listEntities = listEntities;
     return () => {
       if (harness.applyEntityFrame === applyEntityFrame) {
         delete harness.applyEntityFrame;
+      }
+      if (harness.listEntities === listEntities) {
+        delete harness.listEntities;
       }
     };
   }, [runtimeClient, setFrameVersion]);

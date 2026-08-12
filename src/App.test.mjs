@@ -1929,6 +1929,17 @@ assert.match(liveProtocolHarnessScript, /armDropNextInboundEntityFrame/);
 assert.match(liveProtocolHarnessScript, /webrtc_entity_frame_harness_drop/);
 assert.match(liveProtocolHarnessScript, /sequence_gap/);
 assert.match(liveProtocolHarnessScript, /second_delta_session_id|gap_trigger_snapshot_seq/);
+// Parent README chronology must match live stage markers (warmup A, drop B, gap C).
+assert.match(readme, /warmup/);
+assert.match(readme, /claims \*\*B\*\*/);
+assert.match(readme, /claims \*\*C\*\*/);
+assert.match(readme, /A, B, and C|A\/B\/C/);
+assert.match(liveProtocolHarnessScript, /warmup claim A|P2 warmup claim A/);
+assert.match(liveProtocolHarnessScript, /P2 claim B/);
+assert.match(liveProtocolHarnessScript, /P2 claim C/);
+assert.match(liveProtocolHarnessScript, /getActionRequestState/);
+assert.match(liveProtocolHarnessScript, /listEntities/);
+assert.match(webrtcDaemonClient, /DROP_NEXT_INBOUND_ENTITY_FRAME_ARM_TIMEOUT_MS|timed_out/);
 // Stale-submit green path must not force-click disabled controls.
 assert.doesNotMatch(liveProtocolHarnessScript, /\.click\(\{\s*force:\s*true\s*\}\)/);
 assert.match(browserRuntimeSmokeScript, /proveHubGeneralWithoutHub/);
@@ -4850,6 +4861,15 @@ try {
     assert.equal(dropControl.disarmDropNextInboundEntityFrame(), true);
     assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "disarmed");
     assert.equal(dropControl.getDropNextInboundEntityFrameState().reason, "manual");
+
+    // Bounded arm timeout is reachable (short test timeout; real wall clock).
+    const timeoutArm = dropControl.armDropNextInboundEntityFrame(
+      { entity_type: "botster-workspaces.membership" },
+      { timeout_ms: 25 }
+    );
+    assert.equal(timeoutArm.ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "timed_out");
 
     // closeDataChannel remains a separate reconnect control.
     assert.equal(typeof dropControl.closeDataChannel, "function");

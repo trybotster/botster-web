@@ -136,19 +136,20 @@ exposes:
 | Method | Role |
 |--------|------|
 | `armDropNextInboundEntityFrame({ entity_type, frame_types?, subscription_id? })` | Arms a one-shot drop of the next matching inbound entity **delta** after decrypt/assembly and before production `receiveEntityFrame`. Returns arm result only (`ok` / `not_armed` reasons). Default `frame_types` are `entity_upsert` \| `entity_patch` \| `entity_remove` (never snapshot/error). |
-| `getDropNextInboundEntityFrameState()` | Polls `idle` \| `armed` \| `dropped` \| `timed_out` \| `disarmed`. Dropped state includes `snapshot_seq`, `subscription_id`, `generation`. |
+| `getDropNextInboundEntityFrameState()` | Polls `idle` \| `armed` \| `dropped` \| `timed_out` \| `disarmed`. Dropped state includes `snapshot_seq`, `subscription_id`, `generation`. Armed arms time out after 30s (`timed_out`) unless dropped/disarmed/peer-reset first. |
 | `disarmDropNextInboundEntityFrame()` | Clears an arm without dropping. |
 | `closeDataChannel()` | Closes the real data channel for **reconnect** proof on a surviving document. |
 
 Live Workspaces held-open chronology (mandatory in `smoke:workspaces-lifecycle`):
 
-1. Seed sessions **A** (stale selection) and **B** (second-delta carrier).
-2. P1 holds Add dialog with **A** selected (membership subscription baseline `N`).
-3. `armDropNextInboundEntityFrame({ entity_type: "botster-workspaces.membership" })`.
-4. P2 claims **A** → harness records `webrtc_entity_frame_harness_drop` (D1); client stays at `N`.
-5. P2 claims **B** → production `webrtc_entity_frame_discarded` reason `sequence_gap` (D2) → unsubscribe/subscribe → replacement membership snapshot.
-6. Held selection of **A** is invalid; normal (non-forced) stale submit emits zero outbound `botster_workspaces.add_session` for A.
-7. Mandatory cleanup removes membership and Hub sessions for **both** A and B before later lifecycle stages.
+1. Seed sessions **A** (stale selection / warmup), **B** (harness-dropped delta), and **C** (gap-trigger delta).
+2. P1 holds Add dialog with **A** selected (membership subscription ready).
+3. P2 opens Add dialog and claims **A** as a **warmup** production mutation (no arm). Dual-client membership subscribe often advances the Hub package-entity floor; the first claim may arrive as `package_entity_resync` rather than an ordered delta. After warmup, P1 baseline is stable and **A** is excluded (stale selection under test).
+4. `armDropNextInboundEntityFrame({ entity_type: "botster-workspaces.membership" })`.
+5. P2 claims **B** → harness records `webrtc_entity_frame_harness_drop` (D1); client sequence stays at post-warmup baseline `N`.
+6. P2 claims **C** → production `webrtc_entity_frame_discarded` reason `sequence_gap` (D2) → unsubscribe/subscribe → replacement membership snapshot excluding A/B/C.
+7. Held selection of **A** is invalid; normal (non-forced) stale submit emits zero outbound `botster_workspaces.add_session` for A and leaves SPA action pending/result state unchanged.
+8. Mandatory cleanup removes membership and Hub sessions for **A, B, and C** (production remove when possible + hub shutdown/remove) and asserts authoritative membership/session absence before later lifecycle stages.
 
 Pins for that lane:
 

@@ -125,6 +125,9 @@ const DEFAULT_DROP_FRAME_TYPES: readonly DropNextInboundEntityFrameType[] = [
   "entity_remove"
 ];
 
+/** Default one-shot arm lifetime. Prevents a stale arm from catching a late unrelated frame. */
+export const DROP_NEXT_INBOUND_ENTITY_FRAME_ARM_TIMEOUT_MS = 30_000;
+
 function normalizeDropFilter(
   filter: DropNextInboundEntityFrameFilter | null | undefined
 ): DropNextInboundEntityFrameFilter | null {
@@ -361,6 +364,7 @@ class WebrtcDaemonTransport {
   private peerGeneration = 0;
   private aggregateRetainedBytes = 0;
   private dropNextInboundEntityFrameState: DropNextInboundEntityFrameState = { state: "idle" };
+  private dropNextInboundEntityFrameTimeout: number | undefined;
 
   constructor(private readonly options: WebrtcDaemonClientOptions) {
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
@@ -506,7 +510,8 @@ class WebrtcDaemonTransport {
    * claim a frame was dropped. Fail-closed without harness global / open peer / valid filter.
    */
   armDropNextInboundEntityFrame(
-    filter: DropNextInboundEntityFrameFilter
+    filter: DropNextInboundEntityFrameFilter,
+    options?: { timeout_ms?: number }
   ): DropNextInboundEntityFrameArmResult {
     if (!liveHarnessInstalled()) {
       return { ok: false, state: "not_armed", reason: "no_harness" };
@@ -522,11 +527,29 @@ class WebrtcDaemonTransport {
     if (!normalized) {
       return { ok: false, state: "not_armed", reason: "invalid_filter" };
     }
+    const timeoutMs =
+      typeof options?.timeout_ms === "number" && Number.isFinite(options.timeout_ms) && options.timeout_ms > 0
+        ? options.timeout_ms
+        : DROP_NEXT_INBOUND_ENTITY_FRAME_ARM_TIMEOUT_MS;
+    this.clearDropNextInboundEntityFrameTimeout();
+    const armedAt = Date.now();
     this.dropNextInboundEntityFrameState = {
       state: "armed",
       filter: normalized,
-      armed_at: Date.now()
+      armed_at: armedAt
     };
+    this.dropNextInboundEntityFrameTimeout = window.setTimeout(() => {
+      if (this.dropNextInboundEntityFrameState.state !== "armed") return;
+      if (this.dropNextInboundEntityFrameState.armed_at !== armedAt) return;
+      const armedFilter = this.dropNextInboundEntityFrameState.filter;
+      this.dropNextInboundEntityFrameTimeout = undefined;
+      this.dropNextInboundEntityFrameState = {
+        state: "timed_out",
+        filter: armedFilter,
+        armed_at: armedAt,
+        timed_out_at: Date.now()
+      };
+    }, timeoutMs);
     return { ok: true, state: "armed", filter: normalized };
   }
 
@@ -540,8 +563,15 @@ class WebrtcDaemonTransport {
   disarmDropNextInboundEntityFrame(): boolean {
     if (!liveHarnessInstalled()) return false;
     if (this.dropNextInboundEntityFrameState.state !== "armed") return false;
+    this.clearDropNextInboundEntityFrameTimeout();
     this.dropNextInboundEntityFrameState = { state: "disarmed", reason: "manual" };
     return true;
+  }
+
+  private clearDropNextInboundEntityFrameTimeout(): void {
+    if (this.dropNextInboundEntityFrameTimeout === undefined) return;
+    window.clearTimeout(this.dropNextInboundEntityFrameTimeout);
+    this.dropNextInboundEntityFrameTimeout = undefined;
   }
 
   /**
@@ -553,6 +583,7 @@ class WebrtcDaemonTransport {
     if (state.state !== "armed") return false;
     if (!dropFilterAllowsFrame(state.filter, frame)) return false;
 
+    this.clearDropNextInboundEntityFrameTimeout();
     const snapshotSeq =
       "snapshot_seq" in frame && typeof frame.snapshot_seq === "number" ? frame.snapshot_seq : -1;
     this.dropNextInboundEntityFrameState = {
@@ -942,6 +973,7 @@ class WebrtcDaemonTransport {
     this.encryptedStreamReady = false;
     this.clearAssemblies();
     if (this.dropNextInboundEntityFrameState.state === "armed") {
+      this.clearDropNextInboundEntityFrameTimeout();
       this.dropNextInboundEntityFrameState = { state: "disarmed", reason: "peer_reset" };
     }
     for (const subscription of this.entitySubscriptions) {
@@ -1278,7 +1310,8 @@ function installLiveHarnessTransportControl(transport: WebrtcDaemonTransport): v
       transportControl?: {
         closeDataChannel(): boolean;
         armDropNextInboundEntityFrame(
-          filter: DropNextInboundEntityFrameFilter
+          filter: DropNextInboundEntityFrameFilter,
+          options?: { timeout_ms?: number }
         ): DropNextInboundEntityFrameArmResult;
         getDropNextInboundEntityFrameState(): DropNextInboundEntityFrameState;
         disarmDropNextInboundEntityFrame(): boolean;
@@ -1289,7 +1322,8 @@ function installLiveHarnessTransportControl(transport: WebrtcDaemonTransport): v
 
   harness.transportControl = {
     closeDataChannel: () => transport.closeDataChannelForLiveHarness(),
-    armDropNextInboundEntityFrame: (filter) => transport.armDropNextInboundEntityFrame(filter),
+    armDropNextInboundEntityFrame: (filter, options) =>
+      transport.armDropNextInboundEntityFrame(filter, options),
     getDropNextInboundEntityFrameState: () => transport.getDropNextInboundEntityFrameState(),
     disarmDropNextInboundEntityFrame: () => transport.disarmDropNextInboundEntityFrame()
   };

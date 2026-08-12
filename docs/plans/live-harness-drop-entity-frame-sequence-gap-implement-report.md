@@ -66,13 +66,13 @@
 
 None registered. Pins were available locally:
 
-- Hub: `/Users/jasonconigliari/Projects/botster-hub` @ `de6b099` (release rebuild for conf 35)
+- Hub: `pinned Hub checkout` @ `de6b099` (release rebuild for conf 35)
 - Workspaces: `.../ticket_1786474780_590414` @ `7ab4d13`
 
 ## Deviations from plan
 
-1. **Warmup claim A + drop B + gap C** (instead of drop A + gap B only).  
-   Observed: dual-client Add dialog opens a second membership subscriber that advances the Hub package-entity provider floor without updating P1’s `package_last_applied_seq`. The first claim after that open is delivered as `package_entity_resync` (entity_snapshot), which the delta-only drop filter correctly ignores.  
+1. **Warmup claim A + drop B + gap C** (instead of drop A + gap B only).
+   Observed: dual-client Add dialog opens a second membership subscriber that advances the Hub package-entity provider floor without updating P1’s `package_last_applied_seq`. The first claim after that open is delivered as `package_entity_resync` (entity_snapshot), which the delta-only drop filter correctly ignores.
    Implement settles floor with warmup claim **A** (resync OK; A becomes stale selection), then arms and drops claim **B**, then claim **C** triggers production `sequence_gap`. Stale selection under test remains A. Seeds A+B+C; cleanup all three. Recorded in committed plan “Implement deviations”.
 
 2. **`smoke:workspaces-lifecycle` early exit** after lifecycle proof (mirrors entity-options reactive). Prevents continuing into unrelated session/terminal GHOSTSNP stages that failed on this Hub pin after lifecycle already passed.
@@ -122,11 +122,23 @@ Positive stage evidence (representative):
 
 Harness drop sits after decrypt/assembly of `daemon_entity_frame` and **before** `receiveEntityFrame`. Live claim B is a real Hub-produced membership upsert; claim C takes production `sequence_gap` → `resubscribeEntity` → unsubscribe/subscribe → replacement snapshot → entity_options reconcile. Not store injection, not `closeDataChannel`, not reload.
 
+## Review revisit (sequence 11)
+
+Addressed open Review findings:
+
+| Finding | Fix |
+|---------|-----|
+| Parent usage obsolete A/B chronology | README + source guards: warmup A, drop B, gap C, cleanup A/B/C |
+| SPA pending/result not inspected | `getActionRequestState()` harness seam on production ActionDispatcher; live oracle compares pending + recent results |
+| Absolute home path in report | Neutralized to “pinned Hub/Workspaces checkout” |
+| Cleanup false success | Fail membership remove errors; `listEntities` proves membership + session absence |
+| `timed_out` unreachable | 30s default arm timeout (+ optional `timeout_ms`); unit test |
+
 ## Unverified behavior or residual risk
 
-1. **Ablation** `BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1` not re-run in this Implement session (code path preserved; green path force-free + blocked_gate proven live).
-2. **Default** `smoke:live-packaged-protocol` full terminal lane not re-run (lifecycle mode intentionally exits; GHOSTSNP/mode_flags failure observed when lifecycle previously continued into terminal stages — out of this ticket’s ordered-gap scope).
-3. Hub dual-subscriber package-entity floor behavior remains a product hazard for any dual-client membership proof; Web harness compensates with warmup claim rather than changing Hub.
+1. **Ablation** `BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1` not re-run in this Implement session (green path force-free + blocked_gate + SPA state proven live; ablation path still fails first at outbound/SPA oracles).
+2. **Default** `smoke:live-packaged-protocol` full terminal lane not re-run (lifecycle mode intentionally exits).
+3. Hub dual-subscriber package-entity floor behavior remains a product hazard; Web harness compensates with warmup claim rather than changing Hub.
 
 ## Missing vault guidance discovered
 

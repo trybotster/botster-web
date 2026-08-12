@@ -3244,7 +3244,16 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
   };
 
   const cleanupSeededSessions = async ({ page2: cleanupPage2, preferProductionRemove = true } = {}) => {
-    const cleanupResults = { sessions_removed: [], membership_remove: {}, hub_shutdown: {}, hub_remove: {} };
+    const cleanupResults = {
+      sessions_removed: [],
+      membership_remove: {},
+      hub_shutdown: {},
+      hub_remove: {},
+      membership_ids_remaining: [],
+      session_ids_remaining: [],
+      membership_left_cleared: false,
+      sessions_absent: false
+    };
     // Dismiss P1 held dialog if still open so later lifecycle stages are not blocked.
     if (formP1) {
       const stillOpen = await formP1.isVisible().catch(() => false);
@@ -3255,7 +3264,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     }
 
     for (const sessionId of seededSessions) {
-      if (preferProductionRemove && cleanupPage2 && !cleanupPage2.isClosed?.()) {
+      if (preferProductionRemove && cleanupPage2 && !(typeof cleanupPage2.isClosed === "function" && cleanupPage2.isClosed())) {
         try {
           const removeButton = cleanupPage2.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
             .locator(
@@ -3309,9 +3318,66 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
         cleanupResults.sessions_removed.push(sessionId);
       }
     }
-    cleanupResults.membership_left_cleared = seededSessions.every(
-      (id) => cleanupResults.sessions_removed.includes(id)
-    );
+
+    // Fail closed on production membership remove errors (no_row is allowed when already gone).
+    const membershipRemoveErrors = Object.entries(cleanupResults.membership_remove)
+      .filter(([, value]) => typeof value === "string" && value.startsWith("error:"));
+    if (membershipRemoveErrors.length > 0) {
+      throw new Error(
+        `${stage}: production membership remove failed: ${JSON.stringify(membershipRemoveErrors)}`
+      );
+    }
+
+    // Authoritative membership baseline via production entity store (not session removal alone).
+    // Poll briefly so late entity_remove frames apply after production remove.
+    const membershipIds = await page.waitForFunction(({ ids }) => {
+      const list = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities;
+      if (typeof list !== "function") return null;
+      const remaining = list("botster-workspaces.membership")
+        .map((record) => record.id)
+        .filter((id) => ids.includes(id));
+      return remaining.length === 0 ? [] : null;
+    }, { ids: seededSessions }, { timeout: 15_000 })
+      .then((handle) => handle.jsonValue())
+      .catch(async () => {
+        const list = await page.evaluate(() => {
+          const fn = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities;
+          return typeof fn === "function" ? fn("botster-workspaces.membership").map((r) => r.id) : null;
+        });
+        return list;
+      });
+    if (!Array.isArray(membershipIds)) {
+      throw new Error(`${stage}: missing live harness listEntities for membership cleanup proof`);
+    }
+    cleanupResults.membership_ids_remaining = membershipIds.filter((id) => seededSessions.includes(id));
+    cleanupResults.membership_left_cleared = cleanupResults.membership_ids_remaining.length === 0;
+
+    // Authoritative session absence via production entity store (not last hub_frame kind race).
+    const sessionIdsLive = await page.waitForFunction(({ ids }) => {
+      const list = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities;
+      if (typeof list !== "function") return null;
+      const remaining = list("session")
+        .map((record) => record.id ?? record.session_uuid)
+        .filter((id) => ids.includes(id));
+      return remaining.length === 0 ? [] : null;
+    }, { ids: seededSessions }, { timeout: 15_000 })
+      .then((handle) => handle.jsonValue())
+      .catch(async () => page.evaluate(({ ids }) => {
+        const list = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities;
+        if (typeof list !== "function") return null;
+        return list("session")
+          .map((record) => record.id ?? record.session_uuid)
+          .filter((id) => ids.includes(id));
+      }, { ids: seededSessions }));
+    if (!Array.isArray(sessionIdsLive)) {
+      throw new Error(`${stage}: missing live harness listEntities for session cleanup proof`);
+    }
+    cleanupResults.session_ids_remaining = sessionIdsLive;
+    // Require hub remove succeeded for every seed AND store has no residual rows.
+    cleanupResults.sessions_absent =
+      cleanupResults.sessions_removed.length === seededSessions.length
+      && cleanupResults.session_ids_remaining.length === 0;
+
     return cleanupResults;
   };
 
@@ -3718,7 +3784,18 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     const clickSeqBefore = await page.evaluate(() =>
       globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.formSubmitClickSeq ?? 0
     );
-    const spaRequestIdsBefore = await page.evaluate(() => {
+    const readActionRequestState = () => page.evaluate(() => {
+      const getState = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.getActionRequestState;
+      if (typeof getState !== "function") {
+        return { missing: true, pending_count: null, pending_request_ids: [], recent_results: [] };
+      }
+      return getState();
+    });
+    const spaActionStateBefore = await readActionRequestState();
+    if (spaActionStateBefore.missing) {
+      throw new Error(`${stage}: missing live harness getActionRequestState for SPA pending/result proof`);
+    }
+    const outboundAddSessionIdsBefore = await page.evaluate(() => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events
         .filter((entry) =>
@@ -3862,11 +3939,9 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
         `${stage}: held-open P1 dispatched stale add_session for session A: ${JSON.stringify(staleSubmit)}`
       );
     }
-    if (ablateStaleSubmit) {
-      throw new Error(`${stage}: ablation expected stale add_session oracle to fail first`);
-    }
 
-    const spaRequestIdsAfter = await page.evaluate(() => {
+    const spaActionStateAfter = await readActionRequestState();
+    const outboundAddSessionIdsAfter = await page.evaluate(() => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events
         .filter((entry) =>
@@ -3877,38 +3952,77 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
         .map((entry) => entry.payload?.request?.request_id)
         .filter(Boolean);
     });
-    const newStaleRequestIds = spaRequestIdsAfter.filter((id) => !spaRequestIdsBefore.includes(id));
-    if (newStaleRequestIds.length > 0) {
-      // Allow only non-stale (must not be session A). Re-check against staleSubmit already empty.
-      const correlated = await page.evaluate(({ ids, sessionId, workspaceId }) => {
-        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-        return events.filter((entry) => {
-          if (entry.kind !== "daemon_request" || entry.payload?.type !== "plugin_surface_action") {
-            return false;
-          }
-          const request = entry.payload?.request;
-          if (!ids.includes(request?.request_id)) return false;
-          if (request?.action_id !== "botster_workspaces.add_session") return false;
-          const values = request?.values ?? {};
-          if (values.workspace_id !== workspaceId) return false;
-          return values.session_id === sessionId
-            || values.session_id_advanced === sessionId
-            || values["botster-workspaces-add-session-id"] === sessionId
-            || values["botster-workspaces-add-session-id-advanced"] === sessionId;
-        });
-      }, { ids: newStaleRequestIds, sessionId: sessionA, workspaceId: state.workspaceId });
-      if (correlated.length > 0) {
+    const newOutboundAddSessionIds = outboundAddSessionIdsAfter.filter(
+      (id) => !outboundAddSessionIdsBefore.includes(id)
+    );
+    const newStaleOutbound = await page.evaluate(({ ids, sessionId, workspaceId }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events.filter((entry) => {
+        if (entry.kind !== "daemon_request" || entry.payload?.type !== "plugin_surface_action") {
+          return false;
+        }
+        const request = entry.payload?.request;
+        if (!ids.includes(request?.request_id)) return false;
+        if (request?.action_id !== "botster_workspaces.add_session") return false;
+        const values = request?.values ?? {};
+        if (values.workspace_id !== workspaceId) return false;
+        return values.session_id === sessionId
+          || values.session_id_advanced === sessionId
+          || values["botster-workspaces-add-session-id"] === sessionId
+          || values["botster-workspaces-add-session-id-advanced"] === sessionId;
+      });
+    }, { ids: newOutboundAddSessionIds, sessionId: sessionA, workspaceId: state.workspaceId });
+
+    // SPA correlated pending/result state (production ActionDispatcher ledger).
+    const pendingUnchanged =
+      spaActionStateAfter.pending_count === spaActionStateBefore.pending_count
+      && JSON.stringify(spaActionStateAfter.pending_request_ids) === JSON.stringify(spaActionStateBefore.pending_request_ids);
+    const beforeResultIds = new Set(
+      (spaActionStateBefore.recent_results ?? []).map((entry) => entry.request_id)
+    );
+    const newActionResults = (spaActionStateAfter.recent_results ?? []).filter(
+      (entry) => !beforeResultIds.has(entry.request_id)
+    );
+    const newStaleActionResults = newActionResults.filter(
+      (entry) => entry.action_id === "botster_workspaces.add_session"
+    );
+
+    if (ablateStaleSubmit) {
+      // Ablation must fail first at request-state or outbound oracle (not a later cleanup assert).
+      if (newStaleOutbound.length === 0 && newStaleActionResults.length === 0) {
         throw new Error(
-          `${stage}: SPA request ledger gained stale A add_session request_ids: ${JSON.stringify(correlated)}`
+          `${stage}: ablation expected stale add_session to appear in outbound or SPA action results first; ` +
+          `spa_before=${JSON.stringify(spaActionStateBefore)}; spa_after=${JSON.stringify(spaActionStateAfter)}`
         );
       }
+      throw new Error(
+        `${stage}: ablation expected stale-request oracle to fail first: ` +
+        `outbound=${JSON.stringify(newStaleOutbound)}; spa_results=${JSON.stringify(newStaleActionResults)}`
+      );
     }
 
-    // Mandatory cleanup for A and B after assertions (not used as gap trigger).
-    const cleanup = await cleanupSeededSessions({ page2, preferProductionRemove: true });
-    if (!cleanup.membership_left_cleared || cleanup.sessions_removed.length !== seededSessions.length) {
+    if (newStaleOutbound.length > 0) {
       throw new Error(
-        `${stage}: mandatory A+B cleanup incomplete: ${JSON.stringify(cleanup)}`
+        `${stage}: SPA outbound ledger gained stale A add_session request_ids: ${JSON.stringify(newStaleOutbound)}`
+      );
+    }
+    if (!pendingUnchanged || newStaleActionResults.length > 0) {
+      throw new Error(
+        `${stage}: SPA action pending/result state changed for stale A submit; ` +
+        `before=${JSON.stringify(spaActionStateBefore)}; after=${JSON.stringify(spaActionStateAfter)}; ` +
+        `new_stale_results=${JSON.stringify(newStaleActionResults)}`
+      );
+    }
+
+    // Mandatory cleanup for A/B/C after assertions (not used as gap trigger).
+    const cleanup = await cleanupSeededSessions({ page2, preferProductionRemove: true });
+    if (
+      !cleanup.membership_left_cleared
+      || !cleanup.sessions_absent
+      || cleanup.sessions_removed.length !== seededSessions.length
+    ) {
+      throw new Error(
+        `${stage}: mandatory A/B/C cleanup incomplete: ${JSON.stringify(cleanup)}`
       );
     }
 
@@ -3929,8 +4043,12 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       stale_submit_blocked: true,
       click_completion_phase: clickCompletion.phase,
       zero_stale_add_session: true,
-      membership_left_cleared: true,
+      spa_pending_unchanged: true,
+      spa_no_new_stale_results: true,
+      membership_left_cleared: cleanup.membership_left_cleared,
+      sessions_absent: cleanup.sessions_absent,
       sessions_removed: cleanup.sessions_removed,
+      membership_ids_remaining: cleanup.membership_ids_remaining,
       cleanup_a: {
         membership: cleanup.membership_remove[sessionA],
         hub_shutdown: cleanup.hub_shutdown[sessionA],
