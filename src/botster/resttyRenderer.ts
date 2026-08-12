@@ -25,13 +25,21 @@ const botsterResttyFontSources: ResttyFontSource[] = [
  */
 const kittyEnabledBaselineFlags = 0x1;
 
+type MouseReportKind = "down" | "up" | "move" | "wheel";
+
+type PendingSemanticInput =
+  | { kind: "key"; event: KeyboardEvent }
+  | { kind: "mouse"; event: PointerEvent | WheelEvent; reportKind: MouseReportKind }
+  | { kind: "bytes"; data: string };
+
 export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   private readonly ptyTransport = new BotsterTerminalPtyTransport();
   private readonly inputListeners = new Set<(data: TerminalInput) => void>();
   private terminal?: Restty;
   private container?: HTMLElement;
-  private lastKeyEvent: KeyboardEvent | undefined;
-  private keyListener?: (event: KeyboardEvent) => void;
+  private pendingSemantic: PendingSemanticInput | undefined;
+  private removeDomListeners?: () => void;
+
   constructor(readonly descriptor: TerminalViewDescriptor) {}
 
   mount(container: HTMLElement): void {
@@ -42,12 +50,41 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       }
       recordLiveHarnessTerminal("renderer_write", { data, sessionId: this.descriptor.sessionId });
     });
-    this.ptyTransport.setSemanticKeyProvider(() => this.lastKeyEvent);
+    this.ptyTransport.setSemanticInputProvider(() => this.takePendingSemantic());
 
-    this.keyListener = (event: KeyboardEvent) => {
-      this.lastKeyEvent = event;
+    const onKeyDown = (event: KeyboardEvent) => {
+      // One-shot keyboard semantic; cleared when sendInput consumes it.
+      this.pendingSemantic = { kind: "key", event };
     };
-    container.addEventListener("keydown", this.keyListener, true);
+    const onPointerDown = (event: PointerEvent) => {
+      this.pendingSemantic = { kind: "mouse", event, reportKind: "down" };
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      this.pendingSemantic = { kind: "mouse", event, reportKind: "up" };
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      // Only track motion when buttons are down or Restty is in any-motion mode;
+      // still retain the event so a subsequent sendInput is not a stale key.
+      if (event.buttons !== 0) {
+        this.pendingSemantic = { kind: "mouse", event, reportKind: "move" };
+      }
+    };
+    const onWheel = (event: WheelEvent) => {
+      this.pendingSemantic = { kind: "mouse", event, reportKind: "wheel" };
+    };
+
+    container.addEventListener("keydown", onKeyDown, true);
+    container.addEventListener("pointerdown", onPointerDown, true);
+    container.addEventListener("pointerup", onPointerUp, true);
+    container.addEventListener("pointermove", onPointerMove, true);
+    container.addEventListener("wheel", onWheel, true);
+    this.removeDomListeners = () => {
+      container.removeEventListener("keydown", onKeyDown, true);
+      container.removeEventListener("pointerdown", onPointerDown, true);
+      container.removeEventListener("pointerup", onPointerUp, true);
+      container.removeEventListener("pointermove", onPointerMove, true);
+      container.removeEventListener("wheel", onWheel, true);
+    };
 
     this.terminal = new Restty({
       root: container,
@@ -55,6 +92,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       fontSources: botsterResttyFontSources,
       appOptions: {
         // Pure renderer: session owns PTY queries including OSC color replies.
+        // Restty ≥448497041 wires readOnly → suppressQueryReplies (OSC 10/11/12).
         readOnly: true,
         ptyTransport: this.ptyTransport,
         beforeInput: ({ text, source }) => {
@@ -87,8 +125,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
 
     // Pane construction starts Restty init without awaiting. GHOSTSNP import requires
-    // wasmReady + wasmHandle; poll until ready rather than re-entering init() (which is
-    // not idempotent for GPU backends).
+    // wasmReady + wasmHandle; poll until ready rather than re-entering init().
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
         const ok = terminal.loadBinarySnapshot(bytes);
@@ -149,16 +186,20 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   destroy(): void {
-    if (this.container && this.keyListener) {
-      this.container.removeEventListener("keydown", this.keyListener, true);
-    }
-    this.keyListener = undefined;
-    this.lastKeyEvent = undefined;
+    this.removeDomListeners?.();
+    this.removeDomListeners = undefined;
+    this.pendingSemantic = undefined;
     this.ptyTransport.destroy();
     this.inputListeners.clear();
     this.terminal?.destroy();
     this.terminal = undefined;
     this.container = undefined;
+  }
+
+  private takePendingSemantic(): PendingSemanticInput | undefined {
+    const pending = this.pendingSemantic;
+    this.pendingSemantic = undefined;
+    return pending;
   }
 
   private emitInput(data: TerminalInput): void {
@@ -179,15 +220,15 @@ class BotsterTerminalPtyTransport implements PtyTransport {
   private callbacks?: PtyCallbacks;
   private outputSubscription?: TerminalSubscription;
   private onRender?: (data: string) => void;
-  private semanticKeyProvider?: () => KeyboardEvent | undefined;
+  private semanticInputProvider?: () => PendingSemanticInput | undefined;
   private connected = false;
 
   setRenderObserver(onRender: (data: string) => void): void {
     this.onRender = onRender;
   }
 
-  setSemanticKeyProvider(provider: () => KeyboardEvent | undefined): void {
-    this.semanticKeyProvider = provider;
+  setSemanticInputProvider(provider: () => PendingSemanticInput | undefined): void {
+    this.semanticInputProvider = provider;
   }
 
   attach(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription {
@@ -258,26 +299,21 @@ class BotsterTerminalPtyTransport implements PtyTransport {
   destroy(): void {
     this.detach();
     this.callbacks = undefined;
-    this.semanticKeyProvider = undefined;
+    this.semanticInputProvider = undefined;
   }
 
   private createModeDependentInput(initialBytes: string): ModeDependentTerminalInput {
-    const keyEvent = this.semanticKeyProvider?.();
-    let kittyFlags = 0;
-    const inputHandler = createInputHandler({
-      getKittyKeyboardFlags: () => kittyFlags
-    });
+    // Consume one-shot semantic state so a later mouse report cannot reuse a key event.
+    let pending = this.semanticInputProvider?.() ?? { kind: "bytes" as const, data: initialBytes };
+    // insertText / IME paths may not fire keydown, while canvas.click leaves a pending mouse
+    // semantic. Only honor a pending kind when the Restty-encoded bytes match that kind.
+    if (pending.kind === "mouse" && !looksLikeMouseReport(initialBytes)) {
+      pending = { kind: "bytes", data: initialBytes };
+    } else if (pending.kind === "key" && looksLikeMouseReport(initialBytes)) {
+      pending = { kind: "bytes", data: initialBytes };
+    }
     return {
-      encode: (modes: DaemonModeFlags) => {
-        if (keyEvent) {
-          kittyFlags = kittyFlagsFromModeFlags(modes);
-          return inputHandler.encodeKeyEvent(keyEvent);
-        }
-        // Mouse / paste / non-key paths: retain last encoded bytes for the first
-        // attempt; re-encode is a no-op without a retained DOM event (unit tests
-        // inject encode functions directly on the data plane).
-        return initialBytes;
-      }
+      encode: (modes: DaemonModeFlags) => encodeSemanticInput(pending, modes, initialBytes)
     };
   }
 
@@ -292,8 +328,82 @@ class BotsterTerminalPtyTransport implements PtyTransport {
   }
 }
 
+function encodeSemanticInput(
+  pending: PendingSemanticInput,
+  modes: DaemonModeFlags,
+  initialBytes: string
+): string {
+  if (pending.kind === "key") {
+    let kittyFlags = 0;
+    const inputHandler = createInputHandler({
+      getKittyKeyboardFlags: () => kittyFlags,
+      suppressQueryReplies: true
+    });
+    kittyFlags = kittyFlagsFromModeFlags(modes);
+    return inputHandler.encodeKeyEvent(pending.event) || initialBytes;
+  }
+
+  if (pending.kind === "mouse") {
+    const replies: string[] = [];
+    const inputHandler = createInputHandler({
+      sendReply: (data) => {
+        replies.push(data);
+      },
+      suppressQueryReplies: true,
+      // Cell geometry is Restty-owned; use a stable 1-based mapping for re-encode.
+      positionToCell: (event) => {
+        const target = event.target as HTMLElement | null;
+        const rect = target?.getBoundingClientRect?.();
+        if (!rect || rect.width <= 0 || rect.height <= 0) {
+          return { col: 1, row: 1 };
+        }
+        const col = Math.max(1, Math.floor(((event.clientX - rect.left) / rect.width) * 80) + 1);
+        const row = Math.max(1, Math.floor(((event.clientY - rect.top) / rect.height) * 24) + 1);
+        return { col, row };
+      }
+    });
+    inputHandler.rehydrateMouseFromTrackingBits?.(mouseTrackingBitsFromMode(modes.mouse_mode));
+    inputHandler.setMouseMode?.("on");
+    const sent = inputHandler.sendMouseEvent?.(pending.reportKind, pending.event as PointerEvent);
+    if (sent && replies.length > 0) {
+      return replies.join("");
+    }
+    // If encoding could not run (no active mouse), keep the original Restty bytes
+    // for this modes snapshot only — never a keyboard event.
+    return initialBytes;
+  }
+
+  return pending.data || initialBytes;
+}
+
+function looksLikeMouseReport(data: string): boolean {
+  return (
+    data.startsWith("\u001b[<") ||
+    data.startsWith("\u001b[M") ||
+    data.startsWith("\u001b[>")
+  );
+}
+
 function kittyFlagsFromModeFlags(modes: DaemonModeFlags): number {
   return modes.kitty_enabled ? kittyEnabledBaselineFlags : 0;
+}
+
+/**
+ * Map Hub `mouse_mode` compact values onto Restty mouse tracking bitfield bits.
+ * Bit layout matches Restty `rehydrateFromTrackingBits` / wasm mouse tracking bits.
+ * Common DEC codes: 0=off, 9=x10, 1000=normal, 1002=button, 1003=any, +1006 sgr.
+ */
+function mouseTrackingBitsFromMode(mouseMode: number): number {
+  if (!mouseMode) return 0;
+  // Hub may publish raw DEC private mode codes or a packed value.
+  if (mouseMode === 9) return 1 << 0; // x10
+  if (mouseMode === 1000) return 1 << 1;
+  if (mouseMode === 1002) return (1 << 1) | (1 << 2);
+  if (mouseMode === 1003) return (1 << 1) | (1 << 2) | (1 << 3);
+  if (mouseMode === 1006) return (1 << 1) | (1 << 5); // normal + sgr
+  // Treat unknown non-zero as normal tracking + SGR (common modern default).
+  if (mouseMode > 0) return (1 << 1) | (1 << 5);
+  return 0;
 }
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {

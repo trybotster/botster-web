@@ -317,10 +317,20 @@ export type ResttyAppOptions = {
      */
     maxScrollback?: number;
     /**
-     * When true, suppress terminal query responses (DA, DSR, kitty keyboard,
-     * kitty graphics) from being forwarded back to the PTY. Enable this when
-     * restty is used as a pure renderer alongside a session that already owns
-     * the PTY and handles terminal queries itself.
+     * When true, Restty is a pure client renderer: terminal query replies are
+     * not written back to the PTY, while user input encodings still are.
+     *
+     * Muted (must not call `ptyTransport.sendInput`):
+     * - WASM drain of DA / DSR / kitty query responses (`flushWasmOutputToPty`)
+     * - JS OutputFilter replies (OSC 10/11/12, DA, DSR/CPR, XTVERSION, …)
+     *
+     * Still live on the PTY sink:
+     * - Kitty keyboard and other key encodings (`sendKeyInput`)
+     * - Mouse report encodings (`sendMouseEvent` / SGR sequences)
+     *
+     * Botster production mounts should set `appOptions.readOnly: true` so Core
+     * remains the sole PTY query-reply owner. Default is `false` for the
+     * playground sole-PTY path.
      */
     readOnly?: boolean;
 };

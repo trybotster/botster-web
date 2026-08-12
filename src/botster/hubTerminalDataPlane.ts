@@ -117,20 +117,18 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       throw new Error("Authoritative mode flags are unavailable for mode-gated terminal input.");
     }
 
-    // Browser JSON number cannot preserve arbitrary u64 mode generations. When Hub/worker
-    // emits a non-JSON-safe token, ModeGatedInput can never match; fall back to send_input
-    // rather than looping stale rejects. True race-free gating requires JSON-safe tokens
-    // from the producer (core/hub follow-up).
+    // Producer must emit JSON-safe mode tokens (≤ 2^53-1). Core ticket_1786517156_512585 /
+    // botster-core#121 bounds session-worker generations. Fail closed if a non-safe token
+    // still arrives so we never silently admit via send_input.
     if (!isJsonSafeModeToken(modes)) {
-      const encoded = semantic.encode(modes);
-      recordLiveHarnessTerminal("mode_gated_input_fallback", {
+      recordLiveHarnessTerminal("mode_gated_input_failed", {
         reason: "unsafe_json_integer_token",
         mode_generation: modes.mode_generation,
-        mode_revision: modes.mode_revision,
-        bytes: encoded
+        mode_revision: modes.mode_revision
       });
-      await this.writeInput(encoded);
-      return;
+      throw new Error(
+        `Mode freshness token is not JSON-safe (generation=${modes.mode_generation}, revision=${modes.mode_revision}); browser ModeGatedInput requires tokens ≤ 2^53-1.`
+      );
     }
 
     // First encode under current authoritative modes.

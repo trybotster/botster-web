@@ -1,8 +1,8 @@
 # Plan: Make Web a thin Ghostty terminal client
 
-Ticket: `ticket_1786471490_562794`  
-Run: `run_1786508114_691875`  
-Plan step: `botster_stack_plan` / `run_step_1786509313_766377`  
+Ticket: `ticket_1786471490_562794`
+Run: `run_1786508114_691875`
+Plan step: `botster_stack_plan` / `run_step_1786509313_766377`
 Plan **revision 4** after Plan Review `review_1786514229_999258` (`changes_required`)
 
 Rev history:
