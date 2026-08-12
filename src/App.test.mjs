@@ -1929,17 +1929,44 @@ assert.match(liveProtocolHarnessScript, /armDropNextInboundEntityFrame/);
 assert.match(liveProtocolHarnessScript, /webrtc_entity_frame_harness_drop/);
 assert.match(liveProtocolHarnessScript, /sequence_gap/);
 assert.match(liveProtocolHarnessScript, /second_delta_session_id|gap_trigger_snapshot_seq/);
-// Parent README chronology must match live stage markers (warmup A, drop B, gap C).
+// Parent README + live stage + plan must share one coherent A/B/C chronology block.
+// Reject obsolete "drop claim A then claim B for gap" acceptance phrasing.
+const planArtifact = await readFile(
+  new URL("../docs/plans/live-harness-drop-entity-frame-sequence-gap.md", import.meta.url),
+  "utf8"
+);
 assert.match(readme, /warmup/);
 assert.match(readme, /claims \*\*B\*\*/);
 assert.match(readme, /claims \*\*C\*\*/);
 assert.match(readme, /A, B, and C|A\/B\/C/);
+assert.doesNotMatch(
+  readme,
+  /Seed sessions \*\*A\*\* \(stale selection\) and \*\*B\*\* \(second-delta carrier\)/
+);
 assert.match(liveProtocolHarnessScript, /warmup claim A|P2 warmup claim A/);
 assert.match(liveProtocolHarnessScript, /P2 claim B/);
 assert.match(liveProtocolHarnessScript, /P2 claim C/);
+assert.match(liveProtocolHarnessScript, /A\/B\/C chronology|seed A \+ B \+ C/);
+assert.doesNotMatch(
+  liveProtocolHarnessScript,
+  /seed A \+ B → P1 holds Add with A selected → arm membership drop →\s*\n\s*\*   P2 claims A \(D1 harness-dropped\)/
+);
 assert.match(liveProtocolHarnessScript, /getActionRequestState/);
 assert.match(liveProtocolHarnessScript, /listEntities/);
-assert.match(webrtcDaemonClient, /DROP_NEXT_INBOUND_ENTITY_FRAME_ARM_TIMEOUT_MS|timed_out/);
+assert.match(webrtcDaemonClient, /DROP_NEXT_INBOUND_ENTITY_FRAME_ARM_TIMEOUT_MS/);
+assert.match(webrtcDaemonClient, /state: "timed_out"/);
+assert.match(planArtifact, /Warmup claim \*\*A\*\*|warmup claim A/);
+assert.match(planArtifact, /drop claim \*\*B\*\*|claim B \(D1 harness-dropped\)|Ordered delta 1 — claim B/i);
+assert.match(planArtifact, /claim \*\*C\*\*|Ordered delta 2 — claim C/i);
+assert.match(planArtifact, /sessions A, B, and C|cleanup of A, B, and C|A\/B\/C/);
+assert.doesNotMatch(
+  planArtifact,
+  /seed A \+ B;\s*\n\s*- arm → P2 claim A → `webrtc_entity_frame_harness_drop`/
+);
+assert.doesNotMatch(
+  planArtifact,
+  /only if implement adds optional client timer/
+);
 // Stale-submit green path must not force-click disabled controls.
 assert.doesNotMatch(liveProtocolHarnessScript, /\.click\(\{\s*force:\s*true\s*\}\)/);
 assert.match(browserRuntimeSmokeScript, /proveHubGeneralWithoutHub/);

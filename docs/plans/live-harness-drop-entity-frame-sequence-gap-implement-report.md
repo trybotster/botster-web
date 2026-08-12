@@ -134,6 +134,12 @@ Addressed open Review findings:
 | Cleanup false success | Fail membership remove errors; `listEntities` proves membership + session absence |
 | `timed_out` unreachable | 30s default arm timeout (+ optional `timeout_ms`); unit test |
 
+## Review revisit (sequence 13)
+
+| Finding | Fix |
+|---------|-----|
+| Plan acceptance still taught obsolete seed A+B / drop A / gap B | Plan chronology table, cleanup contract, scope, acceptance checks, product ledger, and production-path blurb rewritten to warmup A / drop B / gap C / cleanup A+B+C; timed_out documented as always bounded; harness JSDoc + finally comment updated; source guards reject obsolete exact phrases |
+
 ## Unverified behavior or residual risk
 
 1. **Ablation** `BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1` not re-run in this Implement session (green path force-free + blocked_gate + SPA state proven live; ablation path still fails first at outbound/SPA oracles).

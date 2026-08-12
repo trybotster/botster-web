@@ -3192,10 +3192,13 @@ async function assertWorkspacesAddSelectionInvalid(page, state, label) {
 /**
  * Workspaces-path held-open entity_options membership proof with ordered sequence_gap.
  *
- * Two-mutation chronology (ticket_1786518263_839128):
- *   seed A + B → P1 holds Add with A selected → arm membership drop →
- *   P2 claims A (D1 harness-dropped) → P2 claims B (D2 triggers production sequence_gap) →
- *   replacement snapshot excludes A → force-free stale submit blocked → cleanup A and B.
+ * A/B/C chronology (ticket_1786518263_839128):
+ *   seed A + B + C → P1 holds Add with A selected →
+ *   P2 warmup claim A (may package_entity_resync; settles dual-client floor; A is stale) →
+ *   arm membership drop → P2 claim B (D1 harness-dropped) →
+ *   P2 claim C (D2 triggers production sequence_gap) →
+ *   replacement snapshot excludes A/B/C → force-free stale submit blocked (SPA state unchanged) →
+ *   cleanup A, B, and C (production remove + hub remove + listEntities absence).
  *
  * Dual production clients: P1 holds Add dialog; P2 claims membership via normal UI only.
  * closeDataChannel remains reconnect-only and is not used as the gap trigger.
@@ -4066,7 +4069,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       }
     })}`);
   } catch (error) {
-    // finally-safe: still attempt A/B cleanup on early failure so later lifecycle stages
+    // finally-safe: still attempt A/B/C cleanup on early failure so later lifecycle stages
     // are not poisoned by residual claimed/running seeds.
     const cleanup = await cleanupSeededSessions({ page2, preferProductionRemove: true }).catch((cleanupError) => ({
       cleanup_error: cleanupError.message

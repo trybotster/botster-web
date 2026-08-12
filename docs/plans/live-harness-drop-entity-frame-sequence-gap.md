@@ -196,7 +196,7 @@ type DropNextInboundEntityFrameFilter = {
 ```text
 idle ──arm(valid)──► armed ──matching delta assembled──► dropped
                         │                                    │
-                        ├──timeout (optional harness wait)──► timed_out
+                        ├──timeout (default 30s; optional timeout_ms)──► timed_out
                         ├──disarm() / peer reset────────────► idle / disarmed
                         └──non-matching frames──────────────► stay armed (frames apply normally)
 ```
@@ -206,7 +206,7 @@ idle ──arm(valid)──► armed ──matching delta assembled──► dro
 - `{ state: "idle" }`
 - `{ state: "armed", filter, armed_at }`
 - `{ state: "dropped", filter, entity_type, subscription_id, frame_type, snapshot_seq, generation, dropped_at }`
-- `{ state: "timed_out", filter, armed_at, timed_out_at }` (only if implement adds optional client timer; live stages may instead fail Playwright wait while state stays `armed`)
+- `{ state: "timed_out", filter, armed_at, timed_out_at }` — **always** reachable via the bounded default arm timer (30s; optional `{ timeout_ms }` override for tests). Cleared on drop / disarm / peer_reset.
 - `{ state: "disarmed", reason: "manual" | "peer_reset" }`
 
 ### Drop placement and matching rules
@@ -242,53 +242,54 @@ Production gap event remains **`webrtc_entity_frame_discarded`** with `reason: "
 
 ### Correlation required in live oracles
 
-**Two real membership deltas are mandatory.** Dropping one frame does not by itself call `receiveEntityFrame` with a gap: production `sequence_gap` runs only when a **later** real delta for the same subscription arrives with non-contiguous `snapshot_seq`. A single P2 claim that is dropped leaves the client parked on the pre-drop baseline until another real frame arrives. On current main, P2 `remove_session` for the claimed session runs **after** the stale-submit block, so it cannot supply that next frame in the planned order.
+**Two real ordered membership deltas are mandatory after the dual-client floor is settled.** Dropping one frame does not by itself call `receiveEntityFrame` with a gap: production `sequence_gap` runs only when a **later** real delta for the same subscription arrives with non-contiguous `snapshot_seq`.
+
+**Implemented live chronology (authoritative):** dual-client package-entity fanout often delivers the first claim after P2 opens Add as `package_entity_resync` (entity_snapshot), which the delta-only drop filter correctly ignores. Therefore the live stage uses:
 
 Chronology on **same document** (sentinel survives), family `botster-workspaces.membership`:
 
 | Step | Actor | What must happen | Evidence |
 |------|-------|------------------|----------|
-| 0 | Harness | Seed **two** distinct Hub sessions **A** (stale selection under test) and **B** (second-delta carrier). Both lifecycle `current`, neither claimed yet. | `spawn` + `hub_frame` session current for A and B |
-| 1 | P1 | Open Add dialog; hold it; select **A** via entity_options. Demand holds membership subscription with baseline snapshot seq `N`. | form open; option A selected; membership `subscribe_entities` ready with `snapshot_seq = N` |
-| 2 | Harness | `armDropNextInboundEntityFrame({ entity_type: "botster-workspaces.membership" })` | state `armed` |
-| 3 | P2 | **Mutation 1 — claim A** via normal production Add UI (`botster_workspaces.add_session`). Hub publishes membership delta **D1** with `snapshot_seq = N+1` (or next Hub seq). | P2 accepted claim for A |
-| 4 | P1 client | Control **drops D1** before `receiveEntityFrame`. Client sequence remains **N**. | `webrtc_entity_frame_harness_drop` with `entity_type`, `subscription_id`, `frame_type`, **`snapshot_seq` of D1**, `generation`; state `dropped`. **No** production apply of A membership yet. |
-| 5 | P2 | **Mutation 2 — claim B** via normal production Add UI on a **separate** seeded session B (not A). Hub publishes membership delta **D2** with `snapshot_seq > N+1` (typically `N+2`). Do **not** use store injection, direct action payload construction, `closeDataChannel`, page reload, or Hub test-only `mutation_action`. | P2 accepted claim for B; real wire frame for membership |
-| 6 | P1 client | D2 reaches `receiveEntityFrame` with non-contiguous seq → production **`sequence_gap`**. | `webrtc_entity_frame_discarded` reason `sequence_gap` correlating same `entity_type` / subscription generation; D2’s delivered `snapshot_seq` correlated to dropped D1 seq (gap, not `current+1`) |
-| 7 | P1 client | Resubscribe + authoritative replacement snapshot for membership. | `unsubscribe_entities` + `subscribe_entities`; replacement `entity_snapshot` baseline; membership includes A (claimed) and B |
-| 8 | P1 UI | Options/selection reconcile to post-gap baseline: **A is excluded**; held selection of A is invalid. Dialog still open; no forced `plugin_surface_render` rise beyond existing stage invariants. | option A gone; `data-form-invalid` / `data-selection-invalid` |
-| 9 | P1 UI | Stale pre-gap selection of **A** cannot produce successful outbound claim via **normal** rendered controls (see force-click removal). | zero stale `botster_workspaces.add_session` with session A; click phase blocked_*; request_id ledger unchanged |
-| 10 | **Mandatory cleanup (A and B)** | **After** steps 6–9 (and ablation path when enabled), clear residual state so later Workspaces lifecycle row/reference counts stay correct. Never use cleanup as the sole gap trigger. | See cleanup contract below |
+| 0 | Harness | Seed **three** Hub sessions **A** (stale selection / warmup), **B** (harness-dropped delta), **C** (gap-trigger delta). All lifecycle `current`, none claimed yet. | `spawn` + `hub_frame` session current for A, B, C |
+| 1 | P1 | Open Add dialog; hold it; select **A** via entity_options. Membership subscription ready. | form open; option A selected; membership subscribe ready |
+| 2 | P2 | Open Add dialog (advances provider floor for dual-client). **Warmup claim A** via normal production UI **without arming**. May arrive as `package_entity_resync`. | P2 accepted claim A; P1 baseline settled; **A excluded** (stale selection under test) |
+| 3 | Harness | `armDropNextInboundEntityFrame({ entity_type: "botster-workspaces.membership" })` | state `armed` |
+| 4 | P2 | **Ordered delta 1 — claim B** via normal production Add UI. Hub publishes membership delta **D1**. | P2 accepted claim B |
+| 5 | P1 client | Control **drops D1** before `receiveEntityFrame`. Client sequence remains post-warmup baseline `N`. | `webrtc_entity_frame_harness_drop` with D1 `snapshot_seq`; state `dropped`. **B not applied** client-side yet |
+| 6 | P2 | **Ordered delta 2 — claim C** via separate production Add UI. Hub publishes **D2** with non-contiguous seq. No store injection / `closeDataChannel` / reload / `mutation_action`. | P2 accepted claim C; real wire membership frame |
+| 7 | P1 client | D2 → production **`sequence_gap`**. | `webrtc_entity_frame_discarded` reason `sequence_gap`; D2 seq correlated to dropped D1 |
+| 8 | P1 client | Resubscribe + authoritative replacement snapshot. | new `unsubscribe_entities` + `subscribe_entities`; replacement `entity_snapshot`; membership includes A, B, C |
+| 9 | P1 UI | Options reconcile: **A, B, C excluded**; held selection of A invalid. No forced `plugin_surface_render` rise. | options gone; `data-form-invalid` / `data-selection-invalid` |
+| 10 | P1 UI | Stale selection of **A** blocked under **normal** controls. | zero stale outbound `botster_workspaces.add_session` for A; SPA pending/result unchanged; click phase blocked_* |
+| 11 | **Mandatory cleanup (A, B, C)** | After steps 7–10 (and ablation when enabled). Never use cleanup as sole gap trigger. | See cleanup contract below |
 
 **Correlation invariants (must log in stage evidence JSON):**
 
-- `dropped_snapshot_seq` from harness_drop (D1 / claim A)
-- `gap_trigger_snapshot_seq` from the frame that caused sequence_gap discard (D2 / claim B), with `gap_trigger_snapshot_seq !== dropped_snapshot_seq` and `gap_trigger_snapshot_seq !== client_baseline_N + 1` as observed by production
-- `stale_session_id = A`, `second_delta_session_id = B`, `B !== A`
+- `dropped_snapshot_seq` from harness_drop (D1 / claim **B**)
+- `gap_trigger_snapshot_seq` from the frame that caused sequence_gap discard (D2 / claim **C**), with `gap_trigger_snapshot_seq !== dropped_snapshot_seq` and `gap_trigger_snapshot_seq !== client_baseline_N + 1`
+- `stale_session_id = A`, `dropped_session_id = B`, `second_delta_session_id = C`, pairwise distinct
 - peer `generation` before gap and subscription ids across resubscribe
-- `cleanup_a` / `cleanup_b` results (membership removed, hub shutdown, hub remove)
+- `cleanup_a` / `cleanup_b` / `cleanup_c` results (membership removed, hub shutdown, hub remove)
+- `membership_left_cleared` from authoritative `listEntities("botster-workspaces.membership")`; `sessions_absent` from `listEntities("session")`
 
-### Mandatory cleanup contract (sessions A and B)
+### Mandatory cleanup contract (sessions A, B, and C)
 
-Current main only cleans the single reactive seed (remove membership via P2 production UI → dismiss P1 dialog → Hub `shutdown_session` + `remove_session` for that id). With session **B** added for D2, **both** seeds must be cleaned; leaving B claimed/running can poison later lifecycle oracles.
-
-**Order (after all D1/D2, resubscribe, selection, stale-submit, and ablation assertions complete):**
+**Order (after all gap, resubscribe, selection, stale-submit, and ablation assertions complete):**
 
 1. Dismiss P1 held Add dialog if still open (Escape / detach), without claiming.
-2. For each of **{A, B}** still in workspace membership: remove via **production** `botster_workspaces.remove_session` on a live production client (prefer P2) when the row is visible; if membership was never applied client-side but Hub/server membership exists, still remove via production UI once the post-gap snapshot shows the row, or via the same production remove path the stage already uses for A.
-3. For each of **{A, B}**: Hub daemon `shutdown_session` then `remove_session` (same pattern as current reactive seed close-out) so Available sessions / lifecycle counts are not inflated.
+2. For each of **{A, B, C}** still in workspace membership: remove via **production** `botster_workspaces.remove_session` when the row is visible. Fail on production remove errors (not on `no_row`).
+3. For each of **{A, B, C}**: Hub daemon `shutdown_session` then `remove_session`.
 4. Close secondary page (existing `finally` closes `page2`).
 5. **Assert** before returning to later lifecycle stages:
-   - no membership entity for A or B on the workspace;
-   - no live Hub session entity for A or B (removed);
-   - stage evidence includes `membership_left_cleared: true`, `sessions_removed: [A, B]`.
+   - `listEntities("botster-workspaces.membership")` contains none of A/B/C → `membership_left_cleared: true`;
+   - `listEntities("session")` contains none of A/B/C and hub remove succeeded → `sessions_absent: true`, `sessions_removed: [A, B, C]`.
 
-**`finally`-safe path:** wrap the ordered-gap body so that on early failure (arm fail, claim fail, gap timeout, etc.) cleanup still attempts membership remove + hub shutdown/remove for every session id that was successfully spawned (A and/or B), and always closes `page2`. Cleanup failures after a primary assertion failure should be logged and attached; they must not silently leave B running when the stage otherwise “passed.”
+**`finally`-safe path:** on early failure, still attempt membership remove + hub shutdown/remove for every session id that was successfully spawned (A and/or B and/or C), and always close `page2`.
 
 Cleanup **must not**:
-- substitute for mutation 2 / sequence_gap proof;
+- substitute for ordered delta 2 / sequence_gap proof;
 - use store injection except the existing ablation-only path for stale-submit red-first;
-- skip B because “optional.”
+- skip B or C because “optional.”
 
 ## Scope
 
@@ -305,10 +306,10 @@ Cleanup **must not**:
 3. **Mandatory live Workspaces ordered-gap stage** (extend `exerciseWorkspacesEntityOptionsMembershipReactive` / lifecycle path):
    - Pins: Web base, Hub ≥ `de6b099`, Workspaces package ≥ `7ab4d13`.
    - Command: **`npm run smoke:workspaces-lifecycle`** with those env pins. **No skip** for ticket item 4.
-   - Implement the **two-mutation chronology table above** end-to-end on held-open P1 Add dialog.
-   - Seed A and B before arming; P2 claims A (dropped) then claims B (gap trigger); stale checks only after replacement snapshot excludes A.
-   - Forbid using post-stale-check `remove_session` of A as the only gap trigger.
-   - **Mandatory cleanup of A and B** per cleanup contract (production membership remove when possible + Hub shutdown/remove; finally-safe; assert clear before later lifecycle stages).
+   - Implement the **A/B/C chronology table above** end-to-end on held-open P1 Add dialog.
+   - Seed A+B+C; warmup claim A; arm; claim B dropped; claim C gap trigger; stale checks only after replacement snapshot excludes A (and B/C).
+   - Forbid using post-stale-check `remove_session` as the only gap trigger.
+   - **Mandatory cleanup of A, B, and C** per cleanup contract (production membership remove when possible + Hub shutdown/remove; finally-safe; authoritative `listEntities` absence).
 4. **Replace force-click stale-submit paths** (named current code):
    - `exerciseEntityOptionsReactive` ~1497 `entity-options.submit` `click({ force: true })`.
    - membership stage ~3346 `botster_workspaces.add_session` `click({ force: true })` on non-ablation path.
@@ -317,9 +318,9 @@ Cleanup **must not**:
      - submit control disabled or production-blocked;
      - **normal** Playwright click (no `force: true`) settles via production click telemetry (`lastFormSubmitClick` phase `blocked_disabled` \| `blocked_invalid`) **or** settled native disabled+invalid `blocked_gate` after a non-forced click attempt that does not bypass disabled;
      - **zero** outbound stale `plugin_surface_action` for `botster_workspaces.add_session` (or fixture `entity-options.submit`) carrying the dead session/option value;
-     - correlated SPA request state unchanged: no new stale `request_id`, no misattributed pending/result for that action.
-   - **Ablation remains mandatory:** `BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1` restores valid control via membership entity remove; normal click must emit the stale add_session and make the zero-request oracle fail first ([[a regression test must be shown to go red with the fix reverted]]).
-5. **README** documents exact control names (`armDropNextInboundEntityFrame`, `getDropNextInboundEntityFrameState`), filter fields, reconnect vs ordered-gap distinction, **two-mutation live chronology**, parent usage for `ticket_1786474783_285888`, and required live command + pins.
+     - correlated SPA request state unchanged via production `getActionRequestState()` pending + recent results: no new stale pending/result, no misattributed outcome.
+   - **Ablation remains mandatory:** `BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1` restores valid control via membership entity remove; normal click must fail first at outbound or SPA request-state oracle ([[a regression test must be shown to go red with the fix reverted]]).
+5. **README** documents exact control names (`armDropNextInboundEntityFrame`, `getDropNextInboundEntityFrameState`), filter fields, reconnect vs ordered-gap distinction, **warmup A / drop B / gap C live chronology**, parent usage for `ticket_1786474783_285888`, and required live command + pins.
 6. Optional secondary: `smoke:entity-options-reactive` can use arm+drop on fixture family instead of `closeDataChannel` for gap-style invalidate — **not** a substitute for Workspaces mandatory proof.
 
 ## Non-scope
@@ -409,7 +410,7 @@ Likely touch points already on base (minimal, only as required by harness oracle
 
 `handleMessage` → decrypt `daemon_entity_frame` → `receiveEntityFrame` → gap → `resubscribeEntity("sequence_gap")` → unsubscribe/subscribe → snapshot → store/listeners → entity_options projection.
 
-**This ticket adds:** harness arm/filter/drop of **one** real membership delta (claim A), then a **second** real membership delta (claim B) so production sees non-contiguous `snapshot_seq` and takes `sequence_gap`, plus force-free stale claim SPA proof for A after replacement snapshot.
+**This ticket adds:** dual-client floor warmup (claim A), harness arm/filter/drop of **one** real membership delta (claim B), then a **second** real membership delta (claim C) so production sees non-contiguous `snapshot_seq` and takes `sequence_gap`, plus force-free stale claim SPA proof for A after replacement snapshot.
 
 **Not enough:** “function exists” or “one frame was dropped.” Live evidence must show **D1 drop + D2 gap trigger** correlated chronology + zero stale outbound request under normal controls.
 
@@ -434,19 +435,21 @@ npm run smoke:workspaces-lifecycle
 
 Must exit 0 and emit positive stage evidence for:
 
-- `workspaces-entity-options-membership-reactive` **with two-mutation ordered-gap chronology**:
-  - seed A + B;
-  - arm → P2 claim A → `webrtc_entity_frame_harness_drop` (D1 seq) → state `dropped`;
-  - P2 claim B → `webrtc_entity_frame_discarded` reason `sequence_gap` (D2 seq correlated to D1) → unsubscribe/subscribe → replacement membership snapshot;
-- selection reconcile after gap excludes **A** (stale selection under test);
+- `workspaces-entity-options-membership-reactive` **with A/B/C ordered-gap chronology**:
+  - seed A + B + C;
+  - warmup P2 claim A (may resync) → A excluded / baseline settled;
+  - arm → P2 claim B → `webrtc_entity_frame_harness_drop` (D1 seq) → state `dropped`;
+  - P2 claim C → `webrtc_entity_frame_discarded` reason `sequence_gap` (D2 seq correlated to D1) → unsubscribe/subscribe → replacement membership snapshot;
+- selection reconcile after gap excludes **A, B, and C**;
 - stale add_session for **A** blocked under **normal** controls;
 - **zero** outbound stale `botster_workspaces.add_session` with session A;
+- SPA `getActionRequestState()` pending/results unchanged on green path;
 - click completion phase recorded;
-- evidence fields `stale_session_id`, `second_delta_session_id`, `dropped_snapshot_seq`, `gap_trigger_snapshot_seq`;
-- **mandatory cleanup** evidence: both A and B memberships cleared; both Hub sessions shutdown+removed; `membership_left_cleared: true`, `sessions_removed: [A, B]`; later lifecycle stages see no residual B;
+- evidence fields `stale_session_id`, `dropped_session_id`, `second_delta_session_id`, `dropped_snapshot_seq`, `gap_trigger_snapshot_seq`;
+- **mandatory cleanup** evidence: A/B/C memberships cleared via production remove + `listEntities`; Hub sessions shutdown+removed; `membership_left_cleared: true`, `sessions_absent: true`, `sessions_removed: [A, B, C]`;
 - document/page sentinel survives (no reload for gap path).
 
-5. Ablation: same command with `BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1` must fail first at the stale-request oracle (not a later unrelated assertion).
+5. Ablation: same command with `BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1` must fail first at the stale-request or SPA request-state oracle (not a later unrelated assertion).
 
 6. Provenance log: Web commit, hub/worker paths+versions, Workspaces package path+`git rev-parse HEAD`.
 
@@ -479,8 +482,8 @@ No Plan-time vault capture required beyond this artifact.
 | Implementation base | `aa19ffb` (current origin/main) |
 | Control names | `armDropNextInboundEntityFrame` + `getDropNextInboundEntityFrameState` (+ `disarm…`) |
 | Primary live family | `botster-workspaces.membership` |
-| Gap-trigger design | Drop claim **A**; second production claim **B** triggers sequence_gap |
-| Cleanup | **Mandatory** for A and B after assertions; finally-safe |
+| Gap-trigger design | Warmup claim **A**; drop claim **B**; claim **C** triggers sequence_gap |
+| Cleanup | **Mandatory** for A, B, and C after assertions; finally-safe; `listEntities` absence |
 | Mandatory live command | `smoke:workspaces-lifecycle` with pins |
 | Force-click on stale submit | Forbidden on green path; remove existing two sites |
 | Hub/Workspaces product code | Out of scope; pin or register dependency |
