@@ -39,7 +39,7 @@ export interface HubTerminalDataPlaneTestHooks {
 
 interface ScreenHydration {
   generation: number;
-  bufferedOutput: string[];
+  bufferedOutput: Uint8Array[];
   bufferedBytes: number;
   pendingExit?: number | null;
   snapshotBytes?: Uint8Array;
@@ -621,8 +621,24 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     if (event.type === "terminal_output") {
+      let outputBytes: Uint8Array;
+      try {
+        outputBytes = decodeTerminalOutputEvent(event);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Invalid terminal output payload.";
+        if (this.hydration?.generation === attachmentGeneration && !this.hydration.completed) {
+          this.failHydration(this.hydration, message);
+          return;
+        }
+        this.emitStatus({
+          state: "failed",
+          message
+        });
+        recordLiveHarnessTerminal("output_decode_failed", { message });
+        return;
+      }
       if (this.hydration?.generation === attachmentGeneration && !this.hydration.completed) {
-        this.bufferHydratingOutput(event.data, this.hydration);
+        this.bufferHydratingOutput(outputBytes, this.hydration);
         return;
       }
       if (
@@ -634,7 +650,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
           message: "Terminal stream attached live; no GHOSTSNP snapshot was restored."
         });
       }
-      this.emitOutput(event.data, "output");
+      this.emitOutput(outputBytes, "output");
     }
   }
 
@@ -683,6 +699,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       }
 
       await this.testHooks?.beforeSnapshotInstall?.();
+      await holdLiveSnapshotInstallIfArmed(attachmentGeneration, this.subscriptionId);
       if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) {
         return;
       }
@@ -701,7 +718,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       }
       recordLiveHarnessTerminal("ghostsnp_install", {
         bytes: hydration.snapshotBytes.byteLength,
-        generation: attachmentGeneration
+        generation: attachmentGeneration,
+        subscription_id: this.subscriptionId
       });
 
       this.restoredVisibleScreenGeneration = attachmentGeneration;
@@ -773,8 +791,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.closeStream();
   }
 
-  private bufferHydratingOutput(data: string, hydration: ScreenHydration): void {
-    const bufferedBytes = hydration.bufferedBytes + new TextEncoder().encode(data).byteLength;
+  private bufferHydratingOutput(data: Uint8Array, hydration: ScreenHydration): void {
+    const bufferedBytes = hydration.bufferedBytes + data.byteLength;
     if (bufferedBytes > maxHydrationBufferBytes) {
       this.failHydration(hydration, "Terminal GHOSTSNP hydration exceeded the live-output buffer limit.");
       return;
@@ -868,7 +886,11 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     for (const listener of this.listeners) {
       listener(data);
     }
-    recordLiveHarnessTerminal("output", { data, source: kind });
+    recordLiveHarnessTerminal("output", {
+      payload_bytes_base64: bytesToBase64(data),
+      bytes: data.byteLength,
+      source: kind
+    });
   }
 
   private emitProcessExit(code: number | null): void {
@@ -898,17 +920,74 @@ export function isGhostsnpPayload(bytes: Uint8Array): boolean {
   return true;
 }
 
-export function decodeGhostsnpSnapshot(payloadBase64: string, declaredBytes?: number): Uint8Array {
+export function decodeDaemonByteEnvelope(
+  payloadBase64: string,
+  payloadEncoding: unknown,
+  declaredBytes: unknown
+): Uint8Array {
+  if (payloadEncoding !== "base64") {
+    throw new Error(`Unsupported payload encoding: ${String(payloadEncoding)}.`);
+  }
+  if (typeof payloadBase64 !== "string") {
+    throw new Error("payload_base64 is required.");
+  }
+  if (typeof declaredBytes !== "number" || !Number.isInteger(declaredBytes) || declaredBytes < 0) {
+    throw new Error("bytes must be a non-negative integer.");
+  }
+  if (payloadBase64.length % 4 !== 0 || (payloadBase64.length > 0 && !/^[A-Za-z0-9+/]+={0,2}$/.test(payloadBase64))) {
+    throw new Error("Invalid base64 payload.");
+  }
   const bytes = base64ToBytes(payloadBase64);
-  if (typeof declaredBytes === "number" && declaredBytes !== bytes.byteLength) {
+  if (bytes.byteLength !== declaredBytes) {
     throw new Error(
-      `Snapshot payload length ${bytes.byteLength} does not match declared bytes ${declaredBytes}.`
+      `Payload length ${bytes.byteLength} does not match declared bytes ${declaredBytes}.`
     );
   }
+  return bytes;
+}
+
+export function decodeTerminalOutputEvent(event: object): Uint8Array {
+  if ("data" in event) {
+    throw new Error("Terminal output event includes retired data field.");
+  }
+  const record = event as {
+    payload_base64?: string;
+    payload_encoding?: unknown;
+    bytes?: unknown;
+  };
+  return decodeDaemonByteEnvelope(record.payload_base64 ?? "", record.payload_encoding, record.bytes);
+}
+
+export function decodeGhostsnpSnapshot(
+  payloadBase64: string,
+  declaredBytes?: number,
+  payloadEncoding: unknown = "base64"
+): Uint8Array {
+  const bytes =
+    typeof declaredBytes === "number"
+      ? decodeDaemonByteEnvelope(payloadBase64, payloadEncoding, declaredBytes)
+      : base64ToBytes(payloadBase64);
   if (!isGhostsnpPayload(bytes)) {
     throw new Error("Snapshot payload is not GHOSTSNP; refusing non-Ghostty import.");
   }
   return bytes;
+}
+
+export function bytesToBase64(bytes: Uint8Array): string {
+  if (typeof globalThis.btoa === "function") {
+    let binary = "";
+    for (const value of bytes) {
+      binary += String.fromCharCode(value);
+    }
+    return globalThis.btoa(binary);
+  }
+
+  const buffer = (globalThis as { Buffer?: { from(data: Uint8Array): { toString(enc: string): string } } }).Buffer;
+  if (buffer) {
+    return buffer.from(bytes).toString("base64");
+  }
+
+  throw new Error("No base64 encoder is available in this runtime.");
 }
 
 function base64ToBytes(payloadBase64: string): Uint8Array {
@@ -1006,17 +1085,57 @@ function unregisterTerminalTransportRecoveryPlane(plane: HubTerminalDataPlane): 
 
 function installTerminalTransportRecoveryHarnessHook(): void {
   if (typeof window === "undefined") return;
-  const harness = (window as typeof window & {
-    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
-      disableTerminalTransportRecovery?: () => void;
-    };
-  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  const harness = liveHarness();
   if (!harness) return;
   harness.disableTerminalTransportRecovery = () => {
     for (const plane of [...terminalTransportRecoveryPlanes]) {
       plane.disableTransportRecovery();
     }
   };
+  harness.armSnapshotInstallHold = () => {
+    harness.snapshotInstallHoldArmed = true;
+  };
+  harness.releaseSnapshotInstall = () => {
+    snapshotInstallHoldRelease?.();
+    snapshotInstallHoldRelease = undefined;
+  };
+}
+
+type LiveTerminalHarness = {
+  disableTerminalTransportRecovery?: () => void;
+  armSnapshotInstallHold?: () => void;
+  releaseSnapshotInstall?: () => void;
+  snapshotInstallHoldArmed?: boolean;
+  terminal?: Array<{ kind: string; payload: unknown }>;
+};
+
+function liveHarness(): LiveTerminalHarness | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as typeof window & {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveTerminalHarness;
+  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+}
+
+let snapshotInstallHoldRelease: (() => void) | undefined;
+
+function holdLiveSnapshotInstallIfArmed(
+  generation: number,
+  subscriptionId: string
+): Promise<void> {
+  const harness = liveHarness();
+  if (!harness?.snapshotInstallHoldArmed) return Promise.resolve();
+  harness.snapshotInstallHoldArmed = false;
+  recordLiveHarnessTerminal("snapshot_install_held", {
+    generation,
+    subscription_id: subscriptionId
+  });
+  return new Promise((resolve) => {
+    snapshotInstallHoldRelease = resolve;
+    harness.releaseSnapshotInstall = () => {
+      snapshotInstallHoldRelease?.();
+      snapshotInstallHoldRelease = undefined;
+    };
+  });
 }
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {

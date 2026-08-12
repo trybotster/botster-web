@@ -912,13 +912,14 @@ export type DaemonDiagnosticKind =
   | "compatibility_mismatch"
   | "unsupported_feature"
   | "terminal_stream_unavailable"
+  | "worker_compatibility"
   | "action_failure"
   | "daemon_startup_failure"
   | "backpressure";
 
 export type DaemonEvent =
   | { type: "session_lifecycle"; session_id: string; state: string }
-  | { type: "terminal_output"; session_id: string; subscription_id: string; data: string }
+  | { type: "terminal_output"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number }
   | { type: "snapshot"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number }
   | { type: "scrollback"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number }
   | { type: "process_exit"; session_id: string; subscription_id: string; code: number | null }

@@ -43,8 +43,8 @@ export function TerminalViewHost({
     () =>
       dataPlane ??
       new MockTerminalDataPlane(descriptor.sessionId, [
-        "botster-web terminal_view bridge\r\n",
-        "Restty renderer attached through mock terminal data plane.\r\n"
+        new TextEncoder().encode("botster-web terminal_view bridge\r\n"),
+        new TextEncoder().encode("Restty renderer attached through mock terminal data plane.\r\n")
       ]),
     [dataPlane, descriptor.sessionId]
   );

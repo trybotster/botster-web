@@ -100,6 +100,8 @@ const entityOptionsPackagePath = entityOptionsMode
 const echoProbe = "keys";
 const attachProbe = "botster-web-production-attach-probe";
 const productionSessionId = "web-prod";
+const hydrateHoldBytes = [0xa8, 0x01, 0xff];
+const ablateOracleBytes = [0xfd];
 
 if (!sharedHubDriverMode && !process.env.BOTSTER_HUB_BIN) {
   throw new Error(
@@ -354,6 +356,7 @@ try {
   await typeThroughMountedTerminal(page, `${echoProbe}\n`);
   await waitForTerminalOutput(page, `botster-web-production-echo:${echoProbe}`);
   await waitForTerminalRendererWrite(page, `botster-web-production-echo:${echoProbe}`);
+  await proveByteFaithfulLiveTerminal(page);
   const modeGatedAfterEcho = await daemonRequestCount(page, { type: "mode_gated_input" });
   if (modeGatedAfterEcho <= modeGatedBeforeEcho) {
     throw new Error(
@@ -3223,8 +3226,8 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
   let page2;
   let formP1;
   let selectP1;
-  let renderBaseline = 0;
-  let orderedGapEvidence = null;
+  let renderBaseline;
+  let orderedGapEvidence;
 
   const seedSession = async (sessionId, label) => {
     const spawnResponse = await sendDaemonRequest(socketPath, {
@@ -5501,11 +5504,17 @@ async function startProductionSession() {
   await writeFile(
     scriptPath,
     [
+      "stty -echo 2>/dev/null || true",
       "echo botster-web-production-ready",
       "while IFS= read -r line; do",
       "  case \"$line\" in",
       "    botster-web-production-size) set -- $(stty size); echo botster-web-production-size:${1}x${2} ;;",
       "    botster-web-production-exit) echo botster-web-production-exiting; exit 0 ;;",
+      "    botster-web-production-bytes-lead) printf '\\342' ;;",
+      "    botster-web-production-bytes-rest) printf '\\202\\254' ;;",
+      "    botster-web-production-bytes-ctrl) printf '\\000\\033[0m\\377' ;;",
+      "    botster-web-production-bytes-hold) printf '\\250\\001\\377' ;;",
+      "    botster-web-production-bytes-ablate) printf '\\375' ;;",
       "    *) echo botster-web-production-echo:$line ;;",
       "  esac",
       "done"
@@ -6232,7 +6241,18 @@ async function waitForTerminalOutput(page, text) {
   await page.waitForFunction(
     ({ expectedText }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
-        (entry) => entry.kind === "output" && String(entry.payload?.data ?? "").includes(expectedText)
+        (entry) => {
+          if (entry.kind !== "output") return false;
+          const encoded = entry.payload?.payload_bytes_base64;
+          if (typeof encoded !== "string") return false;
+          try {
+            return new TextDecoder().decode(
+              Uint8Array.from(globalThis.atob(encoded), (char) => char.charCodeAt(0))
+            ).includes(expectedText);
+          } catch {
+            return false;
+          }
+        }
       ),
     { expectedText: text },
     { timeout: 45_000 }
@@ -6245,13 +6265,232 @@ async function waitForTerminalRendererWrite(page, text) {
   await page.waitForFunction(
     ({ expectedText }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
-        (entry) => entry.kind === "renderer_write" && String(entry.payload?.data ?? "").includes(expectedText)
+        (entry) => {
+          if (entry.kind !== "renderer_write") return false;
+          const encoded = entry.payload?.payload_bytes_base64;
+          if (typeof encoded !== "string") return false;
+          try {
+            return new TextDecoder().decode(
+              Uint8Array.from(globalThis.atob(encoded), (char) => char.charCodeAt(0))
+            ).includes(expectedText);
+          } catch {
+            return false;
+          }
+        }
       ),
     { expectedText: text },
     { timeout: 45_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for mounted terminal renderer write ${text}: ${error.message}`);
   });
+}
+
+async function waitForResttyBoundBytes(page, expectedBytes, label, timeout = 45_000) {
+  await page.waitForFunction(
+    ({ expected }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) => {
+        if (entry.kind !== "renderer_write") return false;
+        const encoded = entry.payload?.payload_bytes_base64;
+        if (typeof encoded !== "string") return false;
+        try {
+          const bytes = Uint8Array.from(globalThis.atob(encoded), (char) => char.charCodeAt(0));
+          return bytes.byteLength === expected.length && expected.every((value, index) => bytes[index] === value);
+        } catch {
+          return false;
+        }
+      }),
+    { expected: expectedBytes },
+    { timeout }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for Restty renderer_write bytes ${label}: ${error.message}`);
+  });
+}
+
+async function waitForDaemonTerminalOutputBytes(page, expectedBytes, label) {
+  await page.waitForFunction(
+    ({ expected }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
+        const event = entry.payload;
+        if (entry.kind !== "daemon_event" || event?.type !== "terminal_output") return false;
+        if (event.payload_encoding !== "base64" || typeof event.payload_base64 !== "string") return false;
+        if ("data" in event) return false;
+        try {
+          const raw = globalThis.atob(event.payload_base64);
+          if (raw.length !== event.bytes || raw.length !== expected.length) return false;
+          return expected.every((value, index) => raw.charCodeAt(index) === value);
+        } catch {
+          return false;
+        }
+      }),
+    { expected: expectedBytes },
+    { timeout: 45_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for daemon terminal_output bytes ${label}: ${error.message}`);
+  });
+}
+
+async function countExactTerminalKind(page, kind, expectedBytes) {
+  return page.evaluate(({ expectedKind, expected }) => {
+    return (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => {
+      if (entry.kind !== expectedKind) return false;
+      const encoded = entry.payload?.payload_bytes_base64;
+      if (typeof encoded !== "string") return false;
+      try {
+        const bytes = Uint8Array.from(globalThis.atob(encoded), (char) => char.charCodeAt(0));
+        return bytes.byteLength === expected.length && expected.every((value, index) => bytes[index] === value);
+      } catch {
+        return false;
+      }
+    }).length;
+  }, { expectedKind: kind, expected: expectedBytes });
+}
+
+async function proveHydrationBuffersUntilGhostsnpInstall(page) {
+  const armed = await page.evaluate(() => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    if (typeof harness?.armSnapshotInstallHold !== "function") return false;
+    harness.armSnapshotInstallHold();
+    return true;
+  });
+  if (!armed) {
+    throw new Error("snapshot-install hold unavailable: expose armSnapshotInstallHold on the live harness");
+  }
+
+  const heldBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+      (entry) => entry.kind === "snapshot_install_held"
+    ).length
+  );
+  await page.evaluate(() => {
+    const closed = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.();
+    if (!closed) throw new Error("hydration hold requires closing the real RTCDataChannel");
+  });
+
+  const hold = await page.waitForFunction(
+    ({ before }) => {
+      const held = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+        (entry) => entry.kind === "snapshot_install_held"
+      );
+      if (held.length <= before) return null;
+      const latest = held.at(-1)?.payload ?? {};
+      if (typeof latest.subscription_id !== "string" || !Number.isInteger(latest.generation)) return null;
+      return latest;
+    },
+    { before: heldBefore },
+    { timeout: 30_000 }
+  ).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(`timed out waiting for snapshot_install_held: ${error.message}`);
+  });
+
+  await callTerminalControl(page, "writeInput", "botster-web-production-bytes-hold\n");
+  await waitForDaemonTerminalOutputBytes(page, hydrateHoldBytes, "hydration hold");
+
+  const flushedEarly = {
+    output: await countExactTerminalKind(page, "output", hydrateHoldBytes),
+    renderer_write: await countExactTerminalKind(page, "renderer_write", hydrateHoldBytes)
+  };
+  if (flushedEarly.output !== 0 || flushedEarly.renderer_write !== 0) {
+    throw new Error(
+      `hydration hold leaked bytes before GHOSTSNP install: ${JSON.stringify({ hold, flushedEarly })}`
+    );
+  }
+
+  await page.evaluate(() => {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.releaseSnapshotInstall?.();
+  });
+
+  await page.waitForFunction(
+    ({ expectedGeneration, expectedSubscription }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) =>
+        entry.kind === "ghostsnp_install" &&
+        entry.payload?.generation === expectedGeneration &&
+        entry.payload?.subscription_id === expectedSubscription
+      ),
+    { expectedGeneration: hold.generation, expectedSubscription: hold.subscription_id },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(
+      `timed out waiting for generation-scoped ghostsnp_install after hold release: ${error.message}`
+    );
+  });
+  await waitForResttyBoundBytes(page, hydrateHoldBytes, "hydration flush");
+  recordProofNote("hydration_hold", {
+    generation: hold.generation,
+    subscription_id: hold.subscription_id,
+    bytes: hydrateHoldBytes
+  });
+}
+
+async function proveRendererWriteOracleIsLoadBearing(page) {
+  await page.evaluate(() => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    if (!harness) throw new Error("live harness missing for renderer_write ablation");
+    harness.suppressRendererWriteTelemetry = true;
+  });
+  try {
+    await callTerminalControl(page, "writeInput", "botster-web-production-bytes-ablate\n");
+    await waitForDaemonTerminalOutputBytes(page, ablateOracleBytes, "renderer ablation producer");
+    const dataPlaneSeen = await countExactTerminalKind(page, "output", ablateOracleBytes);
+    if (dataPlaneSeen < 1) {
+      throw new Error("renderer ablation producer never reached HubTerminalDataPlane output telemetry");
+    }
+    let rendererOracleFailed = false;
+    try {
+      await waitForResttyBoundBytes(page, ablateOracleBytes, "ablate-should-timeout", 2_500);
+    } catch (error) {
+      rendererOracleFailed = /Restty renderer_write bytes ablate-should-timeout/.test(String(error?.message ?? error));
+      if (!rendererOracleFailed) throw error;
+    }
+    if (!rendererOracleFailed) {
+      throw new Error("renderer_write oracle stayed green while renderer_write telemetry was suppressed");
+    }
+    recordProofNote("renderer_write_oracle_ablation", {
+      data_plane_output_seen: dataPlaneSeen,
+      renderer_write_failed_first: true
+    });
+  } finally {
+    await page.evaluate(() => {
+      const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+      if (harness) harness.suppressRendererWriteTelemetry = false;
+    });
+  }
+}
+
+async function proveByteFaithfulLiveTerminal(page) {
+  const envelopeProof = await page.evaluate(() => {
+    const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "daemon_event")
+      .map((entry) => entry.payload)
+      .filter((event) => event?.type === "terminal_output");
+    if (events.length === 0) return { error: "no_terminal_output_events" };
+    const invalid = events.find((event) =>
+      event.payload_encoding !== "base64" ||
+      typeof event.payload_base64 !== "string" ||
+      !Number.isInteger(event.bytes) ||
+      "data" in event
+    );
+    if (invalid) {
+      return { error: "legacy_or_invalid_envelope", keys: Object.keys(invalid) };
+    }
+    return { count: events.length };
+  });
+  if (envelopeProof.error) {
+    throw new Error(`live terminal_output envelope invalid: ${JSON.stringify(envelopeProof)}`);
+  }
+
+  await proveHydrationBuffersUntilGhostsnpInstall(page);
+  await proveRendererWriteOracleIsLoadBearing(page);
+
+  await typeThroughMountedTerminal(page, "botster-web-production-bytes-lead\n");
+  await waitForDaemonTerminalOutputBytes(page, [0xe2], "utf8 lead");
+  await waitForResttyBoundBytes(page, [0xe2], "utf8 lead");
+  await typeThroughMountedTerminal(page, "botster-web-production-bytes-rest\n");
+  await waitForDaemonTerminalOutputBytes(page, [0x82, 0xac], "utf8 rest");
+  await waitForResttyBoundBytes(page, [0x82, 0xac], "utf8 rest");
+
+  await typeThroughMountedTerminal(page, "botster-web-production-bytes-ctrl\n");
+  await waitForDaemonTerminalOutputBytes(page, [0x00, 0x1b, 0x5b, 0x30, 0x6d, 0xff], "nul/esc/invalid");
+  await waitForResttyBoundBytes(page, [0x00, 0x1b, 0x5b, 0x30, 0x6d, 0xff], "nul/esc/invalid");
 }
 
 async function proveLiveTerminalAfterAttach(page, probe) {
@@ -6738,7 +6977,11 @@ async function assertTerminalAttachChronology(page, sessionId, requiredSubscript
           const liveIndex = subscriptionEvents.findIndex(
             (event, index) =>
               index > attachedIndex && event.type === "terminal_output" &&
-              typeof event.data === "string" && event.data.length > 0
+              event.payload_encoding === "base64" &&
+              typeof event.payload_base64 === "string" &&
+              Number.isInteger(event.bytes) &&
+              event.bytes > 0 &&
+              !("data" in event)
           );
           if (liveIndex < 0) continue;
 
@@ -7015,7 +7258,18 @@ async function waitForNextSizeProbe(page, outputCount) {
         .filter((entry) => entry.kind === "output")
         .slice(previousOutputCount);
       return outputs
-        .map((entry) => String(entry.payload?.data ?? "").match(/botster-web-production-size:(\d+x\d+)/)?.[1])
+        .map((entry) => {
+          const encoded = entry.payload?.payload_bytes_base64;
+          if (typeof encoded !== "string") return null;
+          try {
+            const text = new TextDecoder().decode(
+              Uint8Array.from(globalThis.atob(encoded), (char) => char.charCodeAt(0))
+            );
+            return text.match(/botster-web-production-size:(\d+x\d+)/)?.[1] ?? null;
+          } catch {
+            return null;
+          }
+        })
         .find((size) => typeof size === "string") ?? null;
     },
     { previousOutputCount: outputCount },

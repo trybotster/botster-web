@@ -2,6 +2,7 @@ import type { PtyCallbacks, PtyConnectOptions, PtyTransport } from "../vendor/re
 import type {
   ModeDependentTerminalInput,
   TerminalDataPlaneAttachment,
+  TerminalOutput,
   TerminalSubscription
 } from "./terminal";
 import {
@@ -19,14 +20,19 @@ export class BotsterTerminalPtyTransport implements PtyTransport {
   private dataPlane?: TerminalDataPlaneAttachment;
   private callbacks?: PtyCallbacks;
   private outputSubscription?: TerminalSubscription;
-  private onRender?: (data: string) => void;
+  private onRender?: (data: TerminalOutput) => void;
   private connected = false;
   private readonly gridState = new TerminalGridState();
 
   constructor(private readonly options: BotsterTerminalPtyTransportOptions) {}
 
-  setRenderObserver(onRender: (data: string) => void): void {
+  setRenderObserver(onRender: (data: TerminalOutput) => void): void {
     this.onRender = onRender;
+  }
+
+  deliverOutput(data: TerminalOutput): void {
+    this.callbacks?.onData?.(data);
+    this.onRender?.(data);
   }
 
   attach(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription {

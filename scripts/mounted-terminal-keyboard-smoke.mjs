@@ -78,11 +78,18 @@ try {
       return (
         harness?.inputs?.length === 1 &&
         harness.inputs[0] === expectedProbe &&
-        writes.some(
-          (entry) =>
-            entry.kind === "renderer_write" &&
-            String(entry.payload?.data ?? "").includes(expectedEcho)
-        )
+        writes.some((entry) => {
+          if (entry.kind !== "renderer_write") return false;
+          const encoded = entry.payload?.payload_bytes_base64;
+          if (typeof encoded !== "string") return false;
+          try {
+            return new TextDecoder().decode(
+              Uint8Array.from(globalThis.atob(encoded), (char) => char.charCodeAt(0))
+            ).includes(expectedEcho);
+          } catch {
+            return false;
+          }
+        })
       );
     },
     { expectedProbe: fullLine, expectedEcho: echo },
