@@ -3284,12 +3284,14 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       );
     }
 
-    // Stale-submit negative: force-click while form is invalid, then wait for a production
-    // click/dispatch completion signal (lastFormSubmitClick phase from the form submit control —
-    // not a wall-clock deadline). Reject the dead UUID in every supported Add value field.
-    // Ablation: BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1 sets harness.ablateEntitySelectInvalidation so
-    // the production invalidation guard reopens; the real action collector must emit the stale
-    // add_session request that makes this oracle fail first.
+    // Stale-submit negative: force-click while form is invalid, then settle on the production
+    // click path completion (onClick telemetry when the handler runs, otherwise native disabled
+    // + form-invalid after the Playwright click resolves — not a wall-clock deadline).
+    // Reject the dead UUID in every supported Add value field.
+    // Ablation: BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1 restores stale control state by removing the
+    // local membership entity through the production entity store so the option projects valid
+    // again; the real action collector must emit the stale add_session that fails this oracle first.
+    const formId = `botster-workspaces-add-form-${state.workspaceId}`;
     const addActionId = "botster_workspaces.add_session";
     const ablateStaleSubmit = process.env.BOTSTER_LIVE_ABLATE_STALE_SUBMIT === "1";
     const eventsBeforeStale = await harnessEventCount(page);
@@ -3298,35 +3300,75 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     );
 
     if (ablateStaleSubmit) {
-      await page.evaluate(() => {
-        const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-        if (!harness) {
-          throw new Error("missing live harness for stale-submit ablation");
+      await page.evaluate(({ sessionId: expectedSession }) => {
+        const apply = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.applyEntityFrame;
+        if (typeof apply !== "function") {
+          throw new Error("missing live harness applyEntityFrame for stale-submit ablation");
         }
-        // Narrow enforcement-point ablation: production formHasInvalidEntitySelects reads this.
-        harness.ablateEntitySelectInvalidation = true;
+        // Restore stale control state: drop the membership exclusion so production projection
+        // re-validates the held draft without any form-validation bypass flag.
+        apply({
+          operation: "entity_remove",
+          key: { family: "botster-workspaces.membership", id: expectedSession },
+          sequence: 1_000_000_000
+        });
+      }, { sessionId });
+      await page.waitForFunction(({ formId: id, actionId }) => {
+        const formEl = globalThis.document.querySelector(`form[data-ui-node-id='${id}']`);
+        const btn = formEl?.querySelector(`ion-button[data-action-id='${actionId}']`);
+        if (!formEl || !btn) return false;
+        const native = btn.shadowRoot?.querySelector("button") ?? btn.querySelector("button") ?? btn;
+        return formEl.getAttribute("data-form-invalid") !== "true"
+          && !btn.hasAttribute("disabled")
+          && !native?.disabled
+          && !native?.hasAttribute?.("disabled");
+      }, { formId, actionId: addActionId }, { timeout: 10_000 }).catch((error) => {
+        throw new Error(`${stage}: ablation did not restore valid Add control state: ${error.message}`);
       });
+      // Real production click (control is enabled again via entity projection).
+      await formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`).click();
+    } else {
+      await formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`)
+        .click({ force: true });
+      // Flush any sync React onClick work that would have run if the control were enabled.
+      await page.evaluate(() => new Promise((resolve) => {
+        queueMicrotask(() => queueMicrotask(resolve));
+      }));
     }
 
-    await formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`)
-      .click({ force: true });
-
-    const clickCompletion = await page.waitForFunction(({ before, actionId }) => {
-      const attempt = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.lastFormSubmitClick;
-      if (!attempt || attempt.seq <= before || attempt.actionId !== actionId) {
-        return null;
+    const clickCompletion = await page.waitForFunction(({ before, actionId, formId: id, ablate }) => {
+      const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+      const attempt = harness?.lastFormSubmitClick;
+      if (attempt && attempt.seq > before && attempt.actionId === actionId) {
+        if (
+          attempt.phase === "dispatched"
+          || attempt.phase === "blocked_disabled"
+          || attempt.phase === "blocked_invalid"
+        ) {
+          return attempt;
+        }
       }
-      if (
-        attempt.phase === "dispatched"
-        || attempt.phase === "blocked_disabled"
-        || attempt.phase === "blocked_invalid"
-      ) {
-        return attempt;
+      if (ablate) return null;
+      // Green path: native disabled + form-invalid is the production fail-closed barrier when
+      // the disabled attribute suppresses onClick entirely.
+      const formEl = globalThis.document.querySelector(`form[data-ui-node-id='${id}']`);
+      const btn = formEl?.querySelector(`ion-button[data-action-id='${actionId}']`);
+      const native = btn?.shadowRoot?.querySelector("button") ?? btn?.querySelector("button") ?? btn;
+      const disabled = Boolean(
+        btn?.hasAttribute("disabled")
+        || native?.disabled
+        || native?.hasAttribute?.("disabled")
+      );
+      const invalid = formEl?.getAttribute("data-form-invalid") === "true";
+      if (disabled && invalid) {
+        return { phase: "blocked_gate", actionId, gated: true, settled: true, seq: before };
       }
       return null;
     }, {
       before: clickSeqBefore,
-      actionId: addActionId
+      actionId: addActionId,
+      formId,
+      ablate: ablateStaleSubmit
     }, { timeout: 10_000 }).then((handle) => handle.jsonValue()).catch((error) => {
       throw new Error(`${stage}: production Add click/dispatch path never completed: ${error.message}`);
     });

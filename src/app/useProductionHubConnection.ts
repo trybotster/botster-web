@@ -13,6 +13,7 @@ import {
   type ConnectionDiagnostic
 } from "../botster/connectionDiagnostics";
 import type { createBotsterWebClient } from "../botster/client";
+import type { EntityFrame } from "../botster/entities";
 import type { HubEntityLoadStatus } from "../botster/LocalHubFirstScreen";
 import type { EntitySubscriptionErrorPayload } from "../botster/protocol";
 import type { UiTreeSnapshot } from "../botster/uiNodes";
@@ -21,6 +22,10 @@ import type { HubEntityLoadKey } from "./hubLifecycle";
 import { visibleStatusText } from "./values";
 
 type RuntimeClient = ReturnType<typeof createBotsterWebClient>;
+
+type LiveProtocolHarnessEntityControl = {
+  applyEntityFrame?: (frame: EntityFrame) => void;
+};
 
 export function useProductionHubConnection(options: {
   runtimeClient: RuntimeClient;
@@ -42,6 +47,27 @@ export function useProductionHubConnection(options: {
     setEntityLoadStatus,
     setSessionTypeSubscriptionError
   } = options;
+
+  // Live-protocol harness only: apply a real entity frame through the production store and
+  // bump the same frame version used for hub-delivered frames. Does not alter validation policy.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const harness = (window as typeof window & {
+      __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveProtocolHarnessEntityControl;
+    }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    if (!harness) return;
+
+    const applyEntityFrame = (frame: EntityFrame) => {
+      runtimeClient.entities.apply(frame);
+      setFrameVersion((version) => version + 1);
+    };
+    harness.applyEntityFrame = applyEntityFrame;
+    return () => {
+      if (harness.applyEntityFrame === applyEntityFrame) {
+        delete harness.applyEntityFrame;
+      }
+    };
+  }, [runtimeClient, setFrameVersion]);
 
   useEffect(() => {
     let cancelled = false;

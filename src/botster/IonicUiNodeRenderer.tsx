@@ -747,12 +747,11 @@ function entitySelectSelectionInvalid(
 }
 
 /**
- * Live-harness control surface for form submit proofs. Present only when the packaged
+ * Read-only live-harness telemetry for form submit proofs. Present only when the packaged
  * protocol harness init script installs `window.__BOTSTER_LIVE_PROTOCOL_HARNESS__`.
- * `ablateEntitySelectInvalidation` is a narrow negative-control switch: when true, the
- * entity-select invalidation gate reports valid so the real click/dispatch path can emit.
+ * This surface never mutates validation, disabled state, or dispatch decisions.
  */
-type LiveProtocolHarnessFormControl = {
+type LiveProtocolHarnessFormTelemetry = {
   formSubmitClickSeq?: number;
   lastFormSubmitClick?: {
     seq: number;
@@ -761,15 +760,13 @@ type LiveProtocolHarnessFormControl = {
     phase: "blocked_disabled" | "blocked_invalid" | "dispatched";
     gated?: boolean;
     settled?: boolean;
-    ablate?: boolean;
   };
-  ablateEntitySelectInvalidation?: boolean;
 };
 
-function liveProtocolHarness(): LiveProtocolHarnessFormControl | undefined {
+function liveProtocolHarness(): LiveProtocolHarnessFormTelemetry | undefined {
   if (typeof window === "undefined") return undefined;
   return (window as typeof window & {
-    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveProtocolHarnessFormControl;
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveProtocolHarnessFormTelemetry;
   }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
 }
 
@@ -780,10 +777,6 @@ function formHasInvalidEntitySelects(
   draft: Record<string, unknown>,
   row?: RowContext
 ): boolean {
-  // Narrow ablation at the invalidation gate for live stale-submit negative controls.
-  if (liveProtocolHarness()?.ablateEntitySelectInvalidation === true) {
-    return false;
-  }
   let invalid = false;
   const visit = (node: RealizedUiNode, currentRow?: RowContext) => {
     if (invalid) return;
@@ -1163,12 +1156,6 @@ function UiNodeForm({
     values: draft as UiNodeActionDispatch["values"]
   };
   options.collectAction?.(submitDispatch);
-  const harness = liveProtocolHarness();
-  // Production keeps native disabled for invalid entity selects. The live harness installs a
-  // global before paint; when it is present, leave the control clickable so the production
-  // onClick fail-closed path (and its completion signal) is always reachable for proofs.
-  // data-form-invalid and the click-time gate remain authoritative.
-  const nativeDisabled = Boolean(submitAction.disabled || (hasInvalidControl && !harness));
   const submitGated = Boolean(submitAction.disabled || hasInvalidControl);
 
   return (
@@ -1186,12 +1173,12 @@ function UiNodeForm({
       ))}
       <IonButton
         data-action-id={submitAction.id}
-        disabled={nativeDisabled}
-        aria-disabled={submitGated ? "true" : undefined}
+        disabled={submitGated}
         type="button"
         onClick={() => {
+          // Read-only harness telemetry only — never changes validation or dispatch.
           const liveHarness = liveProtocolHarness();
-          const mark = (phase: NonNullable<LiveProtocolHarnessFormControl["lastFormSubmitClick"]>["phase"]) => {
+          const mark = (phase: NonNullable<LiveProtocolHarnessFormTelemetry["lastFormSubmitClick"]>["phase"]) => {
             if (!liveHarness) return;
             const seq = (liveHarness.formSubmitClickSeq ?? 0) + 1;
             liveHarness.formSubmitClickSeq = seq;
@@ -1201,7 +1188,6 @@ function UiNodeForm({
               nodeId: node.id,
               phase,
               gated: submitGated,
-              ablate: liveHarness.ablateEntitySelectInvalidation === true,
               settled: true
             };
           };

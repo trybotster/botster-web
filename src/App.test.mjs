@@ -12887,6 +12887,53 @@ function removeCssAtRules(source) {
       // values still hold the draft, but form marks invalid so production click path blocks.
       assert.equal(submitAfter.values?.session, "sess-alpha");
       assert.match(invalidMarkup, /data-form-invalid="true"/);
+
+      // Focused proof: standard renderer keeps native disabled + form-invalid, and the shipped
+      // source has no mutable browser-global form-validation bypass. A hostile harness flag
+      // planted before render must not reopen the gate in markup.
+      const rendererSource = await readFile(
+        new URL("./botster/IonicUiNodeRenderer.tsx", import.meta.url),
+        "utf8"
+      );
+      assert.doesNotMatch(
+        rendererSource,
+        /ablateEntitySelectInvalidation/,
+        "production renderer must not honor a mutable harness validation bypass"
+      );
+      assert.match(
+        rendererSource,
+        /disabled=\{submitGated\}|disabled=\{submitAction\.disabled \|\| hasInvalidControl\}/,
+        "invalid entity-select submit must use native disabled from production gates"
+      );
+      globalThis.window = globalThis.window ?? globalThis;
+      globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {
+        events: [],
+        ablateEntitySelectInvalidation: true
+      };
+      try {
+        const hostileMarkup = renderToStaticMarkup(
+          ionicUiNodeRendererRegistry.render(
+            {
+              kind: "ui_tree_snapshot",
+              surface: "entity-options-test",
+              version: "test",
+              root: formRoot
+            },
+            store,
+            {
+              collectAction: () => undefined,
+              dispatchAction: () => {
+                throw new Error("invalid entity-select form must not dispatch");
+              }
+            }
+          )
+        );
+        assert.match(hostileMarkup, /data-form-invalid="true"/);
+        assert.match(hostileMarkup, /disabled/);
+        assert.match(hostileMarkup, /no longer available|data-selection-invalid="true"/);
+      } finally {
+        delete globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+      }
     } finally {
       await rendererVite.close();
     }
