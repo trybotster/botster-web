@@ -170,18 +170,7 @@ try {
     args: ["--disable-features=WebRtcHideLocalIpsWithMdns", "--force-webrtc-ip-handling-policy=default_public_and_private_interfaces"]
   });
   page = await browser.newPage();
-  await page.addInitScript(() => {
-    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {
-      events: [],
-      terminal: []
-    };
-    globalThis.window.addEventListener("botster:webrtc-daemon-lifecycle", (event) => {
-      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events?.push({
-        kind: "webrtc_lifecycle",
-        payload: event.detail
-      });
-    });
-  });
+  await installLiveHarnessPageHooks(page);
 
   page.on("console", (message) => {
     consoleEvents.push({ type: message.type(), text: message.text() });
@@ -2689,6 +2678,12 @@ async function exerciseWorkspacesLifecycle(page) {
   }
 
   await selectWorkspacesLifecycleWorkspace(page, workspacesCompatibilityState);
+  await exerciseWorkspacesEntityOptionsMembershipReactive(
+    page,
+    browser,
+    workspacesCompatibilityState,
+    socketPath
+  );
   for (const sessionId of allReferences) {
     await addWorkspacesLifecycleReference(page, workspacesCompatibilityState, sessionId);
   }
@@ -2870,7 +2865,7 @@ async function selectWorkspacesLifecycleWorkspace(page, state) {
     .waitFor({ timeout: 15_000 });
 }
 
-async function addWorkspacesLifecycleReference(page, state, sessionId) {
+async function openWorkspacesAddSessionDialog(page, state, labelSuffix) {
   const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const openButton = surface
     .locator("ion-button[data-action-id='botster_workspaces.open']")
@@ -2884,40 +2879,527 @@ async function addWorkspacesLifecycleReference(page, state, sessionId) {
     nodeId: openNodeId,
     kind: "submit",
     sinceIndex: openEventCount,
-    label: `Workspaces Add-session presentation request for ${sessionId}`
+    label: `Workspaces Add-session presentation request for ${labelSuffix}`
   });
   await waitForWorkspacesActionResult(page, {
     actionId: openActionId,
     nodeId: openNodeId,
     presentation: { kind: "set", key: "workspace-dialog", value: `add:${state.workspaceId}` },
     sinceIndex: openEventCount,
-    label: `Workspaces accepted Add-session dialog for ${sessionId}`
+    label: `Workspaces accepted Add-session dialog for ${labelSuffix}`
   });
-
   const form = page.locator(`form[data-ui-node-id='botster-workspaces-add-form-${state.workspaceId}']`);
   await form.waitFor({ timeout: 15_000 });
-  const input = form.locator("[data-ui-node-id='botster-workspaces-add-session-id'] input");
-  await input.fill(sessionId);
+  return form;
+}
+
+async function waitForWorkspacesAddSessionOption(page, state, sessionId, timeoutMs = 30_000) {
+  const select = page.locator(
+    `form[data-ui-node-id='botster-workspaces-add-form-${state.workspaceId}'] ` +
+    "[data-ui-node-id='botster-workspaces-add-session-id'] ion-select"
+  );
+  await select.waitFor({ timeout: 15_000 });
+  await page.waitForFunction(
+    ({ formId, expected }) => {
+      const options = [...globalThis.document.querySelectorAll(
+        `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
+      )];
+      return options.some((option) => (option.value ?? option.getAttribute("value")) === expected);
+    },
+    { formId: `botster-workspaces-add-form-${state.workspaceId}`, expected: sessionId },
+    { timeout: timeoutMs }
+  ).catch(async (error) => {
+    const options = await readUiNodeSelectOptionValues(select);
+    throw new Error(
+      `Workspaces Available sessions never projected ${sessionId}; options=${JSON.stringify(options)}: ${error.message}`
+    );
+  });
+  return select;
+}
+
+/**
+ * Prefer the entity_options Available sessions select when the Hub session is projected.
+ * Use Historical session UUID only when the session is intentionally absent from /session.
+ * Never fill the hidden IonSelect aux input.
+ */
+async function chooseWorkspacesAddSessionControl(page, form, sessionId, { requireSelect = false } = {}) {
+  const select = form.locator("[data-ui-node-id='botster-workspaces-add-session-id'] ion-select");
+  await select.waitFor({ timeout: 15_000 });
+  const formId = await form.getAttribute("data-ui-node-id");
+  const optionPresent = await page.waitForFunction(
+    ({ nextFormId, expected }) => {
+      const options = [...globalThis.document.querySelectorAll(
+        `form[data-ui-node-id='${nextFormId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
+      )];
+      return options.some((option) => (option.value ?? option.getAttribute("value")) === expected);
+    },
+    { nextFormId: formId, expected: sessionId },
+    { timeout: requireSelect ? 30_000 : 5_000 }
+  ).then(() => true).catch(() => false);
+  const options = await readUiNodeSelectOptionValues(select);
+  if (optionPresent || options.includes(sessionId)) {
+    await setUiNodeSelectValue(select, sessionId);
+    return { path: "entity_options_select", options: await readUiNodeSelectOptionValues(select) };
+  }
+  if (requireSelect) {
+    throw new Error(
+      `Workspaces Add requires entity_options option ${sessionId}; rendered=${JSON.stringify(options)}`
+    );
+  }
+  const advanced = form.locator("[data-ui-node-id='botster-workspaces-add-session-id-advanced'] input");
+  await advanced.waitFor({ timeout: 15_000 });
+  await advanced.fill(sessionId);
+  return { path: "historical_advanced", options };
+}
+
+async function submitWorkspacesAddSession(page, form, state, sessionId, label) {
+  const formNodeId = await form.getAttribute("data-ui-node-id");
   const submit = form.locator(":scope > ion-button[data-action-id='botster_workspaces.add_session']");
   const eventCount = await harnessEventCount(page);
   await submit.click();
-  await waitForWorkspacesPluginSurfaceRequest(page, {
-    actionId: "botster_workspaces.add_session",
-    nodeId: await form.getAttribute("data-ui-node-id"),
-    kind: "submit",
-    values: { workspace_id: state.workspaceId, session_id: sessionId },
-    payload: { workspace_id: state.workspaceId },
-    sinceIndex: eventCount,
-    label: `Workspaces renderer-collected Add-session form values for ${sessionId}`
+  // Prefer exact session_id; advanced historical claims may only send session_id_advanced.
+  // Draft may also carry empty optional fields — require identity fields, not exact object equality.
+  await page.waitForFunction(
+    ({ sinceIndex, nodeId, workspaceId, sessionId: expectedSession }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).some((entry) => {
+        const request = entry.payload?.request;
+        if (
+          entry.kind !== "daemon_request"
+          || entry.payload?.type !== "plugin_surface_action"
+          || entry.payload?.package_name !== "botster-workspaces"
+          || request?.surface_id !== "workspaces"
+          || request?.action_id !== "botster_workspaces.add_session"
+          || request?.node_id !== nodeId
+          || request?.kind !== "submit"
+        ) return false;
+        const values = request.values ?? {};
+        if (values.workspace_id !== workspaceId) return false;
+        const resolved = values.session_id || values.session_id_advanced;
+        if (resolved !== expectedSession) return false;
+        // Form payload carries workspace_id; tolerate missing payload when identity is in values.
+        if (request.payload !== undefined && request.payload?.workspace_id !== workspaceId) return false;
+        return true;
+      }),
+    {
+      sinceIndex: eventCount,
+      nodeId: formNodeId,
+      workspaceId: state.workspaceId,
+      sessionId
+    },
+    { timeout: 15_000 }
+  ).catch(async (error) => {
+    const observed = await page.evaluate((start) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .slice(start)
+        .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "plugin_surface_action")
+        .map((entry) => entry.payload),
+      eventCount
+    );
+    throw new Error(
+      `Workspaces renderer-collected Add-session form values for ${label} not observed; ` +
+      `events=${JSON.stringify(observed, null, 2)}: ${error.message}`
+    );
   });
   await waitForWorkspacesActionResult(page, {
     actionId: "botster_workspaces.add_session",
-    nodeId: await form.getAttribute("data-ui-node-id"),
+    nodeId: formNodeId,
     presentation: { kind: "clear", key: "workspace-dialog" },
     replacementRootId: "botster-workspaces-app",
     sinceIndex: eventCount,
-    label: `Workspaces accepted Add-session action for ${sessionId}`
+    label: `Workspaces accepted Add-session action for ${label}`
   });
+}
+
+async function addWorkspacesLifecycleReference(page, state, sessionId) {
+  const form = await openWorkspacesAddSessionDialog(page, state, sessionId);
+  const choice = await chooseWorkspacesAddSessionControl(page, form, sessionId);
+  await submitWorkspacesAddSession(page, form, state, sessionId, `${sessionId} via ${choice.path}`);
+}
+
+function installLiveHarnessPageHooks(targetPage) {
+  return targetPage.addInitScript(() => {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {
+      events: [],
+      terminal: []
+    };
+    globalThis.window.addEventListener("botster:webrtc-daemon-lifecycle", (event) => {
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events?.push({
+        kind: "webrtc_lifecycle",
+        payload: event.detail
+      });
+    });
+  });
+}
+
+async function openSecondaryWorkspacesProductionClient(state) {
+  if (!browser) {
+    throw new Error("Workspaces membership reactive stage requires the shared Playwright browser");
+  }
+  if (!appUrl) {
+    throw new Error("Workspaces membership reactive stage requires the live app URL");
+  }
+  const secondary = await browser.newPage();
+  await installLiveHarnessPageHooks(secondary);
+  await secondary.goto(appUrl, { waitUntil: "domcontentloaded" });
+  await openDiagnosticsView(secondary);
+  await secondary.getByText("Local Botster health").waitFor({ timeout: 30_000 });
+  await waitForTransportLabel(secondary);
+  await waitForHarnessEvent(secondary, { kind: "daemon_request", type: "status" }, "secondary client status request");
+  await waitForHarnessEvent(secondary, { kind: "daemon_request", type: "list_apps" }, "secondary client list_apps request");
+  await openAppsView(secondary);
+  await openFirstPartyUiAppSurface(secondary, "webrtc");
+  await selectWorkspacesLifecycleWorkspace(secondary, state);
+  return secondary;
+}
+
+async function workspacesPluginSurfaceRenderCount(page) {
+  return daemonRequestCount(page, {
+    type: "plugin_surface_render",
+    package_name: "botster-workspaces",
+    surface_id: "workspaces"
+  });
+}
+
+/**
+ * Force held entity-options demand to re-subscribe without navigating or reopening dialogs.
+ * Mirrors exerciseEntityOptionsReactive: real DataChannel close → client reconnect → fresh
+ * membership/session snapshots for claim-scoped families.
+ */
+async function resubscribeHeldWorkspacesEntityOptions(page, stage, label) {
+  const openEventsBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length
+  );
+  const membershipReadyBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) =>
+        entry.kind === "webrtc_entity_subscription"
+        && entry.payload?.entity_type === "botster-workspaces.membership"
+        && entry.payload?.state === "ready"
+      ).length
+  );
+  const closed = await page.evaluate(
+    () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
+  );
+  if (!closed) {
+    throw new Error(`${stage} ${label}: could not close the live WebRTC data channel for resubscribe`);
+  }
+  await page.waitForFunction(
+    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before,
+    { before: openEventsBefore },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(`${stage} ${label}: data channel never reopened: ${error.message}`);
+  });
+  await page.waitForFunction(
+    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) =>
+        entry.kind === "webrtc_entity_subscription"
+        && entry.payload?.entity_type === "botster-workspaces.membership"
+        && entry.payload?.state === "ready"
+      ).length > before,
+    { before: membershipReadyBefore },
+    { timeout: 30_000 }
+  ).catch(async (error) => {
+    const observed = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) =>
+          entry.kind === "webrtc_entity_subscription"
+          || (entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities")
+        )
+        .slice(-20)
+        .map((entry) => entry.payload ?? entry)
+    );
+    throw new Error(
+      `${stage} ${label}: membership never re-ready after reconnect; observed=${JSON.stringify(observed)}: ${error.message}`
+    );
+  });
+}
+
+async function assertWorkspacesAddSelectionInvalid(page, state, label) {
+  await page.waitForFunction(
+    ({ formId }) => {
+      const form = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
+      const field = globalThis.document.querySelector(
+        `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id']`
+      );
+      return form?.getAttribute("data-form-invalid") === "true"
+        || field?.getAttribute("data-selection-invalid") === "true";
+    },
+    { formId: `botster-workspaces-add-form-${state.workspaceId}` },
+    { timeout: 30_000 }
+  ).catch((error) => {
+    throw new Error(`${label}: invalid selection UI never appeared: ${error.message}`);
+  });
+}
+
+/**
+ * Workspaces-path held-open entity_options membership proof.
+ * Dual production clients: P1 holds Add dialog; P2 claims/removes membership.
+ */
+async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBrowser, state, socketPath) {
+  void sharedBrowser;
+  const stage = "workspaces-entity-options-membership-reactive";
+  const sessionId = randomUUID();
+  const spawnResponse = await sendDaemonRequest(socketPath, {
+    type: "spawn",
+    session_id: sessionId,
+    command: "sleep 300"
+  });
+  if (spawnResponse.error) {
+    throw new Error(
+      `${stage} seed spawn failed for ${sessionId}: ${JSON.stringify(spawnResponse.error)}`
+    );
+  }
+  await waitForHarnessEvent(page, {
+    kind: "hub_frame",
+    family: "session",
+    id: sessionId,
+    lifecycle_class: "current"
+  }, `${stage} current seed ${sessionId}`);
+
+  const formP1 = await openWorkspacesAddSessionDialog(page, state, `${stage}-hold`);
+  // Entity-options demand must hold both /session and membership exclude family.
+  // Poll explicitly so diagnostics show every subscribe_entities / entity subscription event.
+  {
+    const demandDeadline = Date.now() + 45_000;
+    let demandEvidence = null;
+    while (Date.now() < demandDeadline) {
+      demandEvidence = await page.evaluate(() => {
+        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+        const subscriptions = events
+          .filter((entry) =>
+            (entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities")
+            || entry.kind === "webrtc_entity_subscription"
+          )
+          .map((entry) => ({
+            kind: entry.kind,
+            entity_type: entry.payload?.entity_type,
+            state: entry.payload?.state,
+            subscription_id: entry.payload?.subscription_id
+          }));
+        const membershipFrames = events
+          .filter((entry) => entry.kind === "hub_frame")
+          .map((entry) => {
+            const frame = entry.payload ?? {};
+            const body = frame.payload ?? {};
+            return {
+              kind: frame.kind,
+              family: body.key?.family ?? body.family ?? null
+            };
+          })
+          .filter((entry) => entry.family === "botster-workspaces.membership");
+        return {
+          subscriptions,
+          membership_frames: membershipFrames,
+          demanded: subscriptions.some((entry) => entry.entity_type === "botster-workspaces.membership"),
+          framed: membershipFrames.length > 0
+        };
+      });
+      if (demandEvidence.demanded && demandEvidence.framed) break;
+      await page.waitForTimeout(150);
+    }
+    console.log(`${stage} membership-demand-evidence ${JSON.stringify(demandEvidence)}`);
+    if (!demandEvidence?.demanded) {
+      throw new Error(
+        `${stage}: P1 never demanded botster-workspaces.membership; evidence=${JSON.stringify(demandEvidence)}`
+      );
+    }
+    if (!demandEvidence?.framed) {
+      throw new Error(
+        `${stage}: P1 demanded membership but received no membership entity frames; evidence=${JSON.stringify(demandEvidence)}`
+      );
+    }
+  }
+  const selectP1 = await waitForWorkspacesAddSessionOption(page, state, sessionId);
+  await setUiNodeSelectValue(selectP1, sessionId);
+  // Dialog stays open; do not submit on P1 yet.
+  if (!(await formP1.isVisible())) {
+    throw new Error(`${stage}: P1 Add dialog closed before membership mutation`);
+  }
+  const renderBaseline = await workspacesPluginSurfaceRenderCount(page);
+
+  const page2 = await openSecondaryWorkspacesProductionClient(state);
+  try {
+    const formP2 = await openWorkspacesAddSessionDialog(page2, state, `${stage}-claim`);
+    await waitForWorkspacesAddSessionOption(page2, state, sessionId);
+    await chooseWorkspacesAddSessionControl(page2, formP2, sessionId, { requireSelect: true });
+    await submitWorkspacesAddSession(page2, formP2, state, sessionId, `${stage} P2 claim`);
+
+    // Held-open P1: production claim on P2 mutates membership. Workspaces package pin
+    // 47b0aeb persists membership via plugin_db.batch and does not call botster.entity_publish,
+    // so live delta fanout is not available yet. Reuse the entity-options reactive pattern:
+    // close/reopen the real WebRTC data channel so claim-scoped demand resubscribes and the
+    // membership entity_provider snapshot excludes S — without reopening the Add dialog or
+    // issuing a new plugin_surface_render from P1.
+    await resubscribeHeldWorkspacesEntityOptions(page, stage, "after-p2-claim");
+
+    await page.waitForFunction(
+      ({ formId, expected }) => {
+        const options = [...globalThis.document.querySelectorAll(
+          `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
+        )];
+        return !options.some((option) =>
+          (option.value ?? option.getAttribute("value")) === expected
+        );
+      },
+      { formId: `botster-workspaces-add-form-${state.workspaceId}`, expected: sessionId },
+      { timeout: 30_000 }
+    ).catch(async (error) => {
+      const options = await readUiNodeSelectOptionValues(selectP1);
+      throw new Error(
+        `${stage}: claimed session still listed on held-open P1 after resubscribe; ` +
+        `options=${JSON.stringify(options)}: ${error.message}`
+      );
+    });
+    await assertWorkspacesAddSelectionInvalid(page, state, `${stage} after P2 claim`);
+    if (!(await formP1.isVisible())) {
+      throw new Error(`${stage}: P1 Add dialog was dismissed during claim exclusion proof`);
+    }
+    const renderAfterClaim = await workspacesPluginSurfaceRenderCount(page);
+    if (renderAfterClaim > renderBaseline) {
+      throw new Error(
+        `${stage}: P1 plugin_surface_render rose during claim exclusion ` +
+        `(baseline=${renderBaseline}, after=${renderAfterClaim})`
+      );
+    }
+
+    const eventsBeforeStale = await harnessEventCount(page);
+    await formP1.locator(":scope > ion-button[data-action-id='botster_workspaces.add_session']")
+      .click({ force: true });
+    await page.waitForTimeout(500);
+    const staleSubmit = await page.evaluate(({ before, workspaceId, sessionId: expectedSession }) => {
+      const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(before);
+      return entries.filter((entry) =>
+        entry.kind === "daemon_request"
+        && entry.payload?.type === "plugin_surface_action"
+        && entry.payload?.package_name === "botster-workspaces"
+        && entry.payload?.request?.action_id === "botster_workspaces.add_session"
+        && entry.payload?.request?.values?.session_id === expectedSession
+        && entry.payload?.request?.values?.workspace_id === workspaceId
+      );
+    }, { before: eventsBeforeStale, workspaceId: state.workspaceId, sessionId });
+    if (staleSubmit.length > 0) {
+      throw new Error(
+        `${stage}: held-open P1 dispatched stale add_session for claimed session: ${JSON.stringify(staleSubmit)}`
+      );
+    }
+
+    // Membership removal restoration via production Remove on P2.
+    const removeButton = page2.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
+      .locator(
+        `ion-button[data-action-id='botster_workspaces.remove_session'][data-ui-node-id*='${sessionId}']`
+      )
+      .first();
+    await removeButton.waitFor({ timeout: 15_000 });
+    const removeNodeId = await removeButton.getAttribute("data-ui-node-id");
+    const removeSince = await harnessEventCount(page2);
+    await removeButton.click();
+    await waitForWorkspacesPluginSurfaceRequest(page2, {
+      actionId: "botster_workspaces.remove_session",
+      nodeId: removeNodeId,
+      kind: "submit",
+      payload: { workspace_id: state.workspaceId, session_id: sessionId },
+      sinceIndex: removeSince,
+      label: `${stage} P2 production remove_session request`
+    });
+    // remove_session keeps the workspace dialog key untouched; correlate accepted result only.
+    await page2.waitForFunction(
+      ({ sinceIndex, actionId, nodeId }) =>
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).some((entry) => {
+          if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
+          const payload = entry.payload.payload ?? {};
+          const result = payload.result ?? {};
+          const plugin = result.plugin_action_result ?? {};
+          return payload.accepted === true
+            && result.package_name === "botster-workspaces"
+            && result.surface_id === "workspaces"
+            && result.action_id === actionId
+            && plugin.state === "accepted"
+            && plugin.action_id === actionId
+            && plugin.node_id === nodeId
+            && plugin.request_id
+            && plugin.request_id === payload.request_id;
+        }),
+      { sinceIndex: removeSince, actionId: "botster_workspaces.remove_session", nodeId: removeNodeId },
+      { timeout: 15_000 }
+    ).catch(async (error) => {
+      const observed = await page2.evaluate((start) =>
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+          .slice(start)
+          .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
+          .map((entry) => entry.payload?.payload)
+          .filter((payload) => payload?.result?.package_name === "botster-workspaces"),
+        removeSince
+      );
+      throw new Error(
+        `${stage}: P2 remove_session accepted action_result missing; results=${JSON.stringify(observed, null, 2)}: ${error.message}`
+      );
+    });
+
+    await resubscribeHeldWorkspacesEntityOptions(page, stage, "after-p2-remove");
+    await waitForWorkspacesAddSessionOption(page, state, sessionId, 30_000);
+    if (!(await formP1.isVisible())) {
+      throw new Error(`${stage}: P1 Add dialog was dismissed during membership restoration proof`);
+    }
+    const renderAfterRestore = await workspacesPluginSurfaceRenderCount(page);
+    if (renderAfterRestore > renderBaseline) {
+      throw new Error(
+        `${stage}: P1 plugin_surface_render rose during restoration ` +
+        `(baseline=${renderBaseline}, after=${renderAfterRestore})`
+      );
+    }
+
+    // Recovery close-out: reselect restored option to prove the form is valid again.
+    // Leave membership cleared so later lifecycle seeding keeps the expected row counts
+    // (plan permits clearing when later stages need S free).
+    await setUiNodeSelectValue(selectP1, sessionId);
+    await page.waitForFunction(
+      ({ formId }) => {
+        const form = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
+        return form?.getAttribute("data-form-invalid") !== "true";
+      },
+      { formId: `botster-workspaces-add-form-${state.workspaceId}` },
+      { timeout: 10_000 }
+    );
+    // Dismiss held dialog without claiming so bulk lifecycle reference counts stay clean.
+    await page.keyboard.press("Escape");
+    await formP1.waitFor({ state: "detached", timeout: 15_000 }).catch(async (error) => {
+      throw new Error(`${stage}: held Add dialog did not dismiss after Escape: ${error.message}`);
+    });
+
+    // Shutdown the reactive seed session so it does not inflate Available sessions later.
+    const shutdown = await sendDaemonRequest(socketPath, {
+      type: "shutdown_session",
+      session_id: sessionId
+    });
+    if (shutdown.error) {
+      throw new Error(`${stage} reactive seed shutdown failed: ${JSON.stringify(shutdown.error)}`);
+    }
+    const remove = await sendDaemonRequest(socketPath, {
+      type: "remove_session",
+      session_id: sessionId
+    });
+    if (remove.error) {
+      throw new Error(`${stage} reactive seed remove failed: ${JSON.stringify(remove.error)}`);
+    }
+  } finally {
+    await page2.close().catch(() => {});
+  }
+
+  console.log(`${stage} passed ${JSON.stringify({
+    stage,
+    session_id: sessionId,
+    workspace_id: state.workspaceId,
+    render_baseline: renderBaseline,
+    dual_client: true,
+    claim_exclusion: true,
+    stale_submit_blocked: true,
+    membership_restore: true,
+    recovery_reselect_valid: true,
+    membership_left_cleared: true
+  })}`);
 }
 
 async function assertWorkspacesLifecycleOracles(page, {
