@@ -69,7 +69,18 @@ export interface DaemonBridgeClient {
     sessionId: string,
     subscriptionId: string,
     onEvent: (event: DaemonEvent) => void
-  ): { unsubscribe(): void };
+  ): DaemonTerminalStreamSubscription;
+}
+
+/**
+ * Terminal stream handle from `streamTerminal`.
+ * `abandon` stops local drain without a detach RPC (dead-channel recovery).
+ * `unsubscribe` stops drain and best-effort detaches; detach rejections must not throw.
+ */
+export interface DaemonTerminalStreamSubscription {
+  unsubscribe(): void;
+  /** Stop local drain only — no detach request. Used when the data channel is already dead. */
+  abandon(): void;
 }
 
 export interface HubTransportOptions {

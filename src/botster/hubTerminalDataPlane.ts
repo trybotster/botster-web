@@ -5,7 +5,7 @@ import type {
   TerminalOutput,
   TerminalSubscription
 } from "./terminal";
-import type { DaemonBridgeClient } from "./hubTransport";
+import type { DaemonBridgeClient, DaemonTerminalStreamSubscription } from "./hubTransport";
 import { hubTerminalSubscriptionId } from "./hubTransport";
 import type {
   DaemonCaptureSnapshot,
@@ -68,7 +68,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     state: "attaching",
     message: "Attaching terminal stream."
   };
-  private streamSubscription: { unsubscribe(): void } | undefined;
+  private streamSubscription: DaemonTerminalStreamSubscription | undefined;
   private attachPromise: Promise<void> | undefined;
   private pendingResize: { rows: number; columns: number } | undefined;
   private detached = false;
@@ -105,7 +105,14 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         }
       };
       window.addEventListener(webRtcDaemonLifecycleEventName, this.onWebrtcLifecycle);
+      registerTerminalTransportRecoveryPlane(this);
     }
+  }
+
+  /** Test/live harness: stop listening for WebRTC recovery (reconnect-listener ablation). */
+  disableTransportRecovery(): void {
+    this.uninstallLifecycleListener();
+    unregisterTerminalTransportRecoveryPlane(this);
   }
 
   bindBinarySnapshotInstaller(
@@ -156,17 +163,40 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     // First encode under current authoritative modes.
-    const encoded = semantic.encode(modes);
-    // Empty encode means modes disabled the semantic event (e.g. mouse_mode=0).
-    // Do not issue ModeGatedInput for a discarded event.
+    let encoded = semantic.encode(modes);
+    // Empty encode may mean modes disabled the event (mouse_mode=0) — but cached
+    // mode flags can be stale if the session later enabled mouse. Refresh once
+    // before treating empty as authoritative discard.
     if (!encoded) {
-      recordLiveHarnessTerminal("mode_gated_input_skipped", {
-        reason: "encode_empty_under_modes",
+      const refreshed = await this.refreshModeFlags(attachmentGeneration);
+      if (!refreshed || !this.isCurrentAttachment(attachmentGeneration)) return;
+      this.modeFlags = refreshed;
+      modes = refreshed;
+      if (!isJsonSafeModeToken(modes)) {
+        recordLiveHarnessTerminal("mode_gated_input_failed", {
+          reason: "unsafe_json_integer_token_after_refresh",
+          mode_generation: modes.mode_generation,
+          mode_revision: modes.mode_revision
+        });
+        throw new Error(
+          `Mode freshness token is not JSON-safe (generation=${modes.mode_generation}, revision=${modes.mode_revision}); browser ModeGatedInput requires tokens ≤ 2^53-1.`
+        );
+      }
+      encoded = semantic.encode(modes);
+      if (!encoded) {
+        recordLiveHarnessTerminal("mode_gated_input_skipped", {
+          reason: "encode_empty_after_mode_refresh",
+          mode_generation: modes.mode_generation,
+          mode_revision: modes.mode_revision,
+          mouse_mode: modes.mouse_mode
+        });
+        return;
+      }
+      recordLiveHarnessTerminal("mode_flags_refreshed_for_encode", {
         mode_generation: modes.mode_generation,
         mode_revision: modes.mode_revision,
         mouse_mode: modes.mouse_mode
       });
-      return;
     }
     const result = await this.sendModeGatedInput(encoded, modes, attachmentGeneration);
     if (!this.isCurrentAttachment(attachmentGeneration)) return;
@@ -333,6 +363,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     if (this.onWebrtcLifecycle && typeof window !== "undefined") {
       window.removeEventListener(webRtcDaemonLifecycleEventName, this.onWebrtcLifecycle);
     }
+    unregisterTerminalTransportRecoveryPlane(this);
   }
 
   /**
@@ -404,17 +435,22 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   private closeStreamWithoutDetachRequest(): void {
-    // Drop the local stream handle without awaiting a detach RPC on a dead channel.
-    // streamTerminal.unsubscribe() would try detach; abandon the drain loop only.
-    const sub = this.streamSubscription as { unsubscribe(): void; abandon?: () => void } | undefined;
-    if (sub && typeof (sub as { abandon?: () => void }).abandon === "function") {
-      (sub as { abandon: () => void }).abandon();
-    } else {
-      // Best-effort: unsubscribe may race a closed channel; swallow.
-      try {
-        sub?.unsubscribe();
-      } catch {
-        // ignore
+    // Drop the local stream handle without a detach RPC on a dead channel.
+    // Prefer typed abandon(); fall back to unsubscribe with explicit rejection capture
+    // for older test bridges that only implement unsubscribe.
+    const sub = this.streamSubscription;
+    if (sub) {
+      if (typeof sub.abandon === "function") {
+        sub.abandon();
+      } else {
+        try {
+          sub.unsubscribe();
+        } catch (unsubscribeError: unknown) {
+          recordLiveHarnessTerminal("stream_unsubscribe_error", {
+            message:
+              unsubscribeError instanceof Error ? unsubscribeError.message : String(unsubscribeError)
+          });
+        }
       }
     }
     this.streamSubscription = undefined;
@@ -955,6 +991,32 @@ function createTerminalSubscriptionId(): string {
   }
 
   return `${hubTerminalSubscriptionId}-${Date.now()}-${nextSubscriptionSequence++}`;
+}
+
+const terminalTransportRecoveryPlanes = new Set<HubTerminalDataPlane>();
+
+function registerTerminalTransportRecoveryPlane(plane: HubTerminalDataPlane): void {
+  terminalTransportRecoveryPlanes.add(plane);
+  installTerminalTransportRecoveryHarnessHook();
+}
+
+function unregisterTerminalTransportRecoveryPlane(plane: HubTerminalDataPlane): void {
+  terminalTransportRecoveryPlanes.delete(plane);
+}
+
+function installTerminalTransportRecoveryHarnessHook(): void {
+  if (typeof window === "undefined") return;
+  const harness = (window as typeof window & {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
+      disableTerminalTransportRecovery?: () => void;
+    };
+  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  if (!harness) return;
+  harness.disableTerminalTransportRecovery = () => {
+    for (const plane of [...terminalTransportRecoveryPlanes]) {
+      plane.disableTransportRecovery();
+    }
+  };
 }
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {

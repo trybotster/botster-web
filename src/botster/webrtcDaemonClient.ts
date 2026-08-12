@@ -233,7 +233,14 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
         },
         unsubscribe: () => {
           stopDrain();
-          void transport.request({ type: "detach", session_id: sessionId, subscription_id: subscriptionId });
+          void transport
+            .request({ type: "detach", session_id: sessionId, subscription_id: subscriptionId })
+            .catch((error: unknown) => {
+              recordLiveHarnessEvent("terminal_stream_error", {
+                stage: "detach",
+                message: error instanceof Error ? error.message : String(error)
+              });
+            });
         }
       };
     }
