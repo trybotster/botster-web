@@ -3120,63 +3120,6 @@ async function workspacesPluginSurfaceRenderCount(page) {
   });
 }
 
-/**
- * Force held entity-options demand to re-subscribe without navigating or reopening dialogs.
- * Mirrors exerciseEntityOptionsReactive: real DataChannel close → client reconnect → fresh
- * membership/session snapshots for claim-scoped families.
- */
-async function resubscribeHeldWorkspacesEntityOptions(page, stage, label) {
-  const openEventsBefore = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length
-  );
-  const membershipReadyBefore = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) =>
-        entry.kind === "webrtc_entity_subscription"
-        && entry.payload?.entity_type === "botster-workspaces.membership"
-        && entry.payload?.state === "ready"
-      ).length
-  );
-  const closed = await page.evaluate(
-    () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
-  );
-  if (!closed) {
-    throw new Error(`${stage} ${label}: could not close the live WebRTC data channel for resubscribe`);
-  }
-  await page.waitForFunction(
-    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before,
-    { before: openEventsBefore },
-    { timeout: 20_000 }
-  ).catch((error) => {
-    throw new Error(`${stage} ${label}: data channel never reopened: ${error.message}`);
-  });
-  await page.waitForFunction(
-    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) =>
-        entry.kind === "webrtc_entity_subscription"
-        && entry.payload?.entity_type === "botster-workspaces.membership"
-        && entry.payload?.state === "ready"
-      ).length > before,
-    { before: membershipReadyBefore },
-    { timeout: 30_000 }
-  ).catch(async (error) => {
-    const observed = await page.evaluate(() =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-        .filter((entry) =>
-          entry.kind === "webrtc_entity_subscription"
-          || (entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities")
-        )
-        .slice(-20)
-        .map((entry) => entry.payload ?? entry)
-    );
-    throw new Error(
-      `${stage} ${label}: membership never re-ready after reconnect; observed=${JSON.stringify(observed)}: ${error.message}`
-    );
-  });
-}
-
 async function assertWorkspacesAddSelectionInvalid(page, state, label) {
   await page.waitForFunction(
     ({ formId }) => {
@@ -3279,6 +3222,13 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     throw new Error(`${stage}: P1 Add dialog closed before membership mutation`);
   }
   const renderBaseline = await workspacesPluginSurfaceRenderCount(page);
+  const membershipFrameCountBeforeClaim = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) => {
+      if (entry.kind !== "hub_frame") return false;
+      const body = entry.payload?.payload ?? {};
+      return (body.key?.family ?? body.family) === "botster-workspaces.membership";
+    }).length
+  );
 
   const page2 = await openSecondaryWorkspacesProductionClient(state);
   try {
@@ -3287,30 +3237,47 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     await chooseWorkspacesAddSessionControl(page2, formP2, sessionId, { requireSelect: true });
     await submitWorkspacesAddSession(page2, formP2, state, sessionId, `${stage} P2 claim`);
 
-    // Held-open P1: production claim on P2 mutates membership. Workspaces package pin
-    // 47b0aeb persists membership via plugin_db.batch and does not call botster.entity_publish,
-    // so live delta fanout is not available yet. Reuse the entity-options reactive pattern:
-    // close/reopen the real WebRTC data channel so claim-scoped demand resubscribes and the
-    // membership entity_provider snapshot excludes S — without reopening the Add dialog or
-    // issuing a new plugin_surface_render from P1.
-    await resubscribeHeldWorkspacesEntityOptions(page, stage, "after-p2-claim");
-
+    // Held-open P1: production claim on P2 must publish membership frames (Workspaces producer
+    // ticket_1786507472_103115). Observe exclusion from the held subscription only — no
+    // DataChannel resubscribe, dialog reopen, or P1 plugin_surface_render.
     await page.waitForFunction(
-      ({ formId, expected }) => {
+      ({ formId, expected, beforeCount }) => {
+        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+        const membershipFrames = events.filter((entry) => {
+          if (entry.kind !== "hub_frame") return false;
+          const body = entry.payload?.payload ?? {};
+          return (body.key?.family ?? body.family) === "botster-workspaces.membership";
+        }).length;
         const options = [...globalThis.document.querySelectorAll(
           `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
         )];
-        return !options.some((option) =>
+        const optionGone = !options.some((option) =>
           (option.value ?? option.getAttribute("value")) === expected
         );
+        return optionGone && membershipFrames > beforeCount;
       },
-      { formId: `botster-workspaces-add-form-${state.workspaceId}`, expected: sessionId },
+      {
+        formId: `botster-workspaces-add-form-${state.workspaceId}`,
+        expected: sessionId,
+        beforeCount: membershipFrameCountBeforeClaim
+      },
       { timeout: 30_000 }
     ).catch(async (error) => {
       const options = await readUiNodeSelectOptionValues(selectP1);
+      const membershipEvidence = await page.evaluate(({ before }) => {
+        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+        return {
+          membership_frame_count: events.filter((entry) => {
+            if (entry.kind !== "hub_frame") return false;
+            const body = entry.payload?.payload ?? {};
+            return (body.key?.family ?? body.family) === "botster-workspaces.membership";
+          }).length,
+          baseline: before
+        };
+      }, { before: membershipFrameCountBeforeClaim });
       throw new Error(
-        `${stage}: claimed session still listed on held-open P1 after resubscribe; ` +
-        `options=${JSON.stringify(options)}: ${error.message}`
+        `${stage}: claimed session still listed on held-open P1 without resubscribe; ` +
+        `options=${JSON.stringify(options)}; membership=${JSON.stringify(membershipEvidence)}: ${error.message}`
       );
     });
     await assertWorkspacesAddSelectionInvalid(page, state, `${stage} after P2 claim`);
@@ -3399,7 +3366,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       label: `${stage} P2 production remove_session accepted`
     });
 
-    await resubscribeHeldWorkspacesEntityOptions(page, stage, "after-p2-remove");
+    // Held subscription must restore option S after production remove (producer publish).
     await waitForWorkspacesAddSessionOption(page, state, sessionId, 30_000);
     if (!(await formP1.isVisible())) {
       throw new Error(`${stage}: P1 Add dialog was dismissed during membership restoration proof`);

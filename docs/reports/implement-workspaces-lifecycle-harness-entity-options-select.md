@@ -119,3 +119,18 @@ Open findings addressed in code (pending human on held-open policy):
 
 Re-proved after correlation/historical/stale fixes: `npm run smoke:workspaces-lifecycle` exit 0 (still uses resubscribe until human answers A/B).
 
+## Human answer A — held-open policy (question_1786507188_545842)
+
+Choose A with a **separate** Workspaces producer ticket (no cycle with ticket_1786474780_590414).
+
+| Action | Evidence |
+| --- | --- |
+| Created producer ticket | `ticket_1786507472_103115` on botster-workspaces (`tgt_71266a8d976d4535902ffed09c18a7ba`) |
+| Web depends on producer | `dependency_1786507482_463871` |
+| Main Workspaces depends on producer | `dependency_1786507486_158720` on ticket_1786474780_590414 |
+| Removed forced resubscribe | both `resubscribeHeldWorkspacesEntityOptions` call sites + helper deleted |
+| Held-open oracle | P1 waits for membership frame count increase + option exclusion/restoration without DataChannel close |
+
+### Residual until producer closes
+Full `smoke:workspaces-lifecycle` green for stage `workspaces-entity-options-membership-reactive` requires a Workspaces pin that publishes membership frames. This Web run is formally blocked on `ticket_1786507472_103115`. Select/advanced Add path, request_id correlation, historical intent, and stale-submit barrier remain implemented on this branch.
+
