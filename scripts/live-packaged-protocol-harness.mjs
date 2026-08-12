@@ -5134,40 +5134,54 @@ async function waitForTerminalCanvas(page) {
 
 
 async function proveMountedMouseModeGatedInput(page) {
-  const before = await daemonRequestCount(page, { type: "mode_gated_input" });
-  await page.evaluate(() => {
-    const root = globalThis.document.querySelector(".terminal-view-container") ?? globalThis.document.body;
-    const rect = root.getBoundingClientRect();
-    const x = rect.left + Math.min(40, Math.max(4, rect.width / 4));
-    const y = rect.top + Math.min(40, Math.max(4, rect.height / 4));
-    for (const type of ["pointerdown", "pointerup"]) {
-      root.dispatchEvent(new globalThis.PointerEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        clientX: x,
-        clientY: y,
-        pointerType: "mouse",
-        buttons: type === "pointerdown" ? 1 : 0,
-        button: 0
-      }));
-    }
+  // Enable normal + SGR mouse tracking in the session, then require ModeGatedInput
+  // for a real pointer event (proves cache refresh after mouse_mode 0 → 9).
+  await callTerminalControl(page, "writeInput", "printf '\\033[?1000h\\033[?1006h'\n");
+  await new Promise((r) => setTimeout(r, 400));
+  // Confirm authoritative modes see mouse tracking when ReadModeFlags is available.
+  const modes = await page.evaluate(() => {
+    // Mode flags land via attach hydration telemetry when available.
+    const modeEntry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
+      .filter((entry) => entry.kind === "mode_flags")
+      .at(-1);
+    return modeEntry?.payload ?? null;
   });
-  // Mouse may be inactive without app tracking; require either a mode_gated_input
-  // mouse report or an explicit inactive-mouse terminal telemetry path. If Restty
-  // has tracking after GHOSTSNP, ModeGatedInput count must rise.
-  await new Promise((r) => setTimeout(r, 250));
+  const before = await daemonRequestCount(page, { type: "mode_gated_input" });
+  // Real Playwright pointer path (synthetic PointerEvent trips setPointerCapture).
+  const canvas = page.locator(".terminal-view-container canvas").first();
+  await canvas.waitFor({ state: "visible", timeout: 10_000 });
+  const box = await canvas.boundingBox();
+  if (!box) throw new Error("mouse path: terminal canvas has no bounding box");
+  const x = box.x + Math.min(40, Math.max(4, box.width / 4));
+  const y = box.y + Math.min(40, Math.max(4, box.height / 4));
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForFunction(
+    ({ beforeCount }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+        (entry) => entry.kind === "daemon_request" && entry.payload?.type === "mode_gated_input"
+      ).length > beforeCount,
+    { beforeCount: before },
+    { timeout: 8_000 }
+  ).catch(async (error) => {
+    const after = await daemonRequestCount(page, { type: "mode_gated_input" });
+    const telemetry = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).slice(-12)
+    );
+    throw new Error(
+      `mouse DECSET 1000/1006 path did not produce mode_gated_input (before=${before} after=${after} modes=${JSON.stringify(modes)}): ${error.message}; telemetry=${JSON.stringify(telemetry)}`
+    );
+  });
   const after = await daemonRequestCount(page, { type: "mode_gated_input" });
-  const mouseTelemetry = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) =>
-      entry.kind === "pty_send_input" || entry.kind === "mode_gated_input" || entry.kind === "before_input"
-    ).slice(-8)
-  );
-  if (after <= before && mouseTelemetry.length === 0) {
-    throw new Error(`mouse path produced no terminal telemetry: ${JSON.stringify({ before, after, mouseTelemetry })}`);
+  if (after <= before) {
+    throw new Error(`expected mode_gated_input after enabled mouse; delta=${after - before}`);
   }
-  // When mouse tracking is active post-GHOSTSNP, mode_gated_input is required.
-  // When inactive, pointer events are local-only; still prove no OSC replies raced in.
-  recordProofNote("mouse_path", { mode_gated_delta: after - before, telemetry: mouseTelemetry.length });
+  recordProofNote("mouse_path", {
+    mode_gated_delta: after - before,
+    modes,
+    decset: ["1000", "1006"]
+  });
 }
 
 async function proveZeroBrowserOscColorReplies(page) {
@@ -5369,18 +5383,21 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
     );
   }
 
-  const chronologyAfter = await assertTerminalAttachChronology(page, sessionId);
+  // Force terminal_output on the new subscription so H0–H5 chronology can complete.
+  const liveKick = `botster-web-inpage-livekick:${Date.now().toString(36)}`;
+  await typeThroughMountedTerminal(page, `echo ${liveKick}\n`);
+  await waitForTerminalOutput(page, liveKick);
+
+  const chronologyAfter = await assertTerminalAttachChronology(page, sessionId, subscriptionAfter);
+  if (chronologyAfter.subscription_id !== subscriptionAfter) {
+    throw new Error(
+      `post-reconnect chronology subscription mismatch: expected ${subscriptionAfter}, got ${chronologyAfter.subscription_id}`
+    );
+  }
   if (!chronologyAfter.sequence?.includes("snapshot")) {
     throw new Error(`post-reconnect chronology missing GHOSTSNP snapshot: ${JSON.stringify(chronologyAfter)}`);
   }
   const snapshotIdx = chronologyAfter.sequence.indexOf("snapshot");
-  const liveIdx = chronologyAfter.sequence.findIndex(
-    (step, index) => index > snapshotIdx && (step === "terminal_output" || step === "attach_state:attached")
-  );
-  if (snapshotIdx < 0 || liveIdx < 0 || snapshotIdx > liveIdx) {
-    // attached often precedes live output; require snapshot before any post-snapshot live marker when present
-  }
-  // Require snapshot before live output when both appear.
   const liveOutputIdx = chronologyAfter.sequence.indexOf("terminal_output");
   if (liveOutputIdx >= 0 && snapshotIdx > liveOutputIdx) {
     throw new Error(`post-reconnect snapshot-before-live violated: ${JSON.stringify(chronologyAfter.sequence)}`);
@@ -5391,19 +5408,24 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
     throw new Error("in-page terminal reconnect navigated; the document was replaced");
   }
 
-  // Retained history + post-reconnect output on the surviving document.
+  // Retained history AND post-reconnect output are both required (not either/or).
   const postProbe = `botster-web-inpage-post:${Date.now().toString(36)}`;
   await typeThroughMountedTerminal(page, `echo ${postProbe}\n`);
   await waitForTerminalOutput(page, postProbe);
   const readScreen = await callTerminalControl(page, "readScreen");
-  const retained =
-    Boolean(readScreen?.text?.includes(historyMarker)) ||
-    Boolean(readScreen?.text?.includes(postProbe));
-  if (!retained) {
+  if (!readScreen?.text?.includes(historyMarker)) {
     throw new Error(
-      `in-page reconnect lost terminal history/output: marker=${historyMarker} probe=${postProbe} read=${JSON.stringify(readScreen)}`
+      `in-page reconnect lost pre-reconnect history marker ${historyMarker}: ${JSON.stringify(readScreen)}`
     );
   }
+  if (!readScreen?.text?.includes(postProbe)) {
+    throw new Error(
+      `in-page reconnect missing post-reconnect probe ${postProbe}: ${JSON.stringify(readScreen)}`
+    );
+  }
+
+  // Ablation: with the recovery listener removed, DataChannel recovery must not mint a fresh attach.
+  await proveTerminalReconnectListenerAblation(page, subscriptionAfter);
 
   recordProofNote("in_page_terminal_reconnect", {
     openEventsBefore,
@@ -5415,7 +5437,64 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
     chronologyAfter,
     historyMarker,
     postProbe,
-    document_sentinel: sentinel
+    document_sentinel: sentinel,
+    ablation: true
+  });
+}
+
+async function proveTerminalReconnectListenerAblation(page, subscriptionAfterRecovery) {
+  const attachBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "attach").length
+  );
+  const ablated = await page.evaluate(() => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    if (typeof harness?.disableTerminalTransportRecovery === "function") {
+      harness.disableTerminalTransportRecovery();
+      return true;
+    }
+    return false;
+  });
+  if (!ablated) {
+    throw new Error(
+      "reconnect-listener ablation unavailable: expose __BOTSTER_LIVE_PROTOCOL_HARNESS__.disableTerminalTransportRecovery"
+    );
+  }
+
+  const openBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+      (entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open"
+    ).length
+  );
+  const closed = await page.evaluate(
+    () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
+  );
+  if (!closed) {
+    throw new Error("ablation reconnect could not close the WebRTC data channel");
+  }
+  await page.waitForFunction(
+    ({ before }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+        (entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open"
+      ).length > before,
+    { before: openBefore },
+    { timeout: 30_000 }
+  ).catch((error) => {
+    throw new Error(`ablation reconnect never reopened the data channel: ${error.message}`);
+  });
+  // Allow time for a non-ablated path to reattach if the listener were still live.
+  await new Promise((r) => setTimeout(r, 1500));
+  const attachAfter = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "attach").length
+  );
+  if (attachAfter > attachBefore) {
+    throw new Error(
+      `ablation failed: fresh attach still occurred after recovery listener removal (before=${attachBefore} after=${attachAfter} lastSub=${subscriptionAfterRecovery})`
+    );
+  }
+  recordProofNote("reconnect_listener_ablation", {
+    attachBefore,
+    attachAfter,
+    subscriptionAfterRecovery
   });
 }
 
@@ -5478,18 +5557,22 @@ async function waitForAutomaticTerminalRestore(page) {
   };
 }
 
-async function assertTerminalAttachChronology(page, sessionId) {
+async function assertTerminalAttachChronology(page, sessionId, requiredSubscriptionId) {
   const chronology = await page.waitForFunction(
-    ({ expectedSessionId }) => {
+    ({ expectedSessionId, requiredSubscriptionId: requiredSub }) => {
       const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .filter((entry) => entry.kind === "daemon_event")
         .map((entry) => entry.payload)
         .filter((event) =>
           event?.session_id === expectedSessionId &&
           typeof event.subscription_id === "string" &&
-          ["attach_state", "snapshot", "scrollback", "terminal_output"].includes(event.type)
+          ["attach_state", "snapshot", "scrollback", "terminal_output"].includes(event.type) &&
+          (!requiredSub || event.subscription_id === requiredSub)
         );
       const subscriptionIds = [...new Set(events.map((event) => event.subscription_id))];
+      if (requiredSub && !subscriptionIds.includes(requiredSub)) {
+        return null;
+      }
 
       for (const subscriptionId of subscriptionIds) {
         const subscriptionEvents = events.filter((event) => event.subscription_id === subscriptionId);
@@ -5571,10 +5654,14 @@ async function assertTerminalAttachChronology(page, sessionId) {
 
       return null;
     },
-    { expectedSessionId: sessionId },
+    { expectedSessionId: sessionId, requiredSubscriptionId: requiredSubscriptionId ?? null },
     { timeout: 45_000 }
   ).then((handle) => handle.jsonValue()).catch((error) => {
-    throw new Error(`timed out waiting for subscription-scoped attach chronology: ${error.message}`);
+    throw new Error(
+      `timed out waiting for subscription-scoped attach chronology${
+        requiredSubscriptionId ? ` for ${requiredSubscriptionId}` : ""
+      }: ${error.message}`
+    );
   });
 
   if (chronology.error) {

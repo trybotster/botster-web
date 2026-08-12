@@ -53,6 +53,9 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   private pendingSemantic: PendingSemanticInput | undefined;
   private removeDomListeners?: () => void;
   private uninstallPaletteProbe?: () => void;
+  /** Authoritative grid size for mouse re-encode (updated on resize). */
+  private gridCols = 80;
+  private gridRows = 24;
 
   constructor(readonly descriptor: TerminalViewDescriptor) {}
 
@@ -194,6 +197,8 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   resize(rows: number, columns: number): void {
+    if (columns > 0) this.gridCols = columns;
+    if (rows > 0) this.gridRows = rows;
     this.terminal?.resize(columns, rows);
   }
 
@@ -214,7 +219,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     this.container = undefined;
   }
 
-  /** Zero-based cell under a pointer/wheel event using the mounted canvas geometry. */
+  /** Zero-based cell under a pointer/wheel event using the mounted canvas + current grid. */
   private positionToCell(event: MouseEvent | PointerEvent | WheelEvent): { col: number; row: number } {
     const canvas =
       (event.target instanceof HTMLElement && event.target.closest?.("canvas")) ||
@@ -224,9 +229,22 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     if (!rect || rect.width <= 0 || rect.height <= 0) {
       return { col: 0, row: 0 };
     }
+    // Prefer live Restty pane grid when available; fall back to last resize.
+    const pane = this.terminal?.activePane?.() as
+      | { cols?: number; rows?: number; getCols?: () => number; getRows?: () => number }
+      | null
+      | undefined;
+    const liveCols =
+      (typeof pane?.getCols === "function" ? pane.getCols() : undefined) ??
+      (typeof pane?.cols === "number" ? pane.cols : undefined) ??
+      this.gridCols;
+    const liveRows =
+      (typeof pane?.getRows === "function" ? pane.getRows() : undefined) ??
+      (typeof pane?.rows === "number" ? pane.rows : undefined) ??
+      this.gridRows;
+    const cols = Math.max(1, liveCols);
+    const rows = Math.max(1, liveRows);
     // Restty MouseController adds 1 to col/row; supply zero-based grid coords.
-    const cols = 80;
-    const rows = 24;
     const col = Math.min(cols - 1, Math.max(0, Math.floor(((event.clientX - rect.left) / rect.width) * cols)));
     const row = Math.min(rows - 1, Math.max(0, Math.floor(((event.clientY - rect.top) / rect.height) * rows)));
     return { col, row };

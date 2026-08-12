@@ -7640,6 +7640,78 @@ assert.equal(coreMouseTrackingEnabled(CORE_MOUSE_SGR), false);
   await plane.detach();
 }
 
+// Cached mouse-off must refresh ModeFlags before discard so 0→9 becomes ModeGatedInput.
+{
+  const requests = [];
+  let modeReads = 0;
+  const plane = createHubTerminalDataPlane({
+    sessionId: "mouse-0-to-9",
+    subscriptionId: "mouse-0-to-9-sub",
+    bridge: {
+      async request(request) {
+        requests.push({ ...request });
+        if (request.type === "read_mode_flags") {
+          modeReads += 1;
+          return {
+            kind: "read_mode_flags",
+            mode_flags: {
+              ...testModeFlags("mouse-0-to-9"),
+              mouse_mode: modeReads === 1 ? 0 : 9,
+              mode_generation: modeReads,
+              mode_revision: modeReads
+            },
+            events: []
+          };
+        }
+        if (request.type === "mode_gated_input") {
+          return {
+            kind: "mode_gated_input",
+            mode_gated_input: {
+              session_id: "mouse-0-to-9",
+              admitted: true,
+              bytes_written: request.data.length,
+              kitty_enabled: false,
+              cursor_visible: true,
+              bracketed_paste: false,
+              mouse_mode: 9,
+              alt_screen: false,
+              focus_reporting: false,
+              application_cursor: false,
+              mode_generation: 2,
+              mode_revision: 2
+            },
+            events: []
+          };
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal() {
+        return { unsubscribe() {}, abandon() {} };
+      }
+    }
+  });
+  plane.subscribeOutput(() => undefined);
+  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+  await plane.writeModeGatedInput({
+    encode: (modes) => (coreMouseTrackingEnabled(modes.mouse_mode) ? "mouse-on-bytes" : "")
+  });
+  const gated = requests.filter((request) => request.type === "mode_gated_input");
+  assert.equal(modeReads >= 2, true, `expected mode refresh after empty encode, reads=${modeReads}`);
+  assert.equal(gated.length, 1, `expected ModeGatedInput after 0→9 refresh, got ${gated.length}`);
+  assert.equal(gated[0].data, "mouse-on-bytes");
+  await plane.detach();
+}
+
+// Mouse grid must track resize (not hard-coded 80x24).
+assert.match(resttyRenderer, /gridCols|this\.gridCols/);
+assert.match(resttyRenderer, /gridRows|this\.gridRows/);
+assert.match(resttyRenderer, /this\.gridCols\s*=\s*columns|if \(columns > 0\) this\.gridCols/);
+assert.match(hubTerminalDataPlane, /mode_flags_refreshed_for_encode|encode_empty_after_mode_refresh/);
+assert.match(hubTerminalDataPlane, /DaemonTerminalStreamSubscription|abandon\(\)/);
+assert.match(hubTransport, /abandon\(\):\s*void|interface DaemonTerminalStreamSubscription/);
+assert.match(liveProtocolHarnessScript, /requiredSubscriptionId|disableTerminalTransportRecovery/);
+assert.match(liveProtocolHarnessScript, /1000h|1006h/);
+
 assert.equal(isGhostsnpPayload(decodeGhostsnpSnapshot(ghostsnpFixturePayloadBase64)), true);
 assert.throws(() => decodeGhostsnpSnapshot("AP9HVFkB"), /GHOSTSNP|not GHOSTSNP/i);
 
