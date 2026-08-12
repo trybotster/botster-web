@@ -2962,12 +2962,7 @@ async function waitForWorkspacesAddSessionOption(page, state, sessionId, timeout
  * Use Historical session UUID only with explicit historical intent (neverExisting cohort).
  * Never fill the hidden IonSelect aux input.
  */
-async function chooseWorkspacesAddSessionControl(
-  page,
-  form,
-  sessionId,
-  { requireSelect = false, historical = false } = {}
-) {
+async function chooseWorkspacesAddSessionControl(page, form, sessionId, { historical = false } = {}) {
   const select = form.locator("[data-ui-node-id='botster-workspaces-add-session-id'] ion-select");
   await select.waitFor({ timeout: 15_000 });
   const formId = await form.getAttribute("data-ui-node-id");
@@ -3069,10 +3064,7 @@ async function submitWorkspacesAddSession(page, form, state, sessionId, label) {
 
 async function addWorkspacesLifecycleReference(page, state, sessionId, { historical = false } = {}) {
   const form = await openWorkspacesAddSessionDialog(page, state, sessionId);
-  const choice = await chooseWorkspacesAddSessionControl(page, form, sessionId, {
-    requireSelect: !historical,
-    historical
-  });
+  const choice = await chooseWorkspacesAddSessionControl(page, form, sessionId, { historical });
   await submitWorkspacesAddSession(page, form, state, sessionId, `${sessionId} via ${choice.path}`);
 }
 
@@ -3234,7 +3226,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
   try {
     const formP2 = await openWorkspacesAddSessionDialog(page2, state, `${stage}-claim`);
     await waitForWorkspacesAddSessionOption(page2, state, sessionId);
-    await chooseWorkspacesAddSessionControl(page2, formP2, sessionId, { requireSelect: true });
+    await chooseWorkspacesAddSessionControl(page2, formP2, sessionId);
     await submitWorkspacesAddSession(page2, formP2, state, sessionId, `${stage} P2 claim`);
 
     // Held-open P1: production claim on P2 must publish membership frames (Workspaces producer
@@ -3295,9 +3287,34 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     // Stale-submit negative: force-click while form is invalid, then settle with a
     // correlated ledger scan (no fixed single delay). Reject the dead UUID in every
     // supported Add value field. Production click path is fail-closed at disabled/invalid.
+    // Ablation: BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1 injects a synthetic stale Add dispatch
+    // after the click baseline so this oracle fails first (proves the scan is live).
     const eventsBeforeStale = await harnessEventCount(page);
     await formP1.locator(":scope > ion-button[data-action-id='botster_workspaces.add_session']")
       .click({ force: true });
+    if (process.env.BOTSTER_LIVE_ABLATE_STALE_SUBMIT === "1") {
+      await page.evaluate(({ workspaceId, sessionId: expectedSession }) => {
+        const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+        if (!harness?.events) return;
+        harness.events.push({
+          kind: "daemon_request",
+          payload: {
+            type: "plugin_surface_action",
+            package_name: "botster-workspaces",
+            request: {
+              surface_id: "workspaces",
+              action_id: "botster_workspaces.add_session",
+              kind: "submit",
+              request_id: "ablation-stale-submit",
+              values: {
+                workspace_id: workspaceId,
+                session_id: expectedSession
+              }
+            }
+          }
+        });
+      }, { workspaceId: state.workspaceId, sessionId });
+    }
     const staleDeadline = Date.now() + 2_000;
     let staleSubmit = [];
     while (Date.now() < staleDeadline) {
@@ -3321,11 +3338,11 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       if (staleSubmit.length > 0) break;
       // Barrier: form must remain invalid while we watch for late dispatches.
       const stillInvalid = await page.evaluate(({ formId }) => {
-        const form = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
+        const formEl = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
         const field = globalThis.document.querySelector(
           `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id']`
         );
-        return form?.getAttribute("data-form-invalid") === "true"
+        return formEl?.getAttribute("data-form-invalid") === "true"
           || field?.getAttribute("data-selection-invalid") === "true";
       }, { formId: `botster-workspaces-add-form-${state.workspaceId}` });
       if (!stillInvalid) {
