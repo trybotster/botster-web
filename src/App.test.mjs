@@ -1807,6 +1807,14 @@ assert.match(resttyRenderer, /writeModeGatedInput/);
 assert.match(resttyRenderer, /takePendingSemantic|pendingSemantic/);
 assert.match(resttyRenderer, /kind: "mouse"|kind: "key"/);
 assert.match(resttyRenderer, /suppressQueryReplies|readOnly:\s*true/);
+assert.match(resttyRenderer, /mouseTrackingBitsFromCoreMode|from "\.\/mouseMode"/);
+assert.match(resttyRenderer, /setMouseMode\?\.\("auto"\)|setMouseMode\("auto"\)/);
+assert.match(resttyRenderer, /__BOTSTER_RESTTY_DEBUG__/);
+assert.match(hubTerminalDataPlane, /transport_recovered|handleTransportRecovered/);
+assert.match(hubTerminalDataPlane, /webRtcDaemonLifecycleEventName/);
+assert.match(liveProtocolHarnessScript, /__BOTSTER_RESTTY_DEBUG__/);
+assert.match(liveProtocolHarnessScript, /0x00ff0000|expectedColor/);
+assert.match(liveProtocolHarnessScript, /subscriptionAfter|fresh subscription/);
 assert.doesNotMatch(connectionDiagnostics, /expectedDaemonSchemaVersion/);
 assert.match(connectionDiagnostics, /schemaVersionInformationFromFrame/);
 assert.match(connectionDiagnostics, /operatorErrorDiagnostic/);
@@ -2694,7 +2702,8 @@ await Promise.all([
   compileTsModule("botster/hubTransport.ts", join(compiledRoot, "botster/hubTransport.js")),
   compileTsModule("botster/hubTerminalDataPlane.ts", join(compiledRoot, "botster/hubTerminalDataPlane.js")),
   compileTsModule("botster/webrtcDaemonClient.ts", join(compiledRoot, "botster/webrtcDaemonClient.js")),
-  compileTsModule("botster/terminal.ts", join(compiledRoot, "botster/terminal.js"))
+  compileTsModule("botster/terminal.ts", join(compiledRoot, "botster/terminal.js")),
+  compileTsModule("botster/mouseMode.ts", join(compiledRoot, "botster/mouseMode.js"))
 ]);
 
 const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
@@ -7316,7 +7325,23 @@ assert.equal(unsafeTokenRequests.some((request) => request.type === "mode_gated_
 assert.equal(unsafeTokenRequests.some((request) => request.type === "send_input"), false);
 
 
-// Request-race isolation matrix: pause ownership-creating boundaries, destroy/switch, resume → zero old side effects.
+// Request-race isolation matrix through DefaultTerminalViewBridge + two renderer instances.
+function isolationContainer() {
+  return {
+    dataset: {},
+    childNodes: [],
+    appendChild() {
+      return undefined;
+    },
+    remove() {
+      return undefined;
+    },
+    querySelector() {
+      return null;
+    }
+  };
+}
+
 async function isolationMatrixCase(boundary) {
   let release = () => undefined;
   const gate = new Promise((resolve) => {
@@ -7332,16 +7357,16 @@ async function isolationMatrixCase(boundary) {
   };
   const oldRequests = [];
   const newRequests = [];
-  const oldInstalls = [];
-  const newInstalls = [];
-  const oldOutputs = [];
-  const newOutputs = [];
-  const oldDatasetWrites = [];
-  const newDatasetWrites = [];
+  const oldBucket = { installs: [], outputs: [], dataset: [] };
+  const newBucket = { installs: [], outputs: [], dataset: [] };
+  const oldStream = { count: 0 };
+  const newStream = { count: 0 };
   const oldSessionId = `iso-old-${boundary}`;
   const newSessionId = `iso-new-${boundary}`;
+  const oldDesc = { sessionId: oldSessionId, renderer: "restty" };
+  const newDesc = { sessionId: newSessionId, renderer: "restty" };
 
-  function makeBridge(sessionId, requests, installs, streamCounter) {
+  function makeDaemonBridge(sessionId, requests, streamCounter) {
     return {
       async request(request) {
         requests.push({ ...request });
@@ -7393,85 +7418,99 @@ async function isolationMatrixCase(boundary) {
             data: `old-live-${boundary}\r\n`
           });
         });
-        return { unsubscribe() {} };
+        return { unsubscribe() {}, abandon() {} };
       }
     };
   }
 
-  const oldStream = { count: 0 };
-  const newStream = { count: 0 };
+  function createTrackingRenderer(bucket) {
+    return {
+      container: undefined,
+      mount(container) {
+        this.container = container;
+        container.dataset.terminalMount = "mounted";
+      },
+      attachDataPlane(dataPlane) {
+        dataPlane.bindBinarySnapshotInstaller?.((bytes) => {
+          bucket.installs.push(Uint8Array.from(bytes));
+          return isGhostsnpPayload(bytes);
+        });
+        return dataPlane.subscribeOutput((data) => {
+          bucket.outputs.push(data);
+          if (this.container?.dataset) {
+            this.container.dataset.terminalLastRenderedOutput = data;
+            bucket.dataset.push(data);
+          }
+        });
+      },
+      onInput() {
+        return { unsubscribe() {} };
+      },
+      write(data) {
+        bucket.outputs.push(data);
+        if (this.container?.dataset) {
+          this.container.dataset.terminalLastRenderedOutput = data;
+          bucket.dataset.push(data);
+        }
+      },
+      resize() {},
+      focus() {},
+      destroy() {
+        this.container = undefined;
+      }
+    };
+  }
+
+  const viewBridge = new DefaultTerminalViewBridge((descriptor) =>
+    createTrackingRenderer(descriptor.sessionId === oldSessionId ? oldBucket : newBucket)
+  );
+
   const oldPlane = createHubTerminalDataPlane({
     sessionId: oldSessionId,
     subscriptionId: `${oldSessionId}-sub`,
     testHooks: hooks,
-    bridge: makeBridge(oldSessionId, oldRequests, oldInstalls, oldStream)
+    bridge: makeDaemonBridge(oldSessionId, oldRequests, oldStream)
   });
   const newPlane = createHubTerminalDataPlane({
     sessionId: newSessionId,
     subscriptionId: `${newSessionId}-sub`,
-    bridge: makeBridge(newSessionId, newRequests, newInstalls, newStream)
+    bridge: makeDaemonBridge(newSessionId, newRequests, newStream)
   });
 
-  // Two distinct renderer sinks (session switch / new mount).
-  const oldRenderer = {
-    installs: oldInstalls,
-    outputs: oldOutputs,
-    dataset: oldDatasetWrites,
-    loadBinarySnapshot(bytes) {
-      oldInstalls.push(Uint8Array.from(bytes));
-      return isGhostsnpPayload(bytes);
-    },
-    write(data) {
-      oldOutputs.push(data);
-      oldDatasetWrites.push(data);
-    }
-  };
-  const newRenderer = {
-    installs: newInstalls,
-    outputs: newOutputs,
-    dataset: newDatasetWrites,
-    loadBinarySnapshot(bytes) {
-      newInstalls.push(Uint8Array.from(bytes));
-      return isGhostsnpPayload(bytes);
-    },
-    write(data) {
-      newOutputs.push(data);
-      newDatasetWrites.push(data);
-    }
-  };
+  const oldContainer = isolationContainer();
+  const newContainer = isolationContainer();
 
-  oldPlane.bindBinarySnapshotInstaller((bytes) => oldRenderer.loadBinarySnapshot(bytes));
-  newPlane.bindBinarySnapshotInstaller((bytes) => newRenderer.loadBinarySnapshot(bytes));
-
-  const oldSub = oldPlane.subscribeOutput((data) => oldRenderer.write(data));
+  await viewBridge.mount(oldContainer, oldDesc);
+  await viewBridge.attach(oldDesc, oldPlane);
 
   if (boundary === "resize") {
-    void oldPlane.resize(12, 40);
+    void viewBridge.resize(oldDesc, 12, 40);
   } else if (boundary === "mode_gated") {
-    await waitFor(() => oldInstalls.length === 1);
+    await waitFor(() => oldBucket.installs.length === 1);
     for (let i = 0; i < 8; i += 1) await flushMicrotasks();
     void oldPlane.writeModeGatedInput({ encode: () => "gated-bytes" }).catch(() => undefined);
   }
 
   for (let i = 0; i < 12; i += 1) await flushMicrotasks();
 
-  // Session switch: detach old host path, attach new session/renderer.
-  await oldPlane.detach();
-  oldSub.unsubscribe();
-  const newSub = newPlane.subscribeOutput((data) => newRenderer.write(data));
+  // Session switch on the real view bridge: unmount old, mount+attach new, then resume old work.
+  await viewBridge.unmount(oldDesc);
+  await viewBridge.mount(newContainer, newDesc);
+  await viewBridge.attach(newDesc, newPlane);
   for (let i = 0; i < 15; i += 1) await flushMicrotasks();
 
   const snapshot = {
     oldRequests: oldRequests.map((request) => request.type),
     newRequests: newRequests.map((request) => request.type),
-    oldInstalls: oldInstalls.length,
-    newInstalls: newInstalls.length,
-    oldOutputs: [...oldOutputs],
-    newOutputs: [...newOutputs],
-    oldDataset: [...oldDatasetWrites],
-    newDataset: [...newDatasetWrites],
+    oldInstalls: oldBucket.installs.length,
+    newInstalls: newBucket.installs.length,
+    oldOutputs: [...oldBucket.outputs],
+    newOutputs: [...newBucket.outputs],
+    oldDataset: [...oldBucket.dataset],
+    newDataset: [...newBucket.dataset],
     oldStreams: oldStream.count,
-    newStreams: newStream.count
+    newStreams: newStream.count,
+    newDatasetAttr: newContainer.dataset.terminalLastRenderedOutput
   };
 
   release();
@@ -7482,27 +7521,31 @@ async function isolationMatrixCase(boundary) {
     snapshot.oldRequests,
     `${boundary}: no new old-session requests after resume`
   );
-  assert.equal(oldInstalls.length, snapshot.oldInstalls, `${boundary}: no old Restty install after resume`);
-  assert.deepEqual(oldOutputs, snapshot.oldOutputs, `${boundary}: no old output after resume`);
-  assert.deepEqual(oldDatasetWrites, snapshot.oldDataset, `${boundary}: no old dataset writes after resume`);
+  assert.equal(oldBucket.installs.length, snapshot.oldInstalls, `${boundary}: no old Restty install after resume`);
+  assert.deepEqual(oldBucket.outputs, snapshot.oldOutputs, `${boundary}: no old output after resume`);
+  assert.deepEqual(oldBucket.dataset, snapshot.oldDataset, `${boundary}: no old dataset writes after resume`);
   assert.equal(oldStream.count, snapshot.oldStreams, `${boundary}: no old subscription recreate`);
 
-  // New session/renderer must not receive resumed old work.
   assert.deepEqual(
     newRequests.map((request) => request.type),
     snapshot.newRequests,
     `${boundary}: resumed old work must not issue new-session requests`
   );
-  assert.equal(newInstalls.length, snapshot.newInstalls, `${boundary}: no install into new renderer from old work`);
-  assert.deepEqual(newOutputs, snapshot.newOutputs, `${boundary}: no flush into new renderer from old work`);
-  assert.deepEqual(newDatasetWrites, snapshot.newDataset, `${boundary}: no dataset write on new mount from old work`);
+  assert.equal(newBucket.installs.length, snapshot.newInstalls, `${boundary}: no install into new renderer from old work`);
+  assert.deepEqual(newBucket.outputs, snapshot.newOutputs, `${boundary}: no flush into new renderer from old work`);
+  assert.deepEqual(newBucket.dataset, snapshot.newDataset, `${boundary}: no dataset write on new mount from old work`);
+  assert.equal(
+    newContainer.dataset.terminalLastRenderedOutput,
+    snapshot.newDatasetAttr,
+    `${boundary}: new mount dataset must not change from old work`
+  );
 
   if (boundary === "attach" || boundary === "listener" || boundary === "snapshot") {
-    assert.equal(oldInstalls.length, 0, `${boundary}: must not install into old Restty after switch`);
-    assert.equal(oldOutputs.includes(`old-live-${boundary}\r\n`), false);
+    assert.equal(oldBucket.installs.length, 0, `${boundary}: must not install into old Restty after switch`);
+    assert.equal(oldBucket.outputs.includes(`old-live-${boundary}\r\n`), false);
   }
   if (boundary === "modes") {
-    assert.equal(oldOutputs.includes(`old-live-${boundary}\r\n`), false);
+    assert.equal(oldBucket.outputs.includes(`old-live-${boundary}\r\n`), false);
     assert.equal(snapshot.oldRequests.includes("mode_gated_input"), false);
   }
   if (boundary === "resize") {
@@ -7514,12 +7557,87 @@ async function isolationMatrixCase(boundary) {
     assert.equal(oldRequests.some((request) => request.type === "mode_gated_input"), false);
   }
 
-  newSub.unsubscribe();
-  await newPlane.detach();
+  await viewBridge.unmount(newDesc);
 }
 
 for (const boundary of ["attach", "snapshot", "modes", "resize", "mode_gated", "listener"]) {
   await isolationMatrixCase(boundary);
+}
+
+// Core mouse_mode compact bitmask → Restty tracking bits.
+const {
+  mouseTrackingBitsFromCoreMode,
+  coreMouseTrackingEnabled,
+  CORE_MOUSE_NORMAL,
+  CORE_MOUSE_ANY,
+  CORE_MOUSE_BUTTON,
+  CORE_MOUSE_SGR
+} = requireRuntime("./botster/mouseMode.js");
+assert.equal(mouseTrackingBitsFromCoreMode(0), 0);
+assert.equal(coreMouseTrackingEnabled(0), false);
+assert.equal(mouseTrackingBitsFromCoreMode(CORE_MOUSE_NORMAL), 1 << 1);
+assert.equal(mouseTrackingBitsFromCoreMode(CORE_MOUSE_ANY), (1 << 1) | (1 << 2) | (1 << 3));
+assert.equal(mouseTrackingBitsFromCoreMode(CORE_MOUSE_BUTTON), (1 << 1) | (1 << 2));
+assert.equal(mouseTrackingBitsFromCoreMode(CORE_MOUSE_SGR), 1 << 5);
+// normal+SGR == 9 (authoritative Core/Hub mouse-on fixture value)
+assert.equal(mouseTrackingBitsFromCoreMode(9), (1 << 1) | (1 << 5));
+assert.equal(coreMouseTrackingEnabled(9), true);
+assert.equal(coreMouseTrackingEnabled(CORE_MOUSE_SGR), false);
+
+// Stale mouse 9→0 must not issue a second ModeGatedInput after re-encode under mouse_mode=0.
+{
+  const skippedRequests = [];
+  const plane = createHubTerminalDataPlane({
+    sessionId: "mouse-stale-9-to-0",
+    subscriptionId: "mouse-stale-sub",
+    bridge: {
+      async request(request) {
+        skippedRequests.push({ ...request });
+        if (request.type === "read_mode_flags") {
+          return {
+            kind: "read_mode_flags",
+            mode_flags: { ...testModeFlags("mouse-stale-9-to-0"), mouse_mode: 9, mode_generation: 1, mode_revision: 1 },
+            events: []
+          };
+        }
+        if (request.type === "mode_gated_input") {
+          return {
+            kind: "mode_gated_input",
+            mode_gated_input: {
+              session_id: "mouse-stale-9-to-0",
+              admitted: false,
+              error_kind: "stale_mode",
+              bytes_written: 0,
+              kitty_enabled: false,
+              cursor_visible: true,
+              bracketed_paste: false,
+              mouse_mode: 0,
+              alt_screen: false,
+              focus_reporting: false,
+              application_cursor: false,
+              mode_generation: 2,
+              mode_revision: 2
+            },
+            events: []
+          };
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal() {
+        return { unsubscribe() {}, abandon() {} };
+      }
+    }
+  });
+  plane.subscribeOutput(() => undefined);
+  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+  // First encode under mouse_mode=9, stale reject carries mouse_mode=0, re-encode returns "".
+  await plane.writeModeGatedInput({
+    encode: (modes) => (coreMouseTrackingEnabled(modes.mouse_mode) ? "mouse-bytes" : "")
+  });
+  const gated = skippedRequests.filter((request) => request.type === "mode_gated_input");
+  assert.equal(gated.length, 1, `expected one mode_gated_input before skip-on-disable, got ${gated.length}`);
+  assert.equal(gated[0].data, "mouse-bytes");
+  await plane.detach();
 }
 
 assert.equal(isGhostsnpPayload(decodeGhostsnpSnapshot(ghostsnpFixturePayloadBase64)), true);

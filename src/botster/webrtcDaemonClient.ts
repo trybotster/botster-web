@@ -173,6 +173,14 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
       let closed = false;
       let timer: number | undefined;
 
+      const stopDrain = () => {
+        closed = true;
+        if (timer !== undefined) {
+          window.clearTimeout(timer);
+          timer = undefined;
+        }
+      };
+
       const emitEvents = (response: DaemonResponse) => {
         const events = response.events ?? [];
         for (const event of events) {
@@ -219,11 +227,12 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
         });
 
       return {
+        /** Stop local drain without detach RPC — used when the data channel is already dead. */
+        abandon: () => {
+          stopDrain();
+        },
         unsubscribe: () => {
-          closed = true;
-          if (timer !== undefined) {
-            window.clearTimeout(timer);
-          }
+          stopDrain();
           void transport.request({ type: "detach", session_id: sessionId, subscription_id: subscriptionId });
         }
       };
