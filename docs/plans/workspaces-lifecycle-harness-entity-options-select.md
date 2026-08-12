@@ -326,11 +326,14 @@ Capture only if Implement confirms a durable rule not already covered by existin
 | Held-open sequence | **Preserved** (stage `workspaces-entity-options-membership-reactive`; claim exclusion, stale-submit prevention, membership removal, option restoration) |
 | Resume | Advance Plan → Plan Review immediately (orchestrator task); cancel dependency poll scheduler |
 
-## Implement deviation (accepted)
+## Implement deviation — superseded by human answer A
 
 | Field | Value |
 | --- | --- |
-| Deviation | Held-open membership **delta fanout** is not exercised end-to-end on Workspaces pin `47b0aeb`. That package persists membership with `plugin_db.batch` and does **not** call `botster.entity_publish`, so Hub fanout admits no live upsert after claim/remove. |
-| Proof used instead | After P2 production claim/remove, P1 force-closes the real WebRTC data channel and reconnects in place (same pattern as `exerciseEntityOptionsReactive`). Claim-scoped demand resubscribes; membership `entity_provider` snapshot excludes/restores `S` while the Add dialog stays mounted and P1 `plugin_surface_render` count is unchanged. |
-| Still proved | Entity_options select Add path; exact `session_id` request correlation; dual production client claim/remove; invalid selection + stale-submit block; option exclusion and restoration without reopening dialog or P1 surface re-render. |
-| Residual | Pure live-delta fanout without reconnect requires a Workspaces package change to publish membership frames after claim/remove (out of botster-web charter). |
+| Question | `question_1786507188_545842` |
+| Decision | **A with separate Workspaces producer ticket** (do not depend on `ticket_1786474780_590414` — it already depends on this Web ticket) |
+| Producer ticket | `ticket_1786507472_103115` — Workspaces: publish membership entity frames after claim and remove (`tgt_71266a8d976d4535902ffed09c18a7ba`) |
+| Web dependency | `dependency_1786507482_463871` — this ticket → producer |
+| Main Workspaces dependency | `dependency_1786507486_158720` — `ticket_1786474780_590414` → producer |
+| Forced resubscribe | **Removed.** P1 observes exclusion/restoration from the held membership subscription only |
+| Full green pin | Closed producer Workspaces pin that calls `botster.entity_publish` after successful claim/remove (truthful empty snapshot when last membership is gone) + Hub ≥ `35dd7d22` |

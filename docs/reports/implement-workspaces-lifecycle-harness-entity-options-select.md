@@ -62,10 +62,10 @@ No `src/**` product changes.
 ## Deviations from plan
 
 1. **Held-open membership delta fanout** — Plan assumed Hub pin alone delivers live membership upserts while P1 holds the dialog. Measured: Workspaces pin persists membership via `plugin_db.batch` without `botster.entity_publish`, so no live upsert arrives on P1 after P2 claim/remove.
-2. **Proof substitution** — After P2 production claim/remove, P1 closes the real WebRTC data channel and reconnects in place (same as `exerciseEntityOptionsReactive`). Claim-scoped demand resubscribes; membership `entity_provider` snapshot excludes/restores `S` with the Add dialog still mounted and no extra P1 `plugin_surface_render`.
+2. **Held-open policy (human A)** — Forced resubscribe **removed**. Producer ticket `ticket_1786507472_103115` owns membership `entity_publish` after claim/remove. Web depends via `dependency_1786507482_463871`. P1 must observe live held subscription frames only.
 3. **Close-out** — After restore, reselect proves form validity; membership left cleared (and reactive seed hub-removed) so bulk lifecycle row counts stay 16.
 
-Committed plan section **Implement deviation (accepted)** records this.
+Committed plan section **Implement deviation — superseded by human answer A** records routing.
 
 ## Tests and downstream proof run
 
@@ -115,9 +115,7 @@ Open findings addressed in code (pending human on held-open policy):
 | `finding_1786507097_169982` stale-submit barrier | **Fixed**: 2s settle loop scans all Add value fields; form must stay invalid |
 | `finding_1786507097_192249` whitespace | **Fixed** in plan file |
 | `finding_1786507097_878462` PR link | **Fixed**: `pr_1786507187_760694` → PR 89 |
-| `finding_1786507097_407993` forced resubscribe | **Blocked on human** `question_1786507188_545842` (A route Workspaces entity_publish dep / B waive reconnect / C other) |
-
-Re-proved after correlation/historical/stale fixes: `npm run smoke:workspaces-lifecycle` exit 0 (still uses resubscribe until human answers A/B).
+| `finding_1786507097_407993` forced resubscribe | **Resolved per human A**: producer ticket + deps registered; resubscribe removed from harness |
 
 ## Human answer A — held-open policy (question_1786507188_545842)
 
