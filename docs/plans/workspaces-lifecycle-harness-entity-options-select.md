@@ -337,3 +337,12 @@ Capture only if Implement confirms a durable rule not already covered by existin
 | Main Workspaces dependency | `dependency_1786507486_158720` — `ticket_1786474780_590414` → producer |
 | Forced resubscribe | **Removed.** P1 observes exclusion/restoration from the held membership subscription only |
 | Full green pin | Closed producer Workspaces pin that calls `botster.entity_publish` after successful claim/remove (truthful empty snapshot when last membership is gone) + Hub ≥ `35dd7d22` |
+
+## Producer pin (merged)
+
+| Field | Value |
+| --- | --- |
+| Producer ticket | `ticket_1786507221_760227` (authoritative; closed) |
+| Publish pin | `c0699007f0cb946d1cbe12f4bc3b718bfcfa4f18` |
+| Picker pin | `47b0aeb5dd2014da192378be515cbbfe4adf6bd8` (Available sessions; not yet on main) |
+| Consumer smoke package | combined publish+picker for dual-client held-open proof without resubscribe |

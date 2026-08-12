@@ -132,3 +132,28 @@ Choose A with a **separate** Workspaces producer ticket (no cycle with ticket_17
 ### Residual until producer closes
 Full `smoke:workspaces-lifecycle` green for stage `workspaces-entity-options-membership-reactive` requires a Workspaces pin that publishes membership frames. This Web run is formally blocked on `ticket_1786507472_103115`. Select/advanced Add path, request_id correlation, historical intent, and stale-submit barrier remain implemented on this branch.
 
+## Final proof (producer pin + no resubscribe)
+
+Authoritative producer ticket `ticket_1786507221_760227` merged at `c0699007f0cb946d1cbe12f4bc3b718bfcfa4f18` (membership `entity_publish`). Available sessions picker still lives on branch pin `47b0aeb` (not yet on Workspaces main). Consumer proof used a local combined package path: c069900 base + Available sessions entity_options form (`5d5b94f` smoke-combined) so both seams are present.
+
+| Check | Result |
+| --- | --- |
+| Forced DataChannel resubscribe | **Absent** from harness |
+| Held-open membership demand | `demanded:true framed:true` |
+| Dual-client reactive stage | `workspaces-entity-options-membership-reactive passed` |
+| Full lifecycle | `Workspaces lifecycle acceptance passed` |
+| Harness | `live packaged protocol harness passed (webrtc)` exit 0 |
+
+### Review findings disposition
+
+| Finding | Disposition |
+| --- | --- |
+| `finding_1786507097_407993` forced resubscribe | Resolved: removed; live held subscription with producer publish |
+| `finding_1786507097_119765` request_id correlation | Resolved in harness helpers |
+| `finding_1786507097_184984` historical intent | Resolved: only neverExisting uses advanced |
+| `finding_1786507097_169982` stale-submit barrier | Resolved: settle loop + all value fields |
+| `finding_1786507097_192249` whitespace | Resolved in plan |
+| `finding_1786507097_878462` PR link | Resolved: `pr_1786507187_760694` |
+
+### Residual
+Workspaces main still lacks the Available sessions picker until `ticket_1786474780_590414` merges onto publish base. Downstream consumer re-run should use a package revision containing **both** entity_options Add form and membership `entity_publish`.
