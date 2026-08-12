@@ -69,5 +69,7 @@ export declare class OutputFilter {
     private handleOsc;
     private handleModeSeq;
     private handleWindowOp;
+    private filterInternal;
     filter(output: string): string;
+    filterBytes(output: Uint8Array): void;
 }

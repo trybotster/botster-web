@@ -7,6 +7,7 @@ export type CreateRuntimeInputHooksOptions = {
 export type RuntimeInputHooks = {
     runBeforeInputHook: (text: string, source: string) => string | null;
     runBeforeRenderOutputHook: (text: string, source: string) => string | null;
+    runBeforeRenderOutputBytesHook: (bytes: Uint8Array, source: string) => boolean;
 };
 export declare function createRuntimeInputHooks(options: CreateRuntimeInputHooksOptions): RuntimeInputHooks;
 export {};

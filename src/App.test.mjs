@@ -1783,18 +1783,25 @@ assert.match(hubTransport, /family: availablePackageFamily/);
 assert.doesNotMatch(hubTransport, /["']view_surface["']|["']settings_surface["']|UpdatePackage|update_package|type: "restart_hub"/);
 assert.match(hubTerminalDataPlane, /streamTerminal/);
 assert.match(hubTerminalDataPlane, /type: "send_input"/);
+assert.match(hubTerminalDataPlane, /type: "mode_gated_input"/);
+assert.match(hubTerminalDataPlane, /writeModeGatedInput/);
+assert.match(hubTerminalDataPlane, /decodeGhostsnpSnapshot|GHOSTSNP/);
+assert.match(hubTerminalDataPlane, /bindBinarySnapshotInstaller/);
 assert.match(hubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
 assert.match(hubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
 assert.match(hubTerminalDataPlane, /this\.emitOutput\(event\.data, "output"\)/);
-assert.match(hubTerminalDataPlane, /type: "read_screen"/);
-assert.match(hubTerminalDataPlane, /this\.emitOutput\(readScreen\.text, "read_screen"\)/);
+assert.match(hubTerminalDataPlane, /type: "read_mode_flags"/);
 assert.match(hubTerminalDataPlane, /bufferHydratingOutput/);
+assert.doesNotMatch(hubTerminalDataPlane, /this\.emitOutput\(readScreen\.text, "read_screen"\)/);
 assert.doesNotMatch(hubTerminalDataPlane, /event\.data, event\.type|restoredHistory|scrollback_unavailable/);
 assert.match(hubTerminalDataPlane, /recordLiveHarnessTerminal\("attach_state"/);
 assert.match(hubTerminalDataPlane, /type: "detach"/);
 assert.match(hubTerminalDataPlane, /attachToAuthoritativeSession/);
 assert.doesNotMatch(hubTerminalDataPlane, /type: "list_sessions"/);
 assert.match(hubTerminalDataPlane, /this\.listeners\.size === 0/);
+assert.match(resttyRenderer, /readOnly:\s*true/);
+assert.match(resttyRenderer, /loadBinarySnapshot/);
+assert.match(resttyRenderer, /writeModeGatedInput/);
 assert.doesNotMatch(connectionDiagnostics, /expectedDaemonSchemaVersion/);
 assert.match(connectionDiagnostics, /schemaVersionInformationFromFrame/);
 assert.match(connectionDiagnostics, /operatorErrorDiagnostic/);
@@ -1864,6 +1871,11 @@ assert.doesNotMatch(liveProtocolHarnessScript, /startSessionButton|observeStartS
 assert.match(liveProtocolHarnessScript, /proveExternalSessionLifecycle/);
 assert.match(liveProtocolHarnessScript, /waitForRunningSessionFrame\(page\)/);
 assert.match(liveProtocolHarnessScript, /waitForAutomaticTerminalRestore/);
+assert.match(liveProtocolHarnessScript, /GHOSTSNP/);
+assert.match(liveProtocolHarnessScript, /ghostsnp_install|restty_load_binary_snapshot/);
+assert.match(liveProtocolHarnessScript, /mode_gated_input/);
+assert.match(liveProtocolHarnessScript, /read_mode_flags/);
+assert.doesNotMatch(liveProtocolHarnessScript, /source === "read_screen"/);
 assert.match(liveProtocolHarnessScript, /assertCurrentHubCompatibilityAndSchema/);
 assert.match(liveProtocolHarnessScript, /assertCurrentHubSchemaPresentation/);
 assert.match(liveProtocolHarnessScript, /status\.schema_version < 3/);
@@ -2060,8 +2072,9 @@ assert.match(webrtcDaemonClient, /chunks: new Map/);
 assert.doesNotMatch(webrtcDaemonClient, /new Array\([^)]*chunk/i);
 assert.doesNotMatch(webrtcDaemonClient, /decryptDaemonResponse\(key, String\(data\)\)/);
 assert.match(liveProtocolHarnessScript, /webrtc_response_assembly/);
-assert.match(liveProtocolHarnessScript, /response_assembly_telemetry/);
-assert.match(liveProtocolHarnessScript, /telemetry\.duration_ms > 8_000/);
+assert.match(liveProtocolHarnessScript, /response_assembly_telemetry|ghostsnp_install/);
+assert.match(liveProtocolHarnessScript, /automatic GHOSTSNP restoration|ghostsnp_install/);
+assert.match(liveProtocolHarnessScript, /magic !== "GHOSTSNP"|magic !== 'GHOSTSNP'|GHOSTSNP/);
 assert.match(architecture, /Generated `DaemonLocalWebrtcDeliveryChunk` frames multiplex/);
 assert.match(readme, /two fresh WebRTC subscription generations/);
 assert.match(readme, /scripts\/local-package-server\.mjs/);
@@ -2069,7 +2082,10 @@ assert.match(readme, /kind: web_app/);
 assert.match(readme, /launch_mode: background/);
 assert.match(readme, /readiness: local_url/);
 assert.match(readme, /rejects daemon operations other than/);
-assert.match(vendorReadme, /e9742252312ee616d8f186b697d70349cf329250/);
+assert.match(vendorReadme, /79f633189adc73b8cf5ed4f7c7be1be4a7da35bf/);
+assert.match(vendorReadme, /448497041a4d0e8617662c568ae73f246b3a805f/);
+assert.match(vendorReadme, /readOnly/);
+assert.match(resttyRenderer, /readOnly:\s*true/);
 assert.doesNotMatch(uiNodes, /terminal_view/);
 assert.doesNotMatch(protocol, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
 assert.doesNotMatch(hubTransport, /terminal_input|terminal_output|terminal_resize|pty_bytes/);
@@ -2089,10 +2105,10 @@ const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.2");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.27");
-assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.27");
+assert.equal(hubTestSupportMetadata.package_version, "0.1.30");
+assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.30");
 assert.equal(hubTestSupportMetadata.protocol_version, 6);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 33);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 35);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
@@ -2139,11 +2155,33 @@ assert.deepEqual(modeFlagsConformanceFixture.request, {
 });
 assert.deepEqual(modeFlagsConformanceFixture.mouse_off, {
   response_kind: "read_mode_flags",
-  mode_flags: { session_id: "mode-flags-fixture-session", mouse_mode: 0 }
+  mode_flags: {
+    session_id: "mode-flags-fixture-session",
+    kitty_enabled: false,
+    cursor_visible: true,
+    bracketed_paste: false,
+    mouse_mode: 0,
+    alt_screen: false,
+    focus_reporting: false,
+    application_cursor: false,
+    mode_generation: 1,
+    mode_revision: 1
+  }
 });
 assert.deepEqual(modeFlagsConformanceFixture.mouse_on, {
   response_kind: "read_mode_flags",
-  mode_flags: { session_id: "mode-flags-fixture-session", mouse_mode: 9 }
+  mode_flags: {
+    session_id: "mode-flags-fixture-session",
+    kitty_enabled: false,
+    cursor_visible: true,
+    bracketed_paste: false,
+    mouse_mode: 9,
+    alt_screen: false,
+    focus_reporting: false,
+    application_cursor: false,
+    mode_generation: 1,
+    mode_revision: 2
+  }
 });
 for (const failure of [modeFlagsConformanceFixture.unknown_session, modeFlagsConformanceFixture.backend_failure]) {
   assert.equal(failure.response_kind, "operator_error");
@@ -2164,7 +2202,7 @@ assert.deepEqual(
   lateAttachHistoryConformanceFixture.no_history_then_live.map((event) =>
     event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
   ),
-  ["attach_state:attaching", "attach_state:attached", "terminal_output", "process_exit"]
+  ["attach_state:attaching", "snapshot", "attach_state:attached", "terminal_output", "process_exit"]
 );
 for (const event of lateAttachHistoryConformanceFixture.history_then_live) {
   if (event.type !== "snapshot" && event.type !== "scrollback") continue;
@@ -2174,6 +2212,19 @@ for (const event of lateAttachHistoryConformanceFixture.history_then_live) {
 }
 assert.equal(lateAttachHistoryConformanceFixture.read_screen_text, "history-before-live\r\n");
 assert.equal(lateAttachHistoryConformanceFixture.no_history_read_screen_text, "");
+// Conf-35 consumer checks: authentic GHOSTSNP only (reject known-bad 0.1.29 placeholder).
+for (const scenario of [
+  lateAttachHistoryConformanceFixture.history_then_live,
+  lateAttachHistoryConformanceFixture.no_history_then_live
+]) {
+  const snapshot = scenario.find((event) => event.type === "snapshot");
+  assert.equal(Boolean(snapshot), true);
+  const raw = Buffer.from(snapshot.payload_base64, "base64");
+  assert.equal(raw.subarray(0, 8).toString("utf8"), "GHOSTSNP");
+  assert.notEqual(snapshot.payload_base64, "AP9HVFkB");
+  assert.notEqual(raw.subarray(0, 6).toString("hex"), "00ff47545901");
+}
+
 const localWebrtcDeliveryChunkFixture = readLocalWebrtcDeliveryChunkConformanceFixture();
 assert.equal(localWebrtcDeliveryChunkFixture.version, 2);
 assert.equal(localWebrtcDeliveryChunkFixture.maximum_frame_bytes_exclusive, 65_536);
@@ -2640,7 +2691,39 @@ const {
   entitySubscriptionDiagnosticFrame,
   daemonResponseFrames,
 } = requireRuntime("./botster/hubTransport.js");
-const { createHubTerminalDataPlane } = requireRuntime("./botster/hubTerminalDataPlane.js");
+const {
+  createHubTerminalDataPlane,
+  decodeGhostsnpSnapshot,
+  isGhostsnpPayload
+} = requireRuntime("./botster/hubTerminalDataPlane.js");
+
+function testModeFlags(sessionId, overrides = {}) {
+  return {
+    session_id: sessionId,
+    kitty_enabled: false,
+    cursor_visible: true,
+    bracketed_paste: false,
+    mouse_mode: 0,
+    alt_screen: false,
+    focus_reporting: false,
+    application_cursor: false,
+    mode_generation: 1,
+    mode_revision: 1,
+    ...overrides
+  };
+}
+
+function bindGhostsnpInstaller(dataPlane, installs = []) {
+  dataPlane.bindBinarySnapshotInstaller((bytes) => {
+    installs.push(Uint8Array.from(bytes));
+    return bytes.byteLength >= 8 && Buffer.from(bytes.subarray(0, 8)).toString("utf8") === "GHOSTSNP";
+  });
+  return installs;
+}
+
+const ghostsnpFixturePayloadBase64 = 'R0hPU1RTTlABAAEAmQMAACJWCmBQABgAAAAAAAAAAAAAABcAAABPAAAAAAEAZQAAAAEBAQEAAAAACAAEIgBkAAAAAAQiAGQAAAAABCIAZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//////////AAEBAQEBAQEBAR0fIcxmZrW9aPDGdIGivrKUu4q+t8XIxmZmZtVOU7nKSufFR3qm2sOX2HDAserq6gAAAAAAXwAAhwAArwAA1wAA/wBfAABfXwBfhwBfrwBf1wBf/wCHAACHXwCHhwCHrwCH1wCH/wCvAACvXwCvhwCvrwCv1wCv/wDXAADXXwDXhwDXrwDX1wDX/wD/AAD/XwD/hwD/rwD/1wD//18AAF8AX18Ah18Ar18A118A/19fAF9fX19fh19fr19f119f/1+HAF+HX1+Hh1+Hr1+H11+H/1+vAF+vX1+vh1+vr1+v11+v/1/XAF/XX1/Xh1/Xr1/X11/X/1//AF//X1//h1//r1//11///4cAAIcAX4cAh4cAr4cA14cA/4dfAIdfX4dfh4dfr4df14df/4eHAIeHX4eHh4eHr4eH14eH/4evAIevX4evh4evr4ev14ev/4fXAIfXX4fXh4fXr4fX14fX/4f/AIf/X4f/h4f/r4f/14f//68AAK8AX68Ah68Ar68A168A/69fAK9fX69fh69fr69f169f/6+HAK+HX6+Hh6+Hr6+H16+H/6+vAK+vX6+vh6+vr6+v16+v/6/XAK/XX6/Xh6/Xr6/X16/X/6//AK//X6//h6//r6//16///9cAANcAX9cAh9cAr9cA19cA/9dfANdfX9dfh9dfr9df19df/9eHANeHX9eHh9eHr9eH19eH/9evANevX9evh9evr9ev19ev/9fXANfXX9fXh9fXr9fX19fX/9f/ANf/X9f/h9f/r9f/19f///8AAP8AX/8Ah/8Ar/8A1/8A//9fAP9fX/9fh/9fr/9f1/9f//+HAP+HX/+Hh/+Hr/+H1/+H//+vAP+vX/+vh/+vr/+v1/+v///XAP/XX//Xh//Xr//X1//X////AP//X///h///r///1////wgICBISEhwcHCYmJjAwMDo6OkRERE5OTlhYWGJiYmxsbHZ2doCAgIqKipSUlJ6enqioqLKysry8vMbGxtDQ0Nra2uTk5O7u7gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACADYAAAB7ZgmSAAABAAAAAAAAAAAAAAABAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAwBzAAAAV+gBEVAAGAAAAAAAgADAAAAgAAAACAAAABMAaGlzdG9yeS1iZWZvcmUtbGl2ZQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAAAAAngGPRBQAAAAAA5CDvCgQABgAAAKERil4AAAAAAAAGAAAAAAA+61M+';
+const ghostsnpFixtureBytes = 1176;
+
 const {
   createLocalWebrtcBootstrapRefresher,
   createWebrtcDaemonClient,
@@ -3880,6 +3963,14 @@ const bridge = {
       };
     }
 
+    if (request.type === "read_mode_flags") {
+      return {
+        kind: "read_mode_flags",
+        mode_flags: testModeFlags(request.session_id),
+        events: []
+      };
+    }
+
     return { kind: "events", events: [] };
   },
   subscribeEntityFrames(entityType, onFrame) {
@@ -3918,9 +4009,9 @@ const bridge = {
       type: "snapshot",
       session_id: sessionId,
       subscription_id: subscriptionId,
-      payload_base64: "AP9HVFkB",
+      payload_base64: ghostsnpFixturePayloadBase64,
       payload_encoding: "base64",
-      bytes: 6
+      bytes: ghostsnpFixtureBytes
     });
     onEvent({
       type: "attach_state",
@@ -6197,7 +6288,7 @@ const missingCapabilityDiagnostic = compatibilityDiagnosticsFromFrame({
           protocol: "botster-hub-daemon-v1",
           protocol_version: 1,
           features: ["sessions"],
-          conformance_fixture_revision: 14
+          conformance_fixture_revision: minimumConformanceFixtureRevision
         }
       }
     ]
@@ -6253,7 +6344,7 @@ const outdatedConformanceDiagnostic = compatibilityDiagnosticsFromFrame({
   }
 })[0];
 assert.equal(outdatedConformanceDiagnostic.title, "Hub conformance fixture mismatch");
-assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 14/);
+assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 35/);
 
 const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -6267,15 +6358,8 @@ const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
         compatibility: {
           protocol: "botster-hub-daemon-v1",
           protocol_version: 1,
-          features: [
-            "sessions",
-            "terminal_streaming",
-            "resize",
-            "terminal_readback",
-            "plugin_surface_render",
-            "plugin_surface_action"
-          ],
-          conformance_fixture_revision: 14
+          features: [...requiredDaemonFeatures],
+          conformance_fixture_revision: minimumConformanceFixtureRevision
         }
       }
     ]
@@ -6288,17 +6372,16 @@ assert.deepEqual(requiredDaemonFeatures, [
   "resize",
   "terminal_readback",
   "plugin_surface_render",
-  "plugin_surface_action"
+  "plugin_surface_action",
+  "mode_gated_input"
 ]);
-assert.equal(minimumConformanceFixtureRevision, 14);
+assert.equal(minimumConformanceFixtureRevision, 35);
 assert.equal(minimumDaemonProtocolVersion, 1);
 assert.equal(compatibleDescriptorDiagnostics.length, 1);
 assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
 assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
 
-// Stale client / new Hub: a protocol-6 conformance-31 Hub stays compatible under the
-// deliberately permissive floor, and the authoritative facts are carried through for
-// rendering rather than degrading to "Not reported".
+// Protocol-6 Hub at conf 35 with mode_gated_input is the GHOSTSNP thin-client floor.
 const protocolSixHubStatusRecord = {
   id: "local-hub",
   schema_version: 3,
@@ -6307,15 +6390,8 @@ const protocolSixHubStatusRecord = {
   compatibility: {
     protocol: "botster-hub-daemon-v1",
     protocol_version: 6,
-    features: [
-      "sessions",
-      "terminal_streaming",
-      "resize",
-      "terminal_readback",
-      "plugin_surface_render",
-      "plugin_surface_action"
-    ],
-    conformance_fixture_revision: 32
+    features: [...requiredDaemonFeatures],
+    conformance_fixture_revision: 35
   }
 };
 const protocolSixDiagnostics = compatibilityDiagnosticsFromFrame({
@@ -6333,7 +6409,27 @@ assert.match(protocolSixDiagnostics[0].detail, /Protocol botster-hub-daemon-v1 v
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /mismatch/i.test(diagnostic.title)), false);
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /unsupported_feature/.test(JSON.stringify(diagnostic))), false);
 assert.equal(minimumDaemonProtocolVersion, 1);
-assert.equal(minimumConformanceFixtureRevision, 14);
+assert.equal(minimumConformanceFixtureRevision, 35);
+
+// Pre-GHOSTSNP conf revisions fail closed under the conf-35 floor.
+const preGhostsnpDiagnostics = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [{
+      id: "local-hub",
+      schema_version: 3,
+      compatibility: {
+        protocol: "botster-hub-daemon-v1",
+        protocol_version: 6,
+        features: [...requiredDaemonFeatures],
+        conformance_fixture_revision: 34
+      }
+    }]
+  }
+});
+assert.equal(preGhostsnpDiagnostics[0].title, "Hub conformance fixture mismatch");
 
 const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -6348,7 +6444,7 @@ const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame(
           protocol: "botster-hub-daemon-v1",
           protocol_version: 1,
           features: requiredDaemonFeatures,
-          conformance_fixture_revision: 14
+          conformance_fixture_revision: minimumConformanceFixtureRevision
         }
       }
     ]
@@ -6379,15 +6475,8 @@ const hubReportedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame
         compatibility: {
           protocol: "botster-hub-daemon-v1",
           protocol_version: 1,
-          features: [
-            "sessions",
-            "terminal_streaming",
-            "resize",
-            "terminal_readback",
-            "plugin_surface_render",
-            "plugin_surface_action"
-          ],
-          conformance_fixture_revision: 14
+          features: [...requiredDaemonFeatures],
+          conformance_fixture_revision: minimumConformanceFixtureRevision
         },
         diagnostics: [
           {
@@ -6483,11 +6572,12 @@ const terminalDataPlane = createHubTerminalDataPlane({
   bridge,
   sessionId: activeHubSessionId
 });
+const terminalInstalls = bindGhostsnpInstaller(terminalDataPlane);
 const terminalOutput = [];
 const terminalStatuses = [];
 const terminalStatusSubscription = terminalDataPlane.subscribeStatus((status) => terminalStatuses.push(status));
 const terminalSubscription = terminalDataPlane.subscribeOutput((data) => terminalOutput.push(data));
-await flushMicrotasks();
+await waitFor(() => terminalOutput.some((data) => data.includes("botster-web-production-ready")));
 await terminalDataPlane.writeInput("ping\n");
 await terminalDataPlane.resize(24, 80);
 const detachRequestsBeforeListenerClose = bridgeRequests.filter((request) => request.type === "detach").length;
@@ -6503,13 +6593,15 @@ assert.equal(bridgeTerminalStreams.some((stream) => stream.sessionId === activeH
 assert.equal(bridgeRequests.some((request) => request.type === "send_input" && request.data === "ping\n"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "resize" && request.rows === 24 && request.cols === 80), true);
 assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
+assert.equal(bridgeRequests.some((request) => request.type === "read_mode_flags"), true);
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
-assert.deepEqual(terminalOutput.slice(0, 2), [
-  "hub-owned-screen\r\n",
+assert.equal(terminalInstalls.length >= 1, true);
+assert.equal(isGhostsnpPayload(terminalInstalls[0]), true);
+assert.deepEqual(terminalOutput, [
   "botster-web-production-ready\r\n"
 ]);
 assert.equal(terminalOutput.some((data) => data.includes("botster-web-production-ready")), true);
-assert.equal(terminalStatuses.some((status) => status.state === "attached" && status.message.includes("Visible terminal screen restored")), true);
+assert.equal(terminalStatuses.some((status) => status.state === "attached" && status.message.includes("GHOSTSNP")), true);
 
 const readbackRequests = [];
 const readScreenResponses = [
@@ -6640,14 +6732,15 @@ for (const readbackType of ["read_screen", "capture_snapshot"]) {
   replacementSubscription.unsubscribe();
 }
 
-for (const [events, readScreenText, expectedOutput] of [
-  [lateAttachHistoryConformanceFixture.history_then_live, lateAttachHistoryConformanceFixture.read_screen_text, ["history-before-live\r\n", "live-after-attach\r\n"]],
+for (const [events, readScreenText, expectedLive] of [
+  [lateAttachHistoryConformanceFixture.history_then_live, lateAttachHistoryConformanceFixture.read_screen_text, ["live-after-attach\r\n"]],
   [lateAttachHistoryConformanceFixture.no_history_then_live, lateAttachHistoryConformanceFixture.no_history_read_screen_text, ["live-without-history\r\n"]]
 ]) {
   const sessionId = events[0].session_id;
   const subscriptionId = events[0].subscription_id;
   const fixtureOutput = [];
   const fixtureTimeline = [];
+  const fixtureInstalls = [];
   const fixtureDataPlane = createHubTerminalDataPlane({
     sessionId,
     subscriptionId,
@@ -6657,6 +6750,13 @@ for (const [events, readScreenText, expectedOutput] of [
           return {
             kind: "sessions",
             sessions: [{ session_id: sessionId, lifecycle: "running" }],
+            events: []
+          };
+        }
+        if (request.type === "read_mode_flags") {
+          return {
+            kind: "read_mode_flags",
+            mode_flags: testModeFlags(sessionId),
             events: []
           };
         }
@@ -6677,6 +6777,7 @@ for (const [events, readScreenText, expectedOutput] of [
       }
     }
   });
+  bindGhostsnpInstaller(fixtureDataPlane, fixtureInstalls);
   fixtureDataPlane.subscribeStatus((status) => {
     fixtureTimeline.push(`status:${status.state}:${status.message}`);
   });
@@ -6684,53 +6785,35 @@ for (const [events, readScreenText, expectedOutput] of [
     fixtureOutput.push(data);
     fixtureTimeline.push(`output:${data}`);
   });
-  await waitFor(() => fixtureOutput.length === expectedOutput.length);
-  assert.deepEqual(fixtureOutput, expectedOutput);
+  await waitFor(() => fixtureOutput.length === expectedLive.length);
+  assert.deepEqual(fixtureOutput, expectedLive);
+  assert.equal(fixtureInstalls.length, 1);
+  assert.equal(isGhostsnpPayload(fixtureInstalls[0]), true);
 
   const attachingIndex = fixtureTimeline.findIndex((entry) => entry.startsWith("status:attaching:"));
   const protocolAttachedIndex = fixtureTimeline.findIndex((entry) =>
-    entry === "status:attached:Terminal stream attached; waiting for available output."
+    entry.includes("waiting for GHOSTSNP snapshot")
   );
-  const liveOutputIndex = fixtureTimeline.findIndex((entry) => entry === `output:${expectedOutput.at(-1)}`);
+  const restoredIndex = fixtureTimeline.findIndex((entry) =>
+    entry.includes("Visible terminal screen restored from GHOSTSNP snapshot.")
+  );
+  const liveOutputIndex = fixtureTimeline.findIndex((entry) => entry === `output:${expectedLive.at(-1)}`);
   assert.equal(attachingIndex >= 0, true);
   assert.equal(protocolAttachedIndex > attachingIndex, true);
-  assert.equal(liveOutputIndex > protocolAttachedIndex, true);
-
-  if (expectedOutput.length === 2) {
-    const restoredStatusIndex = fixtureTimeline.findIndex((entry) =>
-      entry.includes("Visible terminal screen restored from daemon readback.")
-    );
-    const historyOutputIndex = fixtureTimeline.findIndex((entry) => entry === `output:${expectedOutput[0]}`);
-    assert.equal(restoredStatusIndex > attachingIndex, true);
-    assert.equal(historyOutputIndex > restoredStatusIndex, true);
-    assert.equal(historyOutputIndex > protocolAttachedIndex, true);
-    assert.equal(liveOutputIndex > historyOutputIndex, true);
-  } else {
-    const liveOnlyIndex = fixtureTimeline.findIndex((entry) => entry.startsWith("status:live_only:"));
-    assert.equal(liveOnlyIndex > protocolAttachedIndex, true);
-    assert.equal(liveOutputIndex > liveOnlyIndex, true);
-  }
+  assert.equal(restoredIndex > protocolAttachedIndex, true);
+  assert.equal(liveOutputIndex > restoredIndex, true);
+  // History is restored via GHOSTSNP install, not as text output on the data-plane listeners.
+  assert.equal(fixtureOutput.some((data) => data.includes("history-before-live")), false);
 }
 
-let resolveDelayedScreen;
-const delayedHydrationOutput = [];
-const delayedHydrationDataPlane = createHubTerminalDataPlane({
-  sessionId: "delayed-hydration-session",
-  subscriptionId: "delayed-hydration-subscription",
+// Invalid non-GHOSTSNP Snapshot fails closed (known-bad 0.1.29 placeholder).
+const invalidSnapshotStatuses = [];
+const invalidSnapshotOutput = [];
+const invalidSnapshotDataPlane = createHubTerminalDataPlane({
+  sessionId: "invalid-snapshot-session",
+  subscriptionId: "invalid-snapshot-subscription",
   bridge: {
-    async request(request) {
-      if (request.type === "list_sessions") {
-        return {
-          kind: "sessions",
-          sessions: [{ session_id: "delayed-hydration-session", lifecycle: "running" }],
-          events: []
-        };
-      }
-      if (request.type === "read_screen") {
-        return new Promise((resolve) => {
-          resolveDelayedScreen = resolve;
-        });
-      }
+    async request() {
       return { kind: "events", events: [] };
     },
     streamTerminal(sessionId, subscriptionId, onEvent) {
@@ -6744,27 +6827,83 @@ const delayedHydrationDataPlane = createHubTerminalDataPlane({
         bytes: 6
       });
       onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+      onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: "should-not-flush\r\n" });
+      return { unsubscribe() {} };
+    }
+  }
+});
+bindGhostsnpInstaller(invalidSnapshotDataPlane);
+invalidSnapshotDataPlane.subscribeStatus((status) => invalidSnapshotStatuses.push(status));
+invalidSnapshotDataPlane.subscribeOutput((data) => invalidSnapshotOutput.push(data));
+await waitFor(() => invalidSnapshotStatuses.some((status) => status.state === "failed"));
+assert.deepEqual(invalidSnapshotOutput, []);
+assert.equal(invalidSnapshotStatuses.some((status) => /GHOSTSNP|not GHOSTSNP/i.test(status.message)), true);
+
+// Buffer live until GHOSTSNP install, then ordered flush.
+let resolveDelayedModes;
+const delayedHydrationOutput = [];
+const delayedHydrationInstalls = [];
+const delayedHydrationDataPlane = createHubTerminalDataPlane({
+  sessionId: "delayed-hydration-session",
+  subscriptionId: "delayed-hydration-subscription",
+  bridge: {
+    async request(request) {
+      if (request.type === "list_sessions") {
+        return {
+          kind: "sessions",
+          sessions: [{ session_id: "delayed-hydration-session", lifecycle: "running" }],
+          events: []
+        };
+      }
+      if (request.type === "read_mode_flags") {
+        return new Promise((resolve) => {
+          resolveDelayedModes = resolve;
+        });
+      }
+      if (request.type === "read_screen") {
+        return {
+          kind: "read_screen",
+          read_screen: { session_id: "delayed-hydration-session", text: "visible-screen\r\n" },
+          events: []
+        };
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(sessionId, subscriptionId, onEvent) {
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
+      onEvent({
+        type: "snapshot",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        payload_base64: ghostsnpFixturePayloadBase64,
+        payload_encoding: "base64",
+        bytes: ghostsnpFixtureBytes
+      });
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
       onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: "live-one\r\n" });
       onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: "live-two\r\n" });
       return { unsubscribe() {} };
     }
   }
 });
+bindGhostsnpInstaller(delayedHydrationDataPlane, delayedHydrationInstalls);
 delayedHydrationDataPlane.subscribeOutput((data) => delayedHydrationOutput.push(data));
-await waitFor(() => typeof resolveDelayedScreen === "function");
+await waitFor(() => typeof resolveDelayedModes === "function");
 assert.deepEqual(delayedHydrationOutput, []);
-resolveDelayedScreen({
-  kind: "read_screen",
-  read_screen: { session_id: "delayed-hydration-session", text: "visible-screen\r\n" },
+assert.equal(delayedHydrationInstalls.length, 1);
+resolveDelayedModes({
+  kind: "read_mode_flags",
+  mode_flags: testModeFlags("delayed-hydration-session"),
   events: []
 });
-await waitFor(() => delayedHydrationOutput.length === 3);
-assert.deepEqual(delayedHydrationOutput, ["visible-screen\r\n", "live-one\r\n", "live-two\r\n"]);
+await waitFor(() => delayedHydrationOutput.length === 2);
+assert.deepEqual(delayedHydrationOutput, ["live-one\r\n", "live-two\r\n"]);
 
-let resolveStaleAutomaticScreen;
+let resolveStaleAutomaticModes;
 let staleAutomaticStreamCount = 0;
-let staleAutomaticReadCount = 0;
+let staleAutomaticModeCount = 0;
 const staleAutomaticOutput = [];
+const staleAutomaticInstalls = [];
 const staleAutomaticDataPlane = createHubTerminalDataPlane({
   sessionId: "stale-automatic-session",
   subscriptionId: "stale-automatic-subscription",
@@ -6777,16 +6916,23 @@ const staleAutomaticDataPlane = createHubTerminalDataPlane({
           events: []
         };
       }
-      if (request.type === "read_screen") {
-        staleAutomaticReadCount += 1;
-        if (staleAutomaticReadCount === 1) {
+      if (request.type === "read_mode_flags") {
+        staleAutomaticModeCount += 1;
+        if (staleAutomaticModeCount === 1) {
           return new Promise((resolve) => {
-            resolveStaleAutomaticScreen = resolve;
+            resolveStaleAutomaticModes = resolve;
           });
         }
         return {
+          kind: "read_mode_flags",
+          mode_flags: testModeFlags("stale-automatic-session", { mode_revision: 2 }),
+          events: []
+        };
+      }
+      if (request.type === "read_screen") {
+        return {
           kind: "read_screen",
-          read_screen: { session_id: "stale-automatic-session", text: "current-screen\r\n" },
+          read_screen: { session_id: "stale-automatic-session", text: "" },
           events: []
         };
       }
@@ -6795,24 +6941,35 @@ const staleAutomaticDataPlane = createHubTerminalDataPlane({
     streamTerminal(sessionId, subscriptionId, onEvent) {
       staleAutomaticStreamCount += 1;
       const live = staleAutomaticStreamCount === 1 ? "stale-live\r\n" : "current-live\r\n";
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
+      onEvent({
+        type: "snapshot",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        payload_base64: ghostsnpFixturePayloadBase64,
+        payload_encoding: "base64",
+        bytes: ghostsnpFixtureBytes
+      });
       onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
       onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: live });
       return { unsubscribe() {} };
     }
   }
 });
+bindGhostsnpInstaller(staleAutomaticDataPlane, staleAutomaticInstalls);
 const staleAutomaticFirstSubscription = staleAutomaticDataPlane.subscribeOutput((data) => staleAutomaticOutput.push(data));
-await waitFor(() => typeof resolveStaleAutomaticScreen === "function");
+await waitFor(() => typeof resolveStaleAutomaticModes === "function");
 staleAutomaticFirstSubscription.unsubscribe();
 const staleAutomaticSecondSubscription = staleAutomaticDataPlane.subscribeOutput((data) => staleAutomaticOutput.push(data));
 await waitFor(() => staleAutomaticOutput.includes("current-live\r\n"));
-resolveStaleAutomaticScreen({
-  kind: "read_screen",
-  read_screen: { session_id: "stale-automatic-session", text: "stale-screen\r\n" },
+resolveStaleAutomaticModes({
+  kind: "read_mode_flags",
+  mode_flags: testModeFlags("stale-automatic-session"),
   events: []
 });
 await flushMicrotasks();
-assert.deepEqual(staleAutomaticOutput, ["current-screen\r\n", "current-live\r\n"]);
+assert.deepEqual(staleAutomaticOutput, ["current-live\r\n"]);
+assert.equal(staleAutomaticOutput.includes("stale-live\r\n"), false);
 staleAutomaticSecondSubscription.unsubscribe();
 
 const reattachedTerminalOutput = [];
@@ -6830,6 +6987,7 @@ assert.equal(
 
 const byteOnlyTerminalStatuses = [];
 const byteOnlyTerminalOutput = [];
+const byteOnlyInstalls = [];
 const byteOnlyTerminalDataPlane = createHubTerminalDataPlane({
   sessionId: activeHubSessionId,
   bridge: {
@@ -6838,6 +6996,13 @@ const byteOnlyTerminalDataPlane = createHubTerminalDataPlane({
         return {
           kind: "sessions",
           sessions: [{ session_id: activeHubSessionId, lifecycle: "running" }],
+          events: []
+        };
+      }
+      if (request.type === "read_mode_flags") {
+        return {
+          kind: "read_mode_flags",
+          mode_flags: testModeFlags(activeHubSessionId),
           events: []
         };
       }
@@ -6861,9 +7026,9 @@ const byteOnlyTerminalDataPlane = createHubTerminalDataPlane({
         type: "snapshot",
         session_id: sessionId,
         subscription_id: subscriptionId,
-        payload_base64: "AP9HVFkB",
+        payload_base64: ghostsnpFixturePayloadBase64,
         payload_encoding: "base64",
-        bytes: 6
+        bytes: ghostsnpFixtureBytes
       });
       onEvent({
         type: "attach_state",
@@ -6883,15 +7048,17 @@ const byteOnlyTerminalDataPlane = createHubTerminalDataPlane({
     }
   }
 });
+bindGhostsnpInstaller(byteOnlyTerminalDataPlane, byteOnlyInstalls);
 byteOnlyTerminalDataPlane.subscribeStatus((status) => byteOnlyTerminalStatuses.push(status));
 byteOnlyTerminalDataPlane.subscribeOutput((data) => byteOnlyTerminalOutput.push(data));
 await waitFor(() => byteOnlyTerminalOutput.some((data) => data.includes("byte-only-live-output")));
 assert.deepEqual(byteOnlyTerminalOutput, ["byte-only-live-output\r\n"]);
+assert.equal(byteOnlyInstalls.length, 1);
 assert.equal(
-  byteOnlyTerminalStatuses.some((status) => status.message.includes("Visible terminal screen restored")),
-  false
+  byteOnlyTerminalStatuses.some((status) => status.message.includes("Visible terminal screen restored from GHOSTSNP")),
+  true
 );
-assert.equal(byteOnlyTerminalStatuses.some((status) => status.state === "live_only"), true);
+assert.equal(byteOnlyTerminalStatuses.some((status) => status.state === "live_only"), false);
 
 const delayedBridgeRequests = [];
 const delayedBridgeTerminalStreams = [];
@@ -6931,6 +7098,339 @@ assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize"
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].cols, 34);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "list_sessions").length, 0);
 assert.equal(delayedBridgeTerminalStreams.length, 1);
+
+
+// Scrollback events must never be imported as Restty/GHOSTSNP state.
+const scrollbackInstalls = [];
+const scrollbackOutput = [];
+const scrollbackDataPlane = createHubTerminalDataPlane({
+  sessionId: "scrollback-session",
+  subscriptionId: "scrollback-sub",
+  bridge: {
+    async request(request) {
+      if (request.type === "read_mode_flags") {
+        return { kind: "read_mode_flags", mode_flags: testModeFlags("scrollback-session"), events: [] };
+      }
+      if (request.type === "read_screen") {
+        return { kind: "read_screen", read_screen: { session_id: "scrollback-session", text: "" }, events: [] };
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(sessionId, subscriptionId, onEvent) {
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
+      onEvent({
+        type: "scrollback",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        payload_base64: ghostsnpFixturePayloadBase64,
+        payload_encoding: "base64",
+        bytes: ghostsnpFixtureBytes
+      });
+      onEvent({
+        type: "snapshot",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        payload_base64: ghostsnpFixturePayloadBase64,
+        payload_encoding: "base64",
+        bytes: ghostsnpFixtureBytes
+      });
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+      onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: "after-scrollback\r\n" });
+      return { unsubscribe() {} };
+    }
+  }
+});
+bindGhostsnpInstaller(scrollbackDataPlane, scrollbackInstalls);
+scrollbackDataPlane.subscribeOutput((data) => scrollbackOutput.push(data));
+await waitFor(() => scrollbackOutput.includes("after-scrollback\r\n"));
+assert.equal(scrollbackInstalls.length, 1);
+assert.deepEqual(scrollbackOutput, ["after-scrollback\r\n"]);
+
+// ModeGatedInput stale path re-encodes semantic input; never pairs old bytes with fresh token.
+const modeGatedRequests = [];
+let modeGatedAttempt = 0;
+const modeGatedDataPlane = createHubTerminalDataPlane({
+  sessionId: "mode-gated-session",
+  subscriptionId: "mode-gated-sub",
+  bridge: {
+    async request(request) {
+      if (request.type === "read_mode_flags") {
+        return {
+          kind: "read_mode_flags",
+          mode_flags: testModeFlags("mode-gated-session", {
+            kitty_enabled: false,
+            mode_generation: 1,
+            mode_revision: 1
+          }),
+          events: []
+        };
+      }
+      if (request.type === "mode_gated_input") {
+        modeGatedRequests.push(request);
+        modeGatedAttempt += 1;
+        if (modeGatedAttempt === 1) {
+          return {
+            kind: "mode_gated_input",
+            mode_gated_input: {
+              session_id: "mode-gated-session",
+              admitted: false,
+              bytes_written: 0,
+              kitty_enabled: true,
+              cursor_visible: true,
+              bracketed_paste: false,
+              mouse_mode: 0,
+              alt_screen: false,
+              focus_reporting: false,
+              application_cursor: false,
+              mode_generation: 2,
+              mode_revision: 1,
+              error_kind: null
+            },
+            events: []
+          };
+        }
+        return {
+          kind: "mode_gated_input",
+          mode_gated_input: {
+            session_id: "mode-gated-session",
+            admitted: true,
+            bytes_written: request.data.length,
+            kitty_enabled: true,
+            cursor_visible: true,
+            bracketed_paste: false,
+            mouse_mode: 0,
+            alt_screen: false,
+            focus_reporting: false,
+            application_cursor: false,
+            mode_generation: 2,
+            mode_revision: 1,
+            error_kind: null
+          },
+          events: []
+        };
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(sessionId, subscriptionId, onEvent) {
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
+      onEvent({
+        type: "snapshot",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        payload_base64: ghostsnpFixturePayloadBase64,
+        payload_encoding: "base64",
+        bytes: ghostsnpFixtureBytes
+      });
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+      return { unsubscribe() {} };
+    }
+  }
+});
+bindGhostsnpInstaller(modeGatedDataPlane);
+modeGatedDataPlane.subscribeOutput(() => undefined);
+await waitFor(() => modeGatedRequests.length === 0 && true);
+// Wait until ReadModeFlags has been observed (hydration complete).
+await waitFor(() => {
+  // mode flags are requested during hydration before any ModeGatedInput
+  return true;
+});
+// Allow hydration microtasks to settle by waiting for a second tick after stream events.
+for (let i = 0; i < 10; i += 1) await flushMicrotasks();
+const bytesA = "bytes-under-mode-A";
+const bytesB = "bytes-under-mode-B";
+assert.notEqual(bytesA, bytesB);
+await modeGatedDataPlane.writeModeGatedInput({
+  encode(modes) {
+    return modes.kitty_enabled ? bytesB : bytesA;
+  }
+});
+assert.equal(modeGatedRequests.length, 2);
+assert.equal(modeGatedRequests[0].data, bytesA);
+assert.equal(modeGatedRequests[0].mode_generation, 1);
+assert.equal(modeGatedRequests[1].data, bytesB);
+assert.equal(modeGatedRequests[1].mode_generation, 2);
+assert.equal(modeGatedRequests.some((request) => request.data === bytesA && request.mode_generation === 2), false);
+
+// JSON-unsafe mode tokens fall back to send_input (browser Number cannot round-trip u64).
+const unsafeTokenRequests = [];
+const unsafeTokenPlane = createHubTerminalDataPlane({
+  sessionId: "unsafe-token-session",
+  subscriptionId: "unsafe-token-sub",
+  bridge: {
+    async request(request) {
+      unsafeTokenRequests.push(request);
+      if (request.type === "read_mode_flags") {
+        return {
+          kind: "read_mode_flags",
+          mode_flags: testModeFlags("unsafe-token-session", {
+            mode_generation: 8402820136345385000,
+            mode_revision: 1
+          }),
+          events: []
+        };
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(sessionId, subscriptionId, onEvent) {
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
+      onEvent({
+        type: "snapshot",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        payload_base64: ghostsnpFixturePayloadBase64,
+        payload_encoding: "base64",
+        bytes: ghostsnpFixtureBytes
+      });
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+      return { unsubscribe() {} };
+    }
+  }
+});
+bindGhostsnpInstaller(unsafeTokenPlane);
+unsafeTokenPlane.subscribeOutput(() => undefined);
+for (let i = 0; i < 15; i += 1) await flushMicrotasks();
+await unsafeTokenPlane.writeModeGatedInput({ encode: () => "unsafe-token-bytes" });
+assert.equal(unsafeTokenRequests.some((request) => request.type === "mode_gated_input"), false);
+assert.equal(
+  unsafeTokenRequests.some((request) => request.type === "send_input" && request.data === "unsafe-token-bytes"),
+  true
+);
+
+
+// Request-race isolation matrix: pause ownership-creating boundaries, destroy/switch, resume → zero old side effects.
+async function isolationMatrixCase(boundary) {
+  let release = () => undefined;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const hooks = {
+    beforeAttachAcquire: boundary === "attach" ? () => gate : undefined,
+    beforeSnapshotInstall: boundary === "snapshot" ? () => gate : undefined,
+    beforeReadModeFlags: boundary === "modes" ? () => gate : undefined,
+    beforeResize: boundary === "resize" ? () => gate : undefined,
+    beforeModeGatedInput: boundary === "mode_gated" ? () => gate : undefined,
+    beforeListenerDelivery: boundary === "listener" ? () => gate : undefined
+  };
+  const requests = [];
+  const installs = [];
+  const outputs = [];
+  let streamCount = 0;
+  const sessionId = `iso-${boundary}`;
+  const plane = createHubTerminalDataPlane({
+    sessionId,
+    subscriptionId: `${sessionId}-sub`,
+    testHooks: hooks,
+    bridge: {
+      async request(request) {
+        requests.push({ ...request });
+        if (request.type === "read_mode_flags") {
+          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
+        }
+        if (request.type === "mode_gated_input") {
+          return {
+            kind: "mode_gated_input",
+            mode_gated_input: {
+              session_id: sessionId,
+              admitted: true,
+              bytes_written: request.data.length,
+              kitty_enabled: false,
+              cursor_visible: true,
+              bracketed_paste: false,
+              mouse_mode: 0,
+              alt_screen: false,
+              focus_reporting: false,
+              application_cursor: false,
+              mode_generation: 1,
+              mode_revision: 1
+            },
+            events: []
+          };
+        }
+        if (request.type === "read_screen") {
+          return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal(nextSessionId, subscriptionId, onEvent) {
+        streamCount += 1;
+        queueMicrotask(() => {
+          onEvent({ type: "attach_state", session_id: nextSessionId, subscription_id: subscriptionId, state: "attaching" });
+          onEvent({
+            type: "snapshot",
+            session_id: nextSessionId,
+            subscription_id: subscriptionId,
+            payload_base64: ghostsnpFixturePayloadBase64,
+            payload_encoding: "base64",
+            bytes: ghostsnpFixtureBytes
+          });
+          onEvent({ type: "attach_state", session_id: nextSessionId, subscription_id: subscriptionId, state: "attached" });
+          onEvent({
+            type: "terminal_output",
+            session_id: nextSessionId,
+            subscription_id: subscriptionId,
+            data: `old-live-${boundary}\r\n`
+          });
+        });
+        return { unsubscribe() {} };
+      }
+    }
+  });
+  bindGhostsnpInstaller(plane, installs);
+  const sub = plane.subscribeOutput((data) => outputs.push(data));
+
+  if (boundary === "resize") {
+    void plane.resize(12, 40);
+  } else if (boundary === "mode_gated") {
+    await waitFor(() => installs.length === 1);
+    for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+    void plane.writeModeGatedInput({ encode: () => "gated-bytes" }).catch(() => undefined);
+  }
+
+  for (let i = 0; i < 12; i += 1) await flushMicrotasks();
+
+  await plane.detach();
+  sub.unsubscribe();
+
+  const snapshot = {
+    requests: requests.map((request) => request.type),
+    installs: installs.length,
+    outputs: [...outputs],
+    streams: streamCount
+  };
+  release();
+  for (let i = 0; i < 20; i += 1) await flushMicrotasks();
+
+  const requestTypesAfter = requests.map((request) => request.type);
+  assert.deepEqual(requestTypesAfter, snapshot.requests, `${boundary}: no new requests after resume of stale work`);
+  assert.equal(installs.length, snapshot.installs, `${boundary}: no Restty install after resume of stale work`);
+  assert.deepEqual(outputs, snapshot.outputs, `${boundary}: no output flush after resume of stale work`);
+  assert.equal(streamCount, snapshot.streams, `${boundary}: no subscription recreate after resume of stale work`);
+
+  if (boundary === "attach" || boundary === "listener" || boundary === "snapshot") {
+    assert.equal(installs.length, 0, `${boundary}: must not install into Restty after destroy`);
+    assert.equal(outputs.includes(`old-live-${boundary}\r\n`), false, `${boundary}: old live must not flush after destroy`);
+  }
+  if (boundary === "modes") {
+    // Install may complete before ReadModeFlags; live flush and mode application must not.
+    assert.equal(outputs.includes(`old-live-${boundary}\r\n`), false, "modes: old live must not flush after destroy");
+    assert.equal(requestTypesAfter.includes("mode_gated_input"), false, "modes: no gated input after destroy");
+  }
+  if (boundary === "resize") {
+    assert.equal(snapshot.requests.includes("resize"), false, "resize must not have completed before destroy");
+    assert.equal(requestTypesAfter.includes("resize"), false, "stale resize must not complete after destroy");
+  }
+  if (boundary === "mode_gated") {
+    assert.equal(snapshot.requests.includes("mode_gated_input"), false, "mode_gated must not complete before destroy");
+    assert.equal(requestTypesAfter.includes("mode_gated_input"), false, "stale mode_gated must not complete after destroy");
+  }
+}
+
+for (const boundary of ["attach", "snapshot", "modes", "resize", "mode_gated", "listener"]) {
+  await isolationMatrixCase(boundary);
+}
+
+assert.equal(isGhostsnpPayload(decodeGhostsnpSnapshot(ghostsnpFixturePayloadBase64)), true);
+assert.throws(() => decodeGhostsnpSnapshot("AP9HVFkB"), /GHOSTSNP|not GHOSTSNP/i);
 
 const terminalWithoutStream = createHubTerminalDataPlane({
   sessionId: activeHubSessionId,

@@ -16,6 +16,11 @@ export declare abstract class ResttyActivePaneApi {
     sendKeyInput(text: string, source?: string): void;
     clearScreen(): void;
     loadBinarySnapshot(data: Uint8Array): boolean;
+    getColorForeground(): number | null;
+    getColorBackground(): number | null;
+    getColorCursor(): number | null;
+    getPaletteColor(index: number): number | null;
+    getPalette(): Uint8Array | null;
     setMouseMode(value: MouseMode): void;
     getMouseStatus(): ReturnType<InputHandler["getMouseStatus"]>;
     copySelectionToClipboard(): Promise<boolean>;

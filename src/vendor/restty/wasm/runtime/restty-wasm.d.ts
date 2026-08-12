@@ -25,6 +25,11 @@ export declare class ResttyWasm {
     drainOutput(handle: number): string;
     /** Get active Kitty keyboard protocol flags. */
     getKittyKeyboardFlags(handle: number): number;
+    /**
+     * Read Ghostty mouse tracking/format mode bits for JS MouseController rehydrate.
+     * Bits: 9, 1000, 1002, 1003, 1005, 1006, 1015, 1016 (see mouse.ts).
+     */
+    getMouseTrackingBits(handle: number): number;
     /** Set the active terminal search query. */
     setSearchQuery(handle: number, query: string): void;
     /** Clear the active terminal search query and results. */
@@ -43,14 +48,27 @@ export declare class ResttyWasm {
     getKittyPlacements(handle: number): KittyPlacement[];
     /** Write text to terminal for processing. */
     write(handle: number, text: string): void;
+    /** Write raw bytes to terminal for processing (no encoding step). */
+    writeBytes(handle: number, data: Uint8Array): void;
     /** Set default colors for terminal (RGB packed as 0xRRGGBB). */
     setDefaultColors(handle: number, fg: number, bg: number, cursor: number): void;
     /** Set terminal color palette (RGB triples). */
     setPalette(handle: number, colors: Uint8Array, count: number): void;
     /** Reset terminal palette to defaults. */
     resetPalette(handle: number): void;
-    /** Load a binary snapshot bundle into the terminal state. */
-    loadBinarySnapshot(handle: number, data: Uint8Array): boolean;
+    /** Get the active foreground color as 0x00RRGGBB, or null if unset. */
+    getColorForeground(handle: number): number | null;
+    /** Get the active background color as 0x00RRGGBB, or null if unset. */
+    getColorBackground(handle: number): number | null;
+    /** Get the active cursor color as 0x00RRGGBB, or null if unset. */
+    getColorCursor(handle: number): number | null;
+    /** Get a single palette color as 0x00RRGGBB, or null for invalid index. */
+    getPaletteColor(handle: number, index: number): number | null;
+    /** Get the full 256-color palette as a Uint8Array (768 bytes: R,G,B × 256). */
+    getPalette(handle: number): Uint8Array | null;
+    /** Load a binary snapshot bundle into the terminal state.
+     *  Returns null on success, or a string describing the failure. */
+    loadBinarySnapshot(handle: number, data: Uint8Array): string | null;
     /** Get current render state with cached typed array views. */
     getRenderState(handle: number): RenderState | null;
 }

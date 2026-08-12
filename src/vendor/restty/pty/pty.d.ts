@@ -1,6 +1,4 @@
 import type { PtyCallbacks, PtyConnectionState, PtyConnectOptions, PtyResizeMeta, PtyTransport } from "./types";
-/** Decode a binary WebSocket frame into a UTF-8 string using a streaming TextDecoder. */
-export declare function decodePtyBinary(decoder: TextDecoder, payload: ArrayBuffer | Uint8Array, stream?: boolean): string;
 /** Create a fresh idle PTY connection state. */
 export declare function createPtyConnection(): PtyConnectionState;
 /**

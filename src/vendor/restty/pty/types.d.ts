@@ -53,8 +53,6 @@ export type PtyConnectionState = {
     status: PtyLifecycleState;
     /** WebSocket endpoint URL. */
     url: string;
-    /** Decoder for binary WebSocket frames, or null before connection. */
-    decoder: TextDecoder | null;
     /** Monotonic ID used to discard stale connection callbacks. */
     connectId: number;
 };
@@ -67,7 +65,7 @@ export type PtyCallbacks = {
     /** Called when the connection is closed or lost. */
     onDisconnect?: () => void;
     /** Called with terminal output data received from the PTY. */
-    onData?: (data: string) => void;
+    onData?: (data: string | Uint8Array) => void;
     /** Called with the shell name when the PTY reports its status. */
     onStatus?: (shell: string) => void;
     /** Called when the PTY server reports an error. */
