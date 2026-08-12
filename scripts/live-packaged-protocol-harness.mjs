@@ -3284,43 +3284,83 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       );
     }
 
-    // Stale-submit negative: force-click while form is invalid, then settle with a
-    // correlated ledger scan (no fixed single delay). Reject the dead UUID in every
-    // supported Add value field. Production click path is fail-closed at disabled/invalid.
-    // Ablation: BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1 injects a synthetic stale Add dispatch
-    // after the click baseline so this oracle fails first (proves the scan is live).
+    // Stale-submit negative: force-click while form is invalid, then wait for a production
+    // click/dispatch completion signal (lastFormSubmitClick phase from the form submit control —
+    // not a wall-clock deadline). Reject the dead UUID in every supported Add value field.
+    // Ablation: BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1 sets harness.ablateEntitySelectInvalidation so
+    // the production invalidation guard reopens; the real action collector must emit the stale
+    // add_session request that makes this oracle fail first.
+    const addActionId = "botster_workspaces.add_session";
+    const ablateStaleSubmit = process.env.BOTSTER_LIVE_ABLATE_STALE_SUBMIT === "1";
     const eventsBeforeStale = await harnessEventCount(page);
-    await formP1.locator(":scope > ion-button[data-action-id='botster_workspaces.add_session']")
-      .click({ force: true });
-    if (process.env.BOTSTER_LIVE_ABLATE_STALE_SUBMIT === "1") {
-      await page.evaluate(({ workspaceId, sessionId: expectedSession }) => {
+    const clickSeqBefore = await page.evaluate(() =>
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.formSubmitClickSeq ?? 0
+    );
+
+    if (ablateStaleSubmit) {
+      await page.evaluate(() => {
         const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-        if (!harness?.events) return;
-        harness.events.push({
-          kind: "daemon_request",
-          payload: {
-            type: "plugin_surface_action",
-            package_name: "botster-workspaces",
-            request: {
-              surface_id: "workspaces",
-              action_id: "botster_workspaces.add_session",
-              kind: "submit",
-              request_id: "ablation-stale-submit",
-              values: {
-                workspace_id: workspaceId,
-                session_id: expectedSession
-              }
-            }
-          }
-        });
-      }, { workspaceId: state.workspaceId, sessionId });
+        if (!harness) {
+          throw new Error("missing live harness for stale-submit ablation");
+        }
+        // Narrow enforcement-point ablation: production formHasInvalidEntitySelects reads this.
+        harness.ablateEntitySelectInvalidation = true;
+      });
     }
-    const staleDeadline = Date.now() + 2_000;
+
+    await formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`)
+      .click({ force: true });
+
+    const clickCompletion = await page.waitForFunction(({ before, actionId }) => {
+      const attempt = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.lastFormSubmitClick;
+      if (!attempt || attempt.seq <= before || attempt.actionId !== actionId) {
+        return null;
+      }
+      if (
+        attempt.phase === "dispatched"
+        || attempt.phase === "blocked_disabled"
+        || attempt.phase === "blocked_invalid"
+      ) {
+        return attempt;
+      }
+      return null;
+    }, {
+      before: clickSeqBefore,
+      actionId: addActionId
+    }, { timeout: 10_000 }).then((handle) => handle.jsonValue()).catch((error) => {
+      throw new Error(`${stage}: production Add click/dispatch path never completed: ${error.message}`);
+    });
+
+    const staleAddSessionArgs = {
+      before: eventsBeforeStale,
+      workspaceId: state.workspaceId,
+      sessionId
+    };
+    const collectStaleAddSession = ({ before, workspaceId, sessionId: expectedSession }) => {
+      const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(before);
+      return entries.filter((entry) => {
+        if (
+          entry.kind !== "daemon_request"
+          || entry.payload?.type !== "plugin_surface_action"
+          || entry.payload?.package_name !== "botster-workspaces"
+          || entry.payload?.request?.action_id !== "botster_workspaces.add_session"
+        ) return false;
+        const values = entry.payload?.request?.values ?? {};
+        if (values.workspace_id !== workspaceId) return false;
+        return values.session_id === expectedSession
+          || values.session_id_advanced === expectedSession
+          || values["botster-workspaces-add-session-id"] === expectedSession
+          || values["botster-workspaces-add-session-id-advanced"] === expectedSession;
+      });
+    };
+
     let staleSubmit = [];
-    while (Date.now() < staleDeadline) {
-      staleSubmit = await page.evaluate(({ before, workspaceId, sessionId: expectedSession }) => {
-        const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(before);
-        return entries.filter((entry) => {
+    if (ablateStaleSubmit || clickCompletion.phase === "dispatched") {
+      // Real production dispatch: wait for the action collector to record the request.
+      // Return null while empty so waitForFunction does not treat [] as success.
+      staleSubmit = await page.waitForFunction((args) => {
+        const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(args.before);
+        const found = entries.filter((entry) => {
           if (
             entry.kind !== "daemon_request"
             || entry.payload?.type !== "plugin_surface_action"
@@ -3328,32 +3368,33 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
             || entry.payload?.request?.action_id !== "botster_workspaces.add_session"
           ) return false;
           const values = entry.payload?.request?.values ?? {};
-          if (values.workspace_id !== workspaceId) return false;
-          return values.session_id === expectedSession
-            || values.session_id_advanced === expectedSession
-            || values["botster-workspaces-add-session-id"] === expectedSession
-            || values["botster-workspaces-add-session-id-advanced"] === expectedSession;
+          if (values.workspace_id !== args.workspaceId) return false;
+          return values.session_id === args.sessionId
+            || values.session_id_advanced === args.sessionId
+            || values["botster-workspaces-add-session-id"] === args.sessionId
+            || values["botster-workspaces-add-session-id-advanced"] === args.sessionId;
         });
-      }, { before: eventsBeforeStale, workspaceId: state.workspaceId, sessionId });
-      if (staleSubmit.length > 0) break;
-      // Barrier: form must remain invalid while we watch for late dispatches.
-      const stillInvalid = await page.evaluate(({ formId }) => {
-        const formEl = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
-        const field = globalThis.document.querySelector(
-          `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id']`
-        );
-        return formEl?.getAttribute("data-form-invalid") === "true"
-          || field?.getAttribute("data-selection-invalid") === "true";
-      }, { formId: `botster-workspaces-add-form-${state.workspaceId}` });
-      if (!stillInvalid) {
-        throw new Error(`${stage}: form left invalid state during stale-submit settle without accepted recovery`);
-      }
-      await page.waitForTimeout(100);
+        return found.length > 0 ? found : null;
+      }, staleAddSessionArgs, { timeout: 15_000 }).then((handle) => handle.jsonValue()).catch((error) => {
+        if (ablateStaleSubmit) {
+          throw new Error(
+            `${stage}: ablation restored stale dispatch but real action collector emitted no add_session: ${error.message}`
+          );
+        }
+        return [];
+      });
+    } else {
+      // Fail-closed completion: scan the ledger once after the production signal.
+      staleSubmit = await page.evaluate(collectStaleAddSession, staleAddSessionArgs);
     }
+
     if (staleSubmit.length > 0) {
       throw new Error(
         `${stage}: held-open P1 dispatched stale add_session for claimed session: ${JSON.stringify(staleSubmit)}`
       );
+    }
+    if (ablateStaleSubmit) {
+      throw new Error(`${stage}: ablation expected stale add_session oracle to fail first`);
     }
 
     // Membership removal restoration via production Remove on P2.

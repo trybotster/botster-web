@@ -746,6 +746,33 @@ function entitySelectSelectionInvalid(
   return !projectEntitySelectOptions(store, props.options_source, value).selectionValid;
 }
 
+/**
+ * Live-harness control surface for form submit proofs. Present only when the packaged
+ * protocol harness init script installs `window.__BOTSTER_LIVE_PROTOCOL_HARNESS__`.
+ * `ablateEntitySelectInvalidation` is a narrow negative-control switch: when true, the
+ * entity-select invalidation gate reports valid so the real click/dispatch path can emit.
+ */
+type LiveProtocolHarnessFormControl = {
+  formSubmitClickSeq?: number;
+  lastFormSubmitClick?: {
+    seq: number;
+    actionId: string;
+    nodeId?: string;
+    phase: "blocked_disabled" | "blocked_invalid" | "dispatched";
+    gated?: boolean;
+    settled?: boolean;
+    ablate?: boolean;
+  };
+  ablateEntitySelectInvalidation?: boolean;
+};
+
+function liveProtocolHarness(): LiveProtocolHarnessFormControl | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as typeof window & {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveProtocolHarnessFormControl;
+  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+}
+
 function formHasInvalidEntitySelects(
   children: UiChild[],
   store: EntityFrameStore,
@@ -753,6 +780,10 @@ function formHasInvalidEntitySelects(
   draft: Record<string, unknown>,
   row?: RowContext
 ): boolean {
+  // Narrow ablation at the invalidation gate for live stale-submit negative controls.
+  if (liveProtocolHarness()?.ablateEntitySelectInvalidation === true) {
+    return false;
+  }
   let invalid = false;
   const visit = (node: RealizedUiNode, currentRow?: RowContext) => {
     if (invalid) return;
@@ -1132,6 +1163,13 @@ function UiNodeForm({
     values: draft as UiNodeActionDispatch["values"]
   };
   options.collectAction?.(submitDispatch);
+  const harness = liveProtocolHarness();
+  // Production keeps native disabled for invalid entity selects. The live harness installs a
+  // global before paint; when it is present, leave the control clickable so the production
+  // onClick fail-closed path (and its completion signal) is always reachable for proofs.
+  // data-form-invalid and the click-time gate remain authoritative.
+  const nativeDisabled = Boolean(submitAction.disabled || (hasInvalidControl && !harness));
+  const submitGated = Boolean(submitAction.disabled || hasInvalidControl);
 
   return (
     <form className="uinode-form" data-ui-node-id={node.id} data-form-invalid={hasInvalidControl ? "true" : "false"}>
@@ -1148,13 +1186,36 @@ function UiNodeForm({
       ))}
       <IonButton
         data-action-id={submitAction.id}
-        disabled={submitAction.disabled || hasInvalidControl}
+        disabled={nativeDisabled}
+        aria-disabled={submitGated ? "true" : undefined}
         type="button"
         onClick={() => {
+          const liveHarness = liveProtocolHarness();
+          const mark = (phase: NonNullable<LiveProtocolHarnessFormControl["lastFormSubmitClick"]>["phase"]) => {
+            if (!liveHarness) return;
+            const seq = (liveHarness.formSubmitClickSeq ?? 0) + 1;
+            liveHarness.formSubmitClickSeq = seq;
+            liveHarness.lastFormSubmitClick = {
+              seq,
+              actionId: submitAction.id,
+              nodeId: node.id,
+              phase,
+              gated: submitGated,
+              ablate: liveHarness.ablateEntitySelectInvalidation === true,
+              settled: true
+            };
+          };
           // Fail closed at click time too: entity frames may have landed after last paint.
-          if (submitAction.disabled) return;
-          if (formHasInvalidEntitySelects(children, store, options, draft, row)) return;
+          if (submitAction.disabled) {
+            mark("blocked_disabled");
+            return;
+          }
+          if (formHasInvalidEntitySelects(children, store, options, draft, row)) {
+            mark("blocked_invalid");
+            return;
+          }
           options.dispatchAction?.({ ...submitDispatch, values: draft as UiNodeActionDispatch["values"] });
+          mark("dispatched");
         }}
       >
         {readString(props.submit_label, "Submit")}
