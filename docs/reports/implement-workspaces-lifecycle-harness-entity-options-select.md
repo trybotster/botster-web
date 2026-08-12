@@ -9,7 +9,7 @@
 | Target repository | `botster-web` |
 | Target id | `tgt_40abcf71ccf049f4ac0c99953a799869` |
 | PR | https://github.com/trybotster/botster-web/pull/89 (`pr_1786507187_760694`) |
-| Branch commit | current `project-pipelines/ticket_1786494437_647488` HEAD |
+| Web feature commit | `d5849453fa0e3462d7f17d7a3472efcb2edd5922` |
 
 ## Playbooks and notes applied
 
@@ -35,7 +35,7 @@
 
 - **botster-web** owns harness interaction and consumer assertions only.
 - **botster-workspaces** producer ticket `ticket_1786507221_760227` @ `c0699007f0cb946d1cbe12f4bc3b718bfcfa4f18` provides membership `entity_publish` after committed claim/remove.
-- Available sessions entity_options form still lives on picker pin `47b0aeb5dd2014da192378be515cbbfe4adf6bd8` (not yet on Workspaces main alone).
+- Available sessions entity_options form is rebased onto that publish base at combined Workspaces revision `df14369c855a4e7dfee707d72df4b131d8d69510` (`origin/project-pipelines/ticket_1786474780_590414`).
 - Hub pin ≥ `35dd7d22` for empty membership arrays + fanout admission.
 
 ## Cross-repo dependencies
@@ -55,18 +55,22 @@
 
 ## Deviations from plan
 
-None for held-open: forced resubscribe was rejected (human A) and removed. Consumer smoke uses a **combined Workspaces package** because no single main revision yet contains both:
+None for held-open: forced resubscribe was rejected (human A) and removed.
 
-- publish pin `c0699007f0cb946d1cbe12f4bc3b718bfcfa4f18`
-- picker pin `47b0aeb5dd2014da192378be515cbbfe4adf6bd8`
-- combined smoke revision `5d5b94f672600448438af7e27c13273e36cedaa0` (c069900 base + entity_options Add form)
+### Resolvable Workspaces pins
+
+| Role | Revision |
+| --- | --- |
+| Membership publish (merged producer) | `c0699007f0cb946d1cbe12f4bc3b718bfcfa4f18` |
+| Available sessions form (pre-rebase) | `47b0aeb5dd2014da192378be515cbbfe4adf6bd8` |
+| **Consumer smoke package (authoritative)** | `df14369c855a4e7dfee707d72df4b131d8d69510` — Available sessions rebased onto membership publish main (resolvable on `origin/project-pipelines/ticket_1786474780_590414`) |
 
 ## Tests and downstream proof
 
 ```bash
 BOTSTER_HUB_BIN=<hub debug botster-hub, rebuild after 35dd7d22> \
 BOTSTER_SESSION_WORKER_BIN=<hub debug botster-session-worker> \
-BOTSTER_WORKSPACES_PACKAGE_PATH=<combined 5d5b94f: c069900 + 47b0aeb entity_options> \
+BOTSTER_WORKSPACES_PACKAGE_PATH=<checkout of df14369c855a4e7dfee707d72df4b131d8d69510> \
 npm run smoke:workspaces-lifecycle
 # exit 0
 # workspaces-entity-options-membership-reactive passed (no resubscribe)
@@ -74,23 +78,23 @@ npm run smoke:workspaces-lifecycle
 # live packaged protocol harness passed (webrtc)
 
 npm run lint
-# exit 0
+# exit 0 (0 errors)
 
 # Ablation (must fail at stale-submit oracle first):
 BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1 \
 BOTSTER_HUB_BIN=… BOTSTER_SESSION_WORKER_BIN=… \
-BOTSTER_WORKSPACES_PACKAGE_PATH=… \
+BOTSTER_WORKSPACES_PACKAGE_PATH=<df14369 checkout> \
 npm run smoke:workspaces-lifecycle
 # nonzero; message includes held-open P1 dispatched stale add_session
 ```
 
 ## Residual risk
 
-- Workspaces main alone (`c069900`) still lacks Available sessions entity_options until picker merges onto publish base. Downstream should pin a single revision with both seams.
+- Workspaces **main** alone (`c069900`) still lacks Available sessions entity_options until `df14369` (or successor) merges. Consumer proof must use `df14369` (or later combined revision), not bare main.
 - Pure `c069900` without the picker form cannot exercise entity_options select demand.
 
 ## Missing vault guidance
 
-- Consumer lifecycle smoke may need dual Workspaces pins (picker + publish) until both land on one main revision.
+- Consumer lifecycle smoke needs a Workspaces revision that includes both entity_options Available sessions and membership `entity_publish` (currently `df14369`).
 - Harness must select entity_options by option value, never fill hidden IonSelect aux inputs.
 - Held-open membership exclude needs package `entity_publish` after commit, not transport resubscribe.
