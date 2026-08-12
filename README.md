@@ -121,7 +121,46 @@ workspace through rendered Ionic controls, seeds canonical UUID sessions only
 through public daemon requests, and adds sixteen references through the owner-
 authored Add-session form: four current-to-ended transitions, four stable-ended
 references, four ended-to-removed references, and four never-existing
-references. Exact ID membership is checked at the initial, transitioned,
+references.
+
+### Ordered sequence_gap control (live harness)
+
+Parent claim-stack acceptance (`ticket_1786474783_285888`) must use the
+family-bound drop control as the **sole ordered-gap trigger** on Web ≥ this
+change. Do **not** use `closeDataChannel` for ordered gap — that remains the
+in-place reconnect proof only.
+
+When `window.__BOTSTER_LIVE_PROTOCOL_HARNESS__` is installed, transport control
+exposes:
+
+| Method | Role |
+|--------|------|
+| `armDropNextInboundEntityFrame({ entity_type, frame_types?, subscription_id? })` | Arms a one-shot drop of the next matching inbound entity **delta** after decrypt/assembly and before production `receiveEntityFrame`. Returns arm result only (`ok` / `not_armed` reasons). Default `frame_types` are `entity_upsert` \| `entity_patch` \| `entity_remove` (never snapshot/error). |
+| `getDropNextInboundEntityFrameState()` | Polls `idle` \| `armed` \| `dropped` \| `timed_out` \| `disarmed`. Dropped state includes `snapshot_seq`, `subscription_id`, `generation`. |
+| `disarmDropNextInboundEntityFrame()` | Clears an arm without dropping. |
+| `closeDataChannel()` | Closes the real data channel for **reconnect** proof on a surviving document. |
+
+Live Workspaces held-open chronology (mandatory in `smoke:workspaces-lifecycle`):
+
+1. Seed sessions **A** (stale selection) and **B** (second-delta carrier).
+2. P1 holds Add dialog with **A** selected (membership subscription baseline `N`).
+3. `armDropNextInboundEntityFrame({ entity_type: "botster-workspaces.membership" })`.
+4. P2 claims **A** → harness records `webrtc_entity_frame_harness_drop` (D1); client stays at `N`.
+5. P2 claims **B** → production `webrtc_entity_frame_discarded` reason `sequence_gap` (D2) → unsubscribe/subscribe → replacement membership snapshot.
+6. Held selection of **A** is invalid; normal (non-forced) stale submit emits zero outbound `botster_workspaces.add_session` for A.
+7. Mandatory cleanup removes membership and Hub sessions for **both** A and B before later lifecycle stages.
+
+Pins for that lane:
+
+```bash
+BOTSTER_HUB_BIN=<hub built from ≥ de6b09982e72fd5efd04a5258f5fc645f611adbc> \
+BOTSTER_SESSION_WORKER_BIN=<worker from same hub pin> \
+BOTSTER_WORKSPACES_PACKAGE_PATH=<workspaces checkout ≥ 7ab4d1334214b3ea3c8b02e9ea665a27e70c0916> \
+npm run smoke:workspaces-lifecycle
+```
+
+Ablation: `BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1` restores valid stale control via
+store membership remove so the zero-request oracle fails first. Exact ID membership is checked at the initial, transitioned,
 removed, and authoritative-reconnect stages without `list_sessions` or an extra
 surface render. Lifecycle regions are classified from the authored
 `-sessions-(current|ended|unavailable)-` section identity, never from visible

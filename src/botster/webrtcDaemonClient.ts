@@ -75,6 +75,102 @@ type EntitySubscription = {
   closed: boolean;
 };
 
+/** Delta frame types that the live-harness one-shot drop control may match. */
+export type DropNextInboundEntityFrameType = "entity_upsert" | "entity_patch" | "entity_remove";
+
+export type DropNextInboundEntityFrameFilter = {
+  /** Required entity family (e.g. botster-workspaces.membership). */
+  entity_type: string;
+  /**
+   * Allowed delta types. Defaults to all three delta types.
+   * Never matches entity_snapshot or entity_error.
+   */
+  frame_types?: DropNextInboundEntityFrameType[];
+  /** Optional tighter bind when the subscription id is known. */
+  subscription_id?: string;
+};
+
+export type DropNextInboundEntityFrameArmResult =
+  | { ok: true; state: "armed"; filter: DropNextInboundEntityFrameFilter }
+  | {
+      ok: false;
+      state: "not_armed";
+      reason: "no_harness" | "no_peer" | "already_armed" | "invalid_filter";
+    };
+
+export type DropNextInboundEntityFrameState =
+  | { state: "idle" }
+  | { state: "armed"; filter: DropNextInboundEntityFrameFilter; armed_at: number }
+  | {
+      state: "dropped";
+      filter: DropNextInboundEntityFrameFilter;
+      entity_type: string;
+      subscription_id: string;
+      frame_type: string;
+      snapshot_seq: number;
+      generation: number;
+      dropped_at: number;
+    }
+  | {
+      state: "timed_out";
+      filter: DropNextInboundEntityFrameFilter;
+      armed_at: number;
+      timed_out_at: number;
+    }
+  | { state: "disarmed"; reason: "manual" | "peer_reset" };
+
+const DEFAULT_DROP_FRAME_TYPES: readonly DropNextInboundEntityFrameType[] = [
+  "entity_upsert",
+  "entity_patch",
+  "entity_remove"
+];
+
+function normalizeDropFilter(
+  filter: DropNextInboundEntityFrameFilter | null | undefined
+): DropNextInboundEntityFrameFilter | null {
+  if (!filter || typeof filter !== "object") return null;
+  const entityType = typeof filter.entity_type === "string" ? filter.entity_type.trim() : "";
+  if (!entityType) return null;
+
+  let frameTypes: DropNextInboundEntityFrameType[] | undefined;
+  if (filter.frame_types !== undefined) {
+    if (!Array.isArray(filter.frame_types) || filter.frame_types.length === 0) return null;
+    const allowed = new Set<string>(DEFAULT_DROP_FRAME_TYPES);
+    const normalized: DropNextInboundEntityFrameType[] = [];
+    for (const entry of filter.frame_types) {
+      if (typeof entry !== "string" || !allowed.has(entry)) return null;
+      if (!normalized.includes(entry as DropNextInboundEntityFrameType)) {
+        normalized.push(entry as DropNextInboundEntityFrameType);
+      }
+    }
+    if (normalized.length === 0) return null;
+    frameTypes = normalized;
+  }
+
+  let subscriptionId: string | undefined;
+  if (filter.subscription_id !== undefined) {
+    if (typeof filter.subscription_id !== "string" || !filter.subscription_id.trim()) return null;
+    subscriptionId = filter.subscription_id.trim();
+  }
+
+  return {
+    entity_type: entityType,
+    ...(frameTypes ? { frame_types: frameTypes } : {}),
+    ...(subscriptionId ? { subscription_id: subscriptionId } : {})
+  };
+}
+
+function dropFilterAllowsFrame(
+  filter: DropNextInboundEntityFrameFilter,
+  frame: DaemonEntityFrame
+): boolean {
+  if (frame.entity_type !== filter.entity_type) return false;
+  if (filter.subscription_id && frame.subscription_id !== filter.subscription_id) return false;
+  if (frame.type === "entity_snapshot" || frame.type === "entity_error") return false;
+  const allowed = filter.frame_types ?? DEFAULT_DROP_FRAME_TYPES;
+  return (allowed as readonly string[]).includes(frame.type);
+}
+
 export type WebrtcDaemonFailureStage = "bootstrap" | "signaling" | "transport" | "encryption" | "data-plane";
 
 export class WebrtcDaemonClientError extends Error {
@@ -264,6 +360,7 @@ class WebrtcDaemonTransport {
   private closing = false;
   private peerGeneration = 0;
   private aggregateRetainedBytes = 0;
+  private dropNextInboundEntityFrameState: DropNextInboundEntityFrameState = { state: "idle" };
 
   constructor(private readonly options: WebrtcDaemonClientOptions) {
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
@@ -391,12 +488,92 @@ class WebrtcDaemonTransport {
    * global is installed, and it drives the real channel rather than simulating one, so it
    * cannot substitute for production behaviour. Same seam pattern as the harness terminal
    * controls in TerminalViewHost.
+   *
+   * This is the reconnect proof only. Ordered sequence_gap proof uses
+   * {@link armDropNextInboundEntityFrame} instead.
    */
   closeDataChannelForLiveHarness(): boolean {
     if (!liveHarnessInstalled()) return false;
     const dataChannel = this.dataChannel;
     if (!dataChannel || dataChannel.readyState === "closed") return false;
     dataChannel.close?.();
+    return true;
+  }
+
+  /**
+   * Arms a one-shot drop of the next matching inbound entity delta after decrypt/assembly
+   * and before production {@link receiveEntityFrame}. Returns arm outcome only — does not
+   * claim a frame was dropped. Fail-closed without harness global / open peer / valid filter.
+   */
+  armDropNextInboundEntityFrame(
+    filter: DropNextInboundEntityFrameFilter
+  ): DropNextInboundEntityFrameArmResult {
+    if (!liveHarnessInstalled()) {
+      return { ok: false, state: "not_armed", reason: "no_harness" };
+    }
+    const dataChannel = this.dataChannel;
+    if (!dataChannel || dataChannel.readyState === "closed") {
+      return { ok: false, state: "not_armed", reason: "no_peer" };
+    }
+    if (this.dropNextInboundEntityFrameState.state === "armed") {
+      return { ok: false, state: "not_armed", reason: "already_armed" };
+    }
+    const normalized = normalizeDropFilter(filter);
+    if (!normalized) {
+      return { ok: false, state: "not_armed", reason: "invalid_filter" };
+    }
+    this.dropNextInboundEntityFrameState = {
+      state: "armed",
+      filter: normalized,
+      armed_at: Date.now()
+    };
+    return { ok: true, state: "armed", filter: normalized };
+  }
+
+  getDropNextInboundEntityFrameState(): DropNextInboundEntityFrameState {
+    return this.dropNextInboundEntityFrameState;
+  }
+
+  /**
+   * Clears an armed drop without consuming a frame. Returns true when a prior arm was cleared.
+   */
+  disarmDropNextInboundEntityFrame(): boolean {
+    if (!liveHarnessInstalled()) return false;
+    if (this.dropNextInboundEntityFrameState.state !== "armed") return false;
+    this.dropNextInboundEntityFrameState = { state: "disarmed", reason: "manual" };
+    return true;
+  }
+
+  /**
+   * When armed and the assembled frame matches the filter, consume the arm, record the
+   * intentional harness_drop event, and skip production receiveEntityFrame.
+   */
+  private maybeDropArmedInboundEntityFrame(frame: DaemonEntityFrame, generation: number): boolean {
+    const state = this.dropNextInboundEntityFrameState;
+    if (state.state !== "armed") return false;
+    if (!dropFilterAllowsFrame(state.filter, frame)) return false;
+
+    const snapshotSeq =
+      "snapshot_seq" in frame && typeof frame.snapshot_seq === "number" ? frame.snapshot_seq : -1;
+    this.dropNextInboundEntityFrameState = {
+      state: "dropped",
+      filter: state.filter,
+      entity_type: frame.entity_type,
+      subscription_id: frame.subscription_id,
+      frame_type: frame.type,
+      snapshot_seq: snapshotSeq,
+      generation,
+      dropped_at: Date.now()
+    };
+    recordLiveHarnessEvent("webrtc_entity_frame_harness_drop", {
+      reason: "harness_armed_drop",
+      entity_type: frame.entity_type,
+      subscription_id: frame.subscription_id,
+      frame_type: frame.type,
+      snapshot_seq: snapshotSeq,
+      generation,
+      filter: state.filter
+    });
     return true;
   }
 
@@ -642,7 +819,12 @@ class WebrtcDaemonTransport {
         finished_at: finishedAt,
         duration_ms: finishedAt - assembly.startedAt
       });
-      this.receiveEntityFrame(payload as DaemonEntityFrame, generation);
+      const entityFrame = payload as DaemonEntityFrame;
+      // Harness-only intercept: drop a filter-matched real frame before production apply.
+      if (this.maybeDropArmedInboundEntityFrame(entityFrame, generation)) {
+        return;
+      }
+      this.receiveEntityFrame(entityFrame, generation);
       return;
     }
 
@@ -759,6 +941,9 @@ class WebrtcDaemonTransport {
     this.cryptoKey = undefined;
     this.encryptedStreamReady = false;
     this.clearAssemblies();
+    if (this.dropNextInboundEntityFrameState.state === "armed") {
+      this.dropNextInboundEntityFrameState = { state: "disarmed", reason: "peer_reset" };
+    }
     for (const subscription of this.entitySubscriptions) {
       subscription.generation = undefined;
       subscription.subscriptionId = undefined;
@@ -893,7 +1078,16 @@ class WebrtcDaemonTransport {
 
     const currentSequence = subscription.snapshotSeq;
     if (currentSequence === undefined || frame.snapshot_seq !== currentSequence + 1) {
-      void this.resubscribeEntity(subscription, generation, currentSequence === undefined ? "delta_before_snapshot" : "sequence_gap");
+      void this.resubscribeEntity(
+        subscription,
+        generation,
+        currentSequence === undefined ? "delta_before_snapshot" : "sequence_gap",
+        {
+          rejected_snapshot_seq: frame.snapshot_seq,
+          rejected_frame_type: frame.type,
+          current_snapshot_seq: currentSequence ?? null
+        }
+      );
       return;
     }
 
@@ -904,7 +1098,12 @@ class WebrtcDaemonTransport {
   private async resubscribeEntity(
     subscription: EntitySubscription,
     generation: number,
-    reason: string
+    reason: string,
+    correlation: {
+      rejected_snapshot_seq?: number;
+      rejected_frame_type?: string;
+      current_snapshot_seq?: number | null;
+    } = {}
   ): Promise<void> {
     if (subscription.resubscribing || subscription.closed || generation !== this.peerGeneration) return;
     subscription.resubscribing = true;
@@ -913,7 +1112,16 @@ class WebrtcDaemonTransport {
       reason,
       generation,
       subscription_id: previousSubscriptionId,
-      entity_type: subscription.entityType
+      entity_type: subscription.entityType,
+      ...(correlation.rejected_snapshot_seq !== undefined
+        ? { rejected_snapshot_seq: correlation.rejected_snapshot_seq }
+        : {}),
+      ...(correlation.rejected_frame_type !== undefined
+        ? { rejected_frame_type: correlation.rejected_frame_type }
+        : {}),
+      ...(correlation.current_snapshot_seq !== undefined
+        ? { current_snapshot_seq: correlation.current_snapshot_seq }
+        : {})
     });
     try {
       if (previousSubscriptionId) {
@@ -1055,23 +1263,35 @@ function recordLiveHarnessEvent(kind: string, payload: unknown): void {
 }
 
 /**
- * Exposes an in-place transport-loss control to the live-protocol harness so reconnect
- * behaviour can be proven on a surviving document instead of through a page reload, which
- * remounts the app and re-runs initial hydration. Installed only when the harness global is
- * already present.
+ * Exposes live-protocol harness transport controls when the harness global is already
+ * present:
+ * - closeDataChannel — in-place reconnect on a surviving document (not ordered-gap)
+ * - armDropNextInboundEntityFrame / getDropNextInboundEntityFrameState /
+ *   disarmDropNextInboundEntityFrame — intentional one-shot drop of a real inbound entity
+ *   delta so production sequence_gap resubscribe can be proven without store injection
  */
 function installLiveHarnessTransportControl(transport: WebrtcDaemonTransport): void {
   if (!liveHarnessInstalled()) return;
 
   const harness = (window as typeof window & {
     __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
-      transportControl?: { closeDataChannel(): boolean };
+      transportControl?: {
+        closeDataChannel(): boolean;
+        armDropNextInboundEntityFrame(
+          filter: DropNextInboundEntityFrameFilter
+        ): DropNextInboundEntityFrameArmResult;
+        getDropNextInboundEntityFrameState(): DropNextInboundEntityFrameState;
+        disarmDropNextInboundEntityFrame(): boolean;
+      };
     };
   }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
   if (!harness) return;
 
   harness.transportControl = {
-    closeDataChannel: () => transport.closeDataChannelForLiveHarness()
+    closeDataChannel: () => transport.closeDataChannelForLiveHarness(),
+    armDropNextInboundEntityFrame: (filter) => transport.armDropNextInboundEntityFrame(filter),
+    getDropNextInboundEntityFrameState: () => transport.getDropNextInboundEntityFrameState(),
+    disarmDropNextInboundEntityFrame: () => transport.disarmDropNextInboundEntityFrame()
   };
 }
 

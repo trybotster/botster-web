@@ -1919,6 +1919,18 @@ assert.match(liveProtocolHarnessScript, /transportControl\?\.closeDataChannel/);
 assert.match(liveProtocolHarnessScript, /__BOTSTER_RECONNECT_DOCUMENT_SENTINEL__/);
 assert.match(webrtcDaemonClient, /closeDataChannelForLiveHarness/);
 assert.match(webrtcDaemonClient, /installLiveHarnessTransportControl/);
+// Ordered-gap control is distinct from reconnect closeDataChannel.
+assert.match(webrtcDaemonClient, /armDropNextInboundEntityFrame/);
+assert.match(webrtcDaemonClient, /getDropNextInboundEntityFrameState/);
+assert.match(webrtcDaemonClient, /disarmDropNextInboundEntityFrame/);
+assert.match(webrtcDaemonClient, /webrtc_entity_frame_harness_drop/);
+assert.match(webrtcDaemonClient, /maybeDropArmedInboundEntityFrame/);
+assert.match(liveProtocolHarnessScript, /armDropNextInboundEntityFrame/);
+assert.match(liveProtocolHarnessScript, /webrtc_entity_frame_harness_drop/);
+assert.match(liveProtocolHarnessScript, /sequence_gap/);
+assert.match(liveProtocolHarnessScript, /second_delta_session_id|gap_trigger_snapshot_seq/);
+// Stale-submit green path must not force-click disabled controls.
+assert.doesNotMatch(liveProtocolHarnessScript, /\.click\(\{\s*force:\s*true\s*\}\)/);
 assert.match(browserRuntimeSmokeScript, /proveHubGeneralWithoutHub/);
 assert.match(browserRuntimeSmokeScript, /Update check failed/);
 assert.doesNotMatch(browserRuntimeSmokeScript, /check_hub_update/);
@@ -4613,9 +4625,248 @@ try {
     assert.equal(transportControl.closeDataChannel(), false);
     seamSubscription.unsubscribe();
     seamClient.disconnect();
+
+    // Family-bound arm/drop: no control without harness, arm returns arm-only, matching
+    // delta drops once, non-matching family/type pass through, two-frame chronology reaches
+    // production sequence_gap (not after a single dropped frame alone).
+    const dropChannel = createFakeDataChannel();
+    let nextDropSubscriptionId = 0;
+    const dropClient = createWebrtcTestClient([dropChannel], localWebrtcBootstrapFixture, {
+      entitySubscriptionIdGenerator: () => `drop-subscription-${++nextDropSubscriptionId}`
+    });
+    const dropFrames = [];
+    const dropSubscription = dropClient.subscribeEntityFrames("botster-workspaces.membership", (frame) => {
+      dropFrames.push(frame);
+    });
+    await waitForTestCondition(() => dropChannel.sent.length === 1);
+    await emitChunkedTestResponse(
+      dropChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      { kind: "entity_subscribed", events: [], diagnostics: [] },
+      { messageId: "drop-subscribe-response" }
+    );
+    await emitChunkedTestResponse(
+      dropChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        type: "entity_snapshot",
+        subscription_id: "drop-subscription-1",
+        entity_type: "botster-workspaces.membership",
+        snapshot_seq: 10,
+        items: []
+      },
+      { deliveryKind: "daemon_entity_frame", messageId: "drop-baseline-snapshot" }
+    );
+    await dropSubscription.ready;
+    assert.deepEqual(dropFrames.map((frame) => frame.type), ["entity_snapshot"]);
+
+    const dropControl = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl;
+    assert.equal(typeof dropControl.armDropNextInboundEntityFrame, "function");
+    assert.equal(typeof dropControl.getDropNextInboundEntityFrameState, "function");
+    assert.equal(typeof dropControl.disarmDropNextInboundEntityFrame, "function");
+    assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "idle");
+
+    // Invalid filter fails closed without arming.
+    assert.deepEqual(
+      dropControl.armDropNextInboundEntityFrame({}),
+      { ok: false, state: "not_armed", reason: "invalid_filter" }
+    );
+    assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "idle");
+
+    const armResult = dropControl.armDropNextInboundEntityFrame({
+      entity_type: "botster-workspaces.membership"
+    });
+    assert.equal(armResult.ok, true);
+    assert.equal(armResult.state, "armed");
+    assert.equal(armResult.filter.entity_type, "botster-workspaces.membership");
+    assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "armed");
+    // Second arm while armed fails closed.
+    assert.deepEqual(
+      dropControl.armDropNextInboundEntityFrame({ entity_type: "botster-workspaces.membership" }),
+      { ok: false, state: "not_armed", reason: "already_armed" }
+    );
+
+    // Non-matching family passes through and keeps the arm.
+    const framesBeforePassthrough = dropFrames.length;
+    await emitChunkedTestResponse(
+      dropChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        type: "entity_upsert",
+        subscription_id: "drop-subscription-1",
+        entity_type: "session",
+        snapshot_seq: 11,
+        id: "other-family",
+        entity: { id: "other-family" }
+      },
+      { deliveryKind: "daemon_entity_frame", messageId: "drop-non-matching-family" }
+    );
+    await waitForTestCondition(() =>
+      (globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__.events ?? []).some(
+        (entry) =>
+          entry.kind === "webrtc_entity_frame_discarded"
+          && entry.payload?.reason === "stale_generation_or_subscription"
+          && entry.payload?.entity_type === "session"
+      )
+    );
+    // No membership subscription for session frames on this client — discarded, arm remains.
+    assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "armed");
+    assert.equal(dropFrames.length, framesBeforePassthrough);
+
+    // entity_snapshot never matches the default delta filter; remain armed and apply.
+    await emitChunkedTestResponse(
+      dropChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        type: "entity_snapshot",
+        subscription_id: "drop-subscription-1",
+        entity_type: "botster-workspaces.membership",
+        snapshot_seq: 10,
+        items: []
+      },
+      { deliveryKind: "daemon_entity_frame", messageId: "drop-snapshot-not-matched" }
+    );
+    await waitForTestCondition(() => dropFrames.length === framesBeforePassthrough + 1);
+    assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "armed");
+    assert.equal(dropFrames.at(-1).type, "entity_snapshot");
+
+    const harnessEventsBeforeDrop = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__.events.length;
+    const framesBeforeDrop = dropFrames.length;
+    // Matching D1 (seq 11) is dropped once before receiveEntityFrame.
+    await emitChunkedTestResponse(
+      dropChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        type: "entity_upsert",
+        subscription_id: "drop-subscription-1",
+        entity_type: "botster-workspaces.membership",
+        snapshot_seq: 11,
+        id: "session-a",
+        entity: { id: "session-a" }
+      },
+      { deliveryKind: "daemon_entity_frame", messageId: "drop-d1-claim-a" }
+    );
+    await waitForTestCondition(
+      () => dropControl.getDropNextInboundEntityFrameState().state === "dropped"
+    );
+    const dropState = dropControl.getDropNextInboundEntityFrameState();
+    assert.equal(dropState.state, "dropped");
+    assert.equal(dropState.snapshot_seq, 11);
+    assert.equal(dropState.entity_type, "botster-workspaces.membership");
+    assert.equal(dropState.frame_type, "entity_upsert");
+    assert.equal(dropState.subscription_id, "drop-subscription-1");
+    // Dropped frame never reached the listener.
+    assert.equal(dropFrames.length, framesBeforeDrop);
+    const harnessDropEvents = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__.events
+      .slice(harnessEventsBeforeDrop)
+      .filter((entry) => entry.kind === "webrtc_entity_frame_harness_drop");
+    assert.equal(harnessDropEvents.length, 1);
+    assert.equal(harnessDropEvents[0].payload.reason, "harness_armed_drop");
+    assert.equal(harnessDropEvents[0].payload.snapshot_seq, 11);
+
+    // Two-frame chronology: deliver non-contiguous seq 13 after baseline stayed at 10 from the
+    // dropped D1 (seq 11). Production sequence_gap must fire; a single drop alone is not enough.
+    const sentBeforeGap = dropChannel.sent.length;
+    await emitChunkedTestResponse(
+      dropChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        type: "entity_upsert",
+        subscription_id: "drop-subscription-1",
+        entity_type: "botster-workspaces.membership",
+        snapshot_seq: 13,
+        id: "session-b",
+        entity: { id: "session-b" }
+      },
+      { deliveryKind: "daemon_entity_frame", messageId: "drop-d2-claim-b-gap" }
+    );
+    // Production sequence_gap: unsubscribe first, then (after response) resubscribe.
+    await waitForTestCondition(() => dropChannel.sent.length >= sentBeforeGap + 1);
+    assert.deepEqual(
+      await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, dropChannel.sent[sentBeforeGap]),
+      { type: "unsubscribe_entities", subscription_id: "drop-subscription-1" }
+    );
+    const discardEvents = (globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__.events ?? []).filter(
+      (entry) =>
+        entry.kind === "webrtc_entity_frame_discarded"
+        && entry.payload?.reason === "sequence_gap"
+        && entry.payload?.entity_type === "botster-workspaces.membership"
+    );
+    assert.equal(discardEvents.length >= 1, true);
+    assert.equal(discardEvents.at(-1).payload.rejected_snapshot_seq, 13);
+    assert.equal(discardEvents.at(-1).payload.current_snapshot_seq, 10);
+
+    await emitChunkedTestResponse(
+      dropChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      { kind: "entity_unsubscribed", events: [], diagnostics: [] },
+      { messageId: "drop-gap-unsubscribe-response" }
+    );
+    await waitForTestCondition(() => dropChannel.sent.length >= sentBeforeGap + 2);
+    assert.deepEqual(
+      await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, dropChannel.sent[sentBeforeGap + 1]),
+      {
+        type: "subscribe_entities",
+        entity_type: "botster-workspaces.membership",
+        subscription_id: "drop-subscription-2"
+      }
+    );
+    // One-shot state remains dropped (not re-armed); second frame was not auto-dropped.
+    assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "dropped");
+    // Listener still has only snapshots so far (gap discarded D2 before apply).
+    assert.equal(dropFrames.filter((frame) => frame.type === "entity_upsert").length, 0);
+
+    await emitChunkedTestResponse(
+      dropChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      { kind: "entity_subscribed", events: [], diagnostics: [] },
+      { messageId: "drop-gap-subscribe-response" }
+    );
+    await emitChunkedTestResponse(
+      dropChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        type: "entity_snapshot",
+        subscription_id: "drop-subscription-2",
+        entity_type: "botster-workspaces.membership",
+        snapshot_seq: 20,
+        items: [{ id: "session-a" }, { id: "session-b" }],
+        resync_reason: "sequence_gap"
+      },
+      { deliveryKind: "daemon_entity_frame", messageId: "drop-replacement-snapshot" }
+    );
+    await waitForTestCondition(() => dropFrames.some((frame) =>
+      frame.type === "entity_snapshot" && frame.subscription_id === "drop-subscription-2"
+    ));
+    assert.equal(dropFrames.at(-1).snapshot_seq, 20);
+
+    // Disarm when not armed is false; re-arm after drop succeeds; manual disarm works.
+    assert.equal(dropControl.disarmDropNextInboundEntityFrame(), false);
+    const rearm = dropControl.armDropNextInboundEntityFrame({
+      entity_type: "botster-workspaces.membership",
+      frame_types: ["entity_patch"]
+    });
+    assert.equal(rearm.ok, true);
+    assert.equal(dropControl.disarmDropNextInboundEntityFrame(), true);
+    assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "disarmed");
+    assert.equal(dropControl.getDropNextInboundEntityFrameState().reason, "manual");
+
+    // closeDataChannel remains a separate reconnect control.
+    assert.equal(typeof dropControl.closeDataChannel, "function");
+
+    dropSubscription.unsubscribe();
+    dropClient.disconnect();
   } finally {
     delete globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
   }
+
+  // Without harness global, arm control is not installed and production methods fail closed.
+  assert.equal(globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__, undefined);
+  const noDropHarnessChannel = createFakeDataChannel();
+  const noDropHarnessClient = createWebrtcTestClient([noDropHarnessChannel], localWebrtcBootstrapFixture);
+  assert.equal(globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__, undefined);
+  noDropHarnessClient.disconnect();
+
   // entity_error is terminal for the subscription generation. It carries no snapshot_seq,
   // so it must not be read as a sequence gap: the client delivers it and stops. Any
   // resubscribe here would be the loop the session-type surface exists to avoid.

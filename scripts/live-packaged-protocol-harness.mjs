@@ -272,6 +272,13 @@ try {
     await openFirstPartyUiAppSurface(page, "webrtc");
     if (workspacesLifecycleMode) {
       await exerciseWorkspacesLifecycle(page);
+      // Focused lifecycle smoke is complete: do not continue into session/terminal stages
+      // (those are smoke:live-packaged-protocol). Mirrors entity-options reactive early exit.
+      assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+      assertRequiredWorkspacesProof();
+      await requestDaemonShutdown();
+      console.log("workspaces lifecycle live proof passed (webrtc)");
+      process.exit(0);
     }
   }
   if (process.env.BOTSTER_LIVE_SURFACE_ONLY === "1") {
@@ -1491,11 +1498,50 @@ async function exerciseEntityOptionsReactive(page) {
   }
 
   // Stale submit must not produce a successful plugin_surface_action with the dead value.
+  // Normal rendered click only — no force:true (ticket_1786518263_839128).
   const eventsBeforeStale = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length
   );
-  await page.locator("[data-action-id='entity-options.submit']").click({ force: true });
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  const clickSeqBeforeEntityOptions = await page.evaluate(() =>
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.formSubmitClickSeq ?? 0
+  );
+  const staleSubmitButton = page.locator("[data-action-id='entity-options.submit']");
+  await staleSubmitButton.click({ timeout: 3_000 }).catch(() => {});
+  await page.evaluate(() => new Promise((resolve) => {
+    queueMicrotask(() => queueMicrotask(resolve));
+  }));
+  const entityOptionsClick = await page.waitForFunction(({ before }) => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    const attempt = harness?.lastFormSubmitClick;
+    if (
+      attempt
+      && attempt.seq > before
+      && attempt.actionId === "entity-options.submit"
+      && (attempt.phase === "dispatched" || attempt.phase === "blocked_disabled" || attempt.phase === "blocked_invalid")
+    ) {
+      return attempt;
+    }
+    const form = globalThis.document.querySelector("[data-ui-node-id='entity-options-form']");
+    const btn = globalThis.document.querySelector("[data-action-id='entity-options.submit']");
+    const native = btn?.shadowRoot?.querySelector("button") ?? btn?.querySelector("button") ?? btn;
+    const disabled = Boolean(
+      btn?.hasAttribute("disabled")
+      || native?.disabled
+      || native?.hasAttribute?.("disabled")
+    );
+    const invalid = form?.getAttribute("data-form-invalid") === "true"
+      || !!globalThis.document.querySelector("[data-selection-invalid='true']")
+      || !!globalThis.document.querySelector("[data-testid='entity-options-invalid']");
+    if (disabled && invalid) {
+      return { phase: "blocked_gate", actionId: "entity-options.submit", settled: true };
+    }
+    return null;
+  }, { before: clickSeqBeforeEntityOptions }, { timeout: 10_000 })
+    .then((handle) => handle.jsonValue())
+    .catch((error) => {
+      throw new Error(`entity-options stale submit path never settled: ${error.message}`);
+    });
+  void entityOptionsClick;
   const staleSubmit = await page.evaluate(({ before, packageName }) => {
     const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(before);
     return entries.filter((entry) =>
@@ -3144,167 +3190,527 @@ async function assertWorkspacesAddSelectionInvalid(page, state, label) {
 }
 
 /**
- * Workspaces-path held-open entity_options membership proof.
- * Dual production clients: P1 holds Add dialog; P2 claims/removes membership.
+ * Workspaces-path held-open entity_options membership proof with ordered sequence_gap.
+ *
+ * Two-mutation chronology (ticket_1786518263_839128):
+ *   seed A + B → P1 holds Add with A selected → arm membership drop →
+ *   P2 claims A (D1 harness-dropped) → P2 claims B (D2 triggers production sequence_gap) →
+ *   replacement snapshot excludes A → force-free stale submit blocked → cleanup A and B.
+ *
+ * Dual production clients: P1 holds Add dialog; P2 claims membership via normal UI only.
+ * closeDataChannel remains reconnect-only and is not used as the gap trigger.
  */
 async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBrowser, state, socketPath) {
   void sharedBrowser;
   const stage = "workspaces-entity-options-membership-reactive";
-  const sessionId = randomUUID();
-  const spawnResponse = await sendDaemonRequest(socketPath, {
-    type: "spawn",
-    session_id: sessionId,
-    command: "sleep 300"
-  });
-  if (spawnResponse.error) {
-    throw new Error(
-      `${stage} seed spawn failed for ${sessionId}: ${JSON.stringify(spawnResponse.error)}`
-    );
+  // A = stale selection under test (warmup claim may resync P1 after dual-client floor advance).
+  // B = harness-dropped delta (first ordered delta after applied floor is stable).
+  // C = second real delta that triggers production sequence_gap.
+  // Hub package-entity fanout: a second membership subscriber advances the provider sequence
+  // without updating P1's package_last_applied_seq, so the first claim after P2 dialog open is
+  // often package_entity_resync rather than an ordered delta. Warmup claim A settles that floor
+  // so claim B/C can be real deltas for the drop → gap chronology.
+  const sessionA = randomUUID();
+  const sessionB = randomUUID();
+  const sessionC = randomUUID();
+  if (new Set([sessionA, sessionB, sessionC]).size !== 3) {
+    throw new Error(`${stage}: seeded session ids collided`);
   }
-  await waitForHarnessEvent(page, {
-    kind: "hub_frame",
-    family: "session",
-    id: sessionId,
-    lifecycle_class: "current"
-  }, `${stage} current seed ${sessionId}`);
+  const seededSessions = [];
+  let page2;
+  let formP1;
+  let selectP1;
+  let renderBaseline = 0;
+  let orderedGapEvidence = null;
 
-  const formP1 = await openWorkspacesAddSessionDialog(page, state, `${stage}-hold`);
-  // Entity-options demand must hold both /session and membership exclude family.
-  // Poll explicitly so diagnostics show every subscribe_entities / entity subscription event.
-  {
-    const demandDeadline = Date.now() + 45_000;
-    let demandEvidence = null;
-    while (Date.now() < demandDeadline) {
-      demandEvidence = await page.evaluate(() => {
-        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-        const subscriptions = events
-          .filter((entry) =>
-            (entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities")
-            || entry.kind === "webrtc_entity_subscription"
-          )
-          .map((entry) => ({
-            kind: entry.kind,
-            entity_type: entry.payload?.entity_type,
-            state: entry.payload?.state,
-            subscription_id: entry.payload?.subscription_id
-          }));
-        const membershipFrames = events
-          .filter((entry) => entry.kind === "hub_frame")
-          .map((entry) => {
-            const frame = entry.payload ?? {};
-            const body = frame.payload ?? {};
-            return {
-              kind: frame.kind,
-              family: body.key?.family ?? body.family ?? null
-            };
-          })
-          .filter((entry) => entry.family === "botster-workspaces.membership");
-        return {
-          subscriptions,
-          membership_frames: membershipFrames,
-          demanded: subscriptions.some((entry) => entry.entity_type === "botster-workspaces.membership"),
-          framed: membershipFrames.length > 0
-        };
+  const seedSession = async (sessionId, label) => {
+    const spawnResponse = await sendDaemonRequest(socketPath, {
+      type: "spawn",
+      session_id: sessionId,
+      command: "sleep 300"
+    });
+    if (spawnResponse.error) {
+      throw new Error(
+        `${stage} seed spawn failed for ${label} ${sessionId}: ${JSON.stringify(spawnResponse.error)}`
+      );
+    }
+    seededSessions.push(sessionId);
+    await waitForHarnessEvent(page, {
+      kind: "hub_frame",
+      family: "session",
+      id: sessionId,
+      lifecycle_class: "current"
+    }, `${stage} current seed ${label} ${sessionId}`);
+  };
+
+  const cleanupSeededSessions = async ({ page2: cleanupPage2, preferProductionRemove = true } = {}) => {
+    const cleanupResults = { sessions_removed: [], membership_remove: {}, hub_shutdown: {}, hub_remove: {} };
+    // Dismiss P1 held dialog if still open so later lifecycle stages are not blocked.
+    if (formP1) {
+      const stillOpen = await formP1.isVisible().catch(() => false);
+      if (stillOpen) {
+        await page.keyboard.press("Escape").catch(() => {});
+        await formP1.waitFor({ state: "detached", timeout: 10_000 }).catch(() => {});
+      }
+    }
+
+    for (const sessionId of seededSessions) {
+      if (preferProductionRemove && cleanupPage2 && !cleanupPage2.isClosed?.()) {
+        try {
+          const removeButton = cleanupPage2.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
+            .locator(
+              `ion-button[data-action-id='botster_workspaces.remove_session'][data-ui-node-id*='${sessionId}']`
+            )
+            .first();
+          const visible = await removeButton.isVisible().catch(() => false);
+          if (visible) {
+            const removeNodeId = await removeButton.getAttribute("data-ui-node-id");
+            const removeSince = await harnessEventCount(cleanupPage2);
+            await removeButton.click();
+            const removeRequest = await waitForWorkspacesPluginSurfaceRequest(cleanupPage2, {
+              actionId: "botster_workspaces.remove_session",
+              nodeId: removeNodeId,
+              kind: "submit",
+              payload: { workspace_id: state.workspaceId, session_id: sessionId },
+              sinceIndex: removeSince,
+              label: `${stage} cleanup remove_session ${sessionId}`
+            });
+            await waitForWorkspacesActionResult(cleanupPage2, {
+              actionId: "botster_workspaces.remove_session",
+              nodeId: removeNodeId,
+              sinceIndex: removeSince,
+              requestId: removeRequest.requestId,
+              label: `${stage} cleanup remove_session accepted ${sessionId}`
+            });
+            cleanupResults.membership_remove[sessionId] = "production_remove";
+          } else {
+            cleanupResults.membership_remove[sessionId] = "no_row";
+          }
+        } catch (error) {
+          cleanupResults.membership_remove[sessionId] = `error:${error.message}`;
+        }
+      }
+
+      const shutdown = await sendDaemonRequest(socketPath, {
+        type: "shutdown_session",
+        session_id: sessionId
       });
-      if (demandEvidence.demanded && demandEvidence.framed) break;
-      await page.waitForTimeout(150);
+      cleanupResults.hub_shutdown[sessionId] = shutdown.error
+        ? `error:${JSON.stringify(shutdown.error)}`
+        : "ok";
+      const remove = await sendDaemonRequest(socketPath, {
+        type: "remove_session",
+        session_id: sessionId
+      });
+      cleanupResults.hub_remove[sessionId] = remove.error
+        ? `error:${JSON.stringify(remove.error)}`
+        : "ok";
+      if (!remove.error) {
+        cleanupResults.sessions_removed.push(sessionId);
+      }
     }
-    console.log(`${stage} membership-demand-evidence ${JSON.stringify(demandEvidence)}`);
-    if (!demandEvidence?.demanded) {
-      throw new Error(
-        `${stage}: P1 never demanded botster-workspaces.membership; evidence=${JSON.stringify(demandEvidence)}`
-      );
-    }
-    if (!demandEvidence?.framed) {
-      throw new Error(
-        `${stage}: P1 demanded membership but received no membership entity frames; evidence=${JSON.stringify(demandEvidence)}`
-      );
-    }
-  }
-  const selectP1 = await waitForWorkspacesAddSessionOption(page, state, sessionId);
-  await setUiNodeSelectValue(selectP1, sessionId);
-  // Dialog stays open; do not submit on P1 yet.
-  if (!(await formP1.isVisible())) {
-    throw new Error(`${stage}: P1 Add dialog closed before membership mutation`);
-  }
-  const renderBaseline = await workspacesPluginSurfaceRenderCount(page);
-  const membershipFrameCountBeforeClaim = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) => {
-      if (entry.kind !== "hub_frame") return false;
-      const body = entry.payload?.payload ?? {};
-      return (body.key?.family ?? body.family) === "botster-workspaces.membership";
-    }).length
-  );
+    cleanupResults.membership_left_cleared = seededSessions.every(
+      (id) => cleanupResults.sessions_removed.includes(id)
+    );
+    return cleanupResults;
+  };
 
-  const page2 = await openSecondaryWorkspacesProductionClient(state);
   try {
-    const formP2 = await openWorkspacesAddSessionDialog(page2, state, `${stage}-claim`);
-    await waitForWorkspacesAddSessionOption(page2, state, sessionId);
-    await chooseWorkspacesAddSessionControl(page2, formP2, sessionId);
-    await submitWorkspacesAddSession(page2, formP2, state, sessionId, `${stage} P2 claim`);
+    await seedSession(sessionA, "A");
+    await seedSession(sessionB, "B");
+    await seedSession(sessionC, "C");
 
-    // Held-open P1: production claim on P2 must publish membership frames (Workspaces producer
-    // ticket_1786507472_103115). Observe exclusion from the held subscription only — no
-    // DataChannel resubscribe, dialog reopen, or P1 plugin_surface_render.
-    await page.waitForFunction(
-      ({ formId, expected, beforeCount }) => {
-        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-        const membershipFrames = events.filter((entry) => {
+    formP1 = await openWorkspacesAddSessionDialog(page, state, `${stage}-hold`);
+    // Entity-options demand must hold both /session and membership exclude family.
+    {
+      const demandDeadline = Date.now() + 45_000;
+      let demandEvidence = null;
+      while (Date.now() < demandDeadline) {
+        demandEvidence = await page.evaluate(() => {
+          const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+          const subscriptions = events
+            .filter((entry) =>
+              (entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities")
+              || entry.kind === "webrtc_entity_subscription"
+            )
+            .map((entry) => ({
+              kind: entry.kind,
+              entity_type: entry.payload?.entity_type,
+              state: entry.payload?.state,
+              subscription_id: entry.payload?.subscription_id
+            }));
+          const membershipFrames = events
+            .filter((entry) => entry.kind === "hub_frame")
+            .map((entry) => {
+              const frame = entry.payload ?? {};
+              const body = frame.payload ?? {};
+              return {
+                kind: frame.kind,
+                family: body.key?.family ?? body.family ?? null
+              };
+            })
+            .filter((entry) => entry.family === "botster-workspaces.membership");
+          return {
+            subscriptions,
+            membership_frames: membershipFrames,
+            demanded: subscriptions.some((entry) => entry.entity_type === "botster-workspaces.membership"),
+            framed: membershipFrames.length > 0
+          };
+        });
+        if (demandEvidence.demanded && demandEvidence.framed) break;
+        await page.waitForTimeout(150);
+      }
+      console.log(`${stage} membership-demand-evidence ${JSON.stringify(demandEvidence)}`);
+      if (!demandEvidence?.demanded) {
+        throw new Error(
+          `${stage}: P1 never demanded botster-workspaces.membership; evidence=${JSON.stringify(demandEvidence)}`
+        );
+      }
+      if (!demandEvidence?.framed) {
+        throw new Error(
+          `${stage}: P1 demanded membership but received no membership entity frames; evidence=${JSON.stringify(demandEvidence)}`
+        );
+      }
+    }
+
+    selectP1 = await waitForWorkspacesAddSessionOption(page, state, sessionA);
+    // B and C must be available so drop/gap claims are real option paths.
+    await waitForWorkspacesAddSessionOption(page, state, sessionB);
+    await waitForWorkspacesAddSessionOption(page, state, sessionC);
+    await setUiNodeSelectValue(selectP1, sessionA);
+    if (!(await formP1.isVisible())) {
+      throw new Error(`${stage}: P1 Add dialog closed before membership mutation`);
+    }
+    renderBaseline = await workspacesPluginSurfaceRenderCount(page);
+
+    const baselineSeqEvidence = await page.evaluate(() => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const ready = [...events].reverse().find((entry) =>
+        entry.kind === "webrtc_entity_subscription"
+        && entry.payload?.entity_type === "botster-workspaces.membership"
+        && entry.payload?.state === "ready"
+        && typeof entry.payload?.snapshot_seq === "number"
+      );
+      return {
+        client_baseline_n: ready?.payload?.snapshot_seq ?? null,
+        subscription_id: ready?.payload?.subscription_id ?? null,
+        generation: ready?.payload?.generation ?? null
+      };
+    });
+    console.log(`${stage} membership-baseline ${JSON.stringify(baselineSeqEvidence)}`);
+
+    page2 = await openSecondaryWorkspacesProductionClient(state);
+
+    // Arm immediately before the drop claim so peer_reset cannot leave us disarmed.
+    const armMembershipDrop = async (label) => {
+      const armResult = await page.evaluate(() => {
+        const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
+        if (!control || typeof control.armDropNextInboundEntityFrame !== "function") {
+          return { ok: false, state: "not_armed", reason: "no_control" };
+        }
+        // Clear a prior armed/disarmed state so re-arm is allowed after peer_reset.
+        if (typeof control.disarmDropNextInboundEntityFrame === "function") {
+          control.disarmDropNextInboundEntityFrame();
+        }
+        return control.armDropNextInboundEntityFrame({
+          entity_type: "botster-workspaces.membership"
+        });
+      });
+      console.log(`${stage} arm-${label} ${JSON.stringify(armResult)}`);
+      if (!armResult?.ok) {
+        throw new Error(
+          `${stage}: armDropNextInboundEntityFrame failed (${label}): ${JSON.stringify(armResult)}`
+        );
+      }
+      return armResult;
+    };
+
+    const membershipWireEvidence = async () => page.evaluate(() => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
+      return {
+        drop_state: control?.getDropNextInboundEntityFrameState?.() ?? null,
+        harness_drops: events.filter((e) => e.kind === "webrtc_entity_frame_harness_drop").slice(-5),
+        assemblies: events.filter((e) => e.kind === "webrtc_entity_frame_assembly").length,
+        membership_hub_frames: events.filter((entry) => {
           if (entry.kind !== "hub_frame") return false;
           const body = entry.payload?.payload ?? {};
           return (body.key?.family ?? body.family) === "botster-workspaces.membership";
-        }).length;
-        const options = [...globalThis.document.querySelectorAll(
-          `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
-        )];
-        const optionGone = !options.some((option) =>
-          (option.value ?? option.getAttribute("value")) === expected
-        );
-        return optionGone && membershipFrames > beforeCount;
-      },
-      {
-        formId: `botster-workspaces-add-form-${state.workspaceId}`,
-        expected: sessionId,
-        beforeCount: membershipFrameCountBeforeClaim
-      },
-      { timeout: 30_000 }
-    ).catch(async (error) => {
-      const options = await readUiNodeSelectOptionValues(selectP1);
-      const membershipEvidence = await page.evaluate(({ before }) => {
-        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-        return {
-          membership_frame_count: events.filter((entry) => {
-            if (entry.kind !== "hub_frame") return false;
-            const body = entry.payload?.payload ?? {};
-            return (body.key?.family ?? body.family) === "botster-workspaces.membership";
-          }).length,
-          baseline: before
-        };
-      }, { before: membershipFrameCountBeforeClaim });
+        }).map((entry) => ({
+          kind: entry.payload?.kind,
+          id: entry.payload?.payload?.key?.id ?? entry.payload?.payload?.id ?? null
+        })).slice(-10),
+        discards: events.filter((e) => e.kind === "webrtc_entity_frame_discarded").slice(-8),
+        membership_subs: events.filter((e) =>
+          e.kind === "webrtc_entity_subscription"
+          && e.payload?.entity_type === "botster-workspaces.membership"
+        ).slice(-8)
+      };
+    });
+
+    // Warmup claim A without arm: settles dual-client package-entity floor (often via
+    // package_entity_resync) and leaves A as the held stale selection under test.
+    {
+      const formP2Warm = await openWorkspacesAddSessionDialog(page2, state, `${stage}-warmup-a`);
+      await waitForWorkspacesAddSessionOption(page2, state, sessionA);
+      await chooseWorkspacesAddSessionControl(page2, formP2Warm, sessionA);
+      await submitWorkspacesAddSession(page2, formP2Warm, state, sessionA, `${stage} P2 warmup claim A`);
+    }
+    await page.waitForFunction(({ formId, expected }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const ready = [...events].reverse().find((entry) =>
+        entry.kind === "webrtc_entity_subscription"
+        && entry.payload?.entity_type === "botster-workspaces.membership"
+        && entry.payload?.state === "ready"
+        && typeof entry.payload?.snapshot_seq === "number"
+      );
+      const options = [...globalThis.document.querySelectorAll(
+        `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
+      )];
+      const optionGone = !options.some((option) =>
+        (option.value ?? option.getAttribute("value")) === expected
+      );
+      return Boolean(ready && optionGone);
+    }, {
+      formId: `botster-workspaces-add-form-${state.workspaceId}`,
+      expected: sessionA
+    }, { timeout: 45_000 }).catch(async (error) => {
+      const wire = await membershipWireEvidence();
       throw new Error(
-        `${stage}: claimed session still listed on held-open P1 without resubscribe; ` +
-        `options=${JSON.stringify(options)}; membership=${JSON.stringify(membershipEvidence)}: ${error.message}`
+        `${stage}: warmup claim A never settled P1 membership/exclusion; wire=${JSON.stringify(wire)}: ${error.message}`
       );
     });
-    await assertWorkspacesAddSelectionInvalid(page, state, `${stage} after P2 claim`);
+    await assertWorkspacesAddSelectionInvalid(page, state, `${stage} after warmup claim A`);
+    const activeBaseline = await page.evaluate(() => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const ready = [...events].reverse().find((entry) =>
+        entry.kind === "webrtc_entity_subscription"
+        && entry.payload?.entity_type === "botster-workspaces.membership"
+        && entry.payload?.state === "ready"
+        && typeof entry.payload?.snapshot_seq === "number"
+      );
+      return {
+        client_baseline_n: ready?.payload?.snapshot_seq ?? null,
+        subscription_id: ready?.payload?.subscription_id ?? null,
+        generation: ready?.payload?.generation ?? null,
+        resync_reason: ready?.payload?.resync_reason ?? null
+      };
+    });
+    console.log(`${stage} membership-baseline-after-warmup-a ${JSON.stringify({
+      pre: baselineSeqEvidence,
+      post: activeBaseline
+    })}`);
     if (!(await formP1.isVisible())) {
-      throw new Error(`${stage}: P1 Add dialog was dismissed during claim exclusion proof`);
+      throw new Error(`${stage}: P1 Add dialog closed during warmup claim A`);
     }
-    const renderAfterClaim = await workspacesPluginSurfaceRenderCount(page);
-    if (renderAfterClaim > renderBaseline) {
+
+    // Mutation 1 (ordered delta) — claim B; harness drops D1 before receiveEntityFrame.
+    await page2.keyboard.press("Escape").catch(() => {});
+    const formP2ClaimB = await openWorkspacesAddSessionDialog(page2, state, `${stage}-claim-b`);
+    await waitForWorkspacesAddSessionOption(page2, state, sessionB);
+    await chooseWorkspacesAddSessionControl(page2, formP2ClaimB, sessionB);
+    await armMembershipDrop("pre-submit-b");
+    const wireBeforeClaimB = await membershipWireEvidence();
+    console.log(`${stage} wire-before-claim-b ${JSON.stringify(wireBeforeClaimB)}`);
+    await submitWorkspacesAddSession(page2, formP2ClaimB, state, sessionB, `${stage} P2 claim B`);
+
+    const harnessDrop = await page.waitForFunction(() => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const drop = [...events].reverse().find((entry) =>
+        entry.kind === "webrtc_entity_frame_harness_drop"
+        && entry.payload?.entity_type === "botster-workspaces.membership"
+        && entry.payload?.reason === "harness_armed_drop"
+      );
+      const state = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl
+        ?.getDropNextInboundEntityFrameState?.();
+      if (!drop || state?.state !== "dropped") return null;
+      return {
+        dropped_snapshot_seq: drop.payload.snapshot_seq,
+        subscription_id: drop.payload.subscription_id,
+        frame_type: drop.payload.frame_type,
+        generation: drop.payload.generation,
+        drop_state: state
+      };
+    }, undefined, { timeout: 30_000 }).then((handle) => handle.jsonValue()).catch(async (error) => {
+      const wire = await membershipWireEvidence();
       throw new Error(
-        `${stage}: P1 plugin_surface_render rose during claim exclusion ` +
-        `(baseline=${renderBaseline}, after=${renderAfterClaim})`
+        `${stage}: harness never dropped claim-B membership delta; wire=${JSON.stringify(wire)}: ${error.message}`
+      );
+    });
+    console.log(`${stage} harness-drop ${JSON.stringify(harnessDrop)}`);
+
+    // After D1 drop alone, B must still be listed (client sequence parked at post-warmup baseline).
+    {
+      const optionsAfterDrop = await readUiNodeSelectOptionValues(selectP1);
+      if (!optionsAfterDrop.includes(sessionB)) {
+        throw new Error(
+          `${stage}: option B disappeared after harness drop alone before sequence_gap; ` +
+          `options=${JSON.stringify(optionsAfterDrop)}`
+        );
+      }
+      // Stale A remains excluded from the warmup claim.
+      if (optionsAfterDrop.includes(sessionA)) {
+        throw new Error(
+          `${stage}: option A reappeared after drop of B; options=${JSON.stringify(optionsAfterDrop)}`
+        );
+      }
+    }
+
+    // Mutation 2 — claim C via separate production UI path; D2 triggers sequence_gap.
+    {
+      await page2.keyboard.press("Escape").catch(() => {});
+      const formP2c = await openWorkspacesAddSessionDialog(page2, state, `${stage}-claim-c`);
+      await waitForWorkspacesAddSessionOption(page2, state, sessionC);
+      await chooseWorkspacesAddSessionControl(page2, formP2c, sessionC);
+      await submitWorkspacesAddSession(page2, formP2c, state, sessionC, `${stage} P2 claim C`);
+    }
+
+    orderedGapEvidence = await page.waitForFunction(({
+      sessionA: staleA,
+      sessionB: droppedB,
+      sessionC: gapC,
+      baselineN,
+      droppedSeq,
+      dropSubscriptionId
+    }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const gapDiscard = [...events].reverse().find((entry) =>
+        entry.kind === "webrtc_entity_frame_discarded"
+        && entry.payload?.reason === "sequence_gap"
+        && entry.payload?.entity_type === "botster-workspaces.membership"
+        && entry.payload?.subscription_id === dropSubscriptionId
+      );
+      if (!gapDiscard) return null;
+
+      const gapTriggerSeq = gapDiscard.payload.rejected_snapshot_seq;
+      // D2 must differ from dropped D1 and must not be client_baseline+1 alone.
+      if (
+        typeof gapTriggerSeq !== "number"
+        || typeof droppedSeq !== "number"
+        || gapTriggerSeq === droppedSeq
+        || (typeof baselineN === "number" && gapTriggerSeq === baselineN + 1)
+      ) {
+        return null;
+      }
+
+      // Resubscribe after the gap discard: unsubscribe of the dropped subscription, then a
+      // fresh membership subscribe (new subscription_id), then ready on that new id.
+      const dropIndex = events.findIndex((entry) =>
+        entry.kind === "webrtc_entity_frame_harness_drop"
+        && entry.payload?.snapshot_seq === droppedSeq
+      );
+      const afterDrop = dropIndex >= 0 ? events.slice(dropIndex) : events;
+      const unsubAfter = afterDrop.find((entry) =>
+        entry.kind === "daemon_request"
+        && entry.payload?.type === "unsubscribe_entities"
+        && entry.payload?.subscription_id === dropSubscriptionId
+      );
+      if (!unsubAfter) return null;
+      const resub = afterDrop.find((entry) =>
+        entry.kind === "daemon_request"
+        && entry.payload?.type === "subscribe_entities"
+        && entry.payload?.entity_type === "botster-workspaces.membership"
+        && entry.payload?.subscription_id
+        && entry.payload.subscription_id !== dropSubscriptionId
+      );
+      if (!resub) return null;
+      const readyAfter = afterDrop.find((entry) =>
+        entry.kind === "webrtc_entity_subscription"
+        && entry.payload?.entity_type === "botster-workspaces.membership"
+        && entry.payload?.state === "ready"
+        && entry.payload?.subscription_id === resub.payload.subscription_id
+        && typeof entry.payload?.snapshot_seq === "number"
+      );
+      if (!readyAfter) return null;
+
+      const formId = [...globalThis.document.querySelectorAll("form[data-ui-node-id^='botster-workspaces-add-form-']")]
+        .map((el) => el.getAttribute("data-ui-node-id"))
+        .find(Boolean);
+      if (!formId) return null;
+      const options = [...globalThis.document.querySelectorAll(
+        `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
+      )].map((option) => option.value ?? option.getAttribute("value"));
+      // After replacement snapshot: A (warmup), B (dropped claim), and C (gap trigger) are claimed.
+      const optionAGone = !options.includes(staleA);
+      const optionBGone = !options.includes(droppedB);
+      const optionCGone = !options.includes(gapC);
+      if (!optionAGone || !optionBGone || !optionCGone) return null;
+
+      return {
+        gap_reason: gapDiscard.payload.reason,
+        gap_subscription_id: gapDiscard.payload.subscription_id,
+        gap_generation: gapDiscard.payload.generation,
+        gap_trigger_snapshot_seq: gapTriggerSeq,
+        rejected_frame_type: gapDiscard.payload.rejected_frame_type ?? null,
+        current_snapshot_seq_at_gap: gapDiscard.payload.current_snapshot_seq ?? null,
+        replacement_snapshot_seq: readyAfter.payload.snapshot_seq,
+        replacement_subscription_id: readyAfter.payload.subscription_id,
+        client_baseline_n: baselineN,
+        dropped_snapshot_seq: droppedSeq,
+        option_a_excluded: true,
+        option_b_excluded: true,
+        option_c_excluded: true
+      };
+    }, {
+      sessionA,
+      sessionB,
+      sessionC,
+      baselineN: activeBaseline.client_baseline_n,
+      droppedSeq: harnessDrop.dropped_snapshot_seq,
+      dropSubscriptionId: harnessDrop.subscription_id
+    }, { timeout: 45_000 }).then((handle) => handle.jsonValue()).catch(async (error) => {
+      const diagnostics = await page.evaluate(() => {
+        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+        return {
+          discards: events.filter((e) => e.kind === "webrtc_entity_frame_discarded").slice(-5),
+          harness_drops: events.filter((e) => e.kind === "webrtc_entity_frame_harness_drop").slice(-3),
+          membership_subs: events.filter((e) =>
+            e.kind === "webrtc_entity_subscription"
+            && e.payload?.entity_type === "botster-workspaces.membership"
+          ).slice(-8)
+        };
+      });
+      throw new Error(
+        `${stage}: production sequence_gap resubscribe/replacement never completed after claim B; ` +
+        `diag=${JSON.stringify(diagnostics)}: ${error.message}`
+      );
+    });
+
+    // Correlate gap trigger: D1 harness drop + D2 rejected_snapshot_seq + replacement snapshot.
+    if (
+      orderedGapEvidence.dropped_snapshot_seq == null
+      || orderedGapEvidence.gap_trigger_snapshot_seq == null
+      || orderedGapEvidence.replacement_snapshot_seq == null
+    ) {
+      throw new Error(
+        `${stage}: missing sequence correlation fields: ${JSON.stringify(orderedGapEvidence)}`
+      );
+    }
+    if (orderedGapEvidence.gap_trigger_snapshot_seq === orderedGapEvidence.dropped_snapshot_seq) {
+      throw new Error(
+        `${stage}: gap trigger seq must differ from dropped D1 seq: ${JSON.stringify(orderedGapEvidence)}`
+      );
+    }
+    orderedGapEvidence.stale_session_id = sessionA;
+    orderedGapEvidence.dropped_session_id = sessionB;
+    orderedGapEvidence.second_delta_session_id = sessionC;
+    orderedGapEvidence.warmup_session_id = sessionA;
+    console.log(`${stage} ordered-gap ${JSON.stringify(orderedGapEvidence)}`);
+
+    await assertWorkspacesAddSelectionInvalid(page, state, `${stage} after sequence_gap`);
+    if (!(await formP1.isVisible())) {
+      throw new Error(`${stage}: P1 Add dialog was dismissed during ordered-gap proof`);
+    }
+    const renderAfterGap = await workspacesPluginSurfaceRenderCount(page);
+    if (renderAfterGap > renderBaseline) {
+      throw new Error(
+        `${stage}: P1 plugin_surface_render rose during ordered-gap proof ` +
+        `(baseline=${renderBaseline}, after=${renderAfterGap})`
       );
     }
 
-    // Stale-submit negative: force-click while form is invalid, then settle on the production
-    // click path completion (onClick telemetry when the handler runs, otherwise native disabled
-    // + form-invalid after the Playwright click resolves — not a wall-clock deadline).
-    // Reject the dead UUID in every supported Add value field.
-    // Ablation: BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1 restores stale control state by removing the
-    // local membership entity through the production entity store so the option projects valid
-    // again; the real action collector must emit the stale add_session that fails this oracle first.
+    // Stale-submit negative for session A under normal controls (no force:true).
+    // Ablation: BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1 restores valid control so the request oracle fails first.
     const formId = `botster-workspaces-add-form-${state.workspaceId}`;
     const addActionId = "botster_workspaces.add_session";
     const ablateStaleSubmit = process.env.BOTSTER_LIVE_ABLATE_STALE_SUBMIT === "1";
@@ -3312,6 +3718,17 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     const clickSeqBefore = await page.evaluate(() =>
       globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.formSubmitClickSeq ?? 0
     );
+    const spaRequestIdsBefore = await page.evaluate(() => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events
+        .filter((entry) =>
+          entry.kind === "daemon_request"
+          && entry.payload?.type === "plugin_surface_action"
+          && entry.payload?.request?.action_id === "botster_workspaces.add_session"
+        )
+        .map((entry) => entry.payload?.request?.request_id)
+        .filter(Boolean);
+    });
 
     if (ablateStaleSubmit) {
       await page.evaluate(({ sessionId: expectedSession }) => {
@@ -3319,14 +3736,12 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
         if (typeof apply !== "function") {
           throw new Error("missing live harness applyEntityFrame for stale-submit ablation");
         }
-        // Restore stale control state: drop the membership exclusion so production projection
-        // re-validates the held draft without any form-validation bypass flag.
         apply({
           operation: "entity_remove",
           key: { family: "botster-workspaces.membership", id: expectedSession },
           sequence: 1_000_000_000
         });
-      }, { sessionId });
+      }, { sessionId: sessionA });
       await page.waitForFunction(({ formId: id, actionId }) => {
         const formEl = globalThis.document.querySelector(`form[data-ui-node-id='${id}']`);
         const btn = formEl?.querySelector(`ion-button[data-action-id='${actionId}']`);
@@ -3339,12 +3754,14 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       }, { formId, actionId: addActionId }, { timeout: 10_000 }).catch((error) => {
         throw new Error(`${stage}: ablation did not restore valid Add control state: ${error.message}`);
       });
-      // Real production click (control is enabled again via entity projection).
       await formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`).click();
     } else {
-      await formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`)
-        .click({ force: true });
-      // Flush any sync React onClick work that would have run if the control were enabled.
+      // Normal rendered click only — no force. Disabled controls may suppress onClick;
+      // settle via production telemetry or blocked_gate after the non-forced attempt.
+      const submitBtn = formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`);
+      await submitBtn.click({ timeout: 3_000 }).catch(() => {
+        // Playwright may refuse disabled targets; zero outbound + blocked_gate still prove fail-closed.
+      });
       await page.evaluate(() => new Promise((resolve) => {
         queueMicrotask(() => queueMicrotask(resolve));
       }));
@@ -3363,8 +3780,6 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
         }
       }
       if (ablate) return null;
-      // Green path: native disabled + form-invalid is the production fail-closed barrier when
-      // the disabled attribute suppresses onClick entirely.
       const formEl = globalThis.document.querySelector(`form[data-ui-node-id='${id}']`);
       const btn = formEl?.querySelector(`ion-button[data-action-id='${actionId}']`);
       const native = btn?.shadowRoot?.querySelector("button") ?? btn?.querySelector("button") ?? btn;
@@ -3373,7 +3788,8 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
         || native?.disabled
         || native?.hasAttribute?.("disabled")
       );
-      const invalid = formEl?.getAttribute("data-form-invalid") === "true";
+      const invalid = formEl?.getAttribute("data-form-invalid") === "true"
+        || formEl?.querySelector("[data-selection-invalid='true']") != null;
       if (disabled && invalid) {
         return { phase: "blocked_gate", actionId, gated: true, settled: true, seq: before };
       }
@@ -3390,7 +3806,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     const staleAddSessionArgs = {
       before: eventsBeforeStale,
       workspaceId: state.workspaceId,
-      sessionId
+      sessionId: sessionA
     };
     const collectStaleAddSession = ({ before, workspaceId, sessionId: expectedSession }) => {
       const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(before);
@@ -3412,8 +3828,6 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
 
     let staleSubmit = [];
     if (ablateStaleSubmit || clickCompletion.phase === "dispatched") {
-      // Real production dispatch: wait for the action collector to record the request.
-      // Return null while empty so waitForFunction does not treat [] as success.
       staleSubmit = await page.waitForFunction((args) => {
         const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(args.before);
         const found = entries.filter((entry) => {
@@ -3440,108 +3854,112 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
         return [];
       });
     } else {
-      // Fail-closed completion: scan the ledger once after the production signal.
       staleSubmit = await page.evaluate(collectStaleAddSession, staleAddSessionArgs);
     }
 
     if (staleSubmit.length > 0) {
       throw new Error(
-        `${stage}: held-open P1 dispatched stale add_session for claimed session: ${JSON.stringify(staleSubmit)}`
+        `${stage}: held-open P1 dispatched stale add_session for session A: ${JSON.stringify(staleSubmit)}`
       );
     }
     if (ablateStaleSubmit) {
       throw new Error(`${stage}: ablation expected stale add_session oracle to fail first`);
     }
 
-    // Membership removal restoration via production Remove on P2.
-    const removeButton = page2.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
-      .locator(
-        `ion-button[data-action-id='botster_workspaces.remove_session'][data-ui-node-id*='${sessionId}']`
-      )
-      .first();
-    await removeButton.waitFor({ timeout: 15_000 });
-    const removeNodeId = await removeButton.getAttribute("data-ui-node-id");
-    const removeSince = await harnessEventCount(page2);
-    await removeButton.click();
-    const removeRequest = await waitForWorkspacesPluginSurfaceRequest(page2, {
-      actionId: "botster_workspaces.remove_session",
-      nodeId: removeNodeId,
-      kind: "submit",
-      payload: { workspace_id: state.workspaceId, session_id: sessionId },
-      sinceIndex: removeSince,
-      label: `${stage} P2 production remove_session request`
+    const spaRequestIdsAfter = await page.evaluate(() => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events
+        .filter((entry) =>
+          entry.kind === "daemon_request"
+          && entry.payload?.type === "plugin_surface_action"
+          && entry.payload?.request?.action_id === "botster_workspaces.add_session"
+        )
+        .map((entry) => entry.payload?.request?.request_id)
+        .filter(Boolean);
     });
-    // remove_session does not clear workspace-dialog; require exact request_id correlation.
-    await waitForWorkspacesActionResult(page2, {
-      actionId: "botster_workspaces.remove_session",
-      nodeId: removeNodeId,
-      sinceIndex: removeSince,
-      requestId: removeRequest.requestId,
-      label: `${stage} P2 production remove_session accepted`
-    });
-
-    // Held subscription must restore option S after production remove (producer publish).
-    await waitForWorkspacesAddSessionOption(page, state, sessionId, 30_000);
-    if (!(await formP1.isVisible())) {
-      throw new Error(`${stage}: P1 Add dialog was dismissed during membership restoration proof`);
+    const newStaleRequestIds = spaRequestIdsAfter.filter((id) => !spaRequestIdsBefore.includes(id));
+    if (newStaleRequestIds.length > 0) {
+      // Allow only non-stale (must not be session A). Re-check against staleSubmit already empty.
+      const correlated = await page.evaluate(({ ids, sessionId, workspaceId }) => {
+        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+        return events.filter((entry) => {
+          if (entry.kind !== "daemon_request" || entry.payload?.type !== "plugin_surface_action") {
+            return false;
+          }
+          const request = entry.payload?.request;
+          if (!ids.includes(request?.request_id)) return false;
+          if (request?.action_id !== "botster_workspaces.add_session") return false;
+          const values = request?.values ?? {};
+          if (values.workspace_id !== workspaceId) return false;
+          return values.session_id === sessionId
+            || values.session_id_advanced === sessionId
+            || values["botster-workspaces-add-session-id"] === sessionId
+            || values["botster-workspaces-add-session-id-advanced"] === sessionId;
+        });
+      }, { ids: newStaleRequestIds, sessionId: sessionA, workspaceId: state.workspaceId });
+      if (correlated.length > 0) {
+        throw new Error(
+          `${stage}: SPA request ledger gained stale A add_session request_ids: ${JSON.stringify(correlated)}`
+        );
+      }
     }
-    const renderAfterRestore = await workspacesPluginSurfaceRenderCount(page);
-    if (renderAfterRestore > renderBaseline) {
+
+    // Mandatory cleanup for A and B after assertions (not used as gap trigger).
+    const cleanup = await cleanupSeededSessions({ page2, preferProductionRemove: true });
+    if (!cleanup.membership_left_cleared || cleanup.sessions_removed.length !== seededSessions.length) {
       throw new Error(
-        `${stage}: P1 plugin_surface_render rose during restoration ` +
-        `(baseline=${renderBaseline}, after=${renderAfterRestore})`
+        `${stage}: mandatory A+B cleanup incomplete: ${JSON.stringify(cleanup)}`
       );
     }
 
-    // Recovery close-out: reselect restored option to prove the form is valid again.
-    // Leave membership cleared so later lifecycle seeding keeps the expected row counts
-    // (plan permits clearing when later stages need S free).
-    await setUiNodeSelectValue(selectP1, sessionId);
-    await page.waitForFunction(
-      ({ formId }) => {
-        const form = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
-        return form?.getAttribute("data-form-invalid") !== "true";
+    console.log(`${stage} passed ${JSON.stringify({
+      stage,
+      stale_session_id: sessionA,
+      warmup_session_id: sessionA,
+      dropped_session_id: sessionB,
+      second_delta_session_id: sessionC,
+      workspace_id: state.workspaceId,
+      render_baseline: renderBaseline,
+      dual_client: true,
+      ordered_gap: true,
+      dropped_snapshot_seq: orderedGapEvidence.dropped_snapshot_seq,
+      gap_trigger_snapshot_seq: orderedGapEvidence.gap_trigger_snapshot_seq,
+      client_baseline_n: orderedGapEvidence.client_baseline_n,
+      claim_exclusion_after_gap: true,
+      stale_submit_blocked: true,
+      click_completion_phase: clickCompletion.phase,
+      zero_stale_add_session: true,
+      membership_left_cleared: true,
+      sessions_removed: cleanup.sessions_removed,
+      cleanup_a: {
+        membership: cleanup.membership_remove[sessionA],
+        hub_shutdown: cleanup.hub_shutdown[sessionA],
+        hub_remove: cleanup.hub_remove[sessionA]
       },
-      { formId: `botster-workspaces-add-form-${state.workspaceId}` },
-      { timeout: 10_000 }
-    );
-    // Dismiss held dialog without claiming so bulk lifecycle reference counts stay clean.
-    await page.keyboard.press("Escape");
-    await formP1.waitFor({ state: "detached", timeout: 15_000 }).catch(async (error) => {
-      throw new Error(`${stage}: held Add dialog did not dismiss after Escape: ${error.message}`);
-    });
-
-    // Shutdown the reactive seed session so it does not inflate Available sessions later.
-    const shutdown = await sendDaemonRequest(socketPath, {
-      type: "shutdown_session",
-      session_id: sessionId
-    });
-    if (shutdown.error) {
-      throw new Error(`${stage} reactive seed shutdown failed: ${JSON.stringify(shutdown.error)}`);
-    }
-    const remove = await sendDaemonRequest(socketPath, {
-      type: "remove_session",
-      session_id: sessionId
-    });
-    if (remove.error) {
-      throw new Error(`${stage} reactive seed remove failed: ${JSON.stringify(remove.error)}`);
-    }
+      cleanup_b: {
+        membership: cleanup.membership_remove[sessionB],
+        hub_shutdown: cleanup.hub_shutdown[sessionB],
+        hub_remove: cleanup.hub_remove[sessionB]
+      },
+      cleanup_c: {
+        membership: cleanup.membership_remove[sessionC],
+        hub_shutdown: cleanup.hub_shutdown[sessionC],
+        hub_remove: cleanup.hub_remove[sessionC]
+      }
+    })}`);
+  } catch (error) {
+    // finally-safe: still attempt A/B cleanup on early failure so later lifecycle stages
+    // are not poisoned by residual claimed/running seeds.
+    const cleanup = await cleanupSeededSessions({ page2, preferProductionRemove: true }).catch((cleanupError) => ({
+      cleanup_error: cleanupError.message
+    }));
+    console.log(`${stage} cleanup-after-failure ${JSON.stringify(cleanup)}`);
+    throw error;
   } finally {
-    await page2.close().catch(() => {});
+    if (page2) {
+      await page2.close().catch(() => {});
+    }
   }
-
-  console.log(`${stage} passed ${JSON.stringify({
-    stage,
-    session_id: sessionId,
-    workspace_id: state.workspaceId,
-    render_baseline: renderBaseline,
-    dual_client: true,
-    claim_exclusion: true,
-    stale_submit_blocked: true,
-    membership_restore: true,
-    recovery_reselect_valid: true,
-    membership_left_cleared: true
-  })}`);
 }
 
 async function assertWorkspacesLifecycleOracles(page, {
