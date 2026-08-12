@@ -194,41 +194,41 @@ Named stage suggestion: `workspaces-entity-options-membership-reactive`.
 
 **Exact production sequence**
 
-1. **Open Add dialog on `P1`**  
-   Click production “Add existing session” (`botster_workspaces.open` presentation set `workspace-dialog=add:<W>`).  
-   Wait for form `botster-workspaces-add-form-<W>`.  
+1. **Open Add dialog on `P1`**
+   Click production “Add existing session” (`botster_workspaces.open` presentation set `workspace-dialog=add:<W>`).
+   Wait for form `botster-workspaces-add-form-<W>`.
    Record `plugin_surface_render` count for package `botster-workspaces` / surface `workspaces` as `renderBaseline`.
 
-2. **Project options**  
-   Wait until `ion-select-option` values under `botster-workspaces-add-session-id` include exact `S`.  
+2. **Project options**
+   Wait until `ion-select-option` values under `botster-workspaces-add-session-id` include exact `S`.
    Optionally assert held `subscribe_entities` (or equivalent demand) for session + membership families when those events are harness-visible (same spirit as entity-options reactive lane).
 
-3. **Select without submit on `P1`**  
-   `setUiNodeSelectValue(select, S)`.  
+3. **Select without submit on `P1`**
+   `setUiNodeSelectValue(select, S)`.
    Do **not** click Add session on `P1`. Dialog remains open.
 
-4. **Claim membership via separate production client `P2`**  
-   Open second page/context against the same app origin and Hub.  
-   Navigate to Workspaces → select same workspace `W` → open Add → wait for option `S` → select `S` → submit `botster_workspaces.add_session`.  
+4. **Claim membership via separate production client `P2`**
+   Open second page/context against the same app origin and Hub.
+   Navigate to Workspaces → select same workspace `W` → open Add → wait for option `S` → select `S` → submit `botster_workspaces.add_session`.
    On `P2`, correlate independently:
    - daemon `plugin_surface_action` request: `action_id=botster_workspaces.add_session`, `values.session_id === S`, `values.workspace_id === W`;
-   - accepted `action_result` for that request_id.  
+   - accepted `action_result` for that request_id.
    `P1` Add dialog **must remain mounted** (do not close/reopen it).
 
-5. **Claim exclusion + selection invalidation on held-open `P1` (no surface refresh)**  
+5. **Claim exclusion + selection invalidation on held-open `P1` (no surface refresh)**
    On `P1`, without page reload and without a new `plugin_surface_render` for workspaces above `renderBaseline` driven by `P1`:
    - assert option values **no longer include** `S`;
    - assert selection invalid / form invalid affordance used by production entity-options UI (same attributes the entity-options reactive proof already recognizes: e.g. `data-selection-invalid` / `data-form-invalid` or equivalent production signal);
    - force-click Add session on `P1` and assert **no** accepted submit carrying dead `session_id=S` (stale-submit prevention). Correlate by scanning harness events after the force-click.
 
-6. **Membership removal restoration via production surface**  
-   On `P2` (or `P1` chrome outside the still-open modal if reachable without dismissing the held dialog’s demand path—prefer `P2`): execute production **Remove** for session `S` on workspace `W` (`botster_workspaces.remove_session` row action).  
+6. **Membership removal restoration via production surface**
+   On `P2` (or `P1` chrome outside the still-open modal if reachable without dismissing the held dialog’s demand path—prefer `P2`): execute production **Remove** for session `S` on workspace `W` (`botster_workspaces.remove_session` row action).
    Correlate independently:
    - request `action_id=botster_workspaces.remove_session` with workspace/session identity;
-   - accepted `action_result`.  
+   - accepted `action_result`.
    On held-open `P1` dialog: wait until option values **again include** exact `S`, still without `P1` surface re-render / full reload.
 
-7. **Optional close-out**  
+7. **Optional close-out**
    On `P1`, select `S` again and submit a valid Add, correlating exact `values.session_id === S` (proves recovery path after restore). Or leave membership cleared if later lifecycle seeding needs `S` free—document choice in evidence.
 
 **Hard fail conditions**

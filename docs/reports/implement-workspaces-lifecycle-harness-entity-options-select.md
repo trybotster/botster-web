@@ -103,3 +103,19 @@ Entry point: `BOTSTER_LIVE_WORKSPACES_LIFECYCLE=1` → `exerciseWorkspacesLifecy
 | Held-open membership reactivity needs package `entity_publish`, not only Hub fanout admission | Hub admits/publishes frames; Workspaces pin does not call publish after claim/remove |
 
 Capture deferred to Review/Verify unless product owner wants immediate inbox notes.
+
+## Review round 2 (implement response in progress)
+
+Open findings addressed in code (pending human on held-open policy):
+
+| Finding | Status |
+| --- | --- |
+| `finding_1786507097_119765` request_id correlation | **Fixed**: `waitForWorkspacesPluginSurfaceRequest` returns `requestId`; action_result oracles require it for Add open/submit, P2 claim, P2 remove |
+| `finding_1786507097_184984` historical intent | **Fixed**: only `scenario.neverExisting` uses advanced field; live cohorts require select |
+| `finding_1786507097_169982` stale-submit barrier | **Fixed**: 2s settle loop scans all Add value fields; form must stay invalid |
+| `finding_1786507097_192249` whitespace | **Fixed** in plan file |
+| `finding_1786507097_878462` PR link | **Fixed**: `pr_1786507187_760694` → PR 89 |
+| `finding_1786507097_407993` forced resubscribe | **Blocked on human** `question_1786507188_545842` (A route Workspaces entity_publish dep / B waive reconnect / C other) |
+
+Re-proved after correlation/historical/stale fixes: `npm run smoke:workspaces-lifecycle` exit 0 (still uses resubscribe until human answers A/B).
+

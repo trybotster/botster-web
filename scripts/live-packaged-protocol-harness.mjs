@@ -2522,11 +2522,44 @@ async function waitForWorkspacesPluginSurfaceRequest(
     const message = `${label} not observed; events=${JSON.stringify(observed, null, 2)}: ${error.message}`;
     throw workspacesLifecycleMode ? lifecycleOracleError(message) : new Error(message);
   });
+  // Return the exact observed request_id so action_result oracles correlate 1:1.
+  const matched = await page.evaluate((expected) => {
+    const stableJson = (value) => JSON.stringify(value, (_key, nested) =>
+      nested && typeof nested === "object" && !Array.isArray(nested)
+        ? Object.fromEntries(Object.entries(nested).sort(([left], [right]) => left.localeCompare(right)))
+        : nested
+    );
+    const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .slice(expected.sinceIndex)
+      .find((candidate) => {
+        const request = candidate.payload?.request;
+        if (
+          candidate.kind !== "daemon_request" ||
+          candidate.payload?.type !== "plugin_surface_action" ||
+          candidate.payload?.package_name !== "botster-workspaces" ||
+          request?.surface_id !== "workspaces" ||
+          request?.action_id !== expected.actionId ||
+          request?.node_id !== expected.nodeId ||
+          request?.kind !== expected.kind
+        ) return false;
+        if (expected.values !== undefined && stableJson(request.values) !== stableJson(expected.values)) return false;
+        return expected.payload === undefined || stableJson(request.payload) === stableJson(expected.payload);
+      });
+    const request = entry?.payload?.request ?? {};
+    return {
+      requestId: request.request_id ?? null,
+      request
+    };
+  }, { actionId, nodeId, kind, values, payload, sinceIndex });
+  if (!matched?.requestId) {
+    throw new Error(`${label} matched without request_id: ${JSON.stringify(matched)}`);
+  }
+  return matched;
 }
 
 async function waitForWorkspacesActionResult(
   page,
-  { actionId, nodeId, presentation, normalizedName, replacementRootId, sinceIndex, label }
+  { actionId, nodeId, presentation, normalizedName, replacementRootId, sinceIndex, label, requestId }
 ) {
   await page.waitForFunction(
     (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
@@ -2547,15 +2580,18 @@ async function waitForWorkspacesActionResult(
           !pluginActionResult.request_id ||
           pluginActionResult.request_id !== payload.request_id
         ) return false;
-        const presentationMatches = (pluginActionResult.presentation ?? []).some((operation) =>
-          operation.kind === expected.presentation.kind &&
-          operation.key === expected.presentation.key &&
-          (
-            !Object.hasOwn(expected.presentation, "value") ||
-            operation.value === expected.presentation.value
-          )
-        );
-        if (!presentationMatches) return false;
+        if (expected.requestId && pluginActionResult.request_id !== expected.requestId) return false;
+        if (expected.presentation) {
+          const presentationMatches = (pluginActionResult.presentation ?? []).some((operation) =>
+            operation.kind === expected.presentation.kind &&
+            operation.key === expected.presentation.key &&
+            (
+              !Object.hasOwn(expected.presentation, "value") ||
+              operation.value === expected.presentation.value
+            )
+          );
+          if (!presentationMatches) return false;
+        }
         if (
           expected.normalizedName !== undefined &&
           pluginActionResult.normalized_values?.name !== expected.normalizedName
@@ -2563,7 +2599,7 @@ async function waitForWorkspacesActionResult(
         return expected.replacementRootId === undefined ||
           pluginActionResult.replacement?.id === expected.replacementRootId;
       }),
-    { actionId, nodeId, presentation, normalizedName, replacementRootId, sinceIndex },
+    { actionId, nodeId, presentation, normalizedName, replacementRootId, sinceIndex, requestId },
     { timeout: 15_000 }
   ).catch(async (error) => {
     const observed = await page.evaluate((start) =>
@@ -2684,8 +2720,11 @@ async function exerciseWorkspacesLifecycle(page) {
     workspacesCompatibilityState,
     socketPath
   );
+  const historicalReferences = new Set(scenario.neverExisting);
   for (const sessionId of allReferences) {
-    await addWorkspacesLifecycleReference(page, workspacesCompatibilityState, sessionId);
+    await addWorkspacesLifecycleReference(page, workspacesCompatibilityState, sessionId, {
+      historical: historicalReferences.has(sessionId)
+    });
   }
 
   const initial = await assertWorkspacesLifecycleOracles(page, {
@@ -2874,7 +2913,7 @@ async function openWorkspacesAddSessionDialog(page, state, labelSuffix) {
   const openNodeId = await openButton.getAttribute("data-ui-node-id");
   const openEventCount = await harnessEventCount(page);
   await openButton.click();
-  await waitForWorkspacesPluginSurfaceRequest(page, {
+  const openRequest = await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId: openActionId,
     nodeId: openNodeId,
     kind: "submit",
@@ -2886,6 +2925,7 @@ async function openWorkspacesAddSessionDialog(page, state, labelSuffix) {
     nodeId: openNodeId,
     presentation: { kind: "set", key: "workspace-dialog", value: `add:${state.workspaceId}` },
     sinceIndex: openEventCount,
+    requestId: openRequest.requestId,
     label: `Workspaces accepted Add-session dialog for ${labelSuffix}`
   });
   const form = page.locator(`form[data-ui-node-id='botster-workspaces-add-form-${state.workspaceId}']`);
@@ -2919,14 +2959,35 @@ async function waitForWorkspacesAddSessionOption(page, state, sessionId, timeout
 
 /**
  * Prefer the entity_options Available sessions select when the Hub session is projected.
- * Use Historical session UUID only when the session is intentionally absent from /session.
+ * Use Historical session UUID only with explicit historical intent (neverExisting cohort).
  * Never fill the hidden IonSelect aux input.
  */
-async function chooseWorkspacesAddSessionControl(page, form, sessionId, { requireSelect = false } = {}) {
+async function chooseWorkspacesAddSessionControl(
+  page,
+  form,
+  sessionId,
+  { requireSelect = false, historical = false } = {}
+) {
   const select = form.locator("[data-ui-node-id='botster-workspaces-add-session-id'] ion-select");
   await select.waitFor({ timeout: 15_000 });
   const formId = await form.getAttribute("data-ui-node-id");
-  const optionPresent = await page.waitForFunction(
+
+  if (historical) {
+    // Explicit historical absence only — do not treat a short option timeout as absence.
+    await page.waitForTimeout(1_000);
+    const options = await readUiNodeSelectOptionValues(select);
+    if (options.includes(sessionId)) {
+      throw new Error(
+        `Workspaces historical Add expected ${sessionId} absent from entity_options; rendered=${JSON.stringify(options)}`
+      );
+    }
+    const advanced = form.locator("[data-ui-node-id='botster-workspaces-add-session-id-advanced'] input");
+    await advanced.waitFor({ timeout: 15_000 });
+    await advanced.fill(sessionId);
+    return { path: "historical_advanced", options };
+  }
+
+  await page.waitForFunction(
     ({ nextFormId, expected }) => {
       const options = [...globalThis.document.querySelectorAll(
         `form[data-ui-node-id='${nextFormId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
@@ -2934,22 +2995,15 @@ async function chooseWorkspacesAddSessionControl(page, form, sessionId, { requir
       return options.some((option) => (option.value ?? option.getAttribute("value")) === expected);
     },
     { nextFormId: formId, expected: sessionId },
-    { timeout: requireSelect ? 30_000 : 5_000 }
-  ).then(() => true).catch(() => false);
-  const options = await readUiNodeSelectOptionValues(select);
-  if (optionPresent || options.includes(sessionId)) {
-    await setUiNodeSelectValue(select, sessionId);
-    return { path: "entity_options_select", options: await readUiNodeSelectOptionValues(select) };
-  }
-  if (requireSelect) {
+    { timeout: 30_000 }
+  ).catch(async (error) => {
+    const options = await readUiNodeSelectOptionValues(select);
     throw new Error(
-      `Workspaces Add requires entity_options option ${sessionId}; rendered=${JSON.stringify(options)}`
+      `Workspaces Add requires entity_options option ${sessionId}; rendered=${JSON.stringify(options)}: ${error.message}`
     );
-  }
-  const advanced = form.locator("[data-ui-node-id='botster-workspaces-add-session-id-advanced'] input");
-  await advanced.waitFor({ timeout: 15_000 });
-  await advanced.fill(sessionId);
-  return { path: "historical_advanced", options };
+  });
+  await setUiNodeSelectValue(select, sessionId);
+  return { path: "entity_options_select", options: await readUiNodeSelectOptionValues(select) };
 }
 
 async function submitWorkspacesAddSession(page, form, state, sessionId, label) {
@@ -2959,14 +3013,14 @@ async function submitWorkspacesAddSession(page, form, state, sessionId, label) {
   await submit.click();
   // Prefer exact session_id; advanced historical claims may only send session_id_advanced.
   // Draft may also carry empty optional fields — require identity fields, not exact object equality.
-  await page.waitForFunction(
-    ({ sinceIndex, nodeId, workspaceId, sessionId: expectedSession }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).some((entry) => {
-        const request = entry.payload?.request;
+  const matched = await page.waitForFunction(
+    ({ sinceIndex, nodeId, workspaceId, sessionId: expectedSession }) => {
+      const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).find((candidate) => {
+        const request = candidate.payload?.request;
         if (
-          entry.kind !== "daemon_request"
-          || entry.payload?.type !== "plugin_surface_action"
-          || entry.payload?.package_name !== "botster-workspaces"
+          candidate.kind !== "daemon_request"
+          || candidate.payload?.type !== "plugin_surface_action"
+          || candidate.payload?.package_name !== "botster-workspaces"
           || request?.surface_id !== "workspaces"
           || request?.action_id !== "botster_workspaces.add_session"
           || request?.node_id !== nodeId
@@ -2976,10 +3030,11 @@ async function submitWorkspacesAddSession(page, form, state, sessionId, label) {
         if (values.workspace_id !== workspaceId) return false;
         const resolved = values.session_id || values.session_id_advanced;
         if (resolved !== expectedSession) return false;
-        // Form payload carries workspace_id; tolerate missing payload when identity is in values.
         if (request.payload !== undefined && request.payload?.workspace_id !== workspaceId) return false;
-        return true;
-      }),
+        return Boolean(request.request_id);
+      });
+      return entry?.payload?.request?.request_id ?? null;
+    },
     {
       sinceIndex: eventCount,
       nodeId: formNodeId,
@@ -2987,7 +3042,7 @@ async function submitWorkspacesAddSession(page, form, state, sessionId, label) {
       sessionId
     },
     { timeout: 15_000 }
-  ).catch(async (error) => {
+  ).then((handle) => handle.jsonValue()).catch(async (error) => {
     const observed = await page.evaluate((start) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .slice(start)
@@ -3006,13 +3061,18 @@ async function submitWorkspacesAddSession(page, form, state, sessionId, label) {
     presentation: { kind: "clear", key: "workspace-dialog" },
     replacementRootId: "botster-workspaces-app",
     sinceIndex: eventCount,
+    requestId: matched,
     label: `Workspaces accepted Add-session action for ${label}`
   });
+  return { requestId: matched };
 }
 
-async function addWorkspacesLifecycleReference(page, state, sessionId) {
+async function addWorkspacesLifecycleReference(page, state, sessionId, { historical = false } = {}) {
   const form = await openWorkspacesAddSessionDialog(page, state, sessionId);
-  const choice = await chooseWorkspacesAddSessionControl(page, form, sessionId);
+  const choice = await chooseWorkspacesAddSessionControl(page, form, sessionId, {
+    requireSelect: !historical,
+    historical
+  });
   await submitWorkspacesAddSession(page, form, state, sessionId, `${sessionId} via ${choice.path}`);
 }
 
@@ -3265,21 +3325,47 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       );
     }
 
+    // Stale-submit negative: force-click while form is invalid, then settle with a
+    // correlated ledger scan (no fixed single delay). Reject the dead UUID in every
+    // supported Add value field. Production click path is fail-closed at disabled/invalid.
     const eventsBeforeStale = await harnessEventCount(page);
     await formP1.locator(":scope > ion-button[data-action-id='botster_workspaces.add_session']")
       .click({ force: true });
-    await page.waitForTimeout(500);
-    const staleSubmit = await page.evaluate(({ before, workspaceId, sessionId: expectedSession }) => {
-      const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(before);
-      return entries.filter((entry) =>
-        entry.kind === "daemon_request"
-        && entry.payload?.type === "plugin_surface_action"
-        && entry.payload?.package_name === "botster-workspaces"
-        && entry.payload?.request?.action_id === "botster_workspaces.add_session"
-        && entry.payload?.request?.values?.session_id === expectedSession
-        && entry.payload?.request?.values?.workspace_id === workspaceId
-      );
-    }, { before: eventsBeforeStale, workspaceId: state.workspaceId, sessionId });
+    const staleDeadline = Date.now() + 2_000;
+    let staleSubmit = [];
+    while (Date.now() < staleDeadline) {
+      staleSubmit = await page.evaluate(({ before, workspaceId, sessionId: expectedSession }) => {
+        const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(before);
+        return entries.filter((entry) => {
+          if (
+            entry.kind !== "daemon_request"
+            || entry.payload?.type !== "plugin_surface_action"
+            || entry.payload?.package_name !== "botster-workspaces"
+            || entry.payload?.request?.action_id !== "botster_workspaces.add_session"
+          ) return false;
+          const values = entry.payload?.request?.values ?? {};
+          if (values.workspace_id !== workspaceId) return false;
+          return values.session_id === expectedSession
+            || values.session_id_advanced === expectedSession
+            || values["botster-workspaces-add-session-id"] === expectedSession
+            || values["botster-workspaces-add-session-id-advanced"] === expectedSession;
+        });
+      }, { before: eventsBeforeStale, workspaceId: state.workspaceId, sessionId });
+      if (staleSubmit.length > 0) break;
+      // Barrier: form must remain invalid while we watch for late dispatches.
+      const stillInvalid = await page.evaluate(({ formId }) => {
+        const form = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
+        const field = globalThis.document.querySelector(
+          `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id']`
+        );
+        return form?.getAttribute("data-form-invalid") === "true"
+          || field?.getAttribute("data-selection-invalid") === "true";
+      }, { formId: `botster-workspaces-add-form-${state.workspaceId}` });
+      if (!stillInvalid) {
+        throw new Error(`${stage}: form left invalid state during stale-submit settle without accepted recovery`);
+      }
+      await page.waitForTimeout(100);
+    }
     if (staleSubmit.length > 0) {
       throw new Error(
         `${stage}: held-open P1 dispatched stale add_session for claimed session: ${JSON.stringify(staleSubmit)}`
@@ -3296,7 +3382,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     const removeNodeId = await removeButton.getAttribute("data-ui-node-id");
     const removeSince = await harnessEventCount(page2);
     await removeButton.click();
-    await waitForWorkspacesPluginSurfaceRequest(page2, {
+    const removeRequest = await waitForWorkspacesPluginSurfaceRequest(page2, {
       actionId: "botster_workspaces.remove_session",
       nodeId: removeNodeId,
       kind: "submit",
@@ -3304,38 +3390,13 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       sinceIndex: removeSince,
       label: `${stage} P2 production remove_session request`
     });
-    // remove_session keeps the workspace dialog key untouched; correlate accepted result only.
-    await page2.waitForFunction(
-      ({ sinceIndex, actionId, nodeId }) =>
-        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).some((entry) => {
-          if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
-          const payload = entry.payload.payload ?? {};
-          const result = payload.result ?? {};
-          const plugin = result.plugin_action_result ?? {};
-          return payload.accepted === true
-            && result.package_name === "botster-workspaces"
-            && result.surface_id === "workspaces"
-            && result.action_id === actionId
-            && plugin.state === "accepted"
-            && plugin.action_id === actionId
-            && plugin.node_id === nodeId
-            && plugin.request_id
-            && plugin.request_id === payload.request_id;
-        }),
-      { sinceIndex: removeSince, actionId: "botster_workspaces.remove_session", nodeId: removeNodeId },
-      { timeout: 15_000 }
-    ).catch(async (error) => {
-      const observed = await page2.evaluate((start) =>
-        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-          .slice(start)
-          .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
-          .map((entry) => entry.payload?.payload)
-          .filter((payload) => payload?.result?.package_name === "botster-workspaces"),
-        removeSince
-      );
-      throw new Error(
-        `${stage}: P2 remove_session accepted action_result missing; results=${JSON.stringify(observed, null, 2)}: ${error.message}`
-      );
+    // remove_session does not clear workspace-dialog; require exact request_id correlation.
+    await waitForWorkspacesActionResult(page2, {
+      actionId: "botster_workspaces.remove_session",
+      nodeId: removeNodeId,
+      sinceIndex: removeSince,
+      requestId: removeRequest.requestId,
+      label: `${stage} P2 production remove_session accepted`
     });
 
     await resubscribeHeldWorkspacesEntityOptions(page, stage, "after-p2-remove");
