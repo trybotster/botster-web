@@ -15,7 +15,7 @@ export interface TerminalViewMount {
 }
 
 export type TerminalInput = string;
-export type TerminalOutput = string;
+export type TerminalOutput = Uint8Array;
 
 /**
  * Mode-dependent Kitty/mouse input retained as a semantic encoder until Hub admits.
@@ -163,9 +163,13 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     state.outputSubscription = dataPlane.subscribeOutput((data) => {
       void Promise.resolve(state.renderer.write(data)).then(() => {
         if (state.container.dataset) {
-          state.container.dataset.terminalLastRenderedOutput = data;
+          state.container.dataset.terminalLastRenderedOutput = bytesToBase64(data);
         }
-        recordLiveHarnessTerminal("renderer_write", { data, sessionId: descriptor.sessionId });
+        recordLiveHarnessTerminal("renderer_write", {
+          payload_bytes_base64: bytesToBase64(data),
+          bytes: data.byteLength,
+          sessionId: descriptor.sessionId
+        });
       });
     });
   }
@@ -307,6 +311,23 @@ export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.listeners.clear();
     this.statusListeners.clear();
   }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  if (typeof globalThis.btoa === "function") {
+    let binary = "";
+    for (const value of bytes) {
+      binary += String.fromCharCode(value);
+    }
+    return globalThis.btoa(binary);
+  }
+
+  const buffer = (globalThis as { Buffer?: { from(data: Uint8Array): { toString(enc: string): string } } }).Buffer;
+  if (buffer) {
+    return buffer.from(bytes).toString("base64");
+  }
+
+  throw new Error("No base64 encoder is available in this runtime.");
 }
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {

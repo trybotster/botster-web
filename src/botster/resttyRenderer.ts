@@ -5,10 +5,12 @@ import type {
   ModeDependentTerminalInput,
   TerminalDataPlaneAttachment,
   TerminalInput,
+  TerminalOutput,
   TerminalRendererAdapter,
   TerminalSubscription,
   TerminalViewDescriptor
 } from "./terminal";
+import { bytesToBase64 } from "./hubTerminalDataPlane";
 import type { DaemonModeFlags } from "./realHubDaemonDto";
 import {
   coreMouseTrackingEnabled,
@@ -63,9 +65,13 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     this.container = container;
     this.ptyTransport.setRenderObserver((data) => {
       if (this.container?.dataset) {
-        this.container.dataset.terminalLastRenderedOutput = data;
+        this.container.dataset.terminalLastRenderedOutput = bytesToBase64(data);
       }
-      recordLiveHarnessTerminal("renderer_write", { data, sessionId: this.descriptor.sessionId });
+      recordLiveHarnessTerminal("renderer_write", {
+        payload_bytes_base64: bytesToBase64(data),
+        bytes: data.byteLength,
+        sessionId: this.descriptor.sessionId
+      });
     });
     this.ptyTransport.setSemanticInputProvider(() => this.takePendingSemantic());
     this.ptyTransport.setPositionToCell((event) => this.positionToCell(event));
@@ -192,8 +198,8 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     };
   }
 
-  write(data: string): void {
-    this.terminal?.sendInput(data, "pty");
+  write(data: TerminalOutput): void {
+    this.ptyTransport.deliverOutput(data);
   }
 
   resize(rows: number, columns: number): void {
@@ -299,13 +305,18 @@ class BotsterTerminalPtyTransport implements PtyTransport {
   private dataPlane?: TerminalDataPlaneAttachment;
   private callbacks?: PtyCallbacks;
   private outputSubscription?: TerminalSubscription;
-  private onRender?: (data: string) => void;
+  private onRender?: (data: TerminalOutput) => void;
   private semanticInputProvider?: () => PendingSemanticInput | undefined;
   private positionToCellFn?: (event: MouseEvent | PointerEvent | WheelEvent) => { col: number; row: number };
   private connected = false;
 
-  setRenderObserver(onRender: (data: string) => void): void {
+  setRenderObserver(onRender: (data: TerminalOutput) => void): void {
     this.onRender = onRender;
+  }
+
+  deliverOutput(data: TerminalOutput): void {
+    this.callbacks?.onData?.(data);
+    this.onRender?.(data);
   }
 
   setSemanticInputProvider(provider: () => PendingSemanticInput | undefined): void {

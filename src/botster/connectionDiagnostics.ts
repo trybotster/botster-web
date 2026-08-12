@@ -7,7 +7,7 @@ export const hubStatusFamily = "botster-web.hub_status";
 export const hubCompatibilityDiagnosticId = "hub-compatibility";
 export const expectedDaemonProtocol = "botster-hub-daemon-v1";
 export const minimumDaemonProtocolVersion = 1;
-export const minimumConformanceFixtureRevision = 35;
+export const minimumConformanceFixtureRevision = 36;
 export const requiredDaemonFeatures = [
   "sessions",
   "terminal_streaming",

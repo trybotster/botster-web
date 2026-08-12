@@ -21,7 +21,7 @@ const statusListeners = new Set<(status: TerminalAttachmentStatus) => void>();
 
 type MountedKeyboardHarness = {
   callbackOrder: string[];
-  emitOutput(data: string): void;
+  emitOutput(data: string | Uint8Array): void;
   emitStatus(status: TerminalAttachmentStatus): void;
   exitSessions: string[];
   inputs: string[];
@@ -33,10 +33,11 @@ type MountedKeyboardHarness = {
 const harness: MountedKeyboardHarness = {
   callbackOrder: [],
   emitOutput(data) {
+    const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
     for (const listener of outputListeners) {
-      listener(data);
+      listener(bytes);
     }
-    harness.callbackOrder.push(`output:${data}`);
+    harness.callbackOrder.push(`output:${new TextDecoder().decode(bytes)}`);
   },
   emitStatus(status) {
     for (const listener of statusListeners) {
@@ -72,7 +73,7 @@ const dataPlane: TerminalDataPlaneAttachment = {
   sessionId: descriptor.sessionId,
   writeInput(data) {
     harness.inputs.push(data);
-    const output = `${echoPrefix}${data.trimEnd()}\r\n`;
+    const output = new TextEncoder().encode(`${echoPrefix}${data.trimEnd()}\r\n`);
     for (const listener of outputListeners) {
       listener(output);
     }
@@ -82,7 +83,7 @@ const dataPlane: TerminalDataPlaneAttachment = {
     harness.outputSubscribers = outputListeners.size;
     window.setTimeout(() => {
       if (outputListeners.has(listener)) {
-        listener(readyOutput);
+        listener(new TextEncoder().encode(readyOutput));
       }
     }, 0);
 

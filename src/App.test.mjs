@@ -1698,9 +1698,10 @@ assert.match(generatedDaemonProtocol, /execution\?: DaemonSessionTypeExecution;/
 assert.match(generatedDaemonProtocol, /mouse_mode: number;/);
 assert.match(generatedDaemonProtocol, /\| "read_mode_flags"/);
 assert.match(generatedDaemonProtocol, /export type DaemonEvent/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "terminal_output"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "snapshot"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "scrollback"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number \}/);
-assert.doesNotMatch(generatedDaemonProtocol, /type: "(?:snapshot|scrollback)"[^\n]*data: string/);
+assert.doesNotMatch(generatedDaemonProtocol, /type: "(?:snapshot|scrollback|terminal_output)"[^\n]*data: string/);
 assert.doesNotMatch(realHubDaemonDto, /compressed\?: boolean|encoding\?: string/);
 assert.doesNotMatch(hubTransport, /createHttpDaemonBridgeClient|EventSource|fetchImpl/);
 assert.match(hubTransport, /subscribeEvents/);
@@ -1789,7 +1790,9 @@ assert.match(hubTerminalDataPlane, /decodeGhostsnpSnapshot|GHOSTSNP/);
 assert.match(hubTerminalDataPlane, /bindBinarySnapshotInstaller/);
 assert.match(hubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
 assert.match(hubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
-assert.match(hubTerminalDataPlane, /this\.emitOutput\(event\.data, "output"\)/);
+assert.match(hubTerminalDataPlane, /decodeTerminalOutputEvent/);
+assert.doesNotMatch(hubTerminalDataPlane, /this\.emitOutput\(event\.data/);
+assert.match(terminal, /export type TerminalOutput = Uint8Array/);
 assert.match(hubTerminalDataPlane, /type: "read_mode_flags"/);
 assert.match(hubTerminalDataPlane, /bufferHydratingOutput/);
 assert.doesNotMatch(hubTerminalDataPlane, /this\.emitOutput\(readScreen\.text, "read_screen"\)/);
@@ -1949,7 +1952,7 @@ assert.match(liveProtocolHarnessScript, /P2 claim C/);
 assert.match(liveProtocolHarnessScript, /A\/B\/C chronology|seed A \+ B \+ C/);
 assert.doesNotMatch(
   liveProtocolHarnessScript,
-  /seed A \+ B → P1 holds Add with A selected → arm membership drop →\s*\n\s*\*   P2 claims A \(D1 harness-dropped\)/
+  /seed A \+ B → P1 holds Add with A selected → arm membership drop →\s*\n\s*\*\s+P2 claims A \(D1 harness-dropped\)/
 );
 assert.match(liveProtocolHarnessScript, /getActionRequestState/);
 assert.match(liveProtocolHarnessScript, /listEntities/);
@@ -2124,7 +2127,7 @@ assert.doesNotMatch(terminalHost, /tabIndex=\{0\}/);
 assert.doesNotMatch(terminalHost, /onFocus=\{/);
 assert.match(terminalSmokeFixture, /runTerminalViewBridgeSmokeFixture/);
 assert.match(terminalSmokeFixture, /emitInput\("ls\\n"\)/);
-assert.match(terminalSmokeFixture, /dataPlane\.emitOutput\("ok\\r\\n"\)/);
+assert.match(terminalSmokeFixture, /dataPlane\.emitOutput\(new TextEncoder\(\)\.encode\("ok\\r\\n"\)\)/);
 assert.match(terminalSmokeFixture, /bridge\.resize\(descriptor, 24, 80\)/);
 assert.match(terminalSmokeFixture, /bridge\.writeInput\(descriptor, "premount\\n"\)/);
 assert.match(terminalSmokeFixture, /bridge\.unmount\(descriptor\)/);
@@ -2209,10 +2212,10 @@ const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.2");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.30");
-assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.30");
-assert.equal(hubTestSupportMetadata.protocol_version, 6);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 35);
+assert.equal(hubTestSupportMetadata.package_version, "0.1.31");
+assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.31");
+assert.equal(hubTestSupportMetadata.protocol_version, 7);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 36);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
@@ -2309,7 +2312,7 @@ assert.deepEqual(
   ["attach_state:attaching", "snapshot", "attach_state:attached", "terminal_output", "process_exit"]
 );
 for (const event of lateAttachHistoryConformanceFixture.history_then_live) {
-  if (event.type !== "snapshot" && event.type !== "scrollback") continue;
+  if (event.type !== "snapshot" && event.type !== "scrollback" && event.type !== "terminal_output") continue;
   assert.equal(event.payload_encoding, "base64");
   assert.equal(Buffer.from(event.payload_base64, "base64").byteLength, event.bytes);
   assert.equal("data" in event, false);
@@ -2751,7 +2754,7 @@ const { runTerminalViewBridgeSmokeFixture } = await import(
 const smoke = await runTerminalViewBridgeSmokeFixture();
 
 assert.deepEqual(smoke.dataPlane.inputs, ["ls\n"]);
-assert.deepEqual(smoke.firstRenderer.writes, ["ready\r\n", "ok\r\n"]);
+assert.deepEqual(smoke.firstRenderer.writes.map((data) => Buffer.from(data).toString("utf8")), ["ready\r\n", "ok\r\n"]);
 assert.deepEqual(smoke.firstRenderer.resizes, [{ rows: 24, columns: 80 }]);
 assert.equal(smoke.dataPlane.outputSubscriptionCount, 1);
 assert.equal(smoke.dataPlane.outputUnsubscribeCount, 1);
@@ -2760,7 +2763,7 @@ assert.ok(smoke.secondRenderer);
 assert.ok(smoke.lifecycle.indexOf("destroy") < smoke.lifecycle.lastIndexOf("create"));
 assert.equal(smoke.lifecycle.filter((event) => event === "focus").length, 2);
 assert.equal(smoke.lifecycle.filter((event) => event === "input:unsubscribe").length, 1);
-assert.doesNotMatch(smoke.firstRenderer.writes.join(""), /stale/);
+assert.doesNotMatch(smoke.firstRenderer.writes.map((data) => Buffer.from(data).toString("utf8")).join(""), /stale/);
 assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /stale/);
 assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /premount/);
 
@@ -2799,6 +2802,7 @@ const {
 const {
   createHubTerminalDataPlane,
   decodeGhostsnpSnapshot,
+  decodeTerminalOutputEvent,
   isGhostsnpPayload
 } = requireRuntime("./botster/hubTerminalDataPlane.js");
 
@@ -2824,6 +2828,26 @@ function bindGhostsnpInstaller(dataPlane, installs = []) {
     return bytes.byteLength >= 8 && Buffer.from(bytes.subarray(0, 8)).toString("utf8") === "GHOSTSNP";
   });
   return installs;
+}
+
+function liveOutputEvent(sessionId, subscriptionId, textOrBytes) {
+  const bytes = typeof textOrBytes === "string" ? Buffer.from(textOrBytes, "utf8") : Buffer.from(textOrBytes);
+  return {
+    type: "terminal_output",
+    session_id: sessionId,
+    subscription_id: subscriptionId,
+    payload_base64: bytes.toString("base64"),
+    payload_encoding: "base64",
+    bytes: bytes.byteLength
+  };
+}
+
+function outputText(data) {
+  return Buffer.from(data).toString("utf8");
+}
+
+function outputsIncludeText(outputs, text) {
+  return outputs.some((data) => outputText(data).includes(text));
 }
 
 const ghostsnpFixturePayloadBase64 = 'R0hPU1RTTlABAAEAmQMAACJWCmBQABgAAAAAAAAAAAAAABcAAABPAAAAAAEAZQAAAAEBAQEAAAAACAAEIgBkAAAAAAQiAGQAAAAABCIAZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//////////AAEBAQEBAQEBAR0fIcxmZrW9aPDGdIGivrKUu4q+t8XIxmZmZtVOU7nKSufFR3qm2sOX2HDAserq6gAAAAAAXwAAhwAArwAA1wAA/wBfAABfXwBfhwBfrwBf1wBf/wCHAACHXwCHhwCHrwCH1wCH/wCvAACvXwCvhwCvrwCv1wCv/wDXAADXXwDXhwDXrwDX1wDX/wD/AAD/XwD/hwD/rwD/1wD//18AAF8AX18Ah18Ar18A118A/19fAF9fX19fh19fr19f119f/1+HAF+HX1+Hh1+Hr1+H11+H/1+vAF+vX1+vh1+vr1+v11+v/1/XAF/XX1/Xh1/Xr1/X11/X/1//AF//X1//h1//r1//11///4cAAIcAX4cAh4cAr4cA14cA/4dfAIdfX4dfh4dfr4df14df/4eHAIeHX4eHh4eHr4eH14eH/4evAIevX4evh4evr4ev14ev/4fXAIfXX4fXh4fXr4fX14fX/4f/AIf/X4f/h4f/r4f/14f//68AAK8AX68Ah68Ar68A168A/69fAK9fX69fh69fr69f169f/6+HAK+HX6+Hh6+Hr6+H16+H/6+vAK+vX6+vh6+vr6+v16+v/6/XAK/XX6/Xh6/Xr6/X16/X/6//AK//X6//h6//r6//16///9cAANcAX9cAh9cAr9cA19cA/9dfANdfX9dfh9dfr9df19df/9eHANeHX9eHh9eHr9eH19eH/9evANevX9evh9evr9ev19ev/9fXANfXX9fXh9fXr9fX19fX/9f/ANf/X9f/h9f/r9f/19f///8AAP8AX/8Ah/8Ar/8A1/8A//9fAP9fX/9fh/9fr/9f1/9f//+HAP+HX/+Hh/+Hr/+H1/+H//+vAP+vX/+vh/+vr/+v1/+v///XAP/XX//Xh//Xr//X1//X////AP//X///h///r///1////wgICBISEhwcHCYmJjAwMDo6OkRERE5OTlhYWGJiYmxsbHZ2doCAgIqKipSUlJ6enqioqLKysry8vMbGxtDQ0Nra2uTk5O7u7gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACADYAAAB7ZgmSAAABAAAAAAAAAAAAAAABAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAwBzAAAAV+gBEVAAGAAAAAAAgADAAAAgAAAACAAAABMAaGlzdG9yeS1iZWZvcmUtbGl2ZQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAAAAAngGPRBQAAAAAA5CDvCgQABgAAAKERil4AAAAAAAAGAAAAAAA+61M+';
@@ -4047,12 +4071,11 @@ const bridge = {
       return {
         kind: "events",
         events: [
-          {
-            type: "terminal_output",
-            session_id: request.session_id,
-            subscription_id: "botster-web-production-terminal",
-            data: request.type === "attach" ? "botster-web-production-ready\r\n" : "botster-web-production-echo:ping\r\n"
-          }
+          liveOutputEvent(
+            request.session_id,
+            "botster-web-production-terminal",
+            request.type === "attach" ? "botster-web-production-ready\r\n" : "botster-web-production-echo:ping\r\n"
+          )
         ]
       };
     }
@@ -4124,12 +4147,7 @@ const bridge = {
       subscription_id: subscriptionId,
       state: "attached"
     });
-    onEvent({
-      type: "terminal_output",
-      session_id: sessionId,
-      subscription_id: subscriptionId,
-      data: "botster-web-production-ready\r\n"
-    });
+    onEvent(liveOutputEvent(sessionId, subscriptionId, "botster-web-production-ready\r\n"));
     return {
       unsubscribe() {
         bridgeTerminalStreams.push({ sessionId, subscriptionId, unsubscribed: true });
@@ -6697,7 +6715,7 @@ const outdatedConformanceDiagnostic = compatibilityDiagnosticsFromFrame({
   }
 })[0];
 assert.equal(outdatedConformanceDiagnostic.title, "Hub conformance fixture mismatch");
-assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 35/);
+assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 36/);
 
 const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -6728,13 +6746,13 @@ assert.deepEqual(requiredDaemonFeatures, [
   "plugin_surface_action",
   "mode_gated_input"
 ]);
-assert.equal(minimumConformanceFixtureRevision, 35);
+assert.equal(minimumConformanceFixtureRevision, 36);
 assert.equal(minimumDaemonProtocolVersion, 1);
 assert.equal(compatibleDescriptorDiagnostics.length, 1);
 assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
 assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
 
-// Protocol-6 Hub at conf 35 with mode_gated_input is the GHOSTSNP thin-client floor.
+// Protocol-6 Hub at conf 36 remains protocol-compatible; the envelope floor is the conformance revision.
 const protocolSixHubStatusRecord = {
   id: "local-hub",
   schema_version: 3,
@@ -6744,7 +6762,7 @@ const protocolSixHubStatusRecord = {
     protocol: "botster-hub-daemon-v1",
     protocol_version: 6,
     features: [...requiredDaemonFeatures],
-    conformance_fixture_revision: 35
+    conformance_fixture_revision: 36
   }
 };
 const protocolSixDiagnostics = compatibilityDiagnosticsFromFrame({
@@ -6762,9 +6780,9 @@ assert.match(protocolSixDiagnostics[0].detail, /Protocol botster-hub-daemon-v1 v
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /mismatch/i.test(diagnostic.title)), false);
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /unsupported_feature/.test(JSON.stringify(diagnostic))), false);
 assert.equal(minimumDaemonProtocolVersion, 1);
-assert.equal(minimumConformanceFixtureRevision, 35);
+assert.equal(minimumConformanceFixtureRevision, 36);
 
-// Pre-GHOSTSNP conf revisions fail closed under the conf-35 floor.
+// Pre-envelope conf revisions fail closed under the conf-36 floor.
 const preGhostsnpDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
   payload: {
@@ -6783,6 +6801,25 @@ const preGhostsnpDiagnostics = compatibilityDiagnosticsFromFrame({
   }
 });
 assert.equal(preGhostsnpDiagnostics[0].title, "Hub conformance fixture mismatch");
+
+const previousGhostsnpFloorDiagnostics = compatibilityDiagnosticsFromFrame({
+  kind: "entity_snapshot",
+  payload: {
+    operation: "entity_snapshot",
+    family: hubStatusFamily,
+    records: [{
+      id: "local-hub",
+      schema_version: 3,
+      compatibility: {
+        protocol: "botster-hub-daemon-v1",
+        protocol_version: 6,
+        features: [...requiredDaemonFeatures],
+        conformance_fixture_revision: 35
+      }
+    }]
+  }
+});
+assert.equal(previousGhostsnpFloorDiagnostics[0].title, "Hub conformance fixture mismatch");
 
 const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -6930,7 +6967,7 @@ const terminalOutput = [];
 const terminalStatuses = [];
 const terminalStatusSubscription = terminalDataPlane.subscribeStatus((status) => terminalStatuses.push(status));
 const terminalSubscription = terminalDataPlane.subscribeOutput((data) => terminalOutput.push(data));
-await waitFor(() => terminalOutput.some((data) => data.includes("botster-web-production-ready")));
+await waitFor(() => outputsIncludeText(terminalOutput, "botster-web-production-ready"));
 await terminalDataPlane.writeInput("ping\n");
 await terminalDataPlane.resize(24, 80);
 const detachRequestsBeforeListenerClose = bridgeRequests.filter((request) => request.type === "detach").length;
@@ -6950,10 +6987,10 @@ assert.equal(bridgeRequests.some((request) => request.type === "read_mode_flags"
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
 assert.equal(terminalInstalls.length >= 1, true);
 assert.equal(isGhostsnpPayload(terminalInstalls[0]), true);
-assert.deepEqual(terminalOutput, [
+assert.deepEqual(terminalOutput.map(outputText), [
   "botster-web-production-ready\r\n"
 ]);
-assert.equal(terminalOutput.some((data) => data.includes("botster-web-production-ready")), true);
+assert.equal(outputsIncludeText(terminalOutput, "botster-web-production-ready"), true);
 assert.equal(terminalStatuses.some((status) => status.state === "attached" && status.message.includes("GHOSTSNP")), true);
 
 const readbackRequests = [];
@@ -7136,10 +7173,10 @@ for (const [events, readScreenText, expectedLive] of [
   });
   fixtureDataPlane.subscribeOutput((data) => {
     fixtureOutput.push(data);
-    fixtureTimeline.push(`output:${data}`);
+    fixtureTimeline.push(`output:${outputText(data)}`);
   });
   await waitFor(() => fixtureOutput.length === expectedLive.length);
-  assert.deepEqual(fixtureOutput, expectedLive);
+  assert.deepEqual(fixtureOutput.map(outputText), expectedLive);
   assert.equal(fixtureInstalls.length, 1);
   assert.equal(isGhostsnpPayload(fixtureInstalls[0]), true);
 
@@ -7156,7 +7193,7 @@ for (const [events, readScreenText, expectedLive] of [
   assert.equal(restoredIndex > protocolAttachedIndex, true);
   assert.equal(liveOutputIndex > restoredIndex, true);
   // History is restored via GHOSTSNP install, not as text output on the data-plane listeners.
-  assert.equal(fixtureOutput.some((data) => data.includes("history-before-live")), false);
+  assert.equal(outputsIncludeText(fixtureOutput, "history-before-live"), false);
 }
 
 // Invalid non-GHOSTSNP Snapshot fails closed (known-bad 0.1.29 placeholder).
@@ -7180,7 +7217,7 @@ const invalidSnapshotDataPlane = createHubTerminalDataPlane({
         bytes: 6
       });
       onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-      onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: "should-not-flush\r\n" });
+      onEvent(liveOutputEvent(sessionId, subscriptionId, "should-not-flush\r\n"));
       return { unsubscribe() {} };
     }
   }
@@ -7233,8 +7270,8 @@ const delayedHydrationDataPlane = createHubTerminalDataPlane({
         bytes: ghostsnpFixtureBytes
       });
       onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-      onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: "live-one\r\n" });
-      onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: "live-two\r\n" });
+      onEvent(liveOutputEvent(sessionId, subscriptionId, "live-one\r\n"));
+      onEvent(liveOutputEvent(sessionId, subscriptionId, "live-two\r\n"));
       return { unsubscribe() {} };
     }
   }
@@ -7250,7 +7287,7 @@ resolveDelayedModes({
   events: []
 });
 await waitFor(() => delayedHydrationOutput.length === 2);
-assert.deepEqual(delayedHydrationOutput, ["live-one\r\n", "live-two\r\n"]);
+assert.deepEqual(delayedHydrationOutput.map(outputText), ["live-one\r\n", "live-two\r\n"]);
 
 let resolveStaleAutomaticModes;
 let staleAutomaticStreamCount = 0;
@@ -7304,7 +7341,7 @@ const staleAutomaticDataPlane = createHubTerminalDataPlane({
         bytes: ghostsnpFixtureBytes
       });
       onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-      onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: live });
+      onEvent(liveOutputEvent(sessionId, subscriptionId, live));
       return { unsubscribe() {} };
     }
   }
@@ -7314,20 +7351,20 @@ const staleAutomaticFirstSubscription = staleAutomaticDataPlane.subscribeOutput(
 await waitFor(() => typeof resolveStaleAutomaticModes === "function");
 staleAutomaticFirstSubscription.unsubscribe();
 const staleAutomaticSecondSubscription = staleAutomaticDataPlane.subscribeOutput((data) => staleAutomaticOutput.push(data));
-await waitFor(() => staleAutomaticOutput.includes("current-live\r\n"));
+await waitFor(() => outputsIncludeText(staleAutomaticOutput, "current-live\r\n"));
 resolveStaleAutomaticModes({
   kind: "read_mode_flags",
   mode_flags: testModeFlags("stale-automatic-session"),
   events: []
 });
 await flushMicrotasks();
-assert.deepEqual(staleAutomaticOutput, ["current-live\r\n"]);
-assert.equal(staleAutomaticOutput.includes("stale-live\r\n"), false);
+assert.deepEqual(staleAutomaticOutput.map(outputText), ["current-live\r\n"]);
+assert.equal(outputsIncludeText(staleAutomaticOutput, "stale-live\r\n"), false);
 staleAutomaticSecondSubscription.unsubscribe();
 
 const reattachedTerminalOutput = [];
 const reattachedTerminalSubscription = terminalDataPlane.subscribeOutput((data) => reattachedTerminalOutput.push(data));
-await waitFor(() => reattachedTerminalOutput.some((data) => data.includes("botster-web-production-ready")));
+await waitFor(() => outputsIncludeText(reattachedTerminalOutput, "botster-web-production-ready"));
 reattachedTerminalSubscription.unsubscribe();
 assert.equal(
   bridgeTerminalStreams.filter((stream) => stream.sessionId === activeHubSessionId && stream.unsubscribed !== true).length,
@@ -7389,12 +7426,7 @@ const byteOnlyTerminalDataPlane = createHubTerminalDataPlane({
         subscription_id: subscriptionId,
         state: "attached"
       });
-      onEvent({
-        type: "terminal_output",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        data: "byte-only-live-output\r\n"
-      });
+      onEvent(liveOutputEvent(sessionId, subscriptionId, "byte-only-live-output\r\n"));
       return {
         unsubscribe() {}
       };
@@ -7404,8 +7436,8 @@ const byteOnlyTerminalDataPlane = createHubTerminalDataPlane({
 bindGhostsnpInstaller(byteOnlyTerminalDataPlane, byteOnlyInstalls);
 byteOnlyTerminalDataPlane.subscribeStatus((status) => byteOnlyTerminalStatuses.push(status));
 byteOnlyTerminalDataPlane.subscribeOutput((data) => byteOnlyTerminalOutput.push(data));
-await waitFor(() => byteOnlyTerminalOutput.some((data) => data.includes("byte-only-live-output")));
-assert.deepEqual(byteOnlyTerminalOutput, ["byte-only-live-output\r\n"]);
+await waitFor(() => outputsIncludeText(byteOnlyTerminalOutput, "byte-only-live-output"));
+assert.deepEqual(byteOnlyTerminalOutput.map(outputText), ["byte-only-live-output\r\n"]);
 assert.equal(byteOnlyInstalls.length, 1);
 assert.equal(
   byteOnlyTerminalStatuses.some((status) => status.message.includes("Visible terminal screen restored from GHOSTSNP")),
@@ -7424,12 +7456,7 @@ const delayedTerminalDataPlane = createHubTerminalDataPlane({
     },
     streamTerminal(sessionId, subscriptionId, onEvent) {
       delayedBridgeTerminalStreams.push({ sessionId, subscriptionId });
-      onEvent({
-        type: "terminal_output",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        data: "botster-web-production-ready-after-retry\r\n"
-      });
+      onEvent(liveOutputEvent(sessionId, subscriptionId, "botster-web-production-ready-after-retry\r\n"));
       return {
         unsubscribe() {
           delayedBridgeTerminalStreams.push({ sessionId, subscriptionId, unsubscribed: true });
@@ -7443,7 +7470,7 @@ const delayedStatuses = [];
 delayedTerminalDataPlane.subscribeStatus((status) => delayedStatuses.push(status));
 delayedTerminalDataPlane.subscribeOutput((data) => delayedOutput.push(data));
 const delayedResize = delayedTerminalDataPlane.resize(9, 34);
-await waitFor(() => delayedOutput.some((data) => data.includes("ready-after-retry")));
+await waitFor(() => outputsIncludeText(delayedOutput, "ready-after-retry"));
 await delayedResize;
 assert.equal(delayedStatuses.some((status) => status.state === "live_only"), true);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize").length, 1);
@@ -7488,16 +7515,16 @@ const scrollbackDataPlane = createHubTerminalDataPlane({
         bytes: ghostsnpFixtureBytes
       });
       onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-      onEvent({ type: "terminal_output", session_id: sessionId, subscription_id: subscriptionId, data: "after-scrollback\r\n" });
+      onEvent(liveOutputEvent(sessionId, subscriptionId, "after-scrollback\r\n"));
       return { unsubscribe() {} };
     }
   }
 });
 bindGhostsnpInstaller(scrollbackDataPlane, scrollbackInstalls);
 scrollbackDataPlane.subscribeOutput((data) => scrollbackOutput.push(data));
-await waitFor(() => scrollbackOutput.includes("after-scrollback\r\n"));
+await waitFor(() => outputsIncludeText(scrollbackOutput, "after-scrollback\r\n"));
 assert.equal(scrollbackInstalls.length, 1);
-assert.deepEqual(scrollbackOutput, ["after-scrollback\r\n"]);
+assert.deepEqual(scrollbackOutput.map(outputText), ["after-scrollback\r\n"]);
 
 // ModeGatedInput stale path re-encodes semantic input; never pairs old bytes with fresh token.
 const modeGatedRequests = [];
@@ -7739,12 +7766,7 @@ async function isolationMatrixCase(boundary) {
             bytes: ghostsnpFixtureBytes
           });
           onEvent({ type: "attach_state", session_id: nextSessionId, subscription_id: subscriptionId, state: "attached" });
-          onEvent({
-            type: "terminal_output",
-            session_id: nextSessionId,
-            subscription_id: subscriptionId,
-            data: `old-live-${boundary}\r\n`
-          });
+          onEvent(liveOutputEvent(nextSessionId, subscriptionId, `old-live-${boundary}\r\n`));
         });
         return { unsubscribe() {}, abandon() {} };
       }
@@ -7766,7 +7788,7 @@ async function isolationMatrixCase(boundary) {
         return dataPlane.subscribeOutput((data) => {
           bucket.outputs.push(data);
           if (this.container?.dataset) {
-            this.container.dataset.terminalLastRenderedOutput = data;
+            this.container.dataset.terminalLastRenderedOutput = Buffer.from(data).toString("base64");
             bucket.dataset.push(data);
           }
         });
@@ -7777,7 +7799,7 @@ async function isolationMatrixCase(boundary) {
       write(data) {
         bucket.outputs.push(data);
         if (this.container?.dataset) {
-          this.container.dataset.terminalLastRenderedOutput = data;
+          this.container.dataset.terminalLastRenderedOutput = Buffer.from(data).toString("base64");
           bucket.dataset.push(data);
         }
       },
@@ -7870,10 +7892,10 @@ async function isolationMatrixCase(boundary) {
 
   if (boundary === "attach" || boundary === "listener" || boundary === "snapshot") {
     assert.equal(oldBucket.installs.length, 0, `${boundary}: must not install into old Restty after switch`);
-    assert.equal(oldBucket.outputs.includes(`old-live-${boundary}\r\n`), false);
+    assert.equal(outputsIncludeText(oldBucket.outputs, `old-live-${boundary}\r\n`), false);
   }
   if (boundary === "modes") {
-    assert.equal(oldBucket.outputs.includes(`old-live-${boundary}\r\n`), false);
+    assert.equal(outputsIncludeText(oldBucket.outputs, `old-live-${boundary}\r\n`), false);
     assert.equal(snapshot.oldRequests.includes("mode_gated_input"), false);
   }
   if (boundary === "resize") {
@@ -8042,6 +8064,112 @@ assert.match(liveProtocolHarnessScript, /1000h|1006h/);
 
 assert.equal(isGhostsnpPayload(decodeGhostsnpSnapshot(ghostsnpFixturePayloadBase64)), true);
 assert.throws(() => decodeGhostsnpSnapshot("AP9HVFkB"), /GHOSTSNP|not GHOSTSNP/i);
+
+const euroLead = Uint8Array.of(0xe2);
+const euroRest = Uint8Array.of(0x82, 0xac);
+const splitEuroFirst = liveOutputEvent("split-utf8-session", "split-utf8-sub", euroLead);
+const splitEuroSecond = liveOutputEvent("split-utf8-session", "split-utf8-sub", euroRest);
+const splitDecoded = [
+  decodeTerminalOutputEvent(splitEuroFirst),
+  decodeTerminalOutputEvent(splitEuroSecond)
+];
+assert.deepEqual([...splitDecoded[0]], [0xe2]);
+assert.deepEqual([...splitDecoded[1]], [0x82, 0xac]);
+assert.equal(Buffer.concat(splitDecoded.map((chunk) => Buffer.from(chunk))).toString("utf8"), "€");
+assert.equal(new TextDecoder().decode(splitDecoded[0]).includes("\uFFFD"), true);
+
+const arbitraryBytes = Uint8Array.of(0x00, 0x1b, 0x5b, 0x30, 0x6d, 0xff);
+assert.deepEqual(
+  [...decodeTerminalOutputEvent(liveOutputEvent("arb-session", "arb-sub", arbitraryBytes))],
+  [...arbitraryBytes]
+);
+
+const validLiveEnvelope = liveOutputEvent("retire-data-session", "retire-data-sub", "keep-me\r\n");
+assert.throws(
+  () => decodeTerminalOutputEvent({ ...validLiveEnvelope, data: "legacy" }),
+  /retired data field/
+);
+assert.throws(
+  () => decodeTerminalOutputEvent({ ...validLiveEnvelope, payload_encoding: "hex" }),
+  /Unsupported payload encoding/
+);
+assert.throws(
+  () => decodeTerminalOutputEvent({ ...validLiveEnvelope, payload_base64: "!!!!" }),
+  /Invalid base64/
+);
+assert.throws(
+  () => decodeTerminalOutputEvent({ ...validLiveEnvelope, bytes: validLiveEnvelope.bytes + 1 }),
+  /does not match declared bytes/
+);
+
+const retiredDataStatuses = [];
+const retiredDataOutput = [];
+const retiredDataPlane = createHubTerminalDataPlane({
+  sessionId: "retire-data-session",
+  subscriptionId: "retire-data-sub",
+  bridge: {
+    async request() {
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(sessionId, subscriptionId, onEvent) {
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
+      onEvent({
+        type: "snapshot",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        payload_base64: ghostsnpFixturePayloadBase64,
+        payload_encoding: "base64",
+        bytes: ghostsnpFixtureBytes
+      });
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+      onEvent({ ...validLiveEnvelope, session_id: sessionId, subscription_id: subscriptionId, data: "legacy" });
+      return { unsubscribe() {} };
+    }
+  }
+});
+bindGhostsnpInstaller(retiredDataPlane);
+retiredDataPlane.subscribeStatus((status) => retiredDataStatuses.push(status));
+retiredDataPlane.subscribeOutput((data) => retiredDataOutput.push(data));
+await waitFor(() => retiredDataStatuses.some((status) => status.state === "failed"));
+assert.deepEqual(retiredDataOutput, []);
+
+const splitLiveOutput = [];
+const splitLiveDataPlane = createHubTerminalDataPlane({
+  sessionId: "split-utf8-session",
+  subscriptionId: "split-utf8-sub",
+  bridge: {
+    async request(request) {
+      if (request.type === "read_mode_flags") {
+        return { kind: "read_mode_flags", mode_flags: testModeFlags("split-utf8-session"), events: [] };
+      }
+      if (request.type === "read_screen") {
+        return { kind: "read_screen", read_screen: { session_id: "split-utf8-session", text: "" }, events: [] };
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(sessionId, subscriptionId, onEvent) {
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
+      onEvent({
+        type: "snapshot",
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        payload_base64: ghostsnpFixturePayloadBase64,
+        payload_encoding: "base64",
+        bytes: ghostsnpFixtureBytes
+      });
+      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+      onEvent(splitEuroFirst);
+      onEvent(splitEuroSecond);
+      return { unsubscribe() {} };
+    }
+  }
+});
+bindGhostsnpInstaller(splitLiveDataPlane);
+splitLiveDataPlane.subscribeOutput((data) => splitLiveOutput.push(data));
+await waitFor(() => splitLiveOutput.length === 2);
+assert.deepEqual([...splitLiveOutput[0]], [0xe2]);
+assert.deepEqual([...splitLiveOutput[1]], [0x82, 0xac]);
+assert.equal(Buffer.concat(splitLiveOutput.map((chunk) => Buffer.from(chunk))).toString("utf8"), "€");
 
 const terminalWithoutStream = createHubTerminalDataPlane({
   sessionId: activeHubSessionId,

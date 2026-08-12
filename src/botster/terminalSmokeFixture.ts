@@ -2,13 +2,14 @@ import {
   DefaultTerminalViewBridge,
   MockTerminalDataPlane,
   type TerminalInput,
+  type TerminalOutput,
   type TerminalRendererAdapter,
   type TerminalSubscription,
   type TerminalViewDescriptor
 } from "./terminal";
 
 class FakeTerminalRenderer implements TerminalRendererAdapter {
-  readonly writes: string[] = [];
+  readonly writes: TerminalOutput[] = [];
   readonly resizes: Array<{ rows: number; columns: number }> = [];
   readonly lifecycle: string[];
   private inputListener?: (data: TerminalInput) => void;
@@ -38,7 +39,7 @@ class FakeTerminalRenderer implements TerminalRendererAdapter {
     this.inputListener?.(data);
   }
 
-  write(data: string): void {
+  write(data: TerminalOutput): void {
     this.writes.push(data);
   }
 
@@ -68,7 +69,9 @@ export async function runTerminalViewBridgeSmokeFixture() {
     renderers.push(renderer);
     return renderer;
   });
-  const dataPlane = new MockTerminalDataPlane(descriptor.sessionId, ["ready\r\n"]);
+  const dataPlane = new MockTerminalDataPlane(descriptor.sessionId, [
+    new TextEncoder().encode("ready\r\n")
+  ]);
   const container = {} as HTMLElement;
 
   await bridge.focus(descriptor);
@@ -82,12 +85,12 @@ export async function runTerminalViewBridgeSmokeFixture() {
     void bridge.focus(descriptor);
   };
   renderers[0].emitInput("ls\n");
-  dataPlane.emitOutput("ok\r\n");
+  dataPlane.emitOutput(new TextEncoder().encode("ok\r\n"));
   await bridge.resize(descriptor, 24, 80);
   await bridge.focus(descriptor);
   await bridge.focus(descriptor);
   await bridge.unmount(descriptor);
-  dataPlane.emitOutput("stale\r\n");
+  dataPlane.emitOutput(new TextEncoder().encode("stale\r\n"));
   renderers[0].emitInput("stale\n");
 
   await bridge.mount(container, descriptor);
