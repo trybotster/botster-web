@@ -1,0 +1,12 @@
+{
+  "steps": [
+    {
+      "argv": ["npm", "ci"],
+      "timeout_seconds": 600
+    },
+    {
+      "argv": ["npm", "run", "build"],
+      "timeout_seconds": 600
+    }
+  ]
+}
