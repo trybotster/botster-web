@@ -5824,28 +5824,48 @@ async function proveZeroBrowserOscColorReplies(page) {
 }
 
 async function provePaletteProjectionAfterOsc(page, sessionId) {
-  // Drive an OSC palette change through the session and require a later GHOSTSNP or
-  // renderer-visible color change path. Capture snapshot metadata is not enough.
-  await callTerminalControl(page, "writeInput", "printf '\\033]4;1;rgb:ffff/0000/0000\\007'\n").catch(() => undefined);
-  await new Promise((r) => setTimeout(r, 300));
-  // Re-read mode/flags and capture a control-plane snapshot for the session.
+  // Drive an OSC palette change through the live session and require the mounted
+  // Restty palette probe to report the exact expected color for index 1.
+  const expectedColor = 0x00ff0000; // rgb:ffff/0000/0000 → 0x00RRGGBB
+  const beforeColor = await page.evaluate(() => {
+    const probe = globalThis.__BOTSTER_RESTTY_DEBUG__;
+    const get = probe?.getPaletteColor ?? probe?.active?.getPaletteColor;
+    if (typeof get !== "function") return null;
+    return get(1);
+  });
+  if (beforeColor === null || beforeColor === undefined) {
+    throw new Error("palette probe unavailable on mounted Restty renderer (__BOTSTER_RESTTY_DEBUG__.getPaletteColor)");
+  }
+  await callTerminalControl(page, "writeInput", "printf '\\033]4;1;rgb:ffff/0000/0000\\007'\n");
+  await page.waitForFunction(
+    ({ expected }) => {
+      const probe = globalThis.__BOTSTER_RESTTY_DEBUG__;
+      const get = probe?.getPaletteColor ?? probe?.active?.getPaletteColor;
+      if (typeof get !== "function") return false;
+      const color = get(1);
+      return color === expected;
+    },
+    { expected: expectedColor },
+    { timeout: 10_000 }
+  ).catch(async (error) => {
+    const after = await page.evaluate(() => {
+      const probe = globalThis.__BOTSTER_RESTTY_DEBUG__;
+      const get = probe?.getPaletteColor ?? probe?.active?.getPaletteColor;
+      return typeof get === "function" ? get(1) : null;
+    });
+    throw new Error(
+      `palette index 1 did not become 0x${expectedColor.toString(16)} after OSC: before=${beforeColor} after=${after}: ${error.message}`
+    );
+  });
   const capture = await callTerminalControl(page, "captureSnapshot");
   if (!capture || capture.session_id !== sessionId) {
     throw new Error(`palette path missing capture_snapshot for ${sessionId}: ${JSON.stringify(capture)}`);
   }
-  // Prefer Restty palette API if the active renderer exposes it on window debug.
-  const paletteProbe = await page.evaluate(() => {
-    const restty = globalThis.__BOTSTER_RESTTY_DEBUG__?.active;
-    if (restty && typeof restty.getPaletteColor === "function") {
-      return { source: "restty", color: restty.getPaletteColor(1) };
-    }
-    // Fallback: prove the palette OSC was written into the live session output path.
-    const outputs = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
-      .filter((entry) => entry.kind === "output" || entry.kind === "renderer_write")
-      .map((entry) => String(entry.payload?.data ?? ""));
-    return { source: "output_path", saw_printf: outputs.some((data) => data.includes("printf") || data.includes("rgb:")) };
+  const afterColor = await page.evaluate(() => globalThis.__BOTSTER_RESTTY_DEBUG__?.getPaletteColor?.(1) ?? null);
+  recordProofNote("palette_projection", {
+    capture_bytes: capture.payload_bytes,
+    probe: { source: "restty", before: beforeColor, after: afterColor, expected: expectedColor }
   });
-  recordProofNote("palette_projection", { capture_bytes: capture.payload_bytes, probe: paletteProbe });
 }
 
 async function proveRetainedHistoryAfterEcho(page, echoProbe) {
@@ -5865,9 +5885,8 @@ async function proveRetainedHistoryAfterEcho(page, echoProbe) {
 }
 
 async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
-  // Surviving-document DataChannel recovery + live terminal path after recovery.
-  // Fresh H0-H5 across WebRTC generations is already proven by the page-reload cycles
-  // above; this proof focuses on document survival + channel recovery + post-recovery input.
+  // Surviving-document DataChannel recovery must mint a fresh terminal subscription
+  // and re-run H0-H5 on the still-mounted view (no navigation).
   await page.evaluate(() => {
     globalThis.__BOTSTER_TERMINAL_RECONNECT_DOCUMENT_SENTINEL__ = "in-page-terminal-reconnect";
   });
@@ -5875,11 +5894,27 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
       .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length
   );
-  const statusRequestsBefore = await daemonRequestCount(page, { type: "status" });
+  const attachTelemetryBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "attach").length
+  );
+  const ghostsnpBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+      (entry) => entry.kind === "ghostsnp_install" || entry.kind === "restty_load_binary_snapshot"
+    ).length
+  );
+  const subscriptionBefore = await page.evaluate(() => {
+    const attaches = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+      (entry) => entry.kind === "attach" && entry.payload?.subscription_id
+    );
+    return attaches.at(-1)?.payload?.subscription_id ?? null;
+  });
   const chronologyBefore = await assertTerminalAttachChronology(page, sessionId);
   if (!chronologyBefore.sequence?.includes("snapshot")) {
     throw new Error(`pre-reconnect chronology missing GHOSTSNP snapshot: ${JSON.stringify(chronologyBefore)}`);
   }
+  const historyMarker = `botster-web-inpage-history:${Date.now().toString(36)}`;
+  await typeThroughMountedTerminal(page, `echo ${historyMarker}\n`);
+  await waitForTerminalOutput(page, historyMarker);
 
   const closed = await page.evaluate(
     () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
@@ -5907,32 +5942,90 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
   ).catch((error) => {
     throw new Error(`in-page terminal reconnect never reopened the data channel: ${error.message}`);
   });
+
+  // Fresh terminal attach after transport recovery (new subscription + H0-H5).
   await page.waitForFunction(
     ({ before }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
-        (entry) => entry.kind === "daemon_request" && entry.payload?.type === "status"
-      ).length > before,
-    { before: statusRequestsBefore },
-    { timeout: 20_000 }
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "attach")
+        .length > before,
+    { before: attachTelemetryBefore },
+    { timeout: 30_000 }
   ).catch((error) => {
-    throw new Error(`in-page terminal reconnect never re-pulled status: ${error.message}`);
+    throw new Error(`in-page terminal reconnect never reattached the terminal stream: ${error.message}`);
   });
+  await page.waitForFunction(
+    ({ before }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+        (entry) => entry.kind === "ghostsnp_install" || entry.kind === "restty_load_binary_snapshot"
+      ).length > before,
+    { before: ghostsnpBefore },
+    { timeout: 30_000 }
+  ).catch((error) => {
+    throw new Error(`in-page terminal reconnect never reinstalled GHOSTSNP: ${error.message}`);
+  });
+
+  const subscriptionAfter = await page.evaluate(() => {
+    const attaches = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+      (entry) => entry.kind === "attach" && entry.payload?.subscription_id
+    );
+    return attaches.at(-1)?.payload?.subscription_id ?? null;
+  });
+  if (!subscriptionAfter) {
+    throw new Error("in-page terminal reconnect missing post-recovery subscription_id");
+  }
+  if (subscriptionBefore && subscriptionAfter === subscriptionBefore) {
+    throw new Error(
+      `in-page terminal reconnect reused subscription_id ${subscriptionAfter}; expected a fresh subscription`
+    );
+  }
+
+  const chronologyAfter = await assertTerminalAttachChronology(page, sessionId);
+  if (!chronologyAfter.sequence?.includes("snapshot")) {
+    throw new Error(`post-reconnect chronology missing GHOSTSNP snapshot: ${JSON.stringify(chronologyAfter)}`);
+  }
+  const snapshotIdx = chronologyAfter.sequence.indexOf("snapshot");
+  const liveIdx = chronologyAfter.sequence.findIndex(
+    (step, index) => index > snapshotIdx && (step === "terminal_output" || step === "attach_state:attached")
+  );
+  if (snapshotIdx < 0 || liveIdx < 0 || snapshotIdx > liveIdx) {
+    // attached often precedes live output; require snapshot before any post-snapshot live marker when present
+  }
+  // Require snapshot before live output when both appear.
+  const liveOutputIdx = chronologyAfter.sequence.indexOf("terminal_output");
+  if (liveOutputIdx >= 0 && snapshotIdx > liveOutputIdx) {
+    throw new Error(`post-reconnect snapshot-before-live violated: ${JSON.stringify(chronologyAfter.sequence)}`);
+  }
 
   const sentinel = await page.evaluate(() => globalThis.__BOTSTER_TERMINAL_RECONNECT_DOCUMENT_SENTINEL__);
   if (sentinel !== "in-page-terminal-reconnect") {
     throw new Error("in-page terminal reconnect navigated; the document was replaced");
   }
 
-  // Terminal H0-H5 across WebRTC generations is proven by the reload cycles above.
-  // After DataChannel recovery the existing SPA subscription does not auto-reattach;
-  // prove the channel/document recovery here and that the pre-drop attach chronology
-  // already carried a GHOSTSNP H0-H5 cycle for this session.
+  // Retained history + post-reconnect output on the surviving document.
+  const postProbe = `botster-web-inpage-post:${Date.now().toString(36)}`;
+  await typeThroughMountedTerminal(page, `echo ${postProbe}\n`);
+  await waitForTerminalOutput(page, postProbe);
+  const readScreen = await callTerminalControl(page, "readScreen");
+  const retained =
+    Boolean(readScreen?.text?.includes(historyMarker)) ||
+    Boolean(readScreen?.text?.includes(postProbe));
+  if (!retained) {
+    throw new Error(
+      `in-page reconnect lost terminal history/output: marker=${historyMarker} probe=${postProbe} read=${JSON.stringify(readScreen)}`
+    );
+  }
+
   recordProofNote("in_page_terminal_reconnect", {
     openEventsBefore,
-    statusRequestsBefore,
+    attachTelemetryBefore,
+    ghostsnpBefore,
+    subscriptionBefore,
+    subscriptionAfter,
     chronologyBefore,
-    document_sentinel: sentinel,
-    note: "DataChannel recovered on surviving document; terminal H0-H5 re-proven by reload cycles"
+    chronologyAfter,
+    historyMarker,
+    postProbe,
+    document_sentinel: sentinel
   });
 }
 

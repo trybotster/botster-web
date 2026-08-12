@@ -10,6 +10,19 @@ import type {
   TerminalViewDescriptor
 } from "./terminal";
 import type { DaemonModeFlags } from "./realHubDaemonDto";
+import {
+  coreMouseTrackingEnabled,
+  mouseTrackingBitsFromCoreMode
+} from "./mouseMode";
+
+export {
+  CORE_MOUSE_NORMAL,
+  CORE_MOUSE_ANY,
+  CORE_MOUSE_BUTTON,
+  CORE_MOUSE_SGR,
+  coreMouseTrackingEnabled,
+  mouseTrackingBitsFromCoreMode
+} from "./mouseMode";
 
 const botsterResttyFontSources: ResttyFontSource[] = [
   {
@@ -39,6 +52,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   private container?: HTMLElement;
   private pendingSemantic: PendingSemanticInput | undefined;
   private removeDomListeners?: () => void;
+  private uninstallPaletteProbe?: () => void;
 
   constructor(readonly descriptor: TerminalViewDescriptor) {}
 
@@ -51,6 +65,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       recordLiveHarnessTerminal("renderer_write", { data, sessionId: this.descriptor.sessionId });
     });
     this.ptyTransport.setSemanticInputProvider(() => this.takePendingSemantic());
+    this.ptyTransport.setPositionToCell((event) => this.positionToCell(event));
 
     const onKeyDown = (event: KeyboardEvent) => {
       // One-shot keyboard semantic; cleared when sendInput consumes it.
@@ -108,6 +123,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
         }
       }
     });
+    this.installPaletteProbe();
   }
 
   async loadBinarySnapshot(data: Uint8Array): Promise<boolean> {
@@ -189,11 +205,57 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     this.removeDomListeners?.();
     this.removeDomListeners = undefined;
     this.pendingSemantic = undefined;
+    this.uninstallPaletteProbe?.();
+    this.uninstallPaletteProbe = undefined;
     this.ptyTransport.destroy();
     this.inputListeners.clear();
     this.terminal?.destroy();
     this.terminal = undefined;
     this.container = undefined;
+  }
+
+  /** Zero-based cell under a pointer/wheel event using the mounted canvas geometry. */
+  private positionToCell(event: MouseEvent | PointerEvent | WheelEvent): { col: number; row: number } {
+    const canvas =
+      (event.target instanceof HTMLElement && event.target.closest?.("canvas")) ||
+      this.container?.querySelector?.("canvas") ||
+      null;
+    const rect = canvas?.getBoundingClientRect?.();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      return { col: 0, row: 0 };
+    }
+    // Restty MouseController adds 1 to col/row; supply zero-based grid coords.
+    const cols = 80;
+    const rows = 24;
+    const col = Math.min(cols - 1, Math.max(0, Math.floor(((event.clientX - rect.left) / rect.width) * cols)));
+    const row = Math.min(rows - 1, Math.max(0, Math.floor(((event.clientY - rect.top) / rect.height) * rows)));
+    return { col, row };
+  }
+
+  private installPaletteProbe(): void {
+    if (typeof window === "undefined") return;
+    const harnessWindow = window as typeof window & {
+      __BOTSTER_RESTTY_DEBUG__?: {
+        getPaletteColor?: (index: number) => number | null;
+        active?: { getPaletteColor?: (index: number) => number | null };
+      };
+    };
+    const getPaletteColor = (index: number): number | null => {
+      const pane = this.terminal?.activePane?.() as { getPaletteColor?: (i: number) => number | null } | null;
+      if (typeof pane?.getPaletteColor === "function") {
+        return pane.getPaletteColor(index);
+      }
+      return null;
+    };
+    harnessWindow.__BOTSTER_RESTTY_DEBUG__ = {
+      getPaletteColor,
+      active: { getPaletteColor }
+    };
+    this.uninstallPaletteProbe = () => {
+      if (harnessWindow.__BOTSTER_RESTTY_DEBUG__?.getPaletteColor === getPaletteColor) {
+        delete harnessWindow.__BOTSTER_RESTTY_DEBUG__;
+      }
+    };
   }
 
   private takePendingSemantic(): PendingSemanticInput | undefined {
@@ -221,6 +283,7 @@ class BotsterTerminalPtyTransport implements PtyTransport {
   private outputSubscription?: TerminalSubscription;
   private onRender?: (data: string) => void;
   private semanticInputProvider?: () => PendingSemanticInput | undefined;
+  private positionToCellFn?: (event: MouseEvent | PointerEvent | WheelEvent) => { col: number; row: number };
   private connected = false;
 
   setRenderObserver(onRender: (data: string) => void): void {
@@ -229,6 +292,12 @@ class BotsterTerminalPtyTransport implements PtyTransport {
 
   setSemanticInputProvider(provider: () => PendingSemanticInput | undefined): void {
     this.semanticInputProvider = provider;
+  }
+
+  setPositionToCell(
+    positionToCell: (event: MouseEvent | PointerEvent | WheelEvent) => { col: number; row: number }
+  ): void {
+    this.positionToCellFn = positionToCell;
   }
 
   attach(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription {
@@ -312,8 +381,10 @@ class BotsterTerminalPtyTransport implements PtyTransport {
     } else if (pending.kind === "key" && looksLikeMouseReport(initialBytes)) {
       pending = { kind: "bytes", data: initialBytes };
     }
+    const positionToCell = this.positionToCellFn;
     return {
-      encode: (modes: DaemonModeFlags) => encodeSemanticInput(pending, modes, initialBytes)
+      encode: (modes: DaemonModeFlags) =>
+        encodeSemanticInput(pending, modes, initialBytes, positionToCell)
     };
   }
 
@@ -331,7 +402,8 @@ class BotsterTerminalPtyTransport implements PtyTransport {
 function encodeSemanticInput(
   pending: PendingSemanticInput,
   modes: DaemonModeFlags,
-  initialBytes: string
+  initialBytes: string,
+  positionToCell?: (event: MouseEvent | PointerEvent | WheelEvent) => { col: number; row: number }
 ): string {
   if (pending.kind === "key") {
     let kittyFlags = 0;
@@ -344,33 +416,28 @@ function encodeSemanticInput(
   }
 
   if (pending.kind === "mouse") {
+    // Fresh modes may disable mouse tracking: discard without ModeGatedInput payload.
+    if (!coreMouseTrackingEnabled(modes.mouse_mode)) {
+      return "";
+    }
     const replies: string[] = [];
     const inputHandler = createInputHandler({
       sendReply: (data) => {
         replies.push(data);
       },
       suppressQueryReplies: true,
-      // Cell geometry is Restty-owned; use a stable 1-based mapping for re-encode.
-      positionToCell: (event) => {
-        const target = event.target as HTMLElement | null;
-        const rect = target?.getBoundingClientRect?.();
-        if (!rect || rect.width <= 0 || rect.height <= 0) {
-          return { col: 1, row: 1 };
-        }
-        const col = Math.max(1, Math.floor(((event.clientX - rect.left) / rect.width) * 80) + 1);
-        const row = Math.max(1, Math.floor(((event.clientY - rect.top) / rect.height) * 24) + 1);
-        return { col, row };
-      }
+      // Restty adds 1 to col/row; supply zero-based grid coordinates.
+      positionToCell: positionToCell ?? (() => ({ col: 0, row: 0 }))
     });
-    inputHandler.rehydrateMouseFromTrackingBits?.(mouseTrackingBitsFromMode(modes.mouse_mode));
-    inputHandler.setMouseMode?.("on");
+    // Keep Restty mouse mode in "auto" so enablement follows rehydrated tracking bits only.
+    inputHandler.setMouseMode?.("auto");
+    inputHandler.rehydrateMouseFromTrackingBits?.(mouseTrackingBitsFromCoreMode(modes.mouse_mode));
     const sent = inputHandler.sendMouseEvent?.(pending.reportKind, pending.event as PointerEvent);
     if (sent && replies.length > 0) {
       return replies.join("");
     }
-    // If encoding could not run (no active mouse), keep the original Restty bytes
-    // for this modes snapshot only — never a keyboard event.
-    return initialBytes;
+    // Modes claim tracking but Restty could not encode — discard rather than send stale key bytes.
+    return "";
   }
 
   return pending.data || initialBytes;
@@ -386,24 +453,6 @@ function looksLikeMouseReport(data: string): boolean {
 
 function kittyFlagsFromModeFlags(modes: DaemonModeFlags): number {
   return modes.kitty_enabled ? kittyEnabledBaselineFlags : 0;
-}
-
-/**
- * Map Hub `mouse_mode` compact values onto Restty mouse tracking bitfield bits.
- * Bit layout matches Restty `rehydrateFromTrackingBits` / wasm mouse tracking bits.
- * Common DEC codes: 0=off, 9=x10, 1000=normal, 1002=button, 1003=any, +1006 sgr.
- */
-function mouseTrackingBitsFromMode(mouseMode: number): number {
-  if (!mouseMode) return 0;
-  // Hub may publish raw DEC private mode codes or a packed value.
-  if (mouseMode === 9) return 1 << 0; // x10
-  if (mouseMode === 1000) return 1 << 1;
-  if (mouseMode === 1002) return (1 << 1) | (1 << 2);
-  if (mouseMode === 1003) return (1 << 1) | (1 << 2) | (1 << 3);
-  if (mouseMode === 1006) return (1 << 1) | (1 << 5); // normal + sgr
-  // Treat unknown non-zero as normal tracking + SGR (common modern default).
-  if (mouseMode > 0) return (1 << 1) | (1 << 5);
-  return 0;
 }
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {

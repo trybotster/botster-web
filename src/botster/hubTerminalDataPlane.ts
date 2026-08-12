@@ -14,6 +14,10 @@ import type {
   DaemonModeGatedInputResult,
   DaemonReadScreen
 } from "./realHubDaemonDto";
+import {
+  webRtcDaemonLifecycleEventName,
+  type WebrtcDaemonLifecycleEvent
+} from "./webrtcDaemonClient";
 
 const maxHydrationBufferBytes = 16_777_216;
 const ghostsnpMagic = "GHOSTSNP";
@@ -55,7 +59,8 @@ export interface HubTerminalDataPlaneOptions {
 export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   readonly sessionId: string;
 
-  private readonly subscriptionId: string;
+  private subscriptionId: string;
+  private readonly fixedSubscriptionId: boolean;
   private readonly testHooks: HubTerminalDataPlaneTestHooks | undefined;
   private readonly listeners = new Set<(data: TerminalOutput) => void>();
   private readonly statusListeners = new Set<(status: TerminalAttachmentStatus) => void>();
@@ -67,6 +72,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private attachPromise: Promise<void> | undefined;
   private pendingResize: { rows: number; columns: number } | undefined;
   private detached = false;
+  private transportLost = false;
   private attachmentGeneration = 0;
   private hydration: ScreenHydration | undefined;
   private hydratedGeneration: number | undefined;
@@ -76,12 +82,30 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     | ((bytes: Uint8Array) => boolean | Promise<boolean>)
     | undefined;
   private hydratePromise: Promise<void> | undefined;
+  private readonly onWebrtcLifecycle?: (event: Event) => void;
 
   constructor(private readonly options: HubTerminalDataPlaneOptions) {
     if (!options.sessionId) throw new Error("Hub terminal data plane requires a session id.");
     this.sessionId = options.sessionId;
+    this.fixedSubscriptionId = Boolean(options.subscriptionId);
     this.subscriptionId = options.subscriptionId ?? createTerminalSubscriptionId();
     this.testHooks = options.testHooks;
+    // Surviving-document DataChannel recovery must mint a fresh terminal subscription
+    // and re-run H0–H5 without unmounting the renderer. Wait for encrypted-stream-ready
+    // so attach/drain RPCs are not issued against a half-open peer.
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      this.onWebrtcLifecycle = (event: Event) => {
+        const detail = (event as CustomEvent<WebrtcDaemonLifecycleEvent>).detail;
+        if (!detail?.type) return;
+        if (detail.type === "data-channel-closed" || detail.type === "data-channel-error") {
+          this.handleTransportLost();
+        } else if (detail.type === "encrypted-stream-ready") {
+          // data-channel-open alone is not enough — attach/drain need the encrypted stream.
+          this.handleTransportRecovered();
+        }
+      };
+      window.addEventListener(webRtcDaemonLifecycleEventName, this.onWebrtcLifecycle);
+    }
   }
 
   bindBinarySnapshotInstaller(
@@ -133,6 +157,17 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
     // First encode under current authoritative modes.
     const encoded = semantic.encode(modes);
+    // Empty encode means modes disabled the semantic event (e.g. mouse_mode=0).
+    // Do not issue ModeGatedInput for a discarded event.
+    if (!encoded) {
+      recordLiveHarnessTerminal("mode_gated_input_skipped", {
+        reason: "encode_empty_under_modes",
+        mode_generation: modes.mode_generation,
+        mode_revision: modes.mode_revision,
+        mouse_mode: modes.mouse_mode
+      });
+      return;
+    }
     const result = await this.sendModeGatedInput(encoded, modes, attachmentGeneration);
     if (!this.isCurrentAttachment(attachmentGeneration)) return;
     if (result?.admitted) {
@@ -170,6 +205,17 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.modeFlags = freshModes;
 
     const reencoded = semantic.encode(freshModes);
+    // Stale → fresh modes may disable the semantic event (e.g. mouse 9 → 0).
+    if (!reencoded) {
+      recordLiveHarnessTerminal("mode_gated_input_skipped", {
+        reason: "reencode_empty_under_fresh_modes",
+        discarded_bytes: encoded,
+        mode_generation: freshModes.mode_generation,
+        mode_revision: freshModes.mode_revision,
+        mouse_mode: freshModes.mouse_mode
+      });
+      return;
+    }
     // Never pair stale bytes with a fresh token.
     const retryResult = await this.sendModeGatedInput(reencoded, freshModes, attachmentGeneration);
     if (!this.isCurrentAttachment(attachmentGeneration)) return;
@@ -270,15 +316,115 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   async detach(): Promise<void> {
     this.detached = true;
+    this.transportLost = false;
     this.closeStream();
     this.listeners.clear();
     this.statusListeners.clear();
+    this.uninstallLifecycleListener();
 
     await this.options.bridge.request({
       type: "detach",
       session_id: this.sessionId,
       subscription_id: this.subscriptionId
     });
+  }
+
+  private uninstallLifecycleListener(): void {
+    if (this.onWebrtcLifecycle && typeof window !== "undefined") {
+      window.removeEventListener(webRtcDaemonLifecycleEventName, this.onWebrtcLifecycle);
+    }
+  }
+
+  /**
+   * DataChannel lost: abandon the current stream/subscription generation but keep
+   * mounted listeners so recovery can re-attach without unmounting the renderer.
+   */
+  private handleTransportLost(): void {
+    if (this.detached) return;
+    this.transportLost = true;
+    const previousSubscriptionId = this.subscriptionId;
+    this.closeStreamWithoutDetachRequest();
+    this.emitStatus({
+      state: "attaching",
+      message: "WebRTC data channel lost; waiting to reattach terminal stream."
+    });
+    recordLiveHarnessTerminal("transport_lost", {
+      sessionId: this.sessionId,
+      subscription_id: previousSubscriptionId
+    });
+  }
+
+  /**
+   * DataChannel recovered on a surviving document: mint a fresh subscription id and
+   * re-run H0–H5 attach for the still-mounted view.
+   */
+  private handleTransportRecovered(): void {
+    if (this.detached || !this.transportLost || this.listeners.size === 0) return;
+    // Only reattach once the encrypted stream is usable. data-channel-open may fire first;
+    // keep transportLost until encrypted-stream-ready (or a later open after crypto is up).
+    this.transportLost = false;
+    const previousSubscriptionId = this.subscriptionId;
+    if (!this.fixedSubscriptionId) {
+      this.subscriptionId = createTerminalSubscriptionId();
+    }
+    recordLiveHarnessTerminal("transport_recovered", {
+      sessionId: this.sessionId,
+      subscription_id: this.subscriptionId,
+      previous_subscription_id: previousSubscriptionId
+    });
+    this.emitStatus({
+      state: "attaching",
+      message: "Reattaching terminal stream after WebRTC recovery."
+    });
+    void (async () => {
+      // Best-effort detach of the abandoned subscription now that the channel is alive.
+      if (previousSubscriptionId && previousSubscriptionId !== this.subscriptionId) {
+        try {
+          await this.options.bridge.request({
+            type: "detach",
+            session_id: this.sessionId,
+            subscription_id: previousSubscriptionId
+          });
+        } catch {
+          // Channel recovery may still race; new attach remains authoritative.
+        }
+      }
+      if (this.detached || this.listeners.size === 0) return;
+      await this.ensureAttached();
+    })().catch((error: unknown) => {
+      this.emitStatus({
+        state: "failed",
+        message: error instanceof Error ? error.message : "Terminal stream reattach failed."
+      });
+      recordLiveHarnessTerminal("attach_failed", {
+        message: error instanceof Error ? error.message : String(error),
+        stage: "transport_recovered"
+      });
+    });
+  }
+
+  private closeStreamWithoutDetachRequest(): void {
+    // Drop the local stream handle without awaiting a detach RPC on a dead channel.
+    // streamTerminal.unsubscribe() would try detach; abandon the drain loop only.
+    const sub = this.streamSubscription as { unsubscribe(): void; abandon?: () => void } | undefined;
+    if (sub && typeof (sub as { abandon?: () => void }).abandon === "function") {
+      (sub as { abandon: () => void }).abandon();
+    } else {
+      // Best-effort: unsubscribe may race a closed channel; swallow.
+      try {
+        sub?.unsubscribe();
+      } catch {
+        // ignore
+      }
+    }
+    this.streamSubscription = undefined;
+    this.attachPromise = undefined;
+    this.hydratePromise = undefined;
+    this.attachmentGeneration += 1;
+    this.hydration = undefined;
+    this.hydratedGeneration = undefined;
+    this.restoredVisibleScreenGeneration = undefined;
+    this.modeFlags = undefined;
   }
 
   private ensureAttached(): Promise<void> {
@@ -334,7 +480,12 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       return;
     }
     this.streamSubscription = streamSubscription;
-    recordLiveHarnessTerminal("attach", { attempt: 1, generation: attachmentGeneration });
+    recordLiveHarnessTerminal("attach", {
+      attempt: 1,
+      generation: attachmentGeneration,
+      subscription_id: this.subscriptionId,
+      sessionId: this.sessionId
+    });
     await this.flushPendingResize();
   }
 
