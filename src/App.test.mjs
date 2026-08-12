@@ -824,6 +824,7 @@ const [
   actions,
   terminal,
   resttyRenderer,
+  botsterTerminalPtyTransport,
   terminalHost,
   terminalSmokeFixture,
   pluginSurfaces,
@@ -862,6 +863,7 @@ const [
   readFile(new URL("./botster/actions.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/terminal.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/resttyRenderer.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/botsterTerminalPtyTransport.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/TerminalViewHost.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/terminalSmokeFixture.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/pluginSurfaces.ts", import.meta.url), "utf8"),
@@ -1803,7 +1805,7 @@ assert.match(resttyRenderer, /readOnly:\s*true/);
 assert.match(resttyRenderer, /pendingSemantic|takePendingSemantic/);
 assert.match(resttyRenderer, /kind: "mouse"|reportKind/);
 assert.match(resttyRenderer, /loadBinarySnapshot/);
-assert.match(resttyRenderer, /writeModeGatedInput/);
+assert.match(botsterTerminalPtyTransport, /writeModeGatedInput/);
 assert.match(resttyRenderer, /takePendingSemantic|pendingSemantic/);
 assert.match(resttyRenderer, /kind: "mouse"|kind: "key"/);
 assert.match(resttyRenderer, /suppressQueryReplies|readOnly:\s*true/);
@@ -2101,7 +2103,8 @@ assert.match(resttyRenderer, /fontSources: botsterResttyFontSources/);
 assert.match(resttyRenderer, /ptyTransport: this\.ptyTransport/);
 assert.match(resttyRenderer, /connectPty\(\)/);
 assert.doesNotMatch(resttyRenderer, /connectPty\(dataPlane\.sessionId\)/);
-assert.match(resttyRenderer, /dataPlane\.resize\(rows, cols\)/);
+assert.match(botsterTerminalPtyTransport, /gridState\.measure\(cols, rows\)/);
+assert.match(terminal, /!state\.renderer\.attachDataPlane && state\.dataPlane\?\.resize/);
 assert.doesNotMatch(resttyRenderer, /fontPreset:\s*"none"/);
 assert.doesNotMatch(resttyRenderer, /terminalRendererInput/);
 assert.doesNotMatch(resttyRenderer, /sendInput\(data, "key"\)/);
@@ -2782,7 +2785,9 @@ await Promise.all([
   compileTsModule("botster/hubTransport.ts", join(compiledRoot, "botster/hubTransport.js")),
   compileTsModule("botster/hubTerminalDataPlane.ts", join(compiledRoot, "botster/hubTerminalDataPlane.js")),
   compileTsModule("botster/webrtcDaemonClient.ts", join(compiledRoot, "botster/webrtcDaemonClient.js")),
+  compileTsModule("botster/botsterTerminalPtyTransport.ts", join(compiledRoot, "botster/botsterTerminalPtyTransport.js")),
   compileTsModule("botster/terminal.ts", join(compiledRoot, "botster/terminal.js")),
+  compileTsModule("botster/terminalGrid.ts", join(compiledRoot, "botster/terminalGrid.js")),
   compileTsModule("botster/mouseMode.ts", join(compiledRoot, "botster/mouseMode.js"))
 ]);
 
@@ -2837,6 +2842,243 @@ const {
   webRtcDaemonLifecycleEventName
 } = requireRuntime("./botster/webrtcDaemonClient.js");
 const { DefaultTerminalViewBridge } = requireRuntime("./botster/terminal.js");
+const {
+  installSnapshotAndReapplyGrid,
+  TerminalGridState
+} = requireRuntime("./botster/terminalGrid.js");
+const { BotsterTerminalPtyTransport } = requireRuntime("./botster/botsterTerminalPtyTransport.js");
+
+function terminalGridProbe() {
+  const hubResizes = [];
+  const rendered = { grid: undefined, events: [] };
+  const target = {
+    resize(rows, columns) {
+      hubResizes.push({ rows, columns });
+    }
+  };
+  const apply = (grid, event = "browser_resize") => {
+    rendered.grid = { ...grid };
+    rendered.events.push({ event, grid: { ...grid } });
+  };
+  return { apply, hubResizes, rendered, target };
+}
+
+function measureTerminalGrid(gridState, probe, rows, columns, event = "browser_resize") {
+  assert.equal(gridState.measure(columns, rows), true);
+  probe.apply({ rows, columns }, event);
+}
+
+function runTerminalTransportOrder(order, rows, columns) {
+  const probe = terminalGridProbe();
+  const transport = new BotsterTerminalPtyTransport({
+    createModeDependentInput: (data) => ({ encode: () => data }),
+    record() {}
+  });
+  const dataPlane = {
+    sessionId: `transport-${order}`,
+    writeInput() {},
+    subscribeOutput() {
+      return { unsubscribe() {} };
+    },
+    resize(nextRows, nextColumns) {
+      probe.hubResizes.push({ rows: nextRows, columns: nextColumns });
+    }
+  };
+  const connect = () => transport.connect({
+    url: "",
+    cols: columns,
+    rows,
+    callbacks: {
+      onConnect() {
+        assert.equal(transport.resize(columns, rows), true);
+        const grid = transport.currentGrid();
+        assert.ok(grid);
+        probe.apply(grid, "restty_on_connect_resize");
+      }
+    }
+  });
+
+  let subscription;
+  if (order === "connect_then_attach") {
+    connect();
+    assert.equal(transport.isConnected(), true);
+    assert.deepEqual(probe.hubResizes, []);
+    subscription = transport.attach(dataPlane);
+  } else {
+    subscription = transport.attach(dataPlane);
+    connect();
+  }
+
+  const expected = { rows, columns };
+  assert.deepEqual(probe.rendered.grid, expected);
+  assert.deepEqual(probe.hubResizes.at(-1), expected);
+  subscription.unsubscribe();
+  transport.destroy();
+}
+
+runTerminalTransportOrder("connect_then_attach", 31, 101);
+runTerminalTransportOrder("attach_then_connect", 32, 102);
+
+async function runGhostsnpGridCase(resizePosition) {
+  const gridState = new TerminalGridState();
+  const probe = terminalGridProbe();
+  gridState.attach(probe.target);
+  measureTerminalGrid(gridState, probe, 25, 90);
+
+  let releaseInstall = () => undefined;
+  const installGate = new Promise((resolve) => {
+    releaseInstall = resolve;
+  });
+  const install = async () => {
+    if (resizePosition === "during") {
+      await installGate;
+    }
+    probe.apply({ rows: 24, columns: 80 }, "ghostsnp_import");
+    return true;
+  };
+
+  if (resizePosition === "before") {
+    measureTerminalGrid(gridState, probe, 41, 121);
+  }
+
+  const installed = installSnapshotAndReapplyGrid(
+    install,
+    gridState,
+    (grid) => probe.apply(grid, "ghostsnp_grid_reapply")
+  );
+
+  if (resizePosition === "during") {
+    measureTerminalGrid(gridState, probe, 42, 122);
+    releaseInstall();
+  }
+
+  assert.equal(await installed, true);
+
+  if (resizePosition === "after") {
+    measureTerminalGrid(gridState, probe, 43, 123);
+  }
+
+  const expected = resizePosition === "before"
+    ? { rows: 41, columns: 121 }
+    : resizePosition === "during"
+      ? { rows: 42, columns: 122 }
+      : { rows: 43, columns: 123 };
+  const importedAt = probe.rendered.events.findIndex(({ event }) => event === "ghostsnp_import");
+  const reappliedAt = probe.rendered.events.findIndex(({ event }) => event === "ghostsnp_grid_reapply");
+  assert.equal(importedAt >= 0, true);
+  assert.equal(reappliedAt > importedAt, true);
+  assert.deepEqual(probe.rendered.grid, expected);
+  assert.deepEqual(probe.hubResizes.at(-1), expected);
+}
+
+await runGhostsnpGridCase("before");
+await runGhostsnpGridCase("during");
+await runGhostsnpGridCase("after");
+
+// The Hub snapshot-install gate proves that a resize during H0-H5 hydration wins.
+{
+  const sessionId = "ghostsnp-grid-during-hydration";
+  const subscriptionId = "ghostsnp-grid-during-hydration-sub";
+  const gridState = new TerminalGridState();
+  const probe = terminalGridProbe();
+  const requests = [];
+  let releaseSnapshotInstall = () => undefined;
+  let markSnapshotInstallEntered = () => undefined;
+  let markFinalHubResize = () => undefined;
+  let reapplyObserved = false;
+  const snapshotInstallGate = new Promise((resolve) => {
+    releaseSnapshotInstall = resolve;
+  });
+  const snapshotInstallEntered = new Promise((resolve) => {
+    markSnapshotInstallEntered = resolve;
+  });
+  const finalHubResize = new Promise((resolve) => {
+    markFinalHubResize = resolve;
+  });
+  const dataPlane = createHubTerminalDataPlane({
+    sessionId,
+    subscriptionId,
+    testHooks: {
+      beforeSnapshotInstall() {
+        markSnapshotInstallEntered();
+        return snapshotInstallGate;
+      }
+    },
+    bridge: {
+      async request(request) {
+        requests.push({ ...request });
+        if (
+          reapplyObserved &&
+          request.type === "resize" &&
+          request.rows === 44 &&
+          request.cols === 124
+        ) {
+          markFinalHubResize();
+        }
+        if (request.type === "read_mode_flags") {
+          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
+        }
+        if (request.type === "read_screen") {
+          return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal(nextSessionId, nextSubscriptionId, onEvent) {
+        queueMicrotask(() => {
+          onEvent({
+            type: "snapshot",
+            session_id: nextSessionId,
+            subscription_id: nextSubscriptionId,
+            payload_base64: ghostsnpFixturePayloadBase64,
+            payload_encoding: "base64",
+            bytes: ghostsnpFixtureBytes
+          });
+          onEvent({
+            type: "attach_state",
+            session_id: nextSessionId,
+            subscription_id: nextSubscriptionId,
+            state: "attached"
+          });
+        });
+        return { unsubscribe() {} };
+      }
+    }
+  });
+  dataPlane.bindBinarySnapshotInstaller((bytes) =>
+    installSnapshotAndReapplyGrid(
+      () => {
+        assert.equal(isGhostsnpPayload(bytes), true);
+        probe.apply({ rows: 24, columns: 80 }, "ghostsnp_import");
+        return true;
+      },
+      gridState,
+      (grid) => {
+        probe.apply(grid, "ghostsnp_grid_reapply");
+        reapplyObserved = true;
+      }
+    )
+  );
+
+  measureTerminalGrid(gridState, probe, 26, 92);
+  const outputSubscription = dataPlane.subscribeOutput(() => undefined);
+  gridState.attach(dataPlane);
+  await snapshotInstallEntered;
+  measureTerminalGrid(gridState, probe, 44, 124);
+  releaseSnapshotInstall();
+  await finalHubResize;
+
+  const expected = { rows: 44, columns: 124 };
+  const importedAt = probe.rendered.events.findIndex(({ event }) => event === "ghostsnp_import");
+  const reappliedAt = probe.rendered.events.findIndex(({ event }) => event === "ghostsnp_grid_reapply");
+  assert.equal(reappliedAt > importedAt, true);
+  assert.deepEqual(probe.rendered.grid, expected);
+  assert.deepEqual(
+    requests.filter(({ type }) => type === "resize").at(-1),
+    { type: "resize", session_id: sessionId, rows: expected.rows, cols: expected.columns }
+  );
+  outputSubscription.unsubscribe();
+  await dataPlane.detach();
+}
 const {
   generatedDaemonRequestFixtures,
   generatedAppResponseFixture,
@@ -8031,9 +8273,9 @@ assert.equal(coreMouseTrackingEnabled(CORE_MOUSE_SGR), false);
 }
 
 // Mouse grid must track resize (not hard-coded 80x24).
-assert.match(resttyRenderer, /gridCols|this\.gridCols/);
-assert.match(resttyRenderer, /gridRows|this\.gridRows/);
-assert.match(resttyRenderer, /this\.gridCols\s*=\s*columns|if \(columns > 0\) this\.gridCols/);
+assert.match(resttyRenderer, /ptyTransport\.currentGrid\(\)/);
+assert.match(resttyRenderer, /measuredGrid\?\.columns/);
+assert.match(resttyRenderer, /measuredGrid\?\.rows/);
 assert.match(hubTerminalDataPlane, /mode_flags_refreshed_for_encode|encode_empty_after_mode_refresh/);
 assert.match(hubTerminalDataPlane, /DaemonTerminalStreamSubscription|abandon\(\)/);
 assert.match(hubTransport, /abandon\(\):\s*void|interface DaemonTerminalStreamSubscription/);

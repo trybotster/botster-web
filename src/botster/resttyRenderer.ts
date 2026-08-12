@@ -1,5 +1,4 @@
 import { createInputHandler, Restty } from "../vendor/restty/internal.js";
-import type { PtyCallbacks, PtyConnectOptions, PtyTransport } from "../vendor/restty/pty/types";
 import type { ResttyFontSource } from "../vendor/restty/runtime/types";
 import type {
   ModeDependentTerminalInput,
@@ -10,6 +9,8 @@ import type {
   TerminalViewDescriptor
 } from "./terminal";
 import type { DaemonModeFlags } from "./realHubDaemonDto";
+import { BotsterTerminalPtyTransport } from "./botsterTerminalPtyTransport";
+import type { TerminalGrid } from "./terminalGrid";
 import {
   coreMouseTrackingEnabled,
   mouseTrackingBitsFromCoreMode
@@ -46,17 +47,16 @@ type PendingSemanticInput =
   | { kind: "bytes"; data: string };
 
 export class ResttyTerminalRenderer implements TerminalRendererAdapter {
-  private readonly ptyTransport = new BotsterTerminalPtyTransport();
+  private readonly ptyTransport = new BotsterTerminalPtyTransport({
+    createModeDependentInput: (data) => this.createModeDependentInput(data),
+    record: recordLiveHarnessTerminal
+  });
   private readonly inputListeners = new Set<(data: TerminalInput) => void>();
   private terminal?: Restty;
   private container?: HTMLElement;
   private pendingSemantic: PendingSemanticInput | undefined;
   private removeDomListeners?: () => void;
   private uninstallPaletteProbe?: () => void;
-  /** Authoritative grid size for mouse re-encode (updated on resize). */
-  private gridCols = 80;
-  private gridRows = 24;
-
   constructor(readonly descriptor: TerminalViewDescriptor) {}
 
   mount(container: HTMLElement): void {
@@ -67,9 +67,6 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       }
       recordLiveHarnessTerminal("renderer_write", { data, sessionId: this.descriptor.sessionId });
     });
-    this.ptyTransport.setSemanticInputProvider(() => this.takePendingSemantic());
-    this.ptyTransport.setPositionToCell((event) => this.positionToCell(event));
-
     const onKeyDown = (event: KeyboardEvent) => {
       // One-shot keyboard semantic; cleared when sendInput consumes it.
       this.pendingSemantic = { kind: "key", event };
@@ -147,7 +144,10 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     // wasmReady + wasmHandle; poll until ready rather than re-entering init().
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
-        const ok = terminal.loadBinarySnapshot(bytes);
+        const ok = await this.ptyTransport.installSnapshot(
+          () => terminal.loadBinarySnapshot(bytes),
+          (grid) => this.applyGridToRestty(grid)
+        );
         if (ok) {
           recordLiveHarnessTerminal("restty_load_binary_snapshot", {
             ok: true,
@@ -197,9 +197,11 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   resize(rows: number, columns: number): void {
-    if (columns > 0) this.gridCols = columns;
-    if (rows > 0) this.gridRows = rows;
-    this.terminal?.resize(columns, rows);
+    if (!this.ptyTransport.resize(columns, rows)) return;
+    const grid = this.ptyTransport.currentGrid();
+    if (grid) {
+      this.applyGridToRestty(grid);
+    }
   }
 
   focus(): void {
@@ -234,14 +236,17 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       | { cols?: number; rows?: number; getCols?: () => number; getRows?: () => number }
       | null
       | undefined;
+    const measuredGrid = this.ptyTransport.currentGrid();
     const liveCols =
       (typeof pane?.getCols === "function" ? pane.getCols() : undefined) ??
       (typeof pane?.cols === "number" ? pane.cols : undefined) ??
-      this.gridCols;
+      measuredGrid?.columns ??
+      80;
     const liveRows =
       (typeof pane?.getRows === "function" ? pane.getRows() : undefined) ??
       (typeof pane?.rows === "number" ? pane.rows : undefined) ??
-      this.gridRows;
+      measuredGrid?.rows ??
+      24;
     const cols = Math.max(1, liveCols);
     const rows = Math.max(1, liveRows);
     // Restty MouseController adds 1 to col/row; supply zero-based grid coords.
@@ -287,111 +292,14 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       listener(data);
     }
   }
-}
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-class BotsterTerminalPtyTransport implements PtyTransport {
-  private dataPlane?: TerminalDataPlaneAttachment;
-  private callbacks?: PtyCallbacks;
-  private outputSubscription?: TerminalSubscription;
-  private onRender?: (data: string) => void;
-  private semanticInputProvider?: () => PendingSemanticInput | undefined;
-  private positionToCellFn?: (event: MouseEvent | PointerEvent | WheelEvent) => { col: number; row: number };
-  private connected = false;
-
-  setRenderObserver(onRender: (data: string) => void): void {
-    this.onRender = onRender;
-  }
-
-  setSemanticInputProvider(provider: () => PendingSemanticInput | undefined): void {
-    this.semanticInputProvider = provider;
-  }
-
-  setPositionToCell(
-    positionToCell: (event: MouseEvent | PointerEvent | WheelEvent) => { col: number; row: number }
-  ): void {
-    this.positionToCellFn = positionToCell;
-  }
-
-  attach(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription {
-    this.detach();
-    this.dataPlane = dataPlane;
-    this.outputSubscription = dataPlane.subscribeOutput((data) => {
-      this.callbacks?.onData?.(data);
-      this.onRender?.(data);
-    });
-    if (this.callbacks) {
-      this.connected = true;
-      this.callbacks.onConnect?.();
-      recordLiveHarnessTerminal("pty_connected", { sessionId: this.dataPlane.sessionId });
-    }
-
-    return {
-      unsubscribe: () => {
-        this.detach();
-      }
-    };
-  }
-
-  connect(_options: PtyConnectOptions): void {
-    this.callbacks = _options.callbacks;
-    if (this.dataPlane) {
-      this.connected = true;
-      this.callbacks.onConnect?.();
-      recordLiveHarnessTerminal("pty_connected", { sessionId: this.dataPlane.sessionId });
-    }
-  }
-
-  disconnect(): void {
-    if (this.connected) {
-      this.connected = false;
-      this.callbacks?.onDisconnect?.();
-    }
-  }
-
-  sendInput(data: string): boolean {
-    if (!this.dataPlane) return false;
-    recordLiveHarnessTerminal("pty_send_input", { data, sessionId: this.dataPlane.sessionId });
-
-    if (this.dataPlane.writeModeGatedInput) {
-      const semantic = this.createModeDependentInput(data);
-      void Promise.resolve(this.dataPlane.writeModeGatedInput(semantic)).catch((error: unknown) => {
-        recordLiveHarnessTerminal("mode_gated_input_error", {
-          message: error instanceof Error ? error.message : String(error),
-          sessionId: this.dataPlane?.sessionId
-        });
-      });
-      return true;
-    }
-
-    void this.dataPlane.writeInput(data);
-    return true;
-  }
-
-  resize(cols: number, rows: number): boolean {
-    if (!this.dataPlane?.resize) return false;
-    void this.dataPlane.resize(rows, cols);
-    return true;
-  }
-
-  isConnected(): boolean {
-    return this.connected && Boolean(this.dataPlane);
-  }
-
-  destroy(): void {
-    this.detach();
-    this.callbacks = undefined;
-    this.semanticInputProvider = undefined;
+  private applyGridToRestty(grid: TerminalGrid): void {
+    this.terminal?.resize(grid.columns, grid.rows);
   }
 
   private createModeDependentInput(initialBytes: string): ModeDependentTerminalInput {
     // Consume one-shot semantic state so a later mouse report cannot reuse a key event.
-    let pending = this.semanticInputProvider?.() ?? { kind: "bytes" as const, data: initialBytes };
+    let pending = this.takePendingSemantic() ?? { kind: "bytes" as const, data: initialBytes };
     // insertText / IME paths may not fire keydown, while canvas.click leaves a pending mouse
     // semantic. Only honor a pending kind when the Restty-encoded bytes match that kind.
     if (pending.kind === "mouse" && !looksLikeMouseReport(initialBytes)) {
@@ -399,22 +307,18 @@ class BotsterTerminalPtyTransport implements PtyTransport {
     } else if (pending.kind === "key" && looksLikeMouseReport(initialBytes)) {
       pending = { kind: "bytes", data: initialBytes };
     }
-    const positionToCell = this.positionToCellFn;
+    const positionToCell = (event: MouseEvent | PointerEvent | WheelEvent) => this.positionToCell(event);
     return {
       encode: (modes: DaemonModeFlags) =>
         encodeSemanticInput(pending, modes, initialBytes, positionToCell)
     };
   }
+}
 
-  private detach(): void {
-    this.outputSubscription?.unsubscribe();
-    this.outputSubscription = undefined;
-    if (this.connected) {
-      this.connected = false;
-      this.callbacks?.onDisconnect?.();
-    }
-    this.dataPlane = undefined;
-  }
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function encodeSemanticInput(

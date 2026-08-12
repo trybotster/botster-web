@@ -208,7 +208,7 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     if (!state) return;
 
     await state.renderer.resize(rows, columns);
-    if (state.dataPlane?.resize) {
+    if (!state.renderer.attachDataPlane && state.dataPlane?.resize) {
       await state.dataPlane.resize(rows, columns);
     }
   }
