@@ -9,7 +9,7 @@
 | Target repository | `botster-web` |
 | Target id | `tgt_40abcf71ccf049f4ac0c99953a799869` |
 | PR | https://github.com/trybotster/botster-web/pull/89 (`pr_1786507187_760694`) |
-| Web feature commit | `d5849453fa0e3462d7f17d7a3472efcb2edd5922` |
+| Web feature commit | `2f2ff9d5e154c0cb6add4e03c9943dabc4ae8c2e` |
 
 ## Playbooks and notes applied
 
@@ -20,6 +20,9 @@
 - [[the shared hub browser driver is the live packaged protocol harness behind a shim]]
 - [[live packaged harness failures are scoped to the active mode branch]]
 - [[required smoke modes must disable skips and prove execution positively]]
+- [[a regression test must be shown to go red with the fix reverted]]
+- [[narrow ablation at the enforcement point is the cleanest regression negative control]]
+- [[an ablation that reddens at the first assertion does not vouch for later ones]]
 
 ## Final behavior
 
@@ -29,7 +32,7 @@
    - P2 claims `S` via production Add; P1 observes option exclusion + invalid UI + stale-submit block from the **held membership subscription** (no DataChannel resubscribe, no dialog reopen, no extra P1 `plugin_surface_render`).
    - P2 production `botster_workspaces.remove_session`; P1 option restoration on the held dialog.
 3. **Request correlation**: `waitForWorkspacesPluginSurfaceRequest` returns `requestId`; action_result oracles require that exact id for Add open/submit, P2 claim, and P2 remove.
-4. **Stale-submit oracle**: 2s settle loop after force-click; rejects dead UUID in every supported Add value field. Ablation: `BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1` injects a synthetic stale dispatch so the oracle fails first.
+4. **Stale-submit oracle**: force-click while invalid, then wait for a production click/dispatch completion signal (`formSubmitClickSeq` / `lastFormSubmitClick` phases from the form submit control — not a wall-clock deadline). Rejects dead UUID in every supported Add value field. Ablation: `BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1` sets `harness.ablateEntitySelectInvalidation` so the production invalidation gate reopens; the real action collector must emit the stale `add_session` request that fails this oracle first.
 
 ## Ownership boundaries
 
@@ -49,7 +52,8 @@
 
 | Path | Change |
 | --- | --- |
-| `scripts/live-packaged-protocol-harness.mjs` | Select/advanced Add path; dual-client held-open reactive stage; request_id correlation; stale-submit settle + ablation |
+| `scripts/live-packaged-protocol-harness.mjs` | Select/advanced Add path; dual-client held-open reactive stage; request_id correlation; production click-completion stale-submit oracle + real-dispatch ablation |
+| `src/botster/IonicUiNodeRenderer.tsx` | Form submit completion signals for live harness; narrow `ablateEntitySelectInvalidation` gate for stale-submit negative control |
 | `docs/plans/workspaces-lifecycle-harness-entity-options-select.md` | Plan + human A routing |
 | `docs/reports/implement-workspaces-lifecycle-harness-entity-options-select.md` | This report |
 
@@ -85,7 +89,8 @@ BOTSTER_LIVE_ABLATE_STALE_SUBMIT=1 \
 BOTSTER_HUB_BIN=… BOTSTER_SESSION_WORKER_BIN=… \
 BOTSTER_WORKSPACES_PACKAGE_PATH=<df14369 checkout> \
 npm run smoke:workspaces-lifecycle
-# nonzero; message includes held-open P1 dispatched stale add_session
+# nonzero exit 1; first error is held-open P1 dispatched stale add_session
+# request_id is real production ui-action-* (not synthetic ablation-stale-submit)
 ```
 
 ## Residual risk
