@@ -67,11 +67,16 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       if (this.container?.dataset) {
         this.container.dataset.terminalLastRenderedOutput = bytesToBase64(data);
       }
-      recordLiveHarnessTerminal("renderer_write", {
-        payload_bytes_base64: bytesToBase64(data),
-        bytes: data.byteLength,
-        sessionId: this.descriptor.sessionId
-      });
+      const harness = (globalThis as typeof globalThis & {
+        __BOTSTER_LIVE_PROTOCOL_HARNESS__?: { suppressRendererWriteTelemetry?: boolean };
+      }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+      if (!harness?.suppressRendererWriteTelemetry) {
+        recordLiveHarnessTerminal("renderer_write", {
+          payload_bytes_base64: bytesToBase64(data),
+          bytes: data.byteLength,
+          sessionId: this.descriptor.sessionId
+        });
+      }
     });
     this.ptyTransport.setSemanticInputProvider(() => this.takePendingSemantic());
     this.ptyTransport.setPositionToCell((event) => this.positionToCell(event));

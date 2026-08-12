@@ -73,6 +73,15 @@ Web owns browser decode and Restty feed. Hub producer, publish, SessionIo, and T
 - Publish ticket `ticket_1786568764_412473` stayed operator-owned. Implement consumed the published registry coordinate `@trybotster/hub-test-support@0.1.31`, not ticket close.
 - TUI sibling `ticket_1786562566_712634` not touched.
 
+## Review return (this visit)
+
+Addressed `review_1786571897_897614`:
+
+- Exact-byte live oracle now requires `renderer_write` (Restty `onData` seam), not data-plane `output`.
+- Live renderer-write ablation suppresses that telemetry, still records data-plane `output`, and requires the renderer oracle to fail first.
+- Hydration proof now arms a snapshot-install hold, closes the real DataChannel, writes a selected byte chunk while install is held, asserts no flush, then releases and checks generation-scoped `ghostsnp_install` plus `renderer_write`.
+- PR #91 body no longer contains `sess-[0-9]{6,}`. Known-positive control still matches that pattern.
+
 ## Deviations from plan
 
 None. Clean-base lint sites were fixed only in already-touched files. UI-contract stayed `0.3.2`. Protocol version floor stayed 1. GHOSTSNP remained primary paint.

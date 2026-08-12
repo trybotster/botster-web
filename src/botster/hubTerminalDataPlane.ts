@@ -699,6 +699,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       }
 
       await this.testHooks?.beforeSnapshotInstall?.();
+      await holdLiveSnapshotInstallIfArmed(attachmentGeneration, this.subscriptionId);
       if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) {
         return;
       }
@@ -717,7 +718,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       }
       recordLiveHarnessTerminal("ghostsnp_install", {
         bytes: hydration.snapshotBytes.byteLength,
-        generation: attachmentGeneration
+        generation: attachmentGeneration,
+        subscription_id: this.subscriptionId
       });
 
       this.restoredVisibleScreenGeneration = attachmentGeneration;
@@ -1083,17 +1085,57 @@ function unregisterTerminalTransportRecoveryPlane(plane: HubTerminalDataPlane): 
 
 function installTerminalTransportRecoveryHarnessHook(): void {
   if (typeof window === "undefined") return;
-  const harness = (window as typeof window & {
-    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
-      disableTerminalTransportRecovery?: () => void;
-    };
-  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  const harness = liveHarness();
   if (!harness) return;
   harness.disableTerminalTransportRecovery = () => {
     for (const plane of [...terminalTransportRecoveryPlanes]) {
       plane.disableTransportRecovery();
     }
   };
+  harness.armSnapshotInstallHold = () => {
+    harness.snapshotInstallHoldArmed = true;
+  };
+  harness.releaseSnapshotInstall = () => {
+    snapshotInstallHoldRelease?.();
+    snapshotInstallHoldRelease = undefined;
+  };
+}
+
+type LiveTerminalHarness = {
+  disableTerminalTransportRecovery?: () => void;
+  armSnapshotInstallHold?: () => void;
+  releaseSnapshotInstall?: () => void;
+  snapshotInstallHoldArmed?: boolean;
+  terminal?: Array<{ kind: string; payload: unknown }>;
+};
+
+function liveHarness(): LiveTerminalHarness | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as typeof window & {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveTerminalHarness;
+  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+}
+
+let snapshotInstallHoldRelease: (() => void) | undefined;
+
+function holdLiveSnapshotInstallIfArmed(
+  generation: number,
+  subscriptionId: string
+): Promise<void> {
+  const harness = liveHarness();
+  if (!harness?.snapshotInstallHoldArmed) return Promise.resolve();
+  harness.snapshotInstallHoldArmed = false;
+  recordLiveHarnessTerminal("snapshot_install_held", {
+    generation,
+    subscription_id: subscriptionId
+  });
+  return new Promise((resolve) => {
+    snapshotInstallHoldRelease = resolve;
+    harness.releaseSnapshotInstall = () => {
+      snapshotInstallHoldRelease?.();
+      snapshotInstallHoldRelease = undefined;
+    };
+  });
 }
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {

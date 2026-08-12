@@ -100,6 +100,8 @@ const entityOptionsPackagePath = entityOptionsMode
 const echoProbe = "keys";
 const attachProbe = "botster-web-production-attach-probe";
 const productionSessionId = "web-prod";
+const hydrateHoldBytes = [0xa8, 0x01, 0xff];
+const ablateOracleBytes = [0xfd];
 
 if (!sharedHubDriverMode && !process.env.BOTSTER_HUB_BIN) {
   throw new Error(
@@ -5511,6 +5513,8 @@ async function startProductionSession() {
       "    botster-web-production-bytes-lead) printf '\\342' ;;",
       "    botster-web-production-bytes-rest) printf '\\202\\254' ;;",
       "    botster-web-production-bytes-ctrl) printf '\\000\\033[0m\\377' ;;",
+      "    botster-web-production-bytes-hold) printf '\\250\\001\\377' ;;",
+      "    botster-web-production-bytes-ablate) printf '\\375' ;;",
       "    *) echo botster-web-production-echo:$line ;;",
       "  esac",
       "done"
@@ -6281,11 +6285,11 @@ async function waitForTerminalRendererWrite(page, text) {
   });
 }
 
-async function waitForResttyBoundBytes(page, expectedBytes, label) {
+async function waitForResttyBoundBytes(page, expectedBytes, label, timeout = 45_000) {
   await page.waitForFunction(
     ({ expected }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) => {
-        if (entry.kind !== "output") return false;
+        if (entry.kind !== "renderer_write") return false;
         const encoded = entry.payload?.payload_bytes_base64;
         if (typeof encoded !== "string") return false;
         try {
@@ -6296,9 +6300,9 @@ async function waitForResttyBoundBytes(page, expectedBytes, label) {
         }
       }),
     { expected: expectedBytes },
-    { timeout: 45_000 }
+    { timeout }
   ).catch((error) => {
-    throw new Error(`timed out waiting for Restty-bound bytes ${label}: ${error.message}`);
+    throw new Error(`timed out waiting for Restty renderer_write bytes ${label}: ${error.message}`);
   });
 }
 
@@ -6325,6 +6329,133 @@ async function waitForDaemonTerminalOutputBytes(page, expectedBytes, label) {
   });
 }
 
+async function countExactTerminalKind(page, kind, expectedBytes) {
+  return page.evaluate(({ expectedKind, expected }) => {
+    return (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => {
+      if (entry.kind !== expectedKind) return false;
+      const encoded = entry.payload?.payload_bytes_base64;
+      if (typeof encoded !== "string") return false;
+      try {
+        const bytes = Uint8Array.from(globalThis.atob(encoded), (char) => char.charCodeAt(0));
+        return bytes.byteLength === expected.length && expected.every((value, index) => bytes[index] === value);
+      } catch {
+        return false;
+      }
+    }).length;
+  }, { expectedKind: kind, expected: expectedBytes });
+}
+
+async function proveHydrationBuffersUntilGhostsnpInstall(page) {
+  const armed = await page.evaluate(() => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    if (typeof harness?.armSnapshotInstallHold !== "function") return false;
+    harness.armSnapshotInstallHold();
+    return true;
+  });
+  if (!armed) {
+    throw new Error("snapshot-install hold unavailable: expose armSnapshotInstallHold on the live harness");
+  }
+
+  const heldBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+      (entry) => entry.kind === "snapshot_install_held"
+    ).length
+  );
+  await page.evaluate(() => {
+    const closed = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.();
+    if (!closed) throw new Error("hydration hold requires closing the real RTCDataChannel");
+  });
+
+  const hold = await page.waitForFunction(
+    ({ before }) => {
+      const held = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+        (entry) => entry.kind === "snapshot_install_held"
+      );
+      if (held.length <= before) return null;
+      const latest = held.at(-1)?.payload ?? {};
+      if (typeof latest.subscription_id !== "string" || !Number.isInteger(latest.generation)) return null;
+      return latest;
+    },
+    { before: heldBefore },
+    { timeout: 30_000 }
+  ).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(`timed out waiting for snapshot_install_held: ${error.message}`);
+  });
+
+  await callTerminalControl(page, "writeInput", "botster-web-production-bytes-hold\n");
+  await waitForDaemonTerminalOutputBytes(page, hydrateHoldBytes, "hydration hold");
+
+  const flushedEarly = {
+    output: await countExactTerminalKind(page, "output", hydrateHoldBytes),
+    renderer_write: await countExactTerminalKind(page, "renderer_write", hydrateHoldBytes)
+  };
+  if (flushedEarly.output !== 0 || flushedEarly.renderer_write !== 0) {
+    throw new Error(
+      `hydration hold leaked bytes before GHOSTSNP install: ${JSON.stringify({ hold, flushedEarly })}`
+    );
+  }
+
+  await page.evaluate(() => {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.releaseSnapshotInstall?.();
+  });
+
+  await page.waitForFunction(
+    ({ expectedGeneration, expectedSubscription }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) =>
+        entry.kind === "ghostsnp_install" &&
+        entry.payload?.generation === expectedGeneration &&
+        entry.payload?.subscription_id === expectedSubscription
+      ),
+    { expectedGeneration: hold.generation, expectedSubscription: hold.subscription_id },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(
+      `timed out waiting for generation-scoped ghostsnp_install after hold release: ${error.message}`
+    );
+  });
+  await waitForResttyBoundBytes(page, hydrateHoldBytes, "hydration flush");
+  recordProofNote("hydration_hold", {
+    generation: hold.generation,
+    subscription_id: hold.subscription_id,
+    bytes: hydrateHoldBytes
+  });
+}
+
+async function proveRendererWriteOracleIsLoadBearing(page) {
+  await page.evaluate(() => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    if (!harness) throw new Error("live harness missing for renderer_write ablation");
+    harness.suppressRendererWriteTelemetry = true;
+  });
+  try {
+    await callTerminalControl(page, "writeInput", "botster-web-production-bytes-ablate\n");
+    await waitForDaemonTerminalOutputBytes(page, ablateOracleBytes, "renderer ablation producer");
+    const dataPlaneSeen = await countExactTerminalKind(page, "output", ablateOracleBytes);
+    if (dataPlaneSeen < 1) {
+      throw new Error("renderer ablation producer never reached HubTerminalDataPlane output telemetry");
+    }
+    let rendererOracleFailed = false;
+    try {
+      await waitForResttyBoundBytes(page, ablateOracleBytes, "ablate-should-timeout", 2_500);
+    } catch (error) {
+      rendererOracleFailed = /Restty renderer_write bytes ablate-should-timeout/.test(String(error?.message ?? error));
+      if (!rendererOracleFailed) throw error;
+    }
+    if (!rendererOracleFailed) {
+      throw new Error("renderer_write oracle stayed green while renderer_write telemetry was suppressed");
+    }
+    recordProofNote("renderer_write_oracle_ablation", {
+      data_plane_output_seen: dataPlaneSeen,
+      renderer_write_failed_first: true
+    });
+  } finally {
+    await page.evaluate(() => {
+      const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+      if (harness) harness.suppressRendererWriteTelemetry = false;
+    });
+  }
+}
+
 async function proveByteFaithfulLiveTerminal(page) {
   const envelopeProof = await page.evaluate(() => {
     const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
@@ -6347,20 +6478,8 @@ async function proveByteFaithfulLiveTerminal(page) {
     throw new Error(`live terminal_output envelope invalid: ${JSON.stringify(envelopeProof)}`);
   }
 
-  const hydrationOrder = await page.evaluate(() => {
-    const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
-    const firstInstall = terminal.findIndex((entry) => entry.kind === "ghostsnp_install");
-    const firstOutput = terminal.findIndex((entry) => entry.kind === "output");
-    return { firstInstall, firstOutput };
-  });
-  if (hydrationOrder.firstInstall < 0) {
-    throw new Error("live attach never recorded ghostsnp_install before buffered live bytes");
-  }
-  if (hydrationOrder.firstOutput >= 0 && hydrationOrder.firstOutput < hydrationOrder.firstInstall) {
-    throw new Error(
-      `live output flushed before GHOSTSNP install: ${JSON.stringify(hydrationOrder)}`
-    );
-  }
+  await proveHydrationBuffersUntilGhostsnpInstall(page);
+  await proveRendererWriteOracleIsLoadBearing(page);
 
   await typeThroughMountedTerminal(page, "botster-web-production-bytes-lead\n");
   await waitForDaemonTerminalOutputBytes(page, [0xe2], "utf8 lead");

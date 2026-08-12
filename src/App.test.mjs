@@ -8060,6 +8060,9 @@ assert.match(hubTerminalDataPlane, /mode_flags_refreshed_for_encode|encode_empty
 assert.match(hubTerminalDataPlane, /DaemonTerminalStreamSubscription|abandon\(\)/);
 assert.match(hubTransport, /abandon\(\):\s*void|interface DaemonTerminalStreamSubscription/);
 assert.match(liveProtocolHarnessScript, /requiredSubscriptionId|disableTerminalTransportRecovery/);
+assert.match(liveProtocolHarnessScript, /armSnapshotInstallHold|snapshot_install_held/);
+assert.match(liveProtocolHarnessScript, /entry\.kind !== "renderer_write"/);
+assert.match(hubTerminalDataPlane, /holdLiveSnapshotInstallIfArmed|armSnapshotInstallHold/);
 assert.match(liveProtocolHarnessScript, /1000h|1006h/);
 
 assert.equal(isGhostsnpPayload(decodeGhostsnpSnapshot(ghostsnpFixturePayloadBase64)), true);
