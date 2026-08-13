@@ -1,6 +1,10 @@
 /** Action-result toast copy for package, plugin, spawn, and session-type operations. */
 
+import type { UiActionResult } from "@trybotster/ui-contract";
+
 import { actionLabelFromId, readDiagnosticMessage, readRecord, readString } from "./values";
+
+export type ActionToast = { message: string; color: string };
 
 export function packageActionFeedback(result: { accepted: boolean; reason?: string; result?: unknown }): { message: string; color: string } {
   const payload = readRecord(result.result);
@@ -53,7 +57,27 @@ export function packageActionFeedback(result: { accepted: boolean; reason?: stri
   };
 }
 
-export function pluginSurfaceActionFeedback(result: { accepted: boolean; reason?: string; result?: unknown }): { message: string; color: string } | undefined {
+export function pluginActionResultFeedback(result: UiActionResult): ActionToast | undefined {
+  const formErrors = result.form_errors?.filter((message) => message.trim()) ?? [];
+  if (result.state === "rejected" || result.state === "error") {
+    return {
+      message: formErrors.join(" ") || result.error || `${actionLabelFromId(result.action_id)} ${result.state}`,
+      color: "danger"
+    };
+  }
+
+  const warnings = result.warnings?.filter((message) => message.trim()) ?? [];
+  if (warnings.length > 0) {
+    return {
+      message: warnings.join(" "),
+      color: "warning"
+    };
+  }
+
+  return undefined;
+}
+
+export function pluginSurfaceActionFeedback(result: { accepted: boolean; reason?: string; result?: unknown }): ActionToast | undefined {
   const payload = readRecord(result.result);
   const pluginActionResult = readRecord(payload.plugin_action_result);
   const packageName = readString(payload.package_name);
@@ -61,15 +85,14 @@ export function pluginSurfaceActionFeedback(result: { accepted: boolean; reason?
   const actionId = readString(payload.action_id);
   if (!packageName || !surfaceId || !actionId || Object.keys(pluginActionResult).length === 0) return undefined;
 
-  const state = readString(pluginActionResult.state);
-  const message = readString(pluginActionResult.message);
-  const error = readString(pluginActionResult.error);
-  return {
-    message: result.accepted
-      ? message ?? `${actionLabelFromId(actionId)} accepted`
-      : result.reason ?? error ?? `${actionLabelFromId(actionId)} failed`,
-    color: result.accepted && state !== "error" ? "success" : "danger"
-  };
+  if (!result.accepted) {
+    return {
+      message: result.reason ?? readString(pluginActionResult.error) ?? `${actionLabelFromId(actionId)} failed`,
+      color: "danger"
+    };
+  }
+
+  return pluginActionResultFeedback(pluginActionResult as unknown as UiActionResult);
 }
 
 export function spawnTargetActionFeedback(result: { accepted: boolean; reason?: string; result?: unknown }): { message: string; color: string } | undefined {

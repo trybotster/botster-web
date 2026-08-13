@@ -1030,7 +1030,9 @@ assert.match(appFeatureSources.join("\n"), /hubUpdateOutcomeFromResult\(result\)
       applySessionTypeName
     } = await pureVite.ssrLoadModule("/src/app/sessionTypes.ts");
     const {
-      packageActionFeedback
+      packageActionFeedback,
+      pluginActionResultFeedback,
+      pluginSurfaceActionFeedback
     } = await pureVite.ssrLoadModule("/src/app/actionFeedback.ts");
     const {
       clearPresentationValue
@@ -1465,6 +1467,53 @@ assert.match(appFeatureSources.join("\n"), /hubUpdateOutcomeFromResult\(result\)
     });
     assert.equal(acceptedInstall.color, "success");
     assert.match(acceptedInstall.message, /demo/);
+
+    const pluginResult = (overrides) => ({
+      request_id: "plugin-result-1",
+      surface_id: "home",
+      action_id: "ticket.create",
+      node_id: "ticket-form",
+      state: "accepted",
+      ...overrides
+    });
+    assert.equal(
+      pluginActionResultFeedback(pluginResult({ presentation: [{ kind: "set", key: "dialog", value: true }] })),
+      undefined
+    );
+    assert.equal(
+      pluginActionResultFeedback(pluginResult({ replacement: { id: "ticket-list", type: "section" } })),
+      undefined
+    );
+    assert.equal(pluginActionResultFeedback(pluginResult({ payload: { mutated: true } })), undefined);
+    assert.deepEqual(
+      pluginActionResultFeedback(pluginResult({ warnings: ["The ticket has no owner."] })),
+      { message: "The ticket has no owner.", color: "warning" }
+    );
+    assert.deepEqual(
+      pluginActionResultFeedback(pluginResult({
+        state: "rejected",
+        form_errors: ["Title is required.", "Choose a project."],
+        error: "Mutation rejected."
+      })),
+      { message: "Title is required. Choose a project.", color: "danger" }
+    );
+    assert.deepEqual(
+      pluginActionResultFeedback(pluginResult({ state: "error", error: "Plugin worker stopped." })),
+      { message: "Plugin worker stopped.", color: "danger" }
+    );
+    assert.deepEqual(
+      pluginSurfaceActionFeedback({
+        accepted: false,
+        reason: "Plugin action result identity mismatch",
+        result: {
+          package_name: "tickets",
+          surface_id: "home",
+          action_id: "ticket.create",
+          plugin_action_result: pluginResult({ state: "accepted" })
+        }
+      }),
+      { message: "Plugin action result identity mismatch", color: "danger" }
+    );
 
     // Presentation dismissal clears only the targeted key.
     const scopeKey = JSON.stringify(["local", "pkg", "surf"]);

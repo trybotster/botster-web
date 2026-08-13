@@ -18,6 +18,7 @@ import {
   type UiPresentationState
 } from "../botster/uiPresentation";
 import type { SelectedPluginSurface } from "./pluginSurfaceState";
+import { pluginActionResultFeedback } from "./actionFeedback";
 import { actionLabelFromId } from "./values";
 
 type RuntimeClient = ReturnType<typeof createBotsterWebClient>;
@@ -92,12 +93,7 @@ export function usePluginSurfaceDispatch(options: {
         });
 
         const accepted = acceptedResultMatches(request, pluginActionResult);
-        setPackageActionToast({
-          message: accepted
-            ? `${actionLabelFromId(dispatch.action.id)} accepted`
-            : pluginActionResult.form_errors?.[0] ?? pluginActionResult.error ?? `${actionLabelFromId(dispatch.action.id)} rejected`,
-          color: accepted ? "success" : "danger"
-        });
+        setPackageActionToast(pluginActionResultFeedback(pluginActionResult));
         updateLocalState({
           "production.diagnostic_action_status": accepted
             ? `Accepted ${dispatch.action.id}`
