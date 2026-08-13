@@ -56,7 +56,6 @@ export const HOST_CHROME = Object.freeze({
   sessionTypesSectionLabel: "Session types",
   spawnPointsSectionLabel: "Spawn points",
   supportSectionLabel: "Support",
-  openSessionButtonName: "Open",
   settingsBackButtonName: "Back",
   checkForUpdatesButtonName: "Check for updates",
   sessionsHeadingName: "Sessions",
@@ -160,7 +159,7 @@ export const HOST_CHROME_CONTRACTS = Object.freeze([
     id: "dashboard-view",
     harnessUse: "openHomeView / openSessionTerminal / detach destination",
     render: "DashboardView",
-    constants: ["dashboardTestId", "sessionsHeadingName", "openSessionButtonName"],
+    constants: ["dashboardTestId", "sessionsHeadingName"],
     class: "host-chrome"
   }),
   Object.freeze({

@@ -900,6 +900,8 @@ const appFeatureSources = await Promise.all([
   readFile(new URL("./app/pluginRoutes.tsx", import.meta.url), "utf8"),
   readFile(new URL("./app/pluginSurfaceState.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/routing.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/SessionActionsMenu.tsx", import.meta.url), "utf8"),
+  readFile(new URL("./app/sessionActions.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/sessionRoute.tsx", import.meta.url), "utf8"),
   readFile(new URL("./app/sessionTypeUi.tsx", import.meta.url), "utf8"),
   readFile(new URL("./app/sessionTypes.ts", import.meta.url), "utf8"),
@@ -924,6 +926,7 @@ const appFeatureSources = await Promise.all([
   readFile(new URL("./app/dialogs/WorkbenchNotifications.tsx", import.meta.url), "utf8"),
   readFile(new URL("./app/useProductionHubConnection.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/useSessionTypeControl.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/useSessionControl.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/useSpawnControl.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/WorkbenchShell.tsx", import.meta.url), "utf8"),
   readFile(new URL("./app/values.ts", import.meta.url), "utf8"),
@@ -957,6 +960,7 @@ assert.match(appFeatureSources.join("\n"), /from "\.\/workbench"/);
 assert.match(appFeatureSources.join("\n"), /PluginNavigationShortcuts/);
 assert.match(appFeatureSources.join("\n"), /PluginSurfaceRoutePage/);
 assert.match(appShell, /from "\.\/app\/useSessionTypeControl"/);
+assert.match(appShell, /from "\.\/app\/useSessionControl"/);
 assert.match(appFeatureSources.join("\n"), /SessionTypeAdvancedOptions/);
 assert.match(appShell, /from "\.\/app\/useSpawnControl"/);
 assert.match(appShell, /from "\.\/app\/spawnTargets"/);
@@ -976,6 +980,8 @@ assert.match(appShell, /usePluginSurfaceDispatch\(/);
 assert.match(appShell, /usePackageOpenControls\(/);
 assert.match(appShell, /useSpawnControl\(/);
 assert.match(appShell, /useSessionTypeControl\(/);
+assert.match(appShell, /useSessionControl\(/);
+assert.match(appShell, /onStopSession=\{sessionControl\.stopSession\}/);
 assert.match(appShell, /<WorkbenchShell/);
 assert.doesNotMatch(appShell, /export function DashboardView/);
 assert.doesNotMatch(appShell, /export function usePluginControl/);
@@ -5969,6 +5975,15 @@ await flushMicrotasks();
 await realTransport.send({
   kind: "action_request",
   payload: {
+    request_id: "real-stop-session-1",
+    origin: "ui_node",
+    action: { id: "botster.session.stop", target: activeHubSessionId }
+  }
+});
+await flushMicrotasks();
+await realTransport.send({
+  kind: "action_request",
+  payload: {
     request_id: "real-config-save-missing-required",
     origin: "ui_node",
     action: {
@@ -6132,6 +6147,17 @@ for (const action of [
 }
 assert.equal(bridgeRequests.some((request) => request.type === "status"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "list_sessions"), false);
+assert.deepEqual(
+  bridgeRequests.find((request) => request.type === "shutdown_session"),
+  { type: "shutdown_session", session_id: activeHubSessionId }
+);
+const stopSessionResult = realFrames.find(
+  (frame) => frame.kind === "action_result" && frame.payload?.request_id === "real-stop-session-1"
+);
+assert.notEqual(stopSessionResult, undefined);
+assert.equal(stopSessionResult.payload.accepted, false);
+assert.equal(stopSessionResult.payload.result?.request_type, "shutdown_session");
+assert.equal(stopSessionResult.payload.result?.session_id, activeHubSessionId);
 // session and session_type are both canonical held subscriptions, not pull families.
 assert.equal(bridgeEntitySubscriptions.length, 2);
 assert.deepEqual(
@@ -8532,6 +8558,7 @@ try {
     SessionListItem
   } = dashboardModule;
   const { currentDashboardSessions } = await vite.ssrLoadModule("/src/app/dashboardSessions.ts");
+  const { stopSessionAction } = await vite.ssrLoadModule("/src/app/sessionActions.ts");
   const {
     entitySubscriptionErrorFromFrame
   } = entitySubscriptionModule;
@@ -8674,18 +8701,29 @@ try {
   assert.equal(isAttachableSession(runningTerminalSession), true);
   assert.equal(isAttachableSession(indeterminateTerminalSession), false);
   assert.equal(isAttachableSession(contradictoryTerminalSession), false);
+  assert.deepEqual(stopSessionAction(activeHubSessionId), {
+    id: "botster.session.stop",
+    target: activeHubSessionId,
+    label: "Stop session"
+  });
   const currentSessionListItem = renderToStaticMarkup(
     createElement(SessionListItem, {
       session: runningTerminalSession,
-      onOpen: () => {}
+      stopping: false,
+      onOpen: () => {},
+      onStop: () => {}
     })
   );
   assert.match(currentSessionListItem, />current</);
-  assert.match(currentSessionListItem, />Open</);
+  assert.match(currentSessionListItem, /Session options for/);
+  assert.match(currentSessionListItem, />Stop session</);
+  assert.doesNotMatch(currentSessionListItem, />Open</);
   const indeterminateSessionListItem = renderToStaticMarkup(
     createElement(SessionListItem, {
       session: indeterminateTerminalSession,
-      onOpen: () => {}
+      stopping: false,
+      onOpen: () => {},
+      onStop: () => {}
     })
   );
   assert.match(indeterminateSessionListItem, />indeterminate</);
@@ -8693,7 +8731,9 @@ try {
   const contradictorySessionListItem = renderToStaticMarkup(
     createElement(SessionListItem, {
       session: contradictoryTerminalSession,
-      onOpen: () => {}
+      stopping: false,
+      onOpen: () => {},
+      onStop: () => {}
     })
   );
   assert.match(contradictorySessionListItem, />indeterminate</);
@@ -9038,7 +9078,9 @@ try {
         lifecycle_class: "current"
       }],
       sessionLoadStatus: "loaded",
+      stoppingSessionIds: new Set(),
       onOpenSession: () => {},
+      onStopSession: () => {},
       onNavigateToApps: () => {},
       onNavigateToSpawnPoints: () => {}
     })
@@ -9047,7 +9089,8 @@ try {
   assert.equal(markupContainsTestId(dashboardMarkup, HOST_CHROME.dashboardTestId), true);
   assert.match(dashboardMarkup, new RegExp(`data-testid="${HOST_CHROME.dashboardTestId}"`));
   assert.match(dashboardMarkup, new RegExp(`>${HOST_CHROME.sessionsHeadingName}<`));
-  assert.match(dashboardMarkup, new RegExp(`>${HOST_CHROME.openSessionButtonName}<`));
+  assert.match(dashboardMarkup, /<ion-item button="">/);
+  assert.match(dashboardMarkup, /aria-label="Session options for web-prod"/);
   assert.equal(
     isTerminalDetached({
       sessionContainerIds: extractTerminalSessionIdsFromMarkup(dashboardMarkup),
@@ -10162,16 +10205,14 @@ try {
   let openedSessionId;
   const interactiveSessionItem = SessionListItem({
     session: runningTerminalSession,
+    stopping: false,
     onOpen: (sessionId) => {
       openedSessionId = sessionId;
-    }
+    },
+    onStop: () => {}
   });
-  const openSessionButton = findReactElement(
-    interactiveSessionItem,
-    (node) => node.props?.children === "Open"
-  );
-  assert.ok(openSessionButton);
-  openSessionButton.props.onClick();
+  assert.equal(interactiveSessionItem.props.button, true);
+  interactiveSessionItem.props.onClick();
   assert.equal(openedSessionId, activeHubSessionId);
 
   const blockedPluginSurfaceShortcut = packageNavigationShortcut({

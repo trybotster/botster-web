@@ -723,7 +723,7 @@ async function openSessionTerminal(page, sessionId) {
   const sessionRow = page.getByTestId(HOST_CHROME.dashboardTestId).locator("ion-item").filter({
     has: page.getByText(sessionId, { exact: true })
   });
-  await sessionRow.getByRole("button", { name: HOST_CHROME.openSessionButtonName, exact: true }).click();
+  await sessionRow.click();
   await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor();
 }
 

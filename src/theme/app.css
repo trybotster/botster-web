@@ -496,6 +496,23 @@ body {
   padding: 16px;
 }
 
+.session-actions {
+  display: flex;
+  align-items: center;
+}
+
+.session-actions ion-button {
+  margin: 0;
+}
+
+ion-popover.session-actions-popover {
+  --width: 220px;
+}
+
+.session-action-danger {
+  --color: var(--ion-color-danger);
+}
+
 .home-empty-state,
 .marketplace-empty {
   padding: 36px 20px;

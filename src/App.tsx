@@ -40,6 +40,7 @@ import { usePluginRouteState } from "./app/usePluginRouteState";
 import { usePluginSurfaceDispatch } from "./app/usePluginSurfaceDispatch";
 import { useProductionHubConnection } from "./app/useProductionHubConnection";
 import { useSessionTypeControl } from "./app/useSessionTypeControl";
+import { useSessionControl } from "./app/useSessionControl";
 import { useSpawnControl } from "./app/useSpawnControl";
 import { WorkbenchDialogs } from "./app/WorkbenchDialogs";
 import { WorkbenchShell } from "./app/WorkbenchShell";
@@ -182,6 +183,13 @@ export default function App() {
     dispatchAction: actions.dispatchAction,
     recordDiagnostic,
     setPackageActionToast: actions.setPackageActionToast
+  });
+
+  const sessionControl = useSessionControl({
+    runtimeClient,
+    recordDiagnostic,
+    setPackageActionToast: actions.setPackageActionToast,
+    updateLocalState
   });
 
   useProductionHubConnection({
@@ -334,7 +342,9 @@ export default function App() {
         <DashboardView
           sessions={sessions}
           sessionLoadStatus={entityLoadStatus.session}
+          stoppingSessionIds={sessionControl.stoppingSessionIds}
           onOpenSession={openSession}
+          onStopSession={sessionControl.stopSession}
           onNavigateToApps={() => navigateToView("apps")}
           onNavigateToSpawnPoints={() => navigateToHubSettings("spawn-points")}
         />

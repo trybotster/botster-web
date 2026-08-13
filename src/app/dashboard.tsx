@@ -9,24 +9,39 @@ import {
   sessionDisplayStatus,
   sessionDisplayTitle
 } from "../botster/terminalSession";
+import { SessionActionsMenu } from "./SessionActionsMenu";
 
 export function SessionListItem({
   session,
-  onOpen
+  stopping,
+  onOpen,
+  onStop
 }: {
   session: Record<string, unknown>;
+  stopping: boolean;
   onOpen: (sessionId: string) => void;
+  onStop: (sessionId: string) => void;
 }) {
   const sessionId = String(session.id);
   const attachable = isAttachableSession(session);
+  const sessionTitle = sessionDisplayTitle(session);
   return (
-    <IonItem>
+    <IonItem
+      button={attachable}
+      detail={false}
+      onClick={() => attachable && onOpen(sessionId)}
+    >
       <IonIcon icon={serverOutline} slot="start" aria-hidden="true" />
       <IonLabel>
-        <h2>{sessionDisplayTitle(session)}</h2>
+        <h2>{sessionTitle}</h2>
         <p>{sessionDisplayStatus(session)}</p>
       </IonLabel>
-      {attachable ? <IonButton slot="end" fill="outline" onClick={() => onOpen(sessionId)}>Open</IonButton> : null}
+      <SessionActionsMenu
+        sessionId={sessionId}
+        sessionTitle={sessionTitle}
+        stopping={stopping}
+        onStop={() => onStop(sessionId)}
+      />
     </IonItem>
   );
 }
@@ -39,13 +54,17 @@ export function SessionListItem({
 export function DashboardView({
   sessions,
   sessionLoadStatus,
+  stoppingSessionIds,
   onOpenSession,
+  onStopSession,
   onNavigateToApps,
   onNavigateToSpawnPoints
 }: {
   sessions: Record<string, unknown>[];
   sessionLoadStatus: HubEntityLoadStatus;
+  stoppingSessionIds: ReadonlySet<string>;
   onOpenSession: (sessionId: string) => void;
+  onStopSession: (sessionId: string) => void;
   onNavigateToApps: () => void;
   onNavigateToSpawnPoints: () => void;
 }) {
@@ -74,7 +93,9 @@ export function DashboardView({
               <SessionListItem
                 key={String(session.id)}
                 session={session}
+                stopping={stoppingSessionIds.has(String(session.id))}
                 onOpen={onOpenSession}
+                onStop={onStopSession}
               />
             ))}
           </IonList>

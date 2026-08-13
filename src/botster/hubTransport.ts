@@ -1199,6 +1199,27 @@ async function dispatchDaemonAction(
     return;
   }
 
+  if (action.id === "botster.session.stop") {
+    const targetSessionId = action.target ?? "";
+    if (!targetSessionId) {
+      emit(actionResultFrame(request, false, "Session stop action is missing a session target"));
+      return;
+    }
+
+    const response = await bridge.request({
+      type: "shutdown_session",
+      session_id: targetSessionId
+    });
+    emitResponse(response);
+    emit(actionResultFrame(request, !response.error, response.error?.message, {
+      request_type: "shutdown_session",
+      kind: response.kind,
+      session_id: targetSessionId,
+      diagnostics: responseDiagnostics(response)
+    }));
+    return;
+  }
+
   if (action.id === "botster.package.configure") {
     emit(
       actionResultFrame(request, true, undefined, {

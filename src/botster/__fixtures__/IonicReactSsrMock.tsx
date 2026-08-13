@@ -11,6 +11,7 @@ function tag(name: string) {
 }
 
 export const IonBadge = tag("ion-badge");
+export const IonAlert = tag("ion-alert");
 export const IonApp = tag("ion-app");
 export const IonButton = tag("ion-button");
 export const IonButtons = tag("ion-buttons");
@@ -37,6 +38,7 @@ export const IonMenuToggle = tag("ion-menu-toggle");
 export const IonModal = tag("ion-modal");
 export const IonNote = tag("ion-note");
 export const IonPage = tag("ion-page");
+export const IonPopover = tag("ion-popover");
 export const IonRow = tag("ion-row");
 export const IonSelect = tag("ion-select");
 export const IonSelectOption = tag("ion-select-option");
