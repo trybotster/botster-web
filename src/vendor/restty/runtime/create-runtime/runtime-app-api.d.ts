@@ -45,6 +45,12 @@ type RuntimePublicApiOptions = {
 export type RuntimeAppApiRuntime = {
     sendInput: RuntimeSendInput;
     sendInputBytes: (data: Uint8Array) => void;
+    deferTerminalResize: (cols: number, rows: number, meta: {
+        widthPx: number;
+        heightPx: number;
+        cellW: number;
+        cellH: number;
+    }) => boolean;
     createPublicApi: (options: RuntimePublicApiOptions) => ResttyApp;
 };
 type LifecycleThemeRuntime = {
@@ -94,6 +100,8 @@ type CreateRuntimeAppApiOptions = {
     gridState: {
         cols: number;
         rows: number;
+        cellW?: number;
+        cellH?: number;
     };
     getCanvas: () => HTMLCanvasElement;
     applyTheme: ResttyApp["applyTheme"];

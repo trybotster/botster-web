@@ -1,11 +1,15 @@
 import { createInputHandler, Restty } from "../vendor/restty/internal.js";
-import type { ResttyFontSource } from "../vendor/restty/runtime/types";
+import type {
+  ResttyFontSource,
+  ResttySnapshotReader
+} from "../vendor/restty/internal.js";
 import type {
   ModeDependentTerminalInput,
   TerminalDataPlaneAttachment,
   TerminalInput,
   TerminalOutput,
   TerminalRendererAdapter,
+  TerminalSnapshotReader,
   TerminalSubscription,
   TerminalViewDescriptor
 } from "./terminal";
@@ -151,7 +155,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
 
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
 
-    // Pane construction starts Restty init without awaiting. GHOSTSNP import requires
+    // Pane construction starts Restty init without awaiting. Snapshot import requires
     // wasmReady + wasmHandle; poll until ready rather than re-entering init().
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
@@ -187,10 +191,53 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   attachDataPlane(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription {
-    dataPlane.bindBinarySnapshotInstaller?.((bytes) => this.loadBinarySnapshot(bytes));
+    dataPlane.bindIncrementalSnapshotReader?.(() => this.createIncrementalSnapshotReader());
     const subscription = this.ptyTransport.attach(dataPlane);
     this.terminal?.connectPty();
     return subscription;
+  }
+
+  private createIncrementalSnapshotReader(): TerminalSnapshotReader {
+    let reader: ResttySnapshotReader | undefined;
+    let firstFrame = true;
+    let cancelled = false;
+    const acquireReader = async (): Promise<ResttySnapshotReader> => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (cancelled) throw new Error("Restty incremental snapshot reader was cancelled.");
+        const candidate = this.terminal?.createBinarySnapshotReader();
+        if (candidate) return candidate;
+        await delay(50);
+      }
+      throw new Error("Restty incremental snapshot reader is unavailable.");
+    };
+
+    return {
+      read: async (bytes) => {
+        if (!reader) {
+          const acquired = await acquireReader();
+          if (cancelled) {
+            acquired.cancel();
+            throw new Error("Restty incremental snapshot reader was cancelled.");
+          }
+          reader = acquired;
+        }
+        const result = firstFrame ? reader.ready(bytes) : reader.next(bytes);
+        if (result.status === "error") {
+          throw new Error(`Restty rejected an incremental snapshot frame: ${result.error}`);
+        }
+        firstFrame = false;
+        recordLiveHarnessTerminal("restty_incremental_snapshot", {
+          bytes: bytes.byteLength,
+          status: result.status,
+          sessionId: this.descriptor.sessionId
+        });
+        return result.status;
+      },
+      cancel: () => {
+        cancelled = true;
+        reader?.cancel();
+      }
+    };
   }
 
   onInput(listener: (data: TerminalInput) => void): TerminalSubscription {

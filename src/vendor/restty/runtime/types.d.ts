@@ -50,6 +50,26 @@ export type ResttyAppSession = {
     /** Unsubscribe from WASM log output. */
     removeWasmLogListener?: (listener: ResttyWasmLogListener) => void;
 };
+export type ResttySnapshotReadyResult = {
+    status: "ready";
+} | {
+    status: "error";
+    error: string;
+};
+export type ResttySnapshotNextResult = {
+    status: "page";
+} | {
+    status: "finish";
+} | {
+    status: "error";
+    error: string;
+};
+/** One incremental GHOSTSNP decoder for one attach subscription. */
+export type ResttySnapshotReader = {
+    ready: (data: Uint8Array) => ResttySnapshotReadyResult;
+    next: (data: Uint8Array) => ResttySnapshotNextResult;
+    cancel: () => void;
+};
 /**
  * Optional DOM elements for debug/status displays.
  */
@@ -368,6 +388,8 @@ export type ResttyApp = {
     clearScreen: () => void;
     /** Load a binary terminal snapshot into the active WASM instance. */
     loadBinarySnapshot: (data: Uint8Array) => boolean;
+    /** Create one incremental GHOSTSNP reader for one attach subscription. */
+    createBinarySnapshotReader: () => ResttySnapshotReader | null;
     /** Get the active foreground color as 0x00RRGGBB, or null if unset. */
     getColorForeground: () => number | null;
     /** Get the active background color as 0x00RRGGBB, or null if unset. */

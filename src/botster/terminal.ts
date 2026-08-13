@@ -16,6 +16,12 @@ export interface TerminalViewMount {
 
 export type TerminalInput = string;
 export type TerminalOutput = Uint8Array;
+export type TerminalSnapshotProgress = "ready" | "page" | "finish";
+
+export interface TerminalSnapshotReader {
+  read(bytes: Uint8Array): TerminalSnapshotProgress | Promise<TerminalSnapshotProgress>;
+  cancel(): void;
+}
 
 /**
  * Mode-dependent Kitty/mouse input retained as a semantic encoder until Hub admits.
@@ -43,12 +49,8 @@ export interface TerminalDataPlaneAttachment {
    * Implementations re-encode the semantic event once after a stale reject.
    */
   writeModeGatedInput?(semantic: ModeDependentTerminalInput): void | Promise<void>;
-  /**
-   * Bind the Restty GHOSTSNP installer used during H0–H5 attach hydration.
-   */
-  bindBinarySnapshotInstaller?(
-    installer: (bytes: Uint8Array) => boolean | Promise<boolean>
-  ): void;
+  /** Bind the Restty incremental snapshot decoder for one subscription. */
+  bindIncrementalSnapshotReader?(createReader: () => TerminalSnapshotReader): void;
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription;
   subscribeStatus?(listener: (status: TerminalAttachmentStatus) => void): TerminalSubscription;
   resize?(rows: number, columns: number): void | Promise<void>;

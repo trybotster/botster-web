@@ -1,2 +1,2 @@
 export type { CursorInfo, KittyPlacement, RenderState, SearchStatus, SearchViewportMatch, ResttyWasmExports, ResttyWasmOptions, WasmAbi, WasmAbiKind, } from "./runtime/types";
-export { ResttyWasm, loadResttyWasm } from "./runtime/restty-wasm";
+export { GhosttySnapshotReader, ResttyWasm, loadResttyWasm, type GhosttySnapshotNextResult, } from "./runtime/restty-wasm";

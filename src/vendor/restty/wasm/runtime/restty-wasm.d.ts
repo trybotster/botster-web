@@ -5,6 +5,7 @@ export declare class ResttyWasm {
     readonly abi: WasmAbi;
     readonly memory: WebAssembly.Memory;
     private readonly renderViewCaches;
+    private readonly snapshotReaders;
     private constructor();
     /** Load and instantiate the embedded WASM module. */
     static load(options?: ResttyWasmOptions): Promise<ResttyWasm>;
@@ -15,6 +16,9 @@ export declare class ResttyWasm {
     private getRenderViewCache;
     /** Resize the terminal grid. */
     resize(handle: number, cols: number, rows: number): void;
+    /** Create one incremental GHOSTSNP reader for one attach subscription. */
+    createSnapshotReader(handle: number): GhosttySnapshotReader | null;
+    releaseSnapshotReader(handle: number, reader: GhosttySnapshotReader): void;
     /** Set pixel dimensions for Kitty graphics protocol. */
     setPixelSize(handle: number, widthPx: number, heightPx: number): void;
     /** Update internal render buffers after state changes. */
@@ -71,6 +75,33 @@ export declare class ResttyWasm {
     loadBinarySnapshot(handle: number, data: Uint8Array): string | null;
     /** Get current render state with cached typed array views. */
     getRenderState(handle: number): RenderState | null;
+}
+export type GhosttySnapshotNextResult = {
+    status: "page";
+} | {
+    status: "finish";
+} | {
+    status: "error";
+    error: string;
+};
+/** A queued Ghostty reader for one incremental snapshot subscription. */
+export declare class GhosttySnapshotReader {
+    private readonly wasm;
+    private readonly terminalHandle;
+    private readerHandle;
+    private readyComplete;
+    private pendingResize;
+    constructor(wasm: ResttyWasm, terminalHandle: number, readerHandle: number);
+    /** Feed the first opaque frame and decode through READY. */
+    ready(data: Uint8Array): string | null;
+    /** Feed one opaque PAGE or FINISH frame. */
+    next(data: Uint8Array): GhosttySnapshotNextResult;
+    /** Queue the latest terminal resize while history is incomplete. */
+    queueResize(cols: number, rows: number): boolean;
+    /** Release the decoder and keep any READY terminal and restored history. */
+    cancel(applyPendingResize?: boolean): void;
+    private callWithFrame;
+    private finish;
 }
 /** Load and instantiate the embedded WASM module (convenience function). */
 export declare function loadResttyWasm(options?: ResttyWasmOptions): Promise<ResttyWasm>;

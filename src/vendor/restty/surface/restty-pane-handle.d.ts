@@ -1,7 +1,7 @@
 import type { InputHandler, MouseMode } from "../input";
 import type { GhosttyTheme } from "../theme";
 import type { ResttyManagedAppPane, ResttyManagedPaneSearchUiStyleOptions } from "./pane-app-manager";
-import type { ResttySearchState, ResttyShaderStage } from "../runtime/types";
+import type { ResttySearchState, ResttyShaderStage, ResttySnapshotReader } from "../runtime/types";
 import type { ResttyPaneSearchUiCloseOptions, ResttyPaneSearchUiOpenOptions } from "./pane-search-ui";
 type PaneSearchUiHandleOps = {
     open: (paneId: number, options?: ResttyPaneSearchUiOpenOptions) => void;
@@ -26,6 +26,7 @@ export type ResttyPaneApi = {
     sendKeyInput: (text: string, source?: string) => void;
     clearScreen: () => void;
     loadBinarySnapshot: (data: Uint8Array) => boolean;
+    createBinarySnapshotReader: () => ResttySnapshotReader | null;
     getColorForeground: () => number | null;
     getColorBackground: () => number | null;
     getColorCursor: () => number | null;
@@ -79,6 +80,7 @@ export declare class ResttyPaneHandle implements ResttyPaneApi {
     sendKeyInput(text: string, source?: string): void;
     clearScreen(): void;
     loadBinarySnapshot(data: Uint8Array): boolean;
+    createBinarySnapshotReader(): ResttySnapshotReader | null;
     getColorForeground(): number | null;
     getColorBackground(): number | null;
     getColorCursor(): number | null;

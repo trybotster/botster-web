@@ -16,4 +16,4 @@ export { Restty } from "./surface/restty";
 export type { ResttyOptions } from "./surface/restty";
 export type { ResttyManagedAppPane, ResttyPaneDomDefaults, ResttyManagedPaneStyleOptions, ResttyManagedPaneStylesOptions, ResttyManagedPaneSearchUiOptions, ResttyManagedPaneSearchUiStyleOptions, ResttyPaneAppOptionsInput, } from "./surface/pane-app-manager";
 export type { ResttyPaneSearchUiOpenOptions, ResttyPaneSearchUiCloseOptions, } from "./surface/pane-search-ui";
-export type { ResttyFontHintTarget, ResttyFontSource, ResttyUrlFontSource, ResttyBufferFontSource, ResttyLocalFontSource, ResttyShaderStage, ResttyShaderStageMode, ResttyShaderStageBackend, ResttyShaderStageSource, } from "./runtime/types";
+export type { ResttyFontHintTarget, ResttyFontSource, ResttyUrlFontSource, ResttyBufferFontSource, ResttyLocalFontSource, ResttyShaderStage, ResttyShaderStageMode, ResttyShaderStageBackend, ResttyShaderStageSource, ResttySnapshotNextResult, ResttySnapshotReader, ResttySnapshotReadyResult, } from "./runtime/types";

@@ -4,4 +4,4 @@ export type { ResttyManagedPaneSearchUiOptions, ResttyManagedPaneSearchUiStyleOp
 export type { ResttyPaneSearchUiOpenOptions, ResttyPaneSearchUiCloseOptions, } from "./surface/pane-search-ui";
 export { getBuiltinTheme, getBuiltinThemeSource, isBuiltinThemeName, listBuiltinThemeNames, parseGhosttyTheme, } from "./theme";
 export type { GhosttyTheme, ResttyBuiltinThemeName } from "./theme";
-export type { ResttyFontHintTarget, ResttyFontSource, ResttyUrlFontSource, ResttyBufferFontSource, ResttyLocalFontSource, ResttyFontPreset, ResttyShaderStage, ResttyShaderStageMode, ResttyShaderStageBackend, ResttyShaderStageSource, } from "./runtime/types";
+export type { ResttyFontHintTarget, ResttyFontSource, ResttyUrlFontSource, ResttyBufferFontSource, ResttyLocalFontSource, ResttyFontPreset, ResttyShaderStage, ResttyShaderStageMode, ResttyShaderStageBackend, ResttyShaderStageSource, ResttySnapshotNextResult, ResttySnapshotReader, ResttySnapshotReadyResult, } from "./runtime/types";

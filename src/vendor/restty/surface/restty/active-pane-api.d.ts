@@ -3,6 +3,7 @@ import type { GhosttyTheme } from "../../theme";
 import type { ResttyPaneHandle } from "../restty-pane-handle";
 import type { ResttyPaneSearchUiCloseOptions, ResttyPaneSearchUiOpenOptions } from "../pane-search-ui";
 import type { ResttyManagedPaneSearchUiStyleOptions } from "../pane-app-manager";
+import type { ResttySnapshotReader } from "../../runtime/types";
 export declare abstract class ResttyActivePaneApi {
     protected abstract requireActivePaneHandle(): ResttyPaneHandle;
     isPtyConnected(): boolean;
@@ -16,6 +17,7 @@ export declare abstract class ResttyActivePaneApi {
     sendKeyInput(text: string, source?: string): void;
     clearScreen(): void;
     loadBinarySnapshot(data: Uint8Array): boolean;
+    createBinarySnapshotReader(): ResttySnapshotReader | null;
     getColorForeground(): number | null;
     getColorBackground(): number | null;
     getColorCursor(): number | null;

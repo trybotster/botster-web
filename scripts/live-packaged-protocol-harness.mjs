@@ -5650,7 +5650,9 @@ async function assertCurrentHubCompatibilityAndSchema(page) {
     "resize",
     "terminal_readback",
     "plugin_surface_render",
-    "plugin_surface_action"
+    "plugin_surface_action",
+    "mode_gated_input",
+    "snapshot_delivery=ready_then_history"
   ];
   const missingFeatures = requiredFeatures.filter((feature) => !features.includes(feature));
   // Schema is a floor, not an equality. The previous `!== 2` assertion failed against a
@@ -5663,7 +5665,7 @@ async function assertCurrentHubCompatibilityAndSchema(page) {
     !Number.isInteger(protocolVersion) ||
     protocolVersion < 6 ||
     !Number.isInteger(revision) ||
-    revision < 31 ||
+    revision < 38 ||
     missingFeatures.length > 0
   ) {
     throw new Error(
@@ -7027,7 +7029,7 @@ async function waitForAutomaticTerminalRestore(page) {
           entry.kind === "status" &&
           entry.payload?.state === "attached" &&
           typeof entry.payload?.message === "string" &&
-          entry.payload.message.includes("GHOSTSNP")
+          entry.payload.message.includes("snapshot")
       );
       if (!install || !modeFlags || !status) return null;
       return {
@@ -7040,34 +7042,39 @@ async function waitForAutomaticTerminalRestore(page) {
     undefined,
     { timeout: 20_000 }
   ).then((handle) => handle.jsonValue()).catch((error) => {
-    throw new Error(`timed out waiting for automatic GHOSTSNP restoration: ${error.message}`);
+    throw new Error(`timed out waiting for automatic snapshot restoration: ${error.message}`);
   });
 
-  // Snapshot event should carry GHOSTSNP magic on the daemon event plane.
+  // Web validates only the transport envelope. Restty owns the opaque snapshot bytes.
   const snapshotProof = await page.evaluate(() => {
     const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
       .filter((entry) => entry.kind === "daemon_event")
       .map((entry) => entry.payload)
       .filter((event) => event?.type === "snapshot" && typeof event.payload_base64 === "string");
-    const latest = events.at(-1);
-    if (!latest) return null;
+    if (events.length < 2) return null;
     try {
-      const raw = globalThis.atob(latest.payload_base64);
+      const frames = events.map((event) => ({
+        bytes: event.bytes,
+        decoded_bytes: globalThis.atob(event.payload_base64).length,
+        payload_encoding: event.payload_encoding
+      }));
       return {
-        bytes: latest.bytes,
-        magic: raw.slice(0, 8),
-        payload_encoding: latest.payload_encoding
+        frame_count: frames.length,
+        frames,
+        valid_envelopes: frames.every(
+          (frame) => frame.payload_encoding === "base64" && frame.decoded_bytes === frame.bytes
+        )
       };
     } catch {
       return { error: "base64_decode_failed" };
     }
   });
-  if (!snapshotProof || snapshotProof.magic !== "GHOSTSNP") {
-    throw new Error(`automatic restore missing GHOSTSNP Snapshot event: ${JSON.stringify(snapshotProof)}`);
+  if (!snapshotProof?.valid_envelopes) {
+    throw new Error(`automatic restore has invalid snapshot envelopes: ${JSON.stringify(snapshotProof)}`);
   }
 
   return {
-    restored_chars: snapshotProof.bytes,
+    snapshot_frames: snapshotProof.frame_count,
     ghostsnp_install: restoration,
     snapshot: snapshotProof
   };
@@ -7136,13 +7143,28 @@ async function assertTerminalAttachChronology(page, sessionId, requiredSubscript
               observed: initialEvents
             };
           }
+          const unexpectedScrollback = initialEvents.find((event) => event.type === "scrollback");
+          if (unexpectedScrollback) {
+            return {
+              error: "incremental attach used the retired scrollback event",
+              subscription_id: subscriptionId,
+              observed: initialEvents
+            };
+          }
+          const snapshotCount = initialEvents.filter((event) => event.type === "snapshot").length;
+          if (snapshotCount < 2) {
+            return {
+              error: "incremental attach did not deliver READY and FINISH Snapshot events",
+              subscription_id: subscriptionId,
+              observed: initialEvents
+            };
+          }
           const invalidHistory = initialEvents.find((event) => {
-            if (event.type !== "snapshot" && event.type !== "scrollback") return false;
+            if (event.type !== "snapshot") return false;
             if (event.payload_encoding !== "base64" || typeof event.payload_base64 !== "string") return true;
             try {
               const raw = globalThis.atob(event.payload_base64);
               if (raw.length !== event.bytes) return true;
-              if (event.type === "snapshot" && raw.slice(0, 8) !== "GHOSTSNP") return true;
               return false;
             } catch {
               return true;
@@ -7150,7 +7172,7 @@ async function assertTerminalAttachChronology(page, sessionId, requiredSubscript
           });
           if (invalidHistory) {
             return {
-              error: "snapshot/scrollback payload is not valid binary-safe GHOSTSNP metadata",
+              error: "snapshot payload has an invalid binary-safe envelope",
               subscription_id: subscriptionId,
               observed: initialEvents.map((event) => ({ type: event.type, state: event.state, bytes: event.bytes }))
             };
@@ -7162,7 +7184,7 @@ async function assertTerminalAttachChronology(page, sessionId, requiredSubscript
               event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
             ),
             history: initialEvents
-              .filter((event) => event.type === "snapshot" || event.type === "scrollback")
+              .filter((event) => event.type === "snapshot")
               .map((event) => ({
                 type: event.type,
                 bytes: event.bytes ?? null,

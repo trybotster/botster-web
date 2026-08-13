@@ -285,6 +285,7 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
         for (const event of events) {
           recordLiveHarnessEvent("daemon_event", event);
           eventListeners.forEach((listener) => listener(event));
+          // Wait for snapshot decoding before Web handles the next event or drain.
           await onEvent(event);
         }
       };
@@ -293,7 +294,11 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
         if (closed) return;
 
         try {
-          const response = await transport.request({ type: "drain", session_id: sessionId });
+          const response = await transport.request({
+            type: "drain",
+            session_id: sessionId,
+            subscription_id: subscriptionId
+          });
           if (closed) return;
           await emitEvents(response);
         } catch (error) {

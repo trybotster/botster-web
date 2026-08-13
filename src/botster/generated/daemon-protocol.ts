@@ -54,6 +54,8 @@ export interface DaemonCompatibilityRequirement {
 export type DaemonRequest =
   | { type: "status" }
   | { type: "check_hub_update" }
+  | { type: "start_hub_update"; scope: DaemonHubUpdateScope }
+  | { type: "get_hub_update_execution" }
   | { type: "list_sessions" }
   | { type: "subscribe_entities"; entity_type: string; subscription_id: string }
   | { type: "unsubscribe_entities"; subscription_id: string }
@@ -70,7 +72,7 @@ export type DaemonRequest =
   | { type: "mode_gated_input"; session_id: string; data: string; mode_generation: number; mode_revision: number }
   | { type: "resize"; session_id: string; rows: number; cols: number }
   | { type: "shutdown_session"; session_id: string }
-  | { type: "drain"; session_id: string }
+  | { type: "drain"; session_id: string; subscription_id?: string }
   | { type: "read_screen"; session_id: string }
   | { type: "read_mode_flags"; session_id: string }
   | { type: "capture_snapshot"; session_id: string }
@@ -152,6 +154,7 @@ export interface DaemonResponse {
   install_plan?: DaemonPackageInstallPlan | null;
   update_status?: DaemonPackageUpdateStatus | null;
   hub_update?: DaemonHubUpdate | null;
+  hub_update_execution?: DaemonHubUpdateExecution | null;
   package_decision: DaemonPackageDecision | null;
   lifecycle: DaemonPluginLifecycle[];
   plugin_worker_counters?: DaemonPluginWorkerCounters | null;
@@ -238,6 +241,7 @@ export interface DaemonWorktreeLifecycleEvent {
 export type DaemonResponseKind =
   | "status"
   | "hub_update"
+  | "hub_update_execution"
   | "sessions"
   | "entity_subscribed"
   | "entity_unsubscribed"
@@ -829,6 +833,24 @@ export interface DaemonHubUpdate {
   build_revision?: string | null;
   reason?: string | null;
   action?: string | null;
+}
+
+export type DaemonHubUpdateScope =
+  | "core"
+  | "all";
+
+export type DaemonHubUpdateExecutionState =
+  | "started"
+  | "running"
+  | "complete"
+  | "failed";
+
+export interface DaemonHubUpdateExecution {
+  update_id: string;
+  scope: DaemonHubUpdateScope;
+  state: DaemonHubUpdateExecutionState;
+  updater_pid: number;
+  error?: string | null;
 }
 
 export interface DaemonLifecycleCounters {

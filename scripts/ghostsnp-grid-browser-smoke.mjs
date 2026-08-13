@@ -8,9 +8,6 @@ const fixturePath = new URL("../fixtures/ghostsnp/rich-matrix-v1.bin", import.me
 const fixture = await readFile(fixturePath);
 const fixtureSha256 = createHash("sha256").update(fixture).digest("hex");
 
-if (fixture.subarray(0, 8).toString("ascii") !== "GHOSTSNP") {
-  throw new Error("retained scrollback fixture does not have GHOSTSNP magic");
-}
 if (fixtureSha256 !== "7aba861353b9d45cf28a128ba48e6e3ab0b0b87610d53e7136a591363cc4fd28") {
   throw new Error(`retained scrollback fixture has an unknown digest: ${fixtureSha256}`);
 }

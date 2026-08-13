@@ -3,6 +3,7 @@ import type {
   TerminalAttachmentStatus,
   TerminalDataPlaneAttachment,
   TerminalOutput,
+  TerminalSnapshotReader,
   TerminalSubscription
 } from "./terminal";
 import type { DaemonBridgeClient, DaemonTerminalStreamSubscription } from "./hubTransport";
@@ -20,8 +21,6 @@ import {
 } from "./webrtcDaemonClient";
 
 const maxHydrationBufferBytes = 16_777_216;
-const ghostsnpMagic = "GHOSTSNP";
-const ghostsnpMagicBytes = new TextEncoder().encode(ghostsnpMagic);
 let nextSubscriptionSequence = 1;
 
 /**
@@ -42,10 +41,14 @@ interface ScreenHydration {
   bufferedOutput: Uint8Array[];
   bufferedBytes: number;
   pendingExit?: number | null;
-  snapshotBytes?: Uint8Array;
-  snapshotReceived: boolean;
+  readyReceived: boolean;
+  finishReceived: boolean;
+  historyIncomplete: boolean;
   attachedReceived: boolean;
   completed: boolean;
+  reader?: TerminalSnapshotReader;
+  resolveBarrier(): void;
+  barrier: Promise<void>;
 }
 
 export interface HubTerminalDataPlaneOptions {
@@ -75,14 +78,11 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private transportLost = false;
   private attachmentGeneration = 0;
   private hydration: ScreenHydration | undefined;
-  private hydratedGeneration: number | undefined;
   private restoredVisibleScreenGeneration: number | undefined;
   private modeFlags: DaemonModeFlags | undefined;
-  private binarySnapshotInstaller:
-    | ((bytes: Uint8Array) => boolean | Promise<boolean>)
-    | undefined;
-  private hydratePromise: Promise<void> | undefined;
+  private incrementalSnapshotReaderFactory: (() => TerminalSnapshotReader) | undefined;
   private terminalEventQueue: Promise<void> = Promise.resolve();
+  private terminalInputQueue: Promise<void> = Promise.resolve();
   private readonly onWebrtcLifecycle?: (event: Event) => void;
 
   constructor(private readonly options: HubTerminalDataPlaneOptions) {
@@ -116,26 +116,32 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     unregisterTerminalTransportRecoveryPlane(this);
   }
 
-  bindBinarySnapshotInstaller(
-    installer: (bytes: Uint8Array) => boolean | Promise<boolean>
-  ): void {
-    this.binarySnapshotInstaller = installer;
+  bindIncrementalSnapshotReader(createReader: () => TerminalSnapshotReader): void {
+    this.incrementalSnapshotReaderFactory = createReader;
   }
 
-  async writeInput(data: string): Promise<void> {
+  writeInput(data: string): Promise<void> {
     recordLiveHarnessTerminal("input", { data, path: "send_input" });
-    await this.ensureAttached();
-    if (this.detached) return;
-    await this.options.bridge.request({
-      type: "send_input",
-      session_id: this.sessionId,
-      data
+    return this.enqueueTerminalInput(async (attachmentGeneration) => {
+      await this.options.bridge.request({
+        type: "send_input",
+        session_id: this.sessionId,
+        data
+      });
+      if (!this.isCurrentAttachment(attachmentGeneration)) return;
     });
   }
 
-  async writeModeGatedInput(semantic: ModeDependentTerminalInput): Promise<void> {
-    const attachmentGeneration = this.attachmentGeneration;
-    await this.ensureAttached();
+  writeModeGatedInput(semantic: ModeDependentTerminalInput): Promise<void> {
+    return this.enqueueTerminalInput((attachmentGeneration) =>
+      this.writeModeGatedInputAfterBarrier(semantic, attachmentGeneration)
+    );
+  }
+
+  private async writeModeGatedInputAfterBarrier(
+    semantic: ModeDependentTerminalInput,
+    attachmentGeneration: number
+  ): Promise<void> {
     if (!this.isCurrentAttachment(attachmentGeneration)) return;
 
     await this.testHooks?.beforeModeGatedInput?.();
@@ -311,12 +317,11 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   async resize(rows: number, columns: number): Promise<void> {
     recordLiveHarnessTerminal("resize", { rows, columns });
     this.pendingResize = { rows, columns };
-    const attachmentGeneration = this.attachmentGeneration;
     await this.ensureAttached();
-    if (!this.isCurrentAttachment(attachmentGeneration) && this.attachmentGeneration === 0) {
-      // ensureAttached may have started a new generation
+    const hydration = this.hydration;
+    if (hydration?.finishReceived || hydration?.historyIncomplete) {
+      await this.flushPendingResize(hydration.generation);
     }
-    await this.flushPendingResize();
   }
 
   async readScreen(): Promise<DaemonReadScreen | undefined> {
@@ -456,11 +461,12 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
     this.streamSubscription = undefined;
     this.attachPromise = undefined;
-    this.hydratePromise = undefined;
     this.attachmentGeneration += 1;
+    this.hydration?.reader?.cancel();
+    this.hydration?.resolveBarrier();
     this.hydration = undefined;
     this.terminalEventQueue = Promise.resolve();
-    this.hydratedGeneration = undefined;
+    this.terminalInputQueue = Promise.resolve();
     this.restoredVisibleScreenGeneration = undefined;
     this.modeFlags = undefined;
   }
@@ -528,13 +534,23 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     if (streamSubscription.ready) {
       await streamSubscription.ready;
       if (!this.isCurrentAttachment(attachmentGeneration)) return;
-      const hydration = this.hydration;
-      if (hydration?.generation === attachmentGeneration && !hydration.completed) {
-        this.failHydration(hydration, "Initial terminal event delivery did not complete GHOSTSNP hydration.");
-        throw new Error("Initial terminal event delivery did not complete GHOSTSNP hydration.");
-      }
     }
-    await this.flushPendingResize();
+  }
+
+  private enqueueTerminalInput(
+    send: (attachmentGeneration: number) => Promise<void>
+  ): Promise<void> {
+    const queued = this.terminalInputQueue.then(async () => {
+      await this.ensureAttached();
+      const hydration = this.hydration;
+      if (!hydration) return;
+      const attachmentGeneration = hydration.generation;
+      await hydration.barrier;
+      if (!this.isCurrentAttachment(attachmentGeneration) || !hydration.completed) return;
+      await send(attachmentGeneration);
+    });
+    this.terminalInputQueue = queued.catch(() => undefined);
+    return queued;
   }
 
   private enqueueTerminalEvent(event: DaemonEvent, attachmentGeneration: number): Promise<void> {
@@ -555,19 +571,19 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.streamSubscription?.unsubscribe();
     this.streamSubscription = undefined;
     this.attachPromise = undefined;
-    this.hydratePromise = undefined;
     this.attachmentGeneration += 1;
+    this.hydration?.reader?.cancel();
+    this.hydration?.resolveBarrier();
     this.hydration = undefined;
     this.terminalEventQueue = Promise.resolve();
-    this.hydratedGeneration = undefined;
+    this.terminalInputQueue = Promise.resolve();
     this.restoredVisibleScreenGeneration = undefined;
     this.modeFlags = undefined;
   }
 
-  private async flushPendingResize(): Promise<void> {
+  private async flushPendingResize(attachmentGeneration: number): Promise<void> {
     if (!this.streamSubscription || !this.pendingResize) return;
 
-    const attachmentGeneration = this.attachmentGeneration;
     const resize = this.pendingResize;
     this.pendingResize = undefined;
 
@@ -599,10 +615,25 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     if (event.type === "attach_state") {
-      this.emitStatus(attachStateStatus(event.state));
-      if (event.state === "attached") {
-        this.ensureHydration(attachmentGeneration).attachedReceived = true;
-        await this.scheduleHydration(attachmentGeneration);
+      const hydration = this.ensureHydration(attachmentGeneration);
+      if (event.state === "snapshot_history_incomplete") {
+        if (!hydration.readyReceived) {
+          this.failHydration(hydration, "Terminal snapshot history failed before READY.");
+          return;
+        }
+        hydration.historyIncomplete = true;
+        hydration.finishReceived = true;
+        hydration.reader?.cancel();
+        this.emitStatus({
+          state: "attaching",
+          message: "Terminal screen is ready with incomplete snapshot history."
+        });
+        await this.flushPendingResize(attachmentGeneration);
+      } else if (event.state === "attached") {
+        hydration.attachedReceived = true;
+        await this.completeIncrementalHydration(hydration);
+      } else {
+        this.emitStatus(attachStateStatus(event.state));
       }
       recordLiveHarnessTerminal("attach_state", { state: event.state });
       return;
@@ -618,7 +649,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     if (event.type === "scrollback") {
-      // Scrollback events are never imported as GHOSTSNP / Restty state.
+      // Scrollback events never enter the Restty snapshot reader.
       recordLiveHarnessTerminal("scrollback", {
         bytes: event.bytes,
         payload_encoding: event.payload_encoding,
@@ -634,10 +665,12 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       });
       const hydration = this.ensureHydration(attachmentGeneration);
       try {
-        const snapshotBytes = decodeGhostsnpSnapshot(event.payload_base64, event.bytes);
-        hydration.snapshotBytes = snapshotBytes;
-        hydration.snapshotReceived = true;
-        await this.scheduleHydration(attachmentGeneration);
+        const snapshotBytes = decodeDaemonByteEnvelope(
+          event.payload_base64,
+          event.payload_encoding,
+          event.bytes
+        );
+        await this.installIncrementalSnapshotFrame(hydration, snapshotBytes);
       } catch (error: unknown) {
         this.failHydration(
           hydration,
@@ -674,7 +707,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       ) {
         this.emitStatus({
           state: "live_only",
-          message: "Terminal stream attached live; no GHOSTSNP snapshot was restored."
+          message: "Terminal stream attached live; no snapshot was restored."
         });
       }
       this.emitOutput(outputBytes, "output");
@@ -690,81 +723,98 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       generation: attachmentGeneration,
       bufferedOutput: [],
       bufferedBytes: 0,
-      snapshotReceived: false,
+      readyReceived: false,
+      finishReceived: false,
+      historyIncomplete: false,
       attachedReceived: false,
-      completed: false
+      completed: false,
+      reader: this.incrementalSnapshotReaderFactory?.(),
+      resolveBarrier: () => undefined,
+      barrier: Promise.resolve()
     };
+    hydration.barrier = new Promise<void>((resolve) => {
+      hydration.resolveBarrier = resolve;
+    });
     this.hydration = hydration;
-    this.hydratedGeneration = attachmentGeneration;
     return hydration;
   }
 
-  private scheduleHydration(attachmentGeneration: number): Promise<void> {
-    if (this.hydratePromise) return this.hydratePromise;
-    const hydration = this.hydration;
-    if (!hydration || hydration.generation !== attachmentGeneration || hydration.completed) {
-      return Promise.resolve();
-    }
-    if (!hydration.snapshotReceived || !hydration.attachedReceived) {
-      return Promise.resolve();
-    }
-
-    const promise = this.completeGhostsnpHydration(hydration);
-    this.hydratePromise = promise;
-    void promise.finally(() => {
-      if (this.hydratePromise === promise) {
-        this.hydratePromise = undefined;
-      }
-    });
-    return promise;
-  }
-
-  private async completeGhostsnpHydration(hydration: ScreenHydration): Promise<void> {
+  private async installIncrementalSnapshotFrame(
+    hydration: ScreenHydration,
+    bytes: Uint8Array
+  ): Promise<void> {
     const attachmentGeneration = hydration.generation;
-    try {
-      if (!hydration.snapshotBytes) {
-        throw new Error("GHOSTSNP snapshot bytes missing after Snapshot event.");
-      }
+    await this.testHooks?.beforeSnapshotInstall?.();
+    await holdLiveSnapshotInstallIfArmed(attachmentGeneration, this.subscriptionId);
+    if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) return;
 
-      await this.testHooks?.beforeSnapshotInstall?.();
-      await holdLiveSnapshotInstallIfArmed(attachmentGeneration, this.subscriptionId);
-      if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) {
-        return;
-      }
+    const reader = hydration.reader;
+    if (!reader) {
+      throw new Error("Restty incremental snapshot reader is not bound.");
+    }
+    const progress = await reader.read(bytes);
+    if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) return;
 
-      const installer = this.binarySnapshotInstaller;
-      if (!installer) {
-        throw new Error("Restty binary snapshot installer is not bound for GHOSTSNP attach.");
+    if (progress === "ready") {
+      if (hydration.readyReceived || hydration.finishReceived) {
+        throw new Error("Restty returned READY outside the initial snapshot frame.");
       }
-
-      const installed = await installer(hydration.snapshotBytes);
-      if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) {
-        return;
-      }
-      if (!installed) {
-        throw new Error("Restty rejected GHOSTSNP snapshot import.");
-      }
-      recordLiveHarnessTerminal("ghostsnp_install", {
-        bytes: hydration.snapshotBytes.byteLength,
-        generation: attachmentGeneration,
-        subscription_id: this.subscriptionId
-      });
-
+      hydration.readyReceived = true;
       this.restoredVisibleScreenGeneration = attachmentGeneration;
       this.emitStatus({
-        state: "attached",
-        message: "Visible terminal screen restored from GHOSTSNP snapshot."
+        state: "attaching",
+        message: "Visible terminal screen restored at snapshot READY; loading history."
       });
+    } else if (progress === "page") {
+      if (!hydration.readyReceived || hydration.finishReceived) {
+        throw new Error("Restty returned PAGE outside snapshot history delivery.");
+      }
+    } else if (progress === "finish") {
+      if (!hydration.readyReceived || hydration.finishReceived) {
+        throw new Error("Restty returned FINISH outside snapshot history delivery.");
+      }
+      hydration.finishReceived = true;
+      await this.flushPendingResize(attachmentGeneration);
+    } else {
+      throw new Error(`Restty returned unknown snapshot progress: ${String(progress)}.`);
+    }
+
+    recordLiveHarnessTerminal("ghostsnp_install", {
+      bytes: bytes.byteLength,
+      generation: attachmentGeneration,
+      progress,
+      subscription_id: this.subscriptionId
+    });
+
+    if (hydration.attachedReceived) {
+      await this.completeIncrementalHydration(hydration);
+    }
+  }
+
+  private async completeIncrementalHydration(hydration: ScreenHydration): Promise<void> {
+    const attachmentGeneration = hydration.generation;
+    if (hydration.completed) return;
+    if (!hydration.attachedReceived) return;
+    if (!hydration.readyReceived) {
+      this.failHydration(hydration, "Terminal attached before snapshot READY.");
+      return;
+    }
+    if (!hydration.finishReceived && !hydration.historyIncomplete) {
+      this.failHydration(hydration, "Terminal attached before snapshot FINISH.");
+      return;
+    }
+
+    try {
+      await this.flushPendingResize(attachmentGeneration);
 
       const modes = await this.refreshModeFlags(attachmentGeneration);
       if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) {
         return;
       }
       if (!modes) {
-        throw new Error("ReadModeFlags failed after GHOSTSNP install.");
+        throw new Error("ReadModeFlags failed after incremental snapshot attach.");
       }
 
-      // Optional ReadScreen supplement only — never primary paint path.
       try {
         const response = await this.options.bridge.request({
           type: "read_screen",
@@ -777,7 +827,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
           });
         }
       } catch {
-        // Optional supplement; attach already succeeded via GHOSTSNP.
+        // ReadScreen is an optional diagnostic supplement.
       }
 
       if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) {
@@ -785,7 +835,13 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       }
 
       hydration.completed = true;
-      this.hydration = undefined;
+      this.emitStatus({
+        state: "attached",
+        message: hydration.historyIncomplete
+          ? "Terminal attached with incomplete snapshot history."
+          : "Terminal attached after incremental snapshot history."
+      });
+      hydration.resolveBarrier();
 
       for (const data of hydration.bufferedOutput) {
         if (!this.isCurrentAttachment(attachmentGeneration)) {
@@ -802,15 +858,15 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       }
       this.failHydration(
         hydration,
-        error instanceof Error ? error.message : "GHOSTSNP terminal hydration failed."
+        error instanceof Error ? error.message : "Incremental terminal snapshot attach failed."
       );
     }
   }
 
   private failHydration(hydration: ScreenHydration, message: string): void {
     if (this.hydration !== hydration) return;
-    this.hydration = undefined;
     hydration.completed = true;
+    hydration.resolveBarrier();
     this.emitStatus({
       state: "failed",
       message
@@ -822,7 +878,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private bufferHydratingOutput(data: Uint8Array, hydration: ScreenHydration): void {
     const bufferedBytes = hydration.bufferedBytes + data.byteLength;
     if (bufferedBytes > maxHydrationBufferBytes) {
-      this.failHydration(hydration, "Terminal GHOSTSNP hydration exceeded the live-output buffer limit.");
+      this.failHydration(hydration, "Terminal snapshot attach exceeded the live-output buffer limit.");
       return;
     }
 
@@ -910,7 +966,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return response.mode_gated_input ?? undefined;
   }
 
-  private emitOutput(data: TerminalOutput, kind: "output" | "ghostsnp"): void {
+  private emitOutput(data: TerminalOutput, kind: "output"): void {
     for (const listener of this.listeners) {
       listener(data);
     }
@@ -938,14 +994,6 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
     recordLiveHarnessTerminal("status", status);
   }
-}
-
-export function isGhostsnpPayload(bytes: Uint8Array): boolean {
-  if (bytes.byteLength < ghostsnpMagicBytes.byteLength) return false;
-  for (let i = 0; i < ghostsnpMagicBytes.byteLength; i += 1) {
-    if (bytes[i] !== ghostsnpMagicBytes[i]) return false;
-  }
-  return true;
 }
 
 export function decodeDaemonByteEnvelope(
@@ -984,21 +1032,6 @@ export function decodeTerminalOutputEvent(event: object): Uint8Array {
     bytes?: unknown;
   };
   return decodeDaemonByteEnvelope(record.payload_base64 ?? "", record.payload_encoding, record.bytes);
-}
-
-export function decodeGhostsnpSnapshot(
-  payloadBase64: string,
-  declaredBytes?: number,
-  payloadEncoding: unknown = "base64"
-): Uint8Array {
-  const bytes =
-    typeof declaredBytes === "number"
-      ? decodeDaemonByteEnvelope(payloadBase64, payloadEncoding, declaredBytes)
-      : base64ToBytes(payloadBase64);
-  if (!isGhostsnpPayload(bytes)) {
-    throw new Error("Snapshot payload is not GHOSTSNP; refusing non-Ghostty import.");
-  }
-  return bytes;
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {
@@ -1074,13 +1107,6 @@ function isTerminalStreamEvent(event: DaemonEvent): event is Extract<
 }
 
 function attachStateStatus(state: string): TerminalAttachmentStatus {
-  if (state === "attached") {
-    return {
-      state: "attached",
-      message: "Terminal stream attached; waiting for GHOSTSNP snapshot."
-    };
-  }
-
   return {
     state: "attaching",
     message: `Terminal stream state: ${state}.`

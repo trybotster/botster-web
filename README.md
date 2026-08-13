@@ -8,7 +8,7 @@
 - Installed package runtime requires a hub-issued local WebRTC bootstrap grant.
 - Encrypted daemon requests, responses, terminal traffic, and pushed session entity frames travel over the ordered WebRTC data channel.
 - Session state materializes in canonical entity family `session`, beginning with an authoritative subscription snapshot and continuing through ordered pushed deltas. The client does not poll or call `list_sessions`.
-- `@trybotster/ui-contract@0.3.2` is the sole `UiNode`, action request/result, package-surface descriptor, supported-operation, entity-options projection, and manifest-navigation vocabulary source. Hub owns package admission and projects sanitized package/navigation rows; the generated daemon declarations and revision-36 shared conformance fixtures come from `@trybotster/hub-test-support@0.1.31`.
+- `@trybotster/ui-contract@0.3.2` is the sole `UiNode`, action request/result, package-surface descriptor, supported-operation, entity-options projection, and manifest-navigation vocabulary source. Hub owns package admission and projects sanitized package/navigation rows; the generated daemon declarations and revision-38 shared conformance fixtures come from `@trybotster/hub-test-support@0.1.32`. That package comes from approved Hub main revision `8b54c686408e9bba41fd3e3b7a8c7dc8be43a2cf`.
 - A `bind_list` first resolves its direct row-root `$bind`, then realizes each keyed descendant through the UI-contract runtime helper. The resulting literal identity is the single value used for React keys, `data-ui-node-id`, collected action state, requests, and correlated results. Invalid descendant identity or a collision among nodes that coexist in one render replaces the whole surface with a bounded diagnostic and publishes no actions; a missing or blank direct row root still omits only that unresolved row.
 - Plugin form drafts travel in canonical `UiActionRequest.values`; optional action metadata remains in `payload`. Accepted correlated results may replace the owning subtree and mutate Hub/package/surface-scoped presentation state, while rejected results retain the tree, dialog, values, and actionable errors.
 - After binding, the loopback package server requests an origin-bound initial WebRTC grant from Hub and injects it into each HTML load. It handles later bootstrap refresh and signaling at `/request`; it is not a daemon control or terminal-data fallback.
@@ -39,7 +39,13 @@ The focused mounted-terminal browser check does not require Hub binaries:
 
 ```bash
 npm run smoke:mounted-terminal-keyboard
+npm run smoke:ghostsnp-grid
+npm run smoke:incremental-ghostsnp-attach
 ```
+
+The incremental attach smoke feeds authentic READY, PAGE, and FINISH frames
+through the shared Restty reader. It proves READY paint before FINISH. It also
+proves the resize, input, and live-output barriers.
 
 ## Live WebRTC acceptance
 
