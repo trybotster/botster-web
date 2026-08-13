@@ -1840,6 +1840,11 @@ assert.match(hubTransport, /family: packageFamily/);
 assert.match(hubTransport, /family: availablePackageFamily/);
 assert.doesNotMatch(hubTransport, /["']view_surface["']|["']settings_surface["']|UpdatePackage|update_package|type: "restart_hub"/);
 assert.match(hubTerminalDataPlane, /streamTerminal/);
+assert.match(hubTransport, /ready: Promise<void>/);
+assert.match(webrtcDaemonClient, /await onEvent\(event\)/);
+assert.match(hubTerminalDataPlane, /this\.ensureHydration\(attachmentGeneration\)[\s\S]*streamTerminal/);
+assert.match(hubTerminalDataPlane, /await streamSubscription\.ready[\s\S]*await this\.flushPendingResize\(\)/);
+assert.match(hubTerminalDataPlane, /terminalEventQueue/);
 assert.match(hubTerminalDataPlane, /type: "send_input"/);
 assert.match(hubTerminalDataPlane, /type: "mode_gated_input"/);
 assert.match(hubTerminalDataPlane, /writeModeGatedInput/);
@@ -5700,6 +5705,77 @@ try {
     globalThis.window.clearTimeout = originalWindowClearTimeout;
   }
 
+  const orderedAttachChannel = createFakeDataChannel();
+  const orderedAttachClient = createWebrtcTestClient([orderedAttachChannel], localWebrtcBootstrapFixture);
+  const orderedAttachTimeline = [];
+  let releaseFirstAttachEvent;
+  let markFirstAttachEventStarted;
+  const firstAttachEventGate = new Promise((resolve) => {
+    releaseFirstAttachEvent = resolve;
+  });
+  const firstAttachEventStarted = new Promise((resolve) => {
+    markFirstAttachEventStarted = resolve;
+  });
+  let attachReadySettled = false;
+  const orderedAttachment = orderedAttachClient.streamTerminal(
+    "ordered-webrtc-session",
+    "ordered-webrtc-subscription",
+    async (event) => {
+      orderedAttachTimeline.push(`start:${event.type}`);
+      if (orderedAttachTimeline.length === 1) {
+        markFirstAttachEventStarted();
+        await firstAttachEventGate;
+      }
+      orderedAttachTimeline.push(`end:${event.type}`);
+    }
+  );
+  void orderedAttachment.ready.finally(() => {
+    attachReadySettled = true;
+  });
+  await waitForTestCondition(() => orderedAttachChannel.sent.length === 1);
+  await emitChunkedTestResponse(
+    orderedAttachChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "events",
+      events: [
+        {
+          type: "attach_state",
+          session_id: "ordered-webrtc-session",
+          subscription_id: "ordered-webrtc-subscription",
+          state: "attaching"
+        },
+        {
+          type: "attach_state",
+          session_id: "ordered-webrtc-session",
+          subscription_id: "ordered-webrtc-subscription",
+          state: "attached"
+        }
+      ]
+    },
+    { messageId: "ordered-attach-response" }
+  );
+  await firstAttachEventStarted;
+  assert.deepEqual(orderedAttachTimeline, ["start:attach_state"]);
+  assert.equal(attachReadySettled, false);
+  releaseFirstAttachEvent();
+  await waitForTestCondition(() => orderedAttachChannel.sent.length === 2);
+  assert.equal(attachReadySettled, false);
+  await emitChunkedTestResponse(
+    orderedAttachChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "events", events: [] },
+    { messageId: "ordered-first-drain-response" }
+  );
+  await orderedAttachment.ready;
+  assert.deepEqual(orderedAttachTimeline, [
+    "start:attach_state",
+    "end:attach_state",
+    "start:attach_state",
+    "end:attach_state"
+  ]);
+  orderedAttachment.abandon();
+
   const staleAttachChannel = createFakeDataChannel();
   const staleAttachClient = createWebrtcTestClient([staleAttachChannel], localWebrtcBootstrapFixture);
   const staleAttachEvents = [];
@@ -7607,6 +7683,119 @@ resolveDelayedModes({
 await waitFor(() => delayedHydrationOutput.length === 2);
 assert.deepEqual(delayedHydrationOutput.map(outputText), ["live-one\r\n", "live-two\r\n"]);
 
+// Attach readiness serializes the attach batch, GHOSTSNP install, live output, and resize.
+{
+  const sessionId = "ordered-attach-session";
+  const subscriptionId = "ordered-attach-subscription";
+  const requests = [];
+  const outputs = [];
+  const timeline = [];
+  let terminalEvent;
+  let resolveAttachReady;
+  let releaseSnapshotInstall;
+  let markSnapshotInstallStarted;
+  const attachReady = new Promise((resolve) => {
+    resolveAttachReady = resolve;
+  });
+  const snapshotInstallGate = new Promise((resolve) => {
+    releaseSnapshotInstall = resolve;
+  });
+  const snapshotInstallStarted = new Promise((resolve) => {
+    markSnapshotInstallStarted = resolve;
+  });
+
+  const dataPlane = createHubTerminalDataPlane({
+    sessionId,
+    subscriptionId,
+    bridge: {
+      async request(request) {
+        requests.push({ ...request });
+        if (request.type === "read_mode_flags") {
+          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
+        }
+        if (request.type === "read_screen") {
+          return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal(nextSessionId, nextSubscriptionId, onEvent) {
+        assert.equal(nextSessionId, sessionId);
+        assert.equal(nextSubscriptionId, subscriptionId);
+        terminalEvent = onEvent;
+        return {
+          ready: attachReady,
+          abandon() {},
+          unsubscribe() {}
+        };
+      }
+    }
+  });
+  dataPlane.bindBinarySnapshotInstaller(async (bytes) => {
+    assert.equal(isGhostsnpPayload(bytes), true);
+    timeline.push("snapshot-install-start");
+    markSnapshotInstallStarted();
+    await snapshotInstallGate;
+    timeline.push("snapshot-install-complete");
+    return true;
+  });
+  const outputSubscription = dataPlane.subscribeOutput((data) => {
+    const text = outputText(data);
+    outputs.push(text);
+    timeline.push(`output:${text.trim()}`);
+  });
+  await waitFor(() => typeof terminalEvent === "function");
+
+  const resize = dataPlane.resize(33, 111);
+  await flushMicrotasks();
+  assert.equal(requests.some((request) => request.type === "resize"), false);
+
+  const deliverAttachBatch = (async () => {
+    await terminalEvent({
+      type: "attach_state",
+      session_id: sessionId,
+      subscription_id: subscriptionId,
+      state: "attaching"
+    });
+    await terminalEvent({
+      type: "snapshot",
+      session_id: sessionId,
+      subscription_id: subscriptionId,
+      payload_base64: ghostsnpFixturePayloadBase64,
+      payload_encoding: "base64",
+      bytes: ghostsnpFixtureBytes
+    });
+    await terminalEvent({
+      type: "attach_state",
+      session_id: sessionId,
+      subscription_id: subscriptionId,
+      state: "attached"
+    });
+    await terminalEvent(liveOutputEvent(sessionId, subscriptionId, "ordered-live-one\r\n"));
+    await terminalEvent(liveOutputEvent(sessionId, subscriptionId, "ordered-live-two\r\n"));
+    resolveAttachReady();
+  })();
+
+  await snapshotInstallStarted;
+  assert.deepEqual(outputs, []);
+  assert.equal(requests.some((request) => request.type === "resize"), false);
+  releaseSnapshotInstall();
+  await deliverAttachBatch;
+  await resize;
+
+  assert.deepEqual(outputs, ["ordered-live-one\r\n", "ordered-live-two\r\n"]);
+  assert.deepEqual(
+    requests.find((request) => request.type === "resize"),
+    { type: "resize", session_id: sessionId, rows: 33, cols: 111 }
+  );
+  assert.deepEqual(timeline, [
+    "snapshot-install-start",
+    "snapshot-install-complete",
+    "output:ordered-live-one",
+    "output:ordered-live-two"
+  ]);
+  outputSubscription.unsubscribe();
+}
+
 let resolveStaleAutomaticModes;
 let staleAutomaticStreamCount = 0;
 let staleAutomaticModeCount = 0;
@@ -7770,12 +7959,32 @@ const delayedTerminalDataPlane = createHubTerminalDataPlane({
   bridge: {
     async request(request) {
       delayedBridgeRequests.push(request);
+      if (request.type === "read_mode_flags") {
+        return { kind: "read_mode_flags", mode_flags: testModeFlags(activeHubSessionId), events: [] };
+      }
+      if (request.type === "read_screen") {
+        return { kind: "read_screen", read_screen: { session_id: activeHubSessionId, text: "" }, events: [] };
+      }
       return { kind: "events", events: [] };
     },
     streamTerminal(sessionId, subscriptionId, onEvent) {
       delayedBridgeTerminalStreams.push({ sessionId, subscriptionId });
-      onEvent(liveOutputEvent(sessionId, subscriptionId, "botster-web-production-ready-after-retry\r\n"));
+      const ready = (async () => {
+        await onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
+        await onEvent({
+          type: "snapshot",
+          session_id: sessionId,
+          subscription_id: subscriptionId,
+          payload_base64: ghostsnpFixturePayloadBase64,
+          payload_encoding: "base64",
+          bytes: ghostsnpFixtureBytes
+        });
+        await onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+        await onEvent(liveOutputEvent(sessionId, subscriptionId, "botster-web-production-ready-after-retry\r\n"));
+      })();
       return {
+        ready,
+        abandon() {},
         unsubscribe() {
           delayedBridgeTerminalStreams.push({ sessionId, subscriptionId, unsubscribed: true });
         }
@@ -7783,6 +7992,7 @@ const delayedTerminalDataPlane = createHubTerminalDataPlane({
     }
   }
 });
+bindGhostsnpInstaller(delayedTerminalDataPlane);
 const delayedOutput = [];
 const delayedStatuses = [];
 delayedTerminalDataPlane.subscribeStatus((status) => delayedStatuses.push(status));
@@ -7790,7 +8000,7 @@ delayedTerminalDataPlane.subscribeOutput((data) => delayedOutput.push(data));
 const delayedResize = delayedTerminalDataPlane.resize(9, 34);
 await waitFor(() => outputsIncludeText(delayedOutput, "ready-after-retry"));
 await delayedResize;
-assert.equal(delayedStatuses.some((status) => status.state === "live_only"), true);
+assert.equal(delayedStatuses.some((status) => status.state === "live_only"), false);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize").length, 1);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].rows, 9);
 assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].cols, 34);

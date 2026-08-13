@@ -82,6 +82,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     | ((bytes: Uint8Array) => boolean | Promise<boolean>)
     | undefined;
   private hydratePromise: Promise<void> | undefined;
+  private terminalEventQueue: Promise<void> = Promise.resolve();
   private readonly onWebrtcLifecycle?: (event: Event) => void;
 
   constructor(private readonly options: HubTerminalDataPlaneOptions) {
@@ -458,31 +459,34 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.hydratePromise = undefined;
     this.attachmentGeneration += 1;
     this.hydration = undefined;
+    this.terminalEventQueue = Promise.resolve();
     this.hydratedGeneration = undefined;
     this.restoredVisibleScreenGeneration = undefined;
     this.modeFlags = undefined;
   }
 
   private ensureAttached(): Promise<void> {
-    if (this.streamSubscription || (this.detached && this.listeners.size === 0)) {
+    if (this.detached && this.listeners.size === 0) {
       return Promise.resolve();
     }
+
+    if (this.attachPromise) return this.attachPromise;
+    if (this.streamSubscription) return Promise.resolve();
 
     if (!this.options.bridge.streamTerminal) {
       throw new Error("WebRTC client does not expose terminal streaming.");
     }
 
-    if (!this.attachPromise) {
-      const attachPromise = this.attachToAuthoritativeSession();
-      this.attachPromise = attachPromise;
-      void attachPromise.finally(() => {
-        if (this.attachPromise === attachPromise) {
-          this.attachPromise = undefined;
-        }
-      });
-    }
+    const attachPromise = this.attachToAuthoritativeSession();
+    this.attachPromise = attachPromise;
+    const clearAttachPromise = () => {
+      if (this.attachPromise === attachPromise) {
+        this.attachPromise = undefined;
+      }
+    };
+    void attachPromise.then(clearAttachPromise, clearAttachPromise);
 
-    return this.attachPromise;
+    return attachPromise;
   }
 
   private isCurrentAttachment(attachmentGeneration: number): boolean {
@@ -504,12 +508,11 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       throw new Error("WebRTC client does not expose terminal streaming.");
     }
 
+    this.ensureHydration(attachmentGeneration);
     const streamSubscription = this.options.bridge.streamTerminal(
       this.sessionId,
       this.subscriptionId,
-      (event) => {
-        void this.emitTerminalEvent(event, attachmentGeneration);
-      }
+      (event) => this.enqueueTerminalEvent(event, attachmentGeneration)
     );
     if (!this.isCurrentAttachment(attachmentGeneration)) {
       streamSubscription.unsubscribe();
@@ -522,7 +525,30 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       subscription_id: this.subscriptionId,
       sessionId: this.sessionId
     });
+    if (streamSubscription.ready) {
+      await streamSubscription.ready;
+      if (!this.isCurrentAttachment(attachmentGeneration)) return;
+      const hydration = this.hydration;
+      if (hydration?.generation === attachmentGeneration && !hydration.completed) {
+        this.failHydration(hydration, "Initial terminal event delivery did not complete GHOSTSNP hydration.");
+        throw new Error("Initial terminal event delivery did not complete GHOSTSNP hydration.");
+      }
+    }
     await this.flushPendingResize();
+  }
+
+  private enqueueTerminalEvent(event: DaemonEvent, attachmentGeneration: number): Promise<void> {
+    const delivery = this.terminalEventQueue.then(() =>
+      this.emitTerminalEvent(event, attachmentGeneration)
+    );
+    this.terminalEventQueue = delivery.catch((error: unknown) => {
+      recordLiveHarnessTerminal("event_delivery_failed", {
+        message: error instanceof Error ? error.message : String(error),
+        generation: attachmentGeneration,
+        subscription_id: this.subscriptionId
+      });
+    });
+    return delivery;
   }
 
   private closeStream(): void {
@@ -532,6 +558,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.hydratePromise = undefined;
     this.attachmentGeneration += 1;
     this.hydration = undefined;
+    this.terminalEventQueue = Promise.resolve();
     this.hydratedGeneration = undefined;
     this.restoredVisibleScreenGeneration = undefined;
     this.modeFlags = undefined;
@@ -575,7 +602,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       this.emitStatus(attachStateStatus(event.state));
       if (event.state === "attached") {
         this.ensureHydration(attachmentGeneration).attachedReceived = true;
-        this.scheduleHydration(attachmentGeneration);
+        await this.scheduleHydration(attachmentGeneration);
       }
       recordLiveHarnessTerminal("attach_state", { state: event.state });
       return;
@@ -610,7 +637,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         const snapshotBytes = decodeGhostsnpSnapshot(event.payload_base64, event.bytes);
         hydration.snapshotBytes = snapshotBytes;
         hydration.snapshotReceived = true;
-        this.scheduleHydration(attachmentGeneration);
+        await this.scheduleHydration(attachmentGeneration);
       } catch (error: unknown) {
         this.failHydration(
           hydration,
@@ -672,14 +699,14 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return hydration;
   }
 
-  private scheduleHydration(attachmentGeneration: number): void {
-    if (this.hydratePromise) return;
+  private scheduleHydration(attachmentGeneration: number): Promise<void> {
+    if (this.hydratePromise) return this.hydratePromise;
     const hydration = this.hydration;
     if (!hydration || hydration.generation !== attachmentGeneration || hydration.completed) {
-      return;
+      return Promise.resolve();
     }
     if (!hydration.snapshotReceived || !hydration.attachedReceived) {
-      return;
+      return Promise.resolve();
     }
 
     const promise = this.completeGhostsnpHydration(hydration);
@@ -689,6 +716,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         this.hydratePromise = undefined;
       }
     });
+    return promise;
   }
 
   private async completeGhostsnpHydration(hydration: ScreenHydration): Promise<void> {

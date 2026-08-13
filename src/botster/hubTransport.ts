@@ -68,7 +68,7 @@ export interface DaemonBridgeClient {
   streamTerminal?(
     sessionId: string,
     subscriptionId: string,
-    onEvent: (event: DaemonEvent) => void
+    onEvent: (event: DaemonEvent) => void | Promise<void>
   ): DaemonTerminalStreamSubscription;
 }
 
@@ -78,6 +78,8 @@ export interface DaemonBridgeClient {
  * `unsubscribe` stops drain and best-effort detaches; detach rejections must not throw.
  */
 export interface DaemonTerminalStreamSubscription {
+  /** Resolves after Web delivers the attach response and the first drain response in order. */
+  ready: Promise<void>;
   unsubscribe(): void;
   /** Stop local drain only — no detach request. Used when the data channel is already dead. */
   abandon(): void;

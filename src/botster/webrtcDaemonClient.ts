@@ -280,12 +280,12 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
         }
       };
 
-      const emitEvents = (response: DaemonResponse) => {
+      const emitEvents = async (response: DaemonResponse) => {
         const events = response.events ?? [];
         for (const event of events) {
           recordLiveHarnessEvent("daemon_event", event);
           eventListeners.forEach((listener) => listener(event));
-          onEvent(event);
+          await onEvent(event);
         }
       };
 
@@ -295,7 +295,7 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
         try {
           const response = await transport.request({ type: "drain", session_id: sessionId });
           if (closed) return;
-          emitEvents(response);
+          await emitEvents(response);
         } catch (error) {
           recordLiveHarnessEvent("terminal_stream_error", {
             stage: "drain",
@@ -310,12 +310,13 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
         }
       };
 
-      void transport
+      const ready = transport
         .request({ type: "attach", session_id: sessionId, subscription_id: subscriptionId })
-        .then((response) => {
+        .then(async (response) => {
           if (closed) return;
-          emitEvents(response);
-          void drain();
+          await emitEvents(response);
+          if (closed) return;
+          await drain();
         })
         .catch((error: unknown) => {
           recordLiveHarnessEvent("terminal_stream_error", {
@@ -323,9 +324,11 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
             message: error instanceof Error ? error.message : String(error)
           });
           closed = true;
+          throw error;
         });
 
       return {
+        ready,
         /** Stop local drain without detach RPC — used when the data channel is already dead. */
         abandon: () => {
           stopDrain();

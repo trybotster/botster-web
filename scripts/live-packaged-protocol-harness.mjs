@@ -411,6 +411,7 @@ try {
   await proveZeroBrowserOscColorReplies(page);
   await provePaletteProjectionAfterOsc(page, productionSessionId);
   await proveRetainedHistoryAfterEcho(page, echoProbe);
+  await proveRapidAlternateScreenReattach(page, productionSessionId);
   await proveInPageTerminalDataChannelReconnect(page, productionSessionId);
 
   // Rendered-DOM re-check after two WebRTC generations and the full terminal exercise: the
@@ -5515,6 +5516,7 @@ async function startProductionSession() {
       "    botster-web-production-bytes-ctrl) printf '\\000\\033[0m\\377' ;;",
       "    botster-web-production-bytes-hold) printf '\\250\\001\\377' ;;",
       "    botster-web-production-bytes-ablate) printf '\\375' ;;",
+      "    botster-web-production-alt-redraw:*) marker=${line#*:}; set -- $(stty size); rows=$1; printf '\\033[?1049h\\033[2J\\033[H'; row=1; while [ \"$row\" -le \"$rows\" ]; do printf '\\033[%s;1H%s-row-%s-of-%s' \"$row\" \"$marker\" \"$row\" \"$rows\"; row=$((row + 1)); done; printf '\\033[%s;1H%s-final-row-%s' \"$rows\" \"$marker\" \"$rows\" ;;",
       "    *) echo botster-web-production-echo:$line ;;",
       "  esac",
       "done"
@@ -6382,9 +6384,14 @@ async function proveHydrationBuffersUntilGhostsnpInstall(page) {
     throw new Error(`timed out waiting for snapshot_install_held: ${error.message}`);
   });
 
-  await callTerminalControl(page, "writeInput", "botster-web-production-bytes-hold\n");
-  await waitForDaemonTerminalOutputBytes(page, hydrateHoldBytes, "hydration hold");
-
+  const holdInputResponse = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
+    type: "send_input",
+    session_id: productionSessionId,
+    data: "botster-web-production-bytes-hold\n"
+  });
+  if (holdInputResponse.error) {
+    throw new Error(`hydration hold input failed: ${JSON.stringify(holdInputResponse.error)}`);
+  }
   const flushedEarly = {
     output: await countExactTerminalKind(page, "output", hydrateHoldBytes),
     renderer_write: await countExactTerminalKind(page, "renderer_write", hydrateHoldBytes)
@@ -6398,6 +6405,8 @@ async function proveHydrationBuffersUntilGhostsnpInstall(page) {
   await page.evaluate(() => {
     globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.releaseSnapshotInstall?.();
   });
+
+  await waitForDaemonTerminalOutputBytes(page, hydrateHoldBytes, "hydration hold");
 
   await page.waitForFunction(
     ({ expectedGeneration, expectedSubscription }) =>
@@ -6674,6 +6683,125 @@ async function proveRetainedHistoryAfterEcho(page, echoProbe) {
     throw new Error("missing GHOSTSNP install telemetry for retained history proof");
   }
   recordProofNote("retained_history", { echoProbe, install_bytes: install.payload?.bytes ?? null });
+}
+
+async function proveRapidAlternateScreenReattach(page, sessionId) {
+  const iterations = 20;
+  const cycles = [];
+
+  for (let cycle = 0; cycle < iterations; cycle += 1) {
+    const marker = `alt-${String(cycle).padStart(2, "0")}-${Date.now().toString(36)}`;
+    const before = await page.evaluate(() => {
+      const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+      return {
+        terminalLength: terminal.length,
+        attachCount: terminal.filter((entry) => entry.kind === "attach").length
+      };
+    });
+
+    // The producer writes one alternate-screen row at a time. Navigate immediately.
+    // The harness does not issue an extra recovery resize.
+    await callTerminalControl(page, "writeInput", `botster-web-production-alt-redraw:${marker}\n`);
+    await openHomeView(page);
+    await openSessionTerminal(page, sessionId);
+    await waitForTerminalSession(page, sessionId);
+
+    const attachment = await page.waitForFunction(
+      ({ previousAttachCount, fromIndex }) => {
+        const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+        const attaches = terminal.filter((entry) => entry.kind === "attach");
+        if (attaches.length <= previousAttachCount) return null;
+        const latest = attaches.at(-1);
+        const subscriptionId = latest?.payload?.subscription_id;
+        if (typeof subscriptionId !== "string") return null;
+        const attachIndex = terminal.findIndex(
+          (entry, index) => index >= fromIndex && entry.kind === "attach" && entry.payload?.subscription_id === subscriptionId
+        );
+        if (attachIndex < 0) return null;
+        return { subscriptionId, attachIndex };
+      },
+      { previousAttachCount: before.attachCount, fromIndex: before.terminalLength },
+      { timeout: 30_000 }
+    ).then((handle) => handle.jsonValue());
+
+    await page.waitForFunction(
+      ({ subscriptionId }) =>
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
+          (entry) => entry.kind === "ghostsnp_install" && entry.payload?.subscription_id === subscriptionId
+        ),
+      { subscriptionId: attachment.subscriptionId },
+      { timeout: 30_000 }
+    );
+
+    const liveMarker = `${marker}-live`;
+    await typeThroughMountedTerminal(page, `echo ${liveMarker}\n`);
+    await waitForTerminalRendererWrite(page, liveMarker);
+
+    const finalRowPrefix = `${marker}-final-row-`;
+    let finalScreen;
+    const screenDeadline = Date.now() + 20_000;
+    while (Date.now() < screenDeadline) {
+      finalScreen = await callTerminalControl(page, "readScreen");
+      if (finalScreen?.text?.includes(finalRowPrefix)) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!finalScreen?.text?.includes(finalRowPrefix)) {
+      throw new Error(`alternate-screen cycle ${cycle} lost final row marker ${finalRowPrefix}`);
+    }
+
+    const chronology = await page.evaluate(
+      ({ attachIndex, subscriptionId, expectedLiveMarker }) => {
+        const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+        const installIndex = terminal.findIndex(
+          (entry, index) => index > attachIndex && entry.kind === "ghostsnp_install" && entry.payload?.subscription_id === subscriptionId
+        );
+        const rendererIndex = terminal.findIndex((entry, index) => {
+          if (index <= attachIndex || entry.kind !== "renderer_write") return false;
+          const encoded = entry.payload?.payload_bytes_base64;
+          if (typeof encoded !== "string") return false;
+          try {
+            return new TextDecoder().decode(
+              Uint8Array.from(globalThis.atob(encoded), (char) => char.charCodeAt(0))
+            ).includes(expectedLiveMarker);
+          } catch {
+            return false;
+          }
+        });
+        const firstRendererIndex = terminal.findIndex(
+          (entry, index) => index > attachIndex && entry.kind === "renderer_write"
+        );
+        return { installIndex, rendererIndex, firstRendererIndex };
+      },
+      {
+        attachIndex: attachment.attachIndex,
+        subscriptionId: attachment.subscriptionId,
+        expectedLiveMarker: liveMarker
+      }
+    );
+    if (
+      chronology.installIndex < 0 ||
+      chronology.rendererIndex < 0 ||
+      (chronology.firstRendererIndex >= 0 && chronology.firstRendererIndex < chronology.installIndex)
+    ) {
+      throw new Error(
+        `alternate-screen cycle ${cycle} wrote before GHOSTSNP install: ${JSON.stringify({ attachment, chronology })}`
+      );
+    }
+
+    cycles.push({
+      cycle,
+      marker,
+      subscription_id: attachment.subscriptionId,
+      install_before_first_write: true,
+      final_row_present: true
+    });
+  }
+
+  recordProofNote("rapid_alternate_screen_reattach", {
+    iterations,
+    recovery_resize_issued_by_harness: false,
+    cycles
+  });
 }
 
 async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
