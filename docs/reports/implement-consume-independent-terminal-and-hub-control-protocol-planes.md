@@ -2,18 +2,18 @@
 
 Ticket: `ticket_1786661008_897067`
 Run: `run_1786722987_966285`
-Step: `botster_stack_implement` / `run_step_1786750024_601725`
+Step: `botster_stack_implement` / `run_step_1786750943_786076`
 
 ## Review return
 
-Review `review_1786750003_681257` sent Implement back after `951169b`. Two new findings:
+Review `review_1786750930_418832` sent Implement back after `8dc2610`. Two new findings:
 
 | Finding | Response |
 | --- | --- |
-| `finding_1786750003_333794` Keep input blocked until attached | FINISH only sets `finishReceived` and flushes the latest resize. Hydration completes after Core `attach_state=attached`. Input stays behind that barrier. `npm run smoke:incremental-ghostsnp-attach` now passes. |
-| `finding_1786750003_685519` Await terminal consumers without blocking host | Terminal frames use a dedicated delivery queue that awaits each consumer. Host `daemon_response` and `daemon_event` stay on the DataChannel message queue. A unit test holds one terminal consumer, delivers a second terminal frame plus a status response, and proves status completes first. |
+| `finding_1786750930_340631` Keep resize blocked until FINISH and attached | FINISH and incomplete history only record the history barrier. The latest resize stays pending until `completeIncrementalHydration` sees Core `attach_state=attached`. Incremental smoke and the barrier unit test now fail if a resize or input request occurs before attached. |
+| `finding_1786750930_863254` Bound and reset the terminal queue | Terminal delivery is generation-scoped, capped at 16 queued frames, and fail-closed on overflow. Peer reset replaces the queue and increments an epoch so a hung old consumer cannot stall the next generation. A unit test leaves the old consumer blocked, closes the DataChannel, attaches a new generation, and proves the new frame completes first. |
 
-Earlier Review findings remain addressed: live harness exit 0, `daemon_terminal_event` body oracles, path-neutral report.
+Earlier Review findings remain addressed: input waits for attached, host RPCs stay independent of terminal consumers, live harness exit 0, `daemon_terminal_event` body oracles, path-neutral report.
 
 ## Target repository and target_id
 
@@ -122,7 +122,7 @@ BOTSTER_SESSION_WORKER_BIN=$BOTSTER_SESSION_WORKER_BIN \
 npm run smoke:live-packaged-protocol
 ```
 
-Results after the second Review return:
+Results after the third Review return:
 
 - `npm test` passed (includes `scripts/check-daemon-protocol-drift.mjs` against published hub-test-support 0.1.36).
 - Typecheck passed.

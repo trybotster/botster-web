@@ -664,7 +664,6 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
           state: "attaching",
           message: "Terminal screen is ready with incomplete snapshot history."
         });
-        await this.flushPendingResizeBestEffort(attachmentGeneration);
         await this.completeIncrementalHydration(hydration);
       } else if (event.state === "attached") {
         hydration.attachedReceived = true;
@@ -811,7 +810,6 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         throw new Error("Restty returned FINISH outside snapshot history delivery.");
       }
       hydration.finishReceived = true;
-      await this.flushPendingResizeBestEffort(attachmentGeneration);
     } else {
       throw new Error(`Restty returned unknown snapshot progress: ${String(progress)}.`);
     }

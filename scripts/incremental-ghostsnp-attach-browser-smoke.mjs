@@ -100,30 +100,20 @@ try {
   }
 
   await deliverSnapshot(page, snapshots.at(-1));
-  await page.waitForFunction(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests().some(
-      (request) => request.type === "resize"
-    )
-  );
   const finishRequests = await page.evaluate(() =>
     globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests()
   );
-  const resizes = finishRequests.filter((request) => request.type === "resize");
-  if (resizes.length !== 1 || resizes[0].rows !== 40 || resizes[0].cols !== 120) {
-    throw new Error(`Web did not send only the latest resize after FINISH: ${JSON.stringify(resizes)}`);
-  }
-  if (finishRequests.some((request) => request.type === "send_input")) {
-    throw new Error(`Web sent input before attached: ${JSON.stringify(finishRequests)}`);
-  }
-  const finishGrid = await page.evaluate(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRenderGrid()
-  );
-  if (finishGrid?.columns !== 120 || finishGrid?.rows !== 40) {
-    throw new Error(`Restty did not apply the latest resize after FINISH: ${JSON.stringify(finishGrid)}`);
+  if (finishRequests.some((request) => request.type === "resize" || request.type === "send_input")) {
+    throw new Error(`Web sent resize or input before attached: ${JSON.stringify(finishRequests)}`);
   }
 
   await page.evaluate(() => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.deliverAttached());
   await page.evaluate(() => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.attached());
+  await page.waitForFunction(() =>
+    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests().some(
+      (request) => request.type === "resize" && request.rows === 40 && request.cols === 120
+    )
+  );
   await page.waitForFunction(() =>
     globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests().filter(
       (request) => request.type === "send_input"
@@ -178,15 +168,6 @@ try {
   await degradedPage.evaluate(() =>
     globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.deliverHistoryIncomplete()
   );
-  await degradedPage.waitForFunction(() => {
-    const harness = globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__;
-    const grid = harness.getRenderGrid();
-    return (
-      grid?.columns === 110 &&
-      grid?.rows === 36 &&
-      harness.getRequests().some((request) => request.type === "resize")
-    );
-  });
   const degradedBeforeAttached = await degradedPage.evaluate(() => ({
     rows: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows(),
     statuses: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getStatuses(),
@@ -197,9 +178,9 @@ try {
       `Degraded history did not remain attaching before attached: ${JSON.stringify(degradedBeforeAttached.statuses)}`
     );
   }
-  if (degradedBeforeAttached.requests.some((request) => request.type === "send_input")) {
+  if (degradedBeforeAttached.requests.some((request) => request.type === "resize" || request.type === "send_input")) {
     throw new Error(
-      `Degraded history released input before attached: ${JSON.stringify(degradedBeforeAttached.requests)}`
+      `Degraded history released resize or input before attached: ${JSON.stringify(degradedBeforeAttached.requests)}`
     );
   }
   if (degradedBeforeAttached.rows.some((row) => row.includes("DEGRADED-LIVE"))) {
@@ -214,6 +195,7 @@ try {
   await degradedPage.waitForFunction(() => {
     const harness = globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__;
     return (
+      harness.getRequests().some((request) => request.type === "resize" && request.rows === 36 && request.cols === 110) &&
       harness.getRequests().some(
         (request) => request.type === "send_input" && request.data === "degraded-input"
       ) &&

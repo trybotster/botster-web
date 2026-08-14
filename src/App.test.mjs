@@ -1865,7 +1865,10 @@ assert.doesNotMatch(
 assert.doesNotMatch(webrtcDaemonClient, /for_webrtc_terminal_subscription_closed/);
 assert.match(webrtcDaemonClient, /host drain returned a terminal body/);
 assert.match(hubTerminalDataPlane, /this\.ensureHydration\(attachmentGeneration\)[\s\S]*streamTerminal/);
-assert.match(hubTerminalDataPlane, /progress === "finish"[\s\S]*await this\.flushPendingResizeBestEffort\(attachmentGeneration\)/);
+assert.match(hubTerminalDataPlane, /progress === "finish"[\s\S]*hydration\.finishReceived = true/);
+assert.match(hubTerminalDataPlane, /hydration\.completed = true[\s\S]*flushPendingResizeBestEffort/);
+assert.match(webrtcDaemonClient, /terminalDeliveryEpoch/);
+assert.match(webrtcDaemonClient, /maximumTerminalDeliveryBacklog/);
 assert.match(hubTerminalDataPlane, /terminalEventQueue/);
 assert.match(hubTerminalDataPlane, /terminalInputQueue/);
 assert.match(hubTerminalDataPlane, /type: "send_input"/);
@@ -5465,6 +5468,7 @@ try {
     maximumResponseBytes: 16_777_216,
     maximumAggregateRetainedBytes: 32 * 1_024 * 1_024,
     maximumConcurrentAssemblies: 16,
+    maximumTerminalDeliveryBacklog: 16,
     maximumCompletedMessageIds: 64,
     requestTimeoutMs: 10_000,
     assemblyBookkeepingBytes: 256,
@@ -6001,6 +6005,119 @@ try {
   await waitForTestCondition(() => terminalQueueSeen.includes("terminal_output"));
   assert.deepEqual(terminalQueueSeen, ["attach_state", "snapshot", "terminal_output"]);
   terminalQueueStream.abandon();
+
+  const previousHarness = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = { events: [] };
+  try {
+    const generationChannels = [createFakeDataChannel(), createFakeDataChannel()];
+    const generationClient = createWebrtcTestClient(generationChannels, localWebrtcBootstrapFixture);
+    const firstGenerationSeen = [];
+    const secondGenerationSeen = [];
+    let releaseStaleConsumer;
+    let markStaleConsumerStarted;
+    const staleConsumerGate = new Promise((resolve) => {
+      releaseStaleConsumer = resolve;
+    });
+    const staleConsumerStarted = new Promise((resolve) => {
+      markStaleConsumerStarted = resolve;
+    });
+    const firstGenerationStream = generationClient.streamTerminal(
+      "generation-session",
+      "generation-sub-1",
+      async (event) => {
+        firstGenerationSeen.push(event.type);
+        if (event.type === "snapshot") {
+          markStaleConsumerStarted();
+          await staleConsumerGate;
+        }
+      }
+    );
+    await waitForTestCondition(() => generationChannels[0].sent.length === 1);
+    await emitChunkedTestResponse(
+      generationChannels[0],
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        kind: "events",
+        events: [
+          {
+            type: "attach_state",
+            session_id: "generation-session",
+            subscription_id: "generation-sub-1",
+            state: "attaching"
+          }
+        ]
+      },
+      { messageId: "generation-1-attach" }
+    );
+    await firstGenerationStream.ready;
+    await emitChunkedTestResponse(
+      generationChannels[0],
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        type: "snapshot",
+        session_id: "generation-session",
+        subscription_id: "generation-sub-1",
+        payload_base64: Buffer.from("stale").toString("base64"),
+        payload_encoding: "base64",
+        bytes: 5,
+        phase: "ready"
+      },
+      { messageId: "generation-1-held", deliveryKind: "daemon_terminal_frame" }
+    );
+    await staleConsumerStarted;
+    const generationControl = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl;
+    assert.equal(generationControl.closeDataChannel(), true);
+    const secondGenerationStream = generationClient.streamTerminal(
+      "generation-session",
+      "generation-sub-2",
+      (event) => {
+        secondGenerationSeen.push(event.type);
+      }
+    );
+    await waitForTestCondition(() => generationChannels[1].sent.length === 1);
+    await emitChunkedTestResponse(
+      generationChannels[1],
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        kind: "events",
+        events: [
+          {
+            type: "attach_state",
+            session_id: "generation-session",
+            subscription_id: "generation-sub-2",
+            state: "attaching"
+          }
+        ]
+      },
+      { messageId: "generation-2-attach" }
+    );
+    await secondGenerationStream.ready;
+    await emitChunkedTestResponse(
+      generationChannels[1],
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        type: "terminal_output",
+        session_id: "generation-session",
+        subscription_id: "generation-sub-2",
+        payload_base64: Buffer.from("fresh").toString("base64"),
+        payload_encoding: "base64",
+        bytes: 5
+      },
+      { messageId: "generation-2-live", deliveryKind: "daemon_terminal_frame" }
+    );
+    await waitForTestCondition(() => secondGenerationSeen.includes("terminal_output"));
+    assert.deepEqual(secondGenerationSeen, ["attach_state", "terminal_output"]);
+    assert.equal(firstGenerationSeen.includes("terminal_output"), false);
+    releaseStaleConsumer();
+    firstGenerationStream.abandon();
+    secondGenerationStream.abandon();
+  } finally {
+    if (previousHarness) {
+      globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = previousHarness;
+    } else {
+      delete globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    }
+  }
 
   const staleAttachChannel = createFakeDataChannel();
   const staleAttachClient = createWebrtcTestClient([staleAttachChannel], localWebrtcBootstrapFixture);
@@ -8391,15 +8508,20 @@ assert.deepEqual(delayedHydrationOutput.map(outputText), ["live-one\r\n", "live-
     payload_encoding: "base64",
     bytes: 1
   });
+  assert.deepEqual(frames, [[1], [2], [3], [4]]);
+  assert.deepEqual(
+    requests.filter(
+      (request) => request.type === "resize" || request.type === "send_input" || request.type === "mode_gated_input"
+    ),
+    []
+  );
+  await terminalEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
   await waitFor(() => requests.some((request) => request.type === "resize"));
   await Promise.all([firstResize, secondResize]);
-  assert.deepEqual(frames, [[1], [2], [3], [4]]);
   assert.deepEqual(
     requests.filter((request) => request.type === "resize"),
     [{ type: "resize", session_id: sessionId, rows: 40, cols: 120 }]
   );
-  assert.equal(requests.some((request) => request.type === "send_input"), false);
-  await terminalEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
   await Promise.all([firstInput, modeInput, secondInput]);
   assert.deepEqual(
     requests.filter((request) => request.type === "send_input").map((request) => request.data),
@@ -8483,11 +8605,11 @@ assert.deepEqual(delayedHydrationOutput.map(outputText), ["live-one\r\n", "live-
     subscription_id: subscriptionId,
     state: "snapshot_history_incomplete"
   });
-  await resize;
   assert.equal(cancelled, 1);
   assert.equal(statuses.at(-1).state, "attaching");
-  assert.equal(requests.some((request) => request.type === "send_input"), false);
+  assert.equal(requests.some((request) => request.type === "resize" || request.type === "send_input"), false);
   await terminalEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+  await resize;
   await input;
   await terminalEvent(liveOutputEvent(sessionId, subscriptionId, "degraded-live"));
   assert.deepEqual(outputs, ["degraded-live"]);

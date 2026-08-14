@@ -219,6 +219,7 @@ export const localWebrtcResponseChunkLimits = Object.freeze({
   maximumResponseBytes: 16_777_216,
   maximumAggregateRetainedBytes: 32 * 1_024 * 1_024,
   maximumConcurrentAssemblies: 16,
+  maximumTerminalDeliveryBacklog: 16,
   maximumCompletedMessageIds: 64,
   requestTimeoutMs: 10_000,
   assemblyBookkeepingBytes: 256,
@@ -374,6 +375,8 @@ class WebrtcDaemonTransport {
   private readonly pageHideHandler: (() => void) | undefined;
   private readonly pendingRequests: PendingRequest[] = [];
   private terminalDeliveryQueue: Promise<void> = Promise.resolve();
+  private terminalDeliveryBacklog = 0;
+  private terminalDeliveryEpoch = 0;
   private readonly responseAssemblies = new Map<string, ResponseAssembly>();
   private readonly completedMessageIds = new Set<string>();
   private readonly entitySubscriptions = new Set<EntitySubscription>();
@@ -1113,6 +1116,9 @@ class WebrtcDaemonTransport {
   }
 
   private resetPeerState(): void {
+    this.terminalDeliveryEpoch += 1;
+    this.terminalDeliveryQueue = Promise.resolve();
+    this.terminalDeliveryBacklog = 0;
     const dataChannel = this.dataChannel;
     const peerConnection = this.peerConnection;
     this.dataChannel = undefined;
@@ -1239,7 +1245,7 @@ class WebrtcDaemonTransport {
     recordLiveHarnessEvent("daemon_terminal_event", event);
     // Terminal consumers stay ordered. Host responses use the DataChannel
     // message queue and must not wait on this terminal delivery queue.
-    void this.enqueueTerminalDelivery(async () => {
+    void this.enqueueTerminalDelivery(generation, async () => {
       for (const listener of listeners) {
         if (listener.closed) continue;
         await listener.onEvent(event);
@@ -1249,8 +1255,29 @@ class WebrtcDaemonTransport {
     });
   }
 
-  private enqueueTerminalDelivery(work: () => Promise<void>): Promise<void> {
-    const delivery = this.terminalDeliveryQueue.then(work, work);
+  private enqueueTerminalDelivery(generation: number, work: () => Promise<void>): Promise<void> {
+    if (generation !== this.peerGeneration) {
+      return Promise.resolve();
+    }
+    if (this.terminalDeliveryBacklog >= localWebrtcResponseChunkLimits.maximumTerminalDeliveryBacklog) {
+      const error = webrtcFailure("data-plane", "local WebRTC terminal delivery queue overflow");
+      this.failPeerGeneration(generation, error);
+      return Promise.reject(error);
+    }
+    this.terminalDeliveryBacklog += 1;
+    const epoch = this.terminalDeliveryEpoch;
+    const delivery = this.terminalDeliveryQueue.then(async () => {
+      try {
+        if (epoch !== this.terminalDeliveryEpoch || generation !== this.peerGeneration) {
+          return;
+        }
+        await work();
+      } finally {
+        if (epoch === this.terminalDeliveryEpoch) {
+          this.terminalDeliveryBacklog = Math.max(0, this.terminalDeliveryBacklog - 1);
+        }
+      }
+    });
     this.terminalDeliveryQueue = delivery.catch(() => undefined);
     return delivery;
   }
