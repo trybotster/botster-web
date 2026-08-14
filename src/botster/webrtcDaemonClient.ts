@@ -373,6 +373,7 @@ class WebrtcDaemonTransport {
   private readonly peerConnectionFactory: () => RTCPeerConnection;
   private readonly pageHideHandler: (() => void) | undefined;
   private readonly pendingRequests: PendingRequest[] = [];
+  private terminalDeliveryQueue: Promise<void> = Promise.resolve();
   private readonly responseAssemblies = new Map<string, ResponseAssembly>();
   private readonly completedMessageIds = new Set<string>();
   private readonly entitySubscriptions = new Set<EntitySubscription>();
@@ -1236,13 +1237,22 @@ class WebrtcDaemonTransport {
       return;
     }
     recordLiveHarnessEvent("daemon_terminal_event", event);
-    // The data plane serializes consumption. Awaiting install here blocks
-    // host RPC responses and later frames on the same DataChannel.
-    for (const listener of listeners) {
-      void Promise.resolve(listener.onEvent(event)).catch((error: unknown) => {
-        this.failPeerGeneration(generation, error);
-      });
-    }
+    // Terminal consumers stay ordered. Host responses use the DataChannel
+    // message queue and must not wait on this terminal delivery queue.
+    void this.enqueueTerminalDelivery(async () => {
+      for (const listener of listeners) {
+        if (listener.closed) continue;
+        await listener.onEvent(event);
+      }
+    }).catch((error: unknown) => {
+      this.failPeerGeneration(generation, error);
+    });
+  }
+
+  private enqueueTerminalDelivery(work: () => Promise<void>): Promise<void> {
+    const delivery = this.terminalDeliveryQueue.then(work, work);
+    this.terminalDeliveryQueue = delivery.catch(() => undefined);
+    return delivery;
   }
 
   private async receiveHostEvent(payload: unknown, generation: number): Promise<void> {

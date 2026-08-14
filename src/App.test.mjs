@@ -1847,8 +1847,8 @@ assert.match(hubTransport, /family: availablePackageFamily/);
 assert.doesNotMatch(hubTransport, /["']view_surface["']|["']settings_surface["']|UpdatePackage|update_package|type: "restart_hub"/);
 assert.match(hubTerminalDataPlane, /streamTerminal/);
 assert.match(hubTransport, /ready: Promise<void>/);
-assert.match(webrtcDaemonClient, /listener\.onEvent\(event\)/);
-assert.match(webrtcDaemonClient, /must not block the host message queue|data plane serializes consumption/i);
+assert.match(webrtcDaemonClient, /await listener\.onEvent\(event\)/);
+assert.match(webrtcDaemonClient, /enqueueTerminalDelivery/);
 assert.match(webrtcDaemonClient, /daemon_hello/);
 assert.match(webrtcDaemonClient, /daemon_terminal_frame/);
 assert.match(webrtcDaemonClient, /daemon_terminal_event/);
@@ -5905,6 +5905,103 @@ try {
   assert.ok(!helloPayload.compatibility.required_features.includes("snapshot_delivery=ready_then_history"));
   orderedAttachment.abandon();
 
+  const terminalQueueChannel = createFakeDataChannel();
+  const terminalQueueClient = createWebrtcTestClient([terminalQueueChannel], localWebrtcBootstrapFixture);
+  const terminalQueueSeen = [];
+  let releaseFirstTerminalConsumer;
+  let markFirstTerminalConsumerStarted;
+  const firstTerminalConsumerGate = new Promise((resolve) => {
+    releaseFirstTerminalConsumer = resolve;
+  });
+  const firstTerminalConsumerStarted = new Promise((resolve) => {
+    markFirstTerminalConsumerStarted = resolve;
+  });
+  const terminalQueueStream = terminalQueueClient.streamTerminal(
+    "queue-session",
+    "queue-subscription",
+    async (event) => {
+      terminalQueueSeen.push(event.type);
+      if (event.type === "snapshot") {
+        markFirstTerminalConsumerStarted();
+        await firstTerminalConsumerGate;
+      }
+    }
+  );
+  await waitForTestCondition(() => terminalQueueChannel.sent.length === 1);
+  await emitChunkedTestResponse(
+    terminalQueueChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "events",
+      events: [
+        {
+          type: "attach_state",
+          session_id: "queue-session",
+          subscription_id: "queue-subscription",
+          state: "attaching"
+        }
+      ]
+    },
+    { messageId: "queue-attach-response" }
+  );
+  await terminalQueueStream.ready;
+  await emitChunkedTestResponse(
+    terminalQueueChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "snapshot",
+      session_id: "queue-session",
+      subscription_id: "queue-subscription",
+      payload_base64: Buffer.from("ready").toString("base64"),
+      payload_encoding: "base64",
+      bytes: 5,
+      phase: "ready"
+    },
+    { messageId: "queue-first-terminal", deliveryKind: "daemon_terminal_frame" }
+  );
+  await firstTerminalConsumerStarted;
+  await emitChunkedTestResponse(
+    terminalQueueChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "terminal_output",
+      session_id: "queue-session",
+      subscription_id: "queue-subscription",
+      payload_base64: Buffer.from("live").toString("base64"),
+      payload_encoding: "base64",
+      bytes: 4
+    },
+    { messageId: "queue-second-terminal", deliveryKind: "daemon_terminal_frame" }
+  );
+  const sentBeforeStatus = terminalQueueChannel.sent.length;
+  const hostStatusWhileBlocked = terminalQueueClient.request({ type: "status" });
+  await waitForTestCondition(() => terminalQueueChannel.sent.length > sentBeforeStatus);
+  await emitChunkedTestResponse(
+    terminalQueueChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "status",
+      status: null,
+      sessions: [],
+      packages: [],
+      package_decision: null,
+      lifecycle: [],
+      plugin_tools: [],
+      plugin_tool_result: null,
+      events: [],
+      cleanup: null,
+      coordination: null,
+      error: null
+    },
+    { messageId: "queue-host-status" }
+  );
+  assert.equal((await hostStatusWhileBlocked).kind, "status");
+  assert.deepEqual(terminalQueueSeen, ["attach_state", "snapshot"]);
+  releaseFirstTerminalConsumer();
+  await waitForTestCondition(() => terminalQueueSeen.includes("terminal_output"));
+  assert.deepEqual(terminalQueueSeen, ["attach_state", "snapshot", "terminal_output"]);
+  terminalQueueStream.abandon();
+
   const staleAttachChannel = createFakeDataChannel();
   const staleAttachClient = createWebrtcTestClient([staleAttachChannel], localWebrtcBootstrapFixture);
   const staleAttachEvents = [];
@@ -8047,9 +8144,16 @@ await delayedHydrationEvent({
   payload_encoding: "base64",
   bytes: 6
 });
+assert.deepEqual(delayedHydrationOutput, []);
+assert.equal(delayedHydrationInstalls.length, 2);
+await delayedHydrationEvent({
+  type: "attach_state",
+  session_id: "delayed-hydration-session",
+  subscription_id: "delayed-hydration-subscription",
+  state: "attached"
+});
 await waitFor(() => delayedHydrationOutput.length === 2);
 assert.deepEqual(delayedHydrationOutput.map(outputText), ["live-one\r\n", "live-two\r\n"]);
-assert.equal(delayedHydrationInstalls.length, 2);
 
 // Attach readiness serializes the attach batch, GHOSTSNP install, live output, and resize.
 {
@@ -8294,8 +8398,9 @@ assert.equal(delayedHydrationInstalls.length, 2);
     requests.filter((request) => request.type === "resize"),
     [{ type: "resize", session_id: sessionId, rows: 40, cols: 120 }]
   );
-  await Promise.all([firstInput, modeInput, secondInput]);
+  assert.equal(requests.some((request) => request.type === "send_input"), false);
   await terminalEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+  await Promise.all([firstInput, modeInput, secondInput]);
   assert.deepEqual(
     requests.filter((request) => request.type === "send_input").map((request) => request.data),
     ["input-one", "input-two"]
@@ -8511,6 +8616,12 @@ await staleAutomaticEvent({
   bytes: ghostsnpFixtureBytes
 });
 await staleAutomaticEvent(opaqueFinishSnapshotEvent("stale-automatic-session", "stale-automatic-subscription"));
+await staleAutomaticEvent({
+  type: "attach_state",
+  session_id: "stale-automatic-session",
+  subscription_id: "stale-automatic-subscription",
+  state: "attached"
+});
 await firstStaleAutomaticEvent(
   liveOutputEvent("stale-automatic-session", "stale-automatic-subscription", "stale-late\r\n")
 );

@@ -2,17 +2,18 @@
 
 Ticket: `ticket_1786661008_897067`
 Run: `run_1786722987_966285`
-Step: `botster_stack_implement` / `run_step_1786746551_554863`
+Step: `botster_stack_implement` / `run_step_1786750024_601725`
 
 ## Review return
 
-Review `review_1786746535_216745` sent Implement back with three open findings. This visit keeps the first Implement commit and adds the production-path fixes below.
+Review `review_1786750003_681257` sent Implement back after `951169b`. Two new findings:
 
 | Finding | Response |
 | --- | --- |
-| `finding_1786746535_743653` Restore the required live terminal path | Hello waits for HelloAck before `encrypted-stream-ready`. Hydration completes on FINISH and emits `attached` without waiting on optional host RPCs. The DataChannel message queue no longer awaits Restty install, so host responses and later frames stay independent. Exact `npm run smoke:live-packaged-protocol` against Hub `279d828ca377d23e743ae3e724a1ac9ce81520e2` exited 0. Restoration reached `read_mode_flags`, then slow-client `core_adapter_closed`, reconnect, ProcessExited, and later teardown oracles. |
-| `finding_1786746535_944533` Move every terminal oracle to the new family | Terminal-body readers select `daemon_terminal_event`. Host close stays on `daemon_event`. A mixed-family unit test has both families present. |
-| `finding_1786746535_428810` Remove user-specific paths | The committed report uses `$BOTSTER_HUB_BIN` and `$BOTSTER_SESSION_WORKER_BIN`. Exact machine paths stay in non-committed gate evidence. |
+| `finding_1786750003_333794` Keep input blocked until attached | FINISH only sets `finishReceived` and flushes the latest resize. Hydration completes after Core `attach_state=attached`. Input stays behind that barrier. `npm run smoke:incremental-ghostsnp-attach` now passes. |
+| `finding_1786750003_685519` Await terminal consumers without blocking host | Terminal frames use a dedicated delivery queue that awaits each consumer. Host `daemon_response` and `daemon_event` stay on the DataChannel message queue. A unit test holds one terminal consumer, delivers a second terminal frame plus a status response, and proves status completes first. |
+
+Earlier Review findings remain addressed: live harness exit 0, `daemon_terminal_event` body oracles, path-neutral report.
 
 ## Target repository and target_id
 
@@ -89,8 +90,8 @@ Sibling TUI `ticket_1786661009_551067` and Hub cold-cut `ticket_1786661010_19838
 
 - Host metadata is imported from `@trybotster/hub-test-support/metadata` (JSON export), not the package root. The package root `index.js` uses Node `fs` and must not enter the browser bundle. Feature literals and protocol identity still match the published metadata.
 - No Rust helper is imported.
-- Hydration no longer fails closed when ReadModeFlags times out. The plan already called ReadModeFlags optional/background. `attached` is published after READY+FINISH so input/resize can release while host RPCs continue in the background.
-- `receiveTerminalFrame` records the Core event and hands it to the data-plane queue without awaiting Restty install. The data plane still awaits each consumer. This keeps host RPCs independent of snapshot install.
+- Hydration no longer fails closed when ReadModeFlags times out. The plan already called ReadModeFlags optional/background. `attached` still requires Core `attach_state=attached` after FINISH. Optional host RPCs run after that barrier.
+- Terminal frames use a dedicated await queue instead of blocking the shared DataChannel message loop. Host responses stay independent. This is how the plan's "await each consumer" rule is applied to the adapter path.
 
 No accepted scope change requires rewriting the committed plan contract. The optional-ReadModeFlags behavior matches the approved plan text.
 
@@ -121,11 +122,12 @@ BOTSTER_SESSION_WORKER_BIN=$BOTSTER_SESSION_WORKER_BIN \
 npm run smoke:live-packaged-protocol
 ```
 
-Results after Review return:
+Results after the second Review return:
 
 - `npm test` passed (includes `scripts/check-daemon-protocol-drift.mjs` against published hub-test-support 0.1.36).
 - Typecheck passed.
 - Lint passed (pre-existing `IonicUiNodeRenderer` fast-refresh warning only).
+- `npm run smoke:incremental-ghostsnp-attach` passed: READY paint before FINISH, resize after FINISH, input only after attached.
 - Production build passed as part of `npm run smoke:live-packaged-protocol`.
 - Exact live command above, with binaries rebuilt from Hub `279d828ca377d23e743ae3e724a1ac9ce81520e2`, exited 0.
 - Restoration observed `read_mode_flags` plus `ghostsnp_install` and attached status with snapshot history.
