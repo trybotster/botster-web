@@ -318,20 +318,22 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
           }
           const events = response.events ?? [];
           for (const event of events) {
-            if (event.type === "attach_state" && event.state === "attaching") {
-              recordLiveHarnessEvent("daemon_event", event);
-              await onEvent({
-                type: "attach_state",
-                session_id: sessionId,
-                subscription_id: subscriptionId,
-                state: "attaching"
-              });
+            if (isForbiddenAttachResponseEvent(event)) {
+              throw webrtcFailure(
+                "data-plane",
+                `attach response contained a terminal body: ${event.type}`
+              );
+            }
+            if (event.type !== "attach_state") {
               continue;
             }
-            throw webrtcFailure(
-              "data-plane",
-              `attach response contained a terminal body: ${event.type}`
-            );
+            recordLiveHarnessEvent("daemon_terminal_event", event);
+            await onEvent({
+              type: "attach_state",
+              session_id: event.session_id,
+              subscription_id: event.subscription_id,
+              state: event.state === "attach_failed" ? "attach_failed" : "attaching"
+            });
           }
         })
         .catch((error: unknown) => {
@@ -472,10 +474,14 @@ class WebrtcDaemonTransport {
     return new Promise<T>((resolve, reject) => {
       const generation = this.peerGeneration;
       const timeout = window.setTimeout(() => {
-        this.failPeerGeneration(
-          generation,
-          webrtcFailure("data-plane", `local WebRTC request timed out: ${requestType}`)
-        );
+        const error = webrtcFailure("data-plane", `local WebRTC request timed out: ${requestType}`);
+        if (kind === "hello" || requestType === "attach") {
+          this.failPeerGeneration(generation, error);
+          return;
+        }
+        const index = this.pendingRequests.indexOf(pending);
+        if (index >= 0) this.pendingRequests.splice(index, 1);
+        pending.reject(error);
       }, requestTimeoutMs);
 
       const pending: PendingRequest = {
@@ -495,7 +501,7 @@ class WebrtcDaemonTransport {
 
       try {
         channel.send(JSON.stringify(envelope));
-        if (!this.encryptedStreamReady) {
+        if (!this.encryptedStreamReady && kind !== "hello") {
           this.encryptedStreamReady = true;
           this.emitLifecycle({ type: "encrypted-stream-ready", requestType });
         }
@@ -537,6 +543,10 @@ class WebrtcDaemonTransport {
         terminalCompatible,
         detail
       });
+      if (!this.encryptedStreamReady) {
+        this.encryptedStreamReady = true;
+        this.emitLifecycle({ type: "encrypted-stream-ready", requestType: "hello" });
+      }
       recordLiveHarnessEvent("daemon_hello_ack", {
         protocol: ack.protocol,
         host_protocol: ack.compatibility.protocol,
@@ -579,6 +589,13 @@ class WebrtcDaemonTransport {
   private connect(): Promise<void> {
     if (this.disconnected) {
       throw webrtcFailure("transport", "local WebRTC transport is disconnected");
+    }
+    if (
+      this.dataChannel?.readyState === "open" &&
+      this.cryptoKey &&
+      this.encryptedStreamReady
+    ) {
+      return Promise.resolve();
     }
 
     this.connectPromise ??= this.open().catch((error: unknown) => {
@@ -926,9 +943,6 @@ class WebrtcDaemonTransport {
     if (assembly.receivedBytes !== assembly.totalBytes) {
       throw webrtcFailure("data-plane", "local WebRTC response chunk bytes do not match declared total");
     }
-    if (assembly.pending && this.pendingRequests[0] !== assembly.pending) {
-      throw webrtcFailure("data-plane", "local WebRTC response completed outside pending request order");
-    }
 
     let envelopeJson = "";
     for (let index = 0; index < assembly.chunkCount; index += 1) {
@@ -947,10 +961,7 @@ class WebrtcDaemonTransport {
     } catch (error) {
       throw webrtcFailure("encryption", `local WebRTC response decryption failed: ${errorMessage(error)}`);
     }
-    if (
-      generation !== this.peerGeneration ||
-      (assembly.pending && this.pendingRequests[0] !== assembly.pending)
-    ) return;
+    if (generation !== this.peerGeneration) return;
     this.releaseAssembly(chunk.message_id, assembly);
     this.retainCompletedMessageId(chunk.message_id);
     const finishedAt = Date.now();
@@ -999,7 +1010,8 @@ class WebrtcDaemonTransport {
     if (!pending) {
       throw webrtcFailure("data-plane", "local WebRTC daemon response assembly lost its pending request");
     }
-    this.pendingRequests.shift();
+    const pendingIndex = this.pendingRequests.indexOf(pending);
+    if (pendingIndex >= 0) this.pendingRequests.splice(pendingIndex, 1);
     recordLiveHarnessEvent("webrtc_response_assembly", {
       request_type: pending.requestType,
       generation,
@@ -1224,8 +1236,12 @@ class WebrtcDaemonTransport {
       return;
     }
     recordLiveHarnessEvent("daemon_terminal_event", event);
+    // The data plane serializes consumption. Awaiting install here blocks
+    // host RPC responses and later frames on the same DataChannel.
     for (const listener of listeners) {
-      await listener.onEvent(event);
+      void Promise.resolve(listener.onEvent(event)).catch((error: unknown) => {
+        this.failPeerGeneration(generation, error);
+      });
     }
   }
 
@@ -1474,6 +1490,18 @@ function isTerminalBodyEvent(event: DaemonEvent): boolean {
     event.type === "attach_state" ||
     event.type === "scrollback"
   );
+}
+
+function isForbiddenAttachResponseEvent(event: DaemonEvent): boolean {
+  if (
+    event.type === "snapshot" ||
+    event.type === "terminal_output" ||
+    event.type === "process_exit" ||
+    event.type === "scrollback"
+  ) {
+    return true;
+  }
+  return event.type === "attach_state" && event.state !== "attaching" && event.state !== "attach_failed";
 }
 
 function isTerminalCompatibilityAccepted(

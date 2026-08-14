@@ -105,7 +105,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         if (detail.type === "data-channel-closed" || detail.type === "data-channel-error") {
           this.handleTransportLost();
         } else if (detail.type === "encrypted-stream-ready") {
-          // data-channel-open alone is not enough — Hello/attach need the encrypted stream.
+          // Wait for HelloAck, not only the first encrypted send.
           this.handleTransportRecovered();
         }
       };
@@ -323,8 +323,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.pendingResize = { rows, columns };
     await this.ensureAttached();
     const hydration = this.hydration;
-    if (hydration?.finishReceived || hydration?.historyIncomplete) {
-      await this.flushPendingResize(hydration.generation);
+    if (hydration?.completed) {
+      await this.flushPendingResizeBestEffort(hydration.generation);
     }
   }
 
@@ -427,8 +427,11 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
             session_id: this.sessionId,
             subscription_id: previousSubscriptionId
           });
-        } catch {
-          // Channel recovery may still race; new attach remains authoritative.
+        } catch (error: unknown) {
+          recordLiveHarnessTerminal("stale_detach_ignored", {
+            message: error instanceof Error ? error.message : String(error),
+            subscription_id: previousSubscriptionId
+          });
         }
       }
       if (this.detached || this.listeners.size === 0) return;
@@ -605,6 +608,17 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     });
   }
 
+  private async flushPendingResizeBestEffort(attachmentGeneration: number): Promise<void> {
+    try {
+      await this.flushPendingResize(attachmentGeneration);
+    } catch (error: unknown) {
+      recordLiveHarnessTerminal("resize_after_finish_failed", {
+        message: error instanceof Error ? error.message : String(error),
+        generation: attachmentGeneration
+      });
+    }
+  }
+
   private async emitTerminalEvent(event: TerminalStreamEvent, attachmentGeneration: number): Promise<void> {
     if (!this.isCurrentAttachment(attachmentGeneration)) {
       return;
@@ -650,7 +664,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
           state: "attaching",
           message: "Terminal screen is ready with incomplete snapshot history."
         });
-        await this.flushPendingResize(attachmentGeneration);
+        await this.flushPendingResizeBestEffort(attachmentGeneration);
       } else if (event.state === "attached") {
         hydration.attachedReceived = true;
         await this.completeIncrementalHydration(hydration);
@@ -796,7 +810,12 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         throw new Error("Restty returned FINISH outside snapshot history delivery.");
       }
       hydration.finishReceived = true;
-      await this.flushPendingResize(attachmentGeneration);
+      if (!hydration.attachedReceived) {
+        hydration.attachedReceived = true;
+        await this.completeIncrementalHydration(hydration);
+      } else {
+        await this.flushPendingResizeBestEffort(attachmentGeneration);
+      }
     } else {
       throw new Error(`Restty returned unknown snapshot progress: ${String(progress)}.`);
     }
@@ -826,63 +845,48 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       return;
     }
 
-    try {
-      await this.flushPendingResize(attachmentGeneration);
+    hydration.completed = true;
+    this.emitStatus({
+      state: "attached",
+      message: hydration.historyIncomplete
+        ? "Terminal attached with incomplete snapshot history."
+        : "Terminal attached after incremental snapshot history."
+    });
+    hydration.resolveBarrier();
 
-      const modes = await this.refreshModeFlags(attachmentGeneration);
-      if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) {
+    for (const data of hydration.bufferedOutput) {
+      if (!this.isCurrentAttachment(attachmentGeneration)) {
         return;
       }
-      if (!modes) {
-        throw new Error("ReadModeFlags failed after incremental snapshot attach.");
-      }
+      this.emitOutput(data, "output");
+    }
+    if (hydration.pendingExit !== undefined) {
+      this.emitProcessExit(hydration.pendingExit);
+    }
 
-      try {
-        const response = await this.options.bridge.request({
-          type: "read_screen",
-          session_id: this.sessionId
-        });
+    // Host RPCs after adapter bind can stall. Do not hold attached on them.
+    void this.refreshModeFlags(attachmentGeneration).then((modes) => {
+      if (modes && this.isCurrentAttachment(attachmentGeneration) && this.hydration === hydration) {
+        this.modeFlags = modes;
+      }
+    });
+    void this.flushPendingResizeBestEffort(attachmentGeneration);
+    void this.options.bridge
+      .request({
+        type: "read_screen",
+        session_id: this.sessionId
+      })
+      .then((response) => {
         if (this.isCurrentAttachment(attachmentGeneration) && this.hydration === hydration) {
           const text = response.read_screen?.text;
           recordLiveHarnessTerminal("read_screen_supplement", {
             text: typeof text === "string" ? text : null
           });
         }
-      } catch {
+      })
+      .catch(() => {
         // ReadScreen is an optional diagnostic supplement.
-      }
-
-      if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) {
-        return;
-      }
-
-      hydration.completed = true;
-      this.emitStatus({
-        state: "attached",
-        message: hydration.historyIncomplete
-          ? "Terminal attached with incomplete snapshot history."
-          : "Terminal attached after incremental snapshot history."
       });
-      hydration.resolveBarrier();
-
-      for (const data of hydration.bufferedOutput) {
-        if (!this.isCurrentAttachment(attachmentGeneration)) {
-          return;
-        }
-        this.emitOutput(data, "output");
-      }
-      if (hydration.pendingExit !== undefined) {
-        this.emitProcessExit(hydration.pendingExit);
-      }
-    } catch (error: unknown) {
-      if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) {
-        return;
-      }
-      this.failHydration(
-        hydration,
-        error instanceof Error ? error.message : "Incremental terminal snapshot attach failed."
-      );
-    }
   }
 
   private failHydration(hydration: ScreenHydration, message: string): void {

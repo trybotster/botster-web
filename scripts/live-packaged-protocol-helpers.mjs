@@ -706,6 +706,26 @@ export function htmlAssetUrls(html) {
     .sort();
 }
 
+export function isDaemonTerminalBodyEntry(entry) {
+  return entry?.kind === "daemon_terminal_event";
+}
+
+export function isDaemonHostCloseEntry(entry) {
+  return entry?.kind === "daemon_event" && entry?.payload?.type === "terminal_subscription_closed";
+}
+
+export function selectTerminalBodyEvents(entries) {
+  return (entries ?? [])
+    .filter((entry) => isDaemonTerminalBodyEntry(entry))
+    .map((entry) => entry.payload);
+}
+
+export function selectHostCloseEvents(entries) {
+  return (entries ?? [])
+    .filter((entry) => isDaemonHostCloseEntry(entry))
+    .map((entry) => entry.payload);
+}
+
 export function harnessEventMatches(entry, criteria) {
   if (entry?.kind !== criteria.kind) return false;
   const payload = entry.payload ?? {};

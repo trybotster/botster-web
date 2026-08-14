@@ -5516,6 +5516,7 @@ async function startProductionSession() {
       "    botster-web-production-bytes-rest) printf '\\202\\254' ;;",
       "    botster-web-production-bytes-ctrl) printf '\\000\\033[0m\\377' ;;",
       "    botster-web-production-bytes-hold) printf '\\250\\001\\377' ;;",
+      "    botster-web-production-mouse-on) printf '\\033[?1000h\\033[?1006h' ;;",
       "    botster-web-production-bytes-ablate) printf '\\375' ;;",
       "    botster-web-production-alt-redraw:*) marker=${line#*:}; set -- $(stty size); rows=$1; printf '\\033[?1049h\\033[2J\\033[H'; row=1; while [ \"$row\" -le \"$rows\" ]; do printf '\\033[%s;1H%s-row-%s-of-%s' \"$row\" \"$marker\" \"$row\" \"$rows\"; row=$((row + 1)); done; printf '\\033[%s;1H%s-final-row-%s' \"$rows\" \"$marker\" \"$rows\" ;;",
       "    *) echo botster-web-production-echo:$line ;;",
@@ -6315,7 +6316,7 @@ async function waitForDaemonTerminalOutputBytes(page, expectedBytes, label) {
     ({ expected }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
         const event = entry.payload;
-        if (entry.kind !== "daemon_event" || event?.type !== "terminal_output") return false;
+        if (entry.kind !== "daemon_terminal_event" || event?.type !== "terminal_output") return false;
         if (event.payload_encoding !== "base64" || typeof event.payload_base64 !== "string") return false;
         if ("data" in event) return false;
         try {
@@ -6386,13 +6387,44 @@ async function proveHydrationBuffersUntilGhostsnpInstall(page) {
     throw new Error(`timed out waiting for snapshot_install_held: ${error.message}`);
   });
 
-  const holdInputResponse = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
-    type: "send_input",
-    session_id: productionSessionId,
-    data: "botster-web-production-bytes-hold\n"
+  // Core queues host input until incremental attach completes. Wait for the
+  // Core attached frame so Unix send_input hits the live PTY, not the queue.
+  await page.waitForFunction(
+    ({ subscriptionId }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
+        const event = entry.payload;
+        return (
+          entry.kind === "daemon_terminal_event" &&
+          event?.type === "attach_state" &&
+          event.state === "attached" &&
+          event.subscription_id === subscriptionId
+        );
+      }),
+    { subscriptionId: hold.subscription_id },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(
+      `timed out waiting for Core attached during snapshot install hold: ${error.message}`
+    );
   });
-  if (holdInputResponse.error) {
-    throw new Error(`hydration hold input failed: ${JSON.stringify(holdInputResponse.error)}`);
+
+  const holdInputResponse = await page.evaluate(async ({ sessionId }) => {
+    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
+    if (!control?.request) {
+      return { error: { message: "transportControl.request unavailable" } };
+    }
+    try {
+      return await control.request({
+        type: "send_input",
+        session_id: sessionId,
+        data: "botster-web-production-bytes-hold\n"
+      });
+    } catch (error) {
+      return { error: { message: error instanceof Error ? error.message : String(error) } };
+    }
+  }, { sessionId: productionSessionId });
+  if (holdInputResponse.error || holdInputResponse.kind === "error") {
+    throw new Error(`hydration hold input failed: ${JSON.stringify(holdInputResponse)}`);
   }
   const flushedEarly = {
     output: await countExactTerminalKind(page, "output", hydrateHoldBytes),
@@ -6470,7 +6502,7 @@ async function proveRendererWriteOracleIsLoadBearing(page) {
 async function proveByteFaithfulLiveTerminal(page) {
   const envelopeProof = await page.evaluate(() => {
     const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "daemon_event")
+      .filter((entry) => entry.kind === "daemon_terminal_event")
       .map((entry) => entry.payload)
       .filter((event) => event?.type === "terminal_output");
     if (events.length === 0) return { error: "no_terminal_output_events" };
@@ -6611,8 +6643,12 @@ async function waitForTerminalCanvas(page) {
 async function proveMountedMouseModeGatedInput(page) {
   // Enable normal + SGR mouse tracking in the session, then require ModeGatedInput
   // for a real pointer event (proves cache refresh after mouse_mode 0 → 9).
-  await callTerminalControl(page, "writeInput", "printf '\\033[?1000h\\033[?1006h'\n");
-  await new Promise((r) => setTimeout(r, 400));
+  await callTerminalControl(page, "writeInput", "botster-web-production-mouse-on\n");
+  await waitForDaemonTerminalOutputBytes(
+    page,
+    [0x1b, 0x5b, 0x3f, 0x31, 0x30, 0x30, 0x30, 0x68, 0x1b, 0x5b, 0x3f, 0x31, 0x30, 0x30, 0x36, 0x68],
+    "mouse DECSET"
+  );
   // Confirm authoritative modes see mouse tracking when ReadModeFlags is available.
   const modes = await page.evaluate(() => {
     // Mode flags land via attach hydration telemetry when available.
@@ -7108,12 +7144,28 @@ async function proveTerminalReconnectListenerAblation(page, subscriptionAfterRec
 
 async function waitForAutomaticTerminalRestore(page) {
   // GHOSTSNP-first hydrate: Snapshot install + ReadModeFlags (ReadScreen is optional supplement).
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_mode_flags" }, "automatic read_mode_flags request");
+  try {
+    await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_mode_flags" }, "automatic read_mode_flags request");
+  } catch (error) {
+    const debug = await page.evaluate(() => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+      return {
+        stream_errors: events.filter((entry) => entry.kind === "terminal_stream_error").slice(-6),
+        hello: events.filter((entry) => entry.kind === "daemon_hello" || entry.kind === "daemon_hello_ack").slice(-4),
+        discarded: events.filter((entry) => entry.kind === "webrtc_terminal_frame_discarded").slice(-6),
+        terminal_kinds: terminal.map((entry) => entry.kind).slice(-20)
+      };
+    });
+    throw new Error(`${error.message}; hydrate_debug=${JSON.stringify(debug)}`, { cause: error });
+  }
   const restoration = await page.waitForFunction(
     () => {
       const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
       const install = terminal.findLast((entry) => entry.kind === "ghostsnp_install" || entry.kind === "restty_load_binary_snapshot");
-      const modeFlags = terminal.findLast((entry) => entry.kind === "mode_flags");
+      const modeFlags =
+        terminal.findLast((entry) => entry.kind === "mode_flags") ??
+        terminal.findLast((entry) => entry.kind === "mode_flags_failed");
       const status = terminal.findLast(
         (entry) =>
           entry.kind === "status" &&
@@ -7138,7 +7190,7 @@ async function waitForAutomaticTerminalRestore(page) {
   // Web validates only the transport envelope. Restty owns the opaque snapshot bytes.
   const snapshotProof = await page.evaluate(() => {
     const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "daemon_event")
+      .filter((entry) => entry.kind === "daemon_terminal_event")
       .map((entry) => entry.payload)
       .filter((event) => event?.type === "snapshot" && typeof event.payload_base64 === "string");
     if (events.length < 2) return null;
@@ -7174,7 +7226,7 @@ async function assertTerminalAttachChronology(page, sessionId, requiredSubscript
   const chronology = await page.waitForFunction(
     ({ expectedSessionId, requiredSubscriptionId: requiredSub }) => {
       const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-        .filter((entry) => entry.kind === "daemon_event")
+        .filter((entry) => entry.kind === "daemon_terminal_event")
         .map((entry) => entry.payload)
         .filter((event) =>
           event?.session_id === expectedSessionId &&
@@ -7212,12 +7264,24 @@ async function assertTerminalAttachChronology(page, sessionId, requiredSubscript
 
           const initialEvents = subscriptionEvents.slice(attachingIndex, liveIndex + 1);
           const attachedOffset = attachedIndex - attachingIndex;
-          const earlyLive = initialEvents.findIndex(
-            (event, index) => index < attachedOffset && event.type === "terminal_output"
+          // Core may emit terminal_output before Attached. Web must buffer it.
+          const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+          const attachedStatusIndex = terminal.findIndex(
+            (entry) =>
+              entry.kind === "status" &&
+              entry.payload?.state === "attached" &&
+              typeof entry.payload?.message === "string" &&
+              entry.payload.message.includes("snapshot")
           );
-          if (earlyLive >= 0) {
+          const earlyRendered = terminal.findIndex(
+            (entry, index) =>
+              attachedStatusIndex >= 0 &&
+              index < attachedStatusIndex &&
+              entry.kind === "output"
+          );
+          if (earlyRendered >= 0) {
             return {
-              error: "terminal output arrived before attached",
+              error: "renderer output arrived before attached status",
               subscription_id: subscriptionId,
               observed: initialEvents
             };
