@@ -6,11 +6,14 @@ import type {
   TerminalSnapshotReader,
   TerminalSubscription
 } from "./terminal";
-import type { DaemonBridgeClient, DaemonTerminalStreamSubscription } from "./hubTransport";
+import type {
+  DaemonBridgeClient,
+  DaemonTerminalStreamSubscription,
+  TerminalStreamEvent
+} from "./hubTransport";
 import { hubTerminalSubscriptionId } from "./hubTransport";
 import type {
   DaemonCaptureSnapshot,
-  DaemonEvent,
   DaemonModeFlags,
   DaemonModeGatedInputResult,
   DaemonReadScreen
@@ -83,6 +86,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private incrementalSnapshotReaderFactory: (() => TerminalSnapshotReader) | undefined;
   private terminalEventQueue: Promise<void> = Promise.resolve();
   private terminalInputQueue: Promise<void> = Promise.resolve();
+  private snapshotRecoveries = 0;
   private readonly onWebrtcLifecycle?: (event: Event) => void;
 
   constructor(private readonly options: HubTerminalDataPlaneOptions) {
@@ -93,7 +97,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.testHooks = options.testHooks;
     // Surviving-document DataChannel recovery must mint a fresh terminal subscription
     // and re-run H0–H5 without unmounting the renderer. Wait for encrypted-stream-ready
-    // so attach/drain RPCs are not issued against a half-open peer.
+    // so attach RPCs are not issued against a half-open peer.
     if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
       this.onWebrtcLifecycle = (event: Event) => {
         const detail = (event as CustomEvent<WebrtcDaemonLifecycleEvent>).detail;
@@ -101,7 +105,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         if (detail.type === "data-channel-closed" || detail.type === "data-channel-error") {
           this.handleTransportLost();
         } else if (detail.type === "encrypted-stream-ready") {
-          // data-channel-open alone is not enough — attach/drain need the encrypted stream.
+          // data-channel-open alone is not enough — Hello/attach need the encrypted stream.
           this.handleTransportRecovered();
         }
       };
@@ -400,6 +404,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     // Only reattach once the encrypted stream is usable. data-channel-open may fire first;
     // keep transportLost until encrypted-stream-ready (or a later open after crypto is up).
     this.transportLost = false;
+    this.snapshotRecoveries = 0;
     const previousSubscriptionId = this.subscriptionId;
     if (!this.fixedSubscriptionId) {
       this.subscriptionId = createTerminalSubscriptionId();
@@ -553,7 +558,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return queued;
   }
 
-  private enqueueTerminalEvent(event: DaemonEvent, attachmentGeneration: number): Promise<void> {
+  private enqueueTerminalEvent(event: TerminalStreamEvent, attachmentGeneration: number): Promise<void> {
     const delivery = this.terminalEventQueue.then(() =>
       this.emitTerminalEvent(event, attachmentGeneration)
     );
@@ -600,17 +605,34 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     });
   }
 
-  private async emitTerminalEvent(event: DaemonEvent, attachmentGeneration: number): Promise<void> {
+  private async emitTerminalEvent(event: TerminalStreamEvent, attachmentGeneration: number): Promise<void> {
     if (!this.isCurrentAttachment(attachmentGeneration)) {
       return;
     }
 
-    if (!isTerminalStreamEvent(event) || event.session_id !== this.sessionId || event.subscription_id !== this.subscriptionId) {
+    if (event.session_id !== this.sessionId || event.subscription_id !== this.subscriptionId) {
       return;
     }
 
     await this.testHooks?.beforeListenerDelivery?.();
     if (!this.isCurrentAttachment(attachmentGeneration)) {
+      return;
+    }
+
+    if (event.type === "terminal_subscription_closed") {
+      recordLiveHarnessTerminal("terminal_subscription_closed", {
+        reason: event.reason,
+        generation: event.generation,
+        subscription_id: event.subscription_id
+      });
+      if (event.reason === "core_adapter_closed") {
+        this.hydration?.reader?.cancel();
+        this.emitStatus({
+          state: "failed",
+          message: "Terminal subscription closed by Core write-budget."
+        });
+        this.closeStream();
+      }
       return;
     }
 
@@ -632,6 +654,12 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       } else if (event.state === "attached") {
         hydration.attachedReceived = true;
         await this.completeIncrementalHydration(hydration);
+      } else if (event.state === "attach_failed") {
+        if (!hydration.readyReceived) {
+          this.recoverLostSnapshot(hydration, "Terminal attach failed before READY.");
+          return;
+        }
+        this.failHydration(hydration, "Terminal attach failed after READY.");
       } else {
         this.emitStatus(attachStateStatus(event.state));
       }
@@ -640,28 +668,20 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     if (event.type === "process_exit") {
+      const code = event.code ?? null;
       if (this.hydration?.generation === attachmentGeneration && !this.hydration.completed) {
-        this.hydration.pendingExit = event.code;
+        this.hydration.pendingExit = code;
         return;
       }
-      this.emitProcessExit(event.code);
-      return;
-    }
-
-    if (event.type === "scrollback") {
-      // Scrollback events never enter the Restty snapshot reader.
-      recordLiveHarnessTerminal("scrollback", {
-        bytes: event.bytes,
-        payload_encoding: event.payload_encoding,
-        imported: false
-      });
+      this.emitProcessExit(code);
       return;
     }
 
     if (event.type === "snapshot") {
       recordLiveHarnessTerminal("snapshot", {
         bytes: event.bytes,
-        payload_encoding: event.payload_encoding
+        payload_encoding: event.payload_encoding,
+        phase: event.phase
       });
       const hydration = this.ensureHydration(attachmentGeneration);
       try {
@@ -672,10 +692,12 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         );
         await this.installIncrementalSnapshotFrame(hydration, snapshotBytes);
       } catch (error: unknown) {
-        this.failHydration(
-          hydration,
-          error instanceof Error ? error.message : "Invalid terminal snapshot payload."
-        );
+        const message = error instanceof Error ? error.message : "Invalid terminal snapshot payload.";
+        if (isLostSnapshotProgress(message)) {
+          this.recoverLostSnapshot(hydration, message);
+          return;
+        }
+        this.failHydration(hydration, message);
       }
       return;
     }
@@ -873,6 +895,33 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     });
     recordLiveHarnessTerminal("ghostsnp_hydrate_failed", { message });
     this.closeStream();
+  }
+
+  private recoverLostSnapshot(hydration: ScreenHydration, message: string): void {
+    if (this.hydration !== hydration) return;
+    if (this.snapshotRecoveries >= 1 || this.fixedSubscriptionId) {
+      this.failHydration(hydration, message);
+      return;
+    }
+    this.snapshotRecoveries += 1;
+    const previousSubscriptionId = this.subscriptionId;
+    recordLiveHarnessTerminal("snapshot_lost_recover", {
+      message,
+      previous_subscription_id: previousSubscriptionId
+    });
+    hydration.reader?.cancel();
+    this.closeStream();
+    this.subscriptionId = createTerminalSubscriptionId();
+    this.emitStatus({
+      state: "attaching",
+      message: "Lost snapshot page; starting a fresh attach."
+    });
+    void this.ensureAttached().catch((error: unknown) => {
+      this.emitStatus({
+        state: "failed",
+        message: error instanceof Error ? error.message : "Fresh terminal attach failed."
+      });
+    });
   }
 
   private bufferHydratingOutput(data: Uint8Array, hydration: ScreenHydration): void {
@@ -1099,11 +1148,14 @@ function modeFlagsFromGatedResult(result: DaemonModeGatedInputResult): DaemonMod
   };
 }
 
-function isTerminalStreamEvent(event: DaemonEvent): event is Extract<
-  DaemonEvent,
-  { session_id: string; subscription_id: string }
-> {
-  return "session_id" in event && "subscription_id" in event;
+function isLostSnapshotProgress(message: string): boolean {
+  return (
+    message.includes("unknown snapshot progress") ||
+    message.includes("PAGE outside snapshot history") ||
+    message.includes("READY outside the initial snapshot frame") ||
+    message.includes("FINISH outside snapshot history") ||
+    message.includes("Invalid terminal snapshot payload")
+  );
 }
 
 function attachStateStatus(state: string): TerminalAttachmentStatus {

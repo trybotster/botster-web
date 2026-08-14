@@ -1,23 +1,26 @@
 import type { ActionBinding, ActionDispatchResult } from "./actions";
 import type { TerminalDataPlaneKind } from "./hubRuntime";
 import type { HubControlFrame } from "./protocol";
+import {
+  hostCompatibilityRequirement,
+  hostHelloConformanceRevision,
+  hostHelloProtocol,
+  requiredHostFeatures,
+  terminalCompatibilityRequirement
+} from "./protocolPlanes";
 import type { WebrtcDaemonLifecycleEvent } from "./webrtcDaemonClient";
 
 export const hubStatusFamily = "botster-web.hub_status";
 export const hubCompatibilityDiagnosticId = "hub-compatibility";
-export const expectedDaemonProtocol = "botster-hub-daemon-v1";
+export const terminalCompatibilityDiagnosticId = "terminal-compatibility";
+export const expectedDaemonProtocol = hostHelloProtocol;
 export const minimumDaemonProtocolVersion = 1;
-export const minimumConformanceFixtureRevision = 38;
-export const requiredDaemonFeatures = [
-  "sessions",
-  "terminal_streaming",
-  "resize",
-  "terminal_readback",
-  "plugin_surface_render",
-  "plugin_surface_action",
-  "mode_gated_input",
-  "snapshot_delivery=ready_then_history"
-] as const;
+export const minimumConformanceFixtureRevision = hostHelloConformanceRevision;
+export const requiredDaemonFeatures = requiredHostFeatures;
+export {
+  hostCompatibilityRequirement,
+  terminalCompatibilityRequirement
+};
 
 export type ConnectionDiagnosticSeverity = "info" | "success" | "warning" | "danger";
 
@@ -136,7 +139,7 @@ export function dataPlaneDiagnostic(kind: TerminalDataPlaneKind): ConnectionDiag
       return {
         id: "terminal-data-plane",
         title: "Terminal data plane: WebRTC DataChannel",
-        detail: "Terminal requests and terminal stream polling use the encrypted local WebRTC DataChannel after bootstrap/signaling.",
+        detail: "Terminal requests and Core terminal frames use the encrypted local WebRTC DataChannel after DataChannel Hello.",
         severity: "success",
         source: "data-plane"
       };
@@ -176,6 +179,16 @@ export function webRtcLifecycleDiagnostic(event: WebrtcDaemonLifecycleEvent): Co
         detail: `Encrypted WebRTC request/response traffic is active for ${event.requestType}.`,
         severity: "success",
         source: "encryption"
+      };
+    case "hello-ack":
+      return {
+        id: event.terminalCompatible ? "terminal-compatibility" : terminalCompatibilityDiagnosticId,
+        title: event.terminalCompatible
+          ? "Terminal compatibility accepted"
+          : "Terminal compatibility rejected",
+        detail: event.detail,
+        severity: event.terminalCompatible ? "success" : "warning",
+        source: "compatibility"
       };
   }
 }

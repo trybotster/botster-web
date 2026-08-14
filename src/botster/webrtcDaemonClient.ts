@@ -1,9 +1,12 @@
+import type { TerminalEvent } from "@trybotster/terminal-protocol";
 import type {
   AesGcmEnvelope,
   DaemonBridgeRequestEnvelope,
   DaemonBridgeResponseEnvelope,
   DaemonEntityFrame,
   DaemonEvent,
+  DaemonHello,
+  DaemonHelloAck,
   DaemonLocalWebrtcBootstrap,
   DaemonLocalWebrtcDeliveryChunk,
   DaemonLocalWebrtcDeliveryKind,
@@ -11,7 +14,12 @@ import type {
   DaemonResponse,
   JsonValue
 } from "./realHubDaemonDto";
-import type { DaemonBridgeClient } from "./hubTransport";
+import type { DaemonBridgeClient, TerminalStreamEvent } from "./hubTransport";
+import {
+  hostCompatibilityRequirement,
+  hostHelloProtocol,
+  terminalCompatibilityRequirement
+} from "./protocolPlanes";
 
 export interface LocalWebrtcBootstrap extends DaemonLocalWebrtcBootstrap {
   signaling_url: string;
@@ -37,17 +45,37 @@ export type WebrtcDaemonLifecycleEvent =
   | { type: "data-channel-open" }
   | { type: "data-channel-closed" }
   | { type: "data-channel-error" }
-  | { type: "encrypted-stream-ready"; requestType: string };
+  | { type: "encrypted-stream-ready"; requestType: string }
+  | { type: "hello-ack"; hostCompatible: boolean; terminalCompatible: boolean; detail: string };
 
 export const webRtcDaemonLifecycleEventName = "botster:webrtc-daemon-lifecycle";
+
+type PendingKind = "hello" | "request";
 
 type PendingRequest = {
   generation: number;
   requestType: string;
+  kind: PendingKind;
   messageId?: string;
-  resolve(response: DaemonResponse): void;
+  resolve(response: DaemonResponse | DaemonHelloAck): void;
   reject(error: unknown): void;
 };
+
+type TerminalStreamListener = {
+  sessionId: string;
+  subscriptionId: string;
+  peerGeneration: number;
+  coreGeneration: number;
+  closed: boolean;
+  onEvent(event: TerminalStreamEvent): void | Promise<void>;
+};
+
+/** Test/live-harness switch: skip production assembly-timeout cleanup so ablation goes red. */
+export let applyAssemblyTimeoutCleanup = true;
+
+export function setApplyAssemblyTimeoutCleanup(enabled: boolean): void {
+  applyAssemblyTimeoutCleanup = enabled;
+}
 
 type ResponseAssembly = {
   generation: number;
@@ -199,7 +227,6 @@ export const localWebrtcResponseChunkLimits = Object.freeze({
 });
 
 const requestTimeoutMs = localWebrtcResponseChunkLimits.requestTimeoutMs;
-const drainIntervalMs = 25;
 
 function createRequestIdGenerator(prefix: string) {
   let counter = 0;
@@ -248,9 +275,7 @@ export function createLocalWebrtcBootstrapRefresher({
 export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): DaemonBridgeClient {
   const transport = new WebrtcDaemonTransport(options);
   const eventListeners = new Set<(event: DaemonEvent) => void>();
-  installLiveHarnessTransportControl(transport);
-
-  return {
+  const client: DaemonBridgeClient = {
     async request(request) {
       return transport.request(request);
     },
@@ -270,76 +295,61 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
     },
     streamTerminal(sessionId, subscriptionId, onEvent) {
       let closed = false;
-      let timer: number | undefined;
-
-      const stopDrain = () => {
-        closed = true;
-        if (timer !== undefined) {
-          window.clearTimeout(timer);
-          timer = undefined;
-        }
-      };
-
-      const emitEvents = async (response: DaemonResponse) => {
-        const events = response.events ?? [];
-        for (const event of events) {
-          recordLiveHarnessEvent("daemon_event", event);
-          eventListeners.forEach((listener) => listener(event));
-          // Wait for snapshot decoding before Web handles the next event or drain.
-          await onEvent(event);
-        }
-      };
-
-      const drain = async () => {
+      const listener = transport.addTerminalStreamListener(sessionId, subscriptionId, async (event) => {
         if (closed) return;
-
-        try {
-          const response = await transport.request({
-            type: "drain",
-            session_id: sessionId,
-            subscription_id: subscriptionId
-          });
-          if (closed) return;
-          await emitEvents(response);
-        } catch (error) {
-          recordLiveHarnessEvent("terminal_stream_error", {
-            stage: "drain",
-            message: error instanceof Error ? error.message : String(error)
-          });
-          closed = true;
-          return;
+        if (event.type !== "terminal_subscription_closed") {
+          eventListeners.forEach((subscriber) => subscriber(event as unknown as DaemonEvent));
         }
+        await onEvent(event);
+      });
 
-        if (!closed) {
-          timer = window.setTimeout(() => void drain(), drainIntervalMs);
-        }
+      const stopDelivery = () => {
+        closed = true;
+        listener.closed = true;
+        transport.removeTerminalStreamListener(listener);
       };
 
       const ready = transport
         .request({ type: "attach", session_id: sessionId, subscription_id: subscriptionId })
         .then(async (response) => {
           if (closed) return;
-          await emitEvents(response);
-          if (closed) return;
-          await drain();
+          if (response.error) {
+            throw webrtcFailure("data-plane", response.error.message);
+          }
+          const events = response.events ?? [];
+          for (const event of events) {
+            if (event.type === "attach_state" && event.state === "attaching") {
+              recordLiveHarnessEvent("daemon_event", event);
+              await onEvent({
+                type: "attach_state",
+                session_id: sessionId,
+                subscription_id: subscriptionId,
+                state: "attaching"
+              });
+              continue;
+            }
+            throw webrtcFailure(
+              "data-plane",
+              `attach response contained a terminal body: ${event.type}`
+            );
+          }
         })
         .catch((error: unknown) => {
           recordLiveHarnessEvent("terminal_stream_error", {
             stage: "attach",
             message: error instanceof Error ? error.message : String(error)
           });
-          closed = true;
+          stopDelivery();
           throw error;
         });
 
       return {
         ready,
-        /** Stop local drain without detach RPC — used when the data channel is already dead. */
         abandon: () => {
-          stopDrain();
+          stopDelivery();
         },
         unsubscribe: () => {
-          stopDrain();
+          stopDelivery();
           void transport
             .request({ type: "detach", session_id: sessionId, subscription_id: subscriptionId })
             .catch((error: unknown) => {
@@ -352,6 +362,8 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
       };
     }
   };
+  installLiveHarnessTransportControl(transport, client);
+  return client;
 }
 
 class WebrtcDaemonTransport {
@@ -362,6 +374,9 @@ class WebrtcDaemonTransport {
   private readonly responseAssemblies = new Map<string, ResponseAssembly>();
   private readonly completedMessageIds = new Set<string>();
   private readonly entitySubscriptions = new Set<EntitySubscription>();
+  private readonly terminalStreamListeners = new Set<TerminalStreamListener>();
+  private readonly subscriptionGenerations = new Map<string, number>();
+  private helloPromise: Promise<DaemonHelloAck> | undefined;
   private peerConnection: RTCPeerConnection | undefined;
   private dataChannel: RTCDataChannel | undefined;
   private cryptoKey: CryptoKey | undefined;
@@ -401,27 +416,75 @@ class WebrtcDaemonTransport {
     }
 
     recordLiveHarnessEvent("daemon_request", request);
+    const response = await this.sendEncrypted<DaemonResponse>(
+      request,
+      request.type,
+      "request",
+      (payload) => payload as DaemonResponse
+    );
+    if (request.type === "drain" && (response.events ?? []).some(isTerminalBodyEvent)) {
+      throw webrtcFailure("data-plane", "host drain returned a terminal body");
+    }
+    return response;
+  }
+
+  addTerminalStreamListener(
+    sessionId: string,
+    subscriptionId: string,
+    onEvent: (event: TerminalStreamEvent) => void | Promise<void>
+  ): TerminalStreamListener {
+    const coreGeneration = (this.subscriptionGenerations.get(subscriptionId) ?? 0) + 1;
+    this.subscriptionGenerations.set(subscriptionId, coreGeneration);
+    const listener: TerminalStreamListener = {
+      sessionId,
+      subscriptionId,
+      peerGeneration: this.peerGeneration,
+      coreGeneration,
+      closed: false,
+      onEvent
+    };
+    this.terminalStreamListeners.add(listener);
+    return listener;
+  }
+
+  removeTerminalStreamListener(listener: TerminalStreamListener): void {
+    listener.closed = true;
+    this.terminalStreamListeners.delete(listener);
+  }
+
+  private async sendEncrypted<T extends DaemonResponse | DaemonHelloAck>(
+    plaintext: DaemonRequest | DaemonHello,
+    requestType: string,
+    kind: PendingKind,
+    parse: (payload: unknown) => T
+  ): Promise<T> {
+    const channel = this.dataChannel;
+    const key = this.cryptoKey;
+    if (!channel || !key || channel.readyState !== "open") {
+      throw webrtcFailure("transport", "local WebRTC data channel is not open");
+    }
     let envelope: AesGcmEnvelope;
     try {
-      envelope = await encryptDaemonRequest(key, request);
+      envelope = await encryptJsonPayload(key, plaintext);
     } catch (error) {
       throw webrtcFailure("encryption", `local WebRTC request encryption failed: ${errorMessage(error)}`);
     }
-    return new Promise<DaemonResponse>((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       const generation = this.peerGeneration;
       const timeout = window.setTimeout(() => {
         this.failPeerGeneration(
           generation,
-          webrtcFailure("data-plane", `local WebRTC request timed out: ${request.type}`)
+          webrtcFailure("data-plane", `local WebRTC request timed out: ${requestType}`)
         );
       }, requestTimeoutMs);
 
       const pending: PendingRequest = {
         generation,
-        requestType: request.type,
+        requestType,
+        kind,
         resolve: (response) => {
           window.clearTimeout(timeout);
-          resolve(response);
+          resolve(parse(response));
         },
         reject: (error) => {
           window.clearTimeout(timeout);
@@ -434,16 +497,56 @@ class WebrtcDaemonTransport {
         channel.send(JSON.stringify(envelope));
         if (!this.encryptedStreamReady) {
           this.encryptedStreamReady = true;
-          this.emitLifecycle({ type: "encrypted-stream-ready", requestType: request.type });
+          this.emitLifecycle({ type: "encrypted-stream-ready", requestType });
         }
       } catch (error) {
         const index = this.pendingRequests.indexOf(pending);
         if (index >= 0) this.pendingRequests.splice(index, 1);
         pending.reject(
-          webrtcFailure("data-plane", `local WebRTC data-plane send failed for ${request.type}: ${errorMessage(error)}`)
+          webrtcFailure("data-plane", `local WebRTC data-plane send failed for ${requestType}: ${errorMessage(error)}`)
         );
       }
     });
+  }
+
+  private async sendHello(generation: number): Promise<DaemonHelloAck> {
+    if (generation !== this.peerGeneration) {
+      throw webrtcFailure("transport", "local WebRTC hello targeted a stale peer generation");
+    }
+    if (this.helloPromise) return this.helloPromise;
+    const hello: DaemonHello = {
+      protocol: hostHelloProtocol,
+      compatibility: hostCompatibilityRequirement,
+      terminal_compatibility: terminalCompatibilityRequirement
+    };
+    recordLiveHarnessEvent("daemon_hello", hello);
+    this.helloPromise = this.sendEncrypted<DaemonHelloAck>(hello, "hello", "hello", (payload) => {
+      const ack = payload as DaemonHelloAck;
+      if (!ack || typeof ack.protocol !== "string" || !ack.compatibility) {
+        throw webrtcFailure("data-plane", "local WebRTC hello ack is not a DaemonHelloAck");
+      }
+      return ack;
+    }).then((ack) => {
+      const terminalCompatible = isTerminalCompatibilityAccepted(ack.terminal_compatibility);
+      const detail = terminalCompatible
+        ? `Host Hello accepted protocol ${ack.compatibility.protocol} v${ack.compatibility.protocol_version}; terminal plane is compatible.`
+        : `Terminal compatibility rejected: ${describeTerminalCompatibility(ack.terminal_compatibility)}. Host operations remain available.`;
+      this.emitLifecycle({
+        type: "hello-ack",
+        hostCompatible: true,
+        terminalCompatible,
+        detail
+      });
+      recordLiveHarnessEvent("daemon_hello_ack", {
+        protocol: ack.protocol,
+        host_protocol: ack.compatibility.protocol,
+        host_protocol_version: ack.compatibility.protocol_version,
+        terminal_compatible: terminalCompatible,
+        terminal_protocol: ack.terminal_compatibility?.protocol ?? null
+      });
+      return ack;
+    });
+    return this.helloPromise;
   }
 
   subscribeEntityFrames(
@@ -720,6 +823,7 @@ class WebrtcDaemonTransport {
     } catch (error) {
       throw webrtcFailure("transport", `local WebRTC transport failed: ${errorMessage(error)}`);
     }
+    await this.sendHello(generation);
     queueMicrotask(() => {
       for (const subscription of this.entitySubscriptions) {
         void this.startEntitySubscription(subscription, generation);
@@ -784,6 +888,7 @@ class WebrtcDaemonTransport {
         retainedBytes,
         startedAt,
         timeout: window.setTimeout(() => {
+          if (!applyAssemblyTimeoutCleanup) return;
           this.failPeerGeneration(
             generation,
             webrtcFailure(
@@ -836,7 +941,7 @@ class WebrtcDaemonTransport {
     const key = this.cryptoKey;
     if (!key) throw webrtcFailure("encryption", "local WebRTC response key is unavailable");
 
-    let payload: DaemonResponse | DaemonEntityFrame;
+    let payload: unknown;
     try {
       payload = await decryptDaemonPayload(key, envelopeJson);
     } catch (error) {
@@ -859,11 +964,34 @@ class WebrtcDaemonTransport {
         duration_ms: finishedAt - assembly.startedAt
       });
       const entityFrame = payload as DaemonEntityFrame;
-      // Harness-only intercept: drop a filter-matched real frame before production apply.
       if (this.maybeDropArmedInboundEntityFrame(entityFrame, generation)) {
         return;
       }
       this.receiveEntityFrame(entityFrame, generation);
+      return;
+    }
+    if (assembly.deliveryKind === "daemon_terminal_frame") {
+      recordLiveHarnessEvent("webrtc_terminal_frame_assembly", {
+        generation,
+        total_bytes: assembly.totalBytes,
+        chunk_count: assembly.chunkCount,
+        started_at: assembly.startedAt,
+        finished_at: finishedAt,
+        duration_ms: finishedAt - assembly.startedAt
+      });
+      await this.receiveTerminalFrame(payload, generation);
+      return;
+    }
+    if (assembly.deliveryKind === "daemon_event") {
+      recordLiveHarnessEvent("webrtc_daemon_event_assembly", {
+        generation,
+        total_bytes: assembly.totalBytes,
+        chunk_count: assembly.chunkCount,
+        started_at: assembly.startedAt,
+        finished_at: finishedAt,
+        duration_ms: finishedAt - assembly.startedAt
+      });
+      await this.receiveHostEvent(payload, generation);
       return;
     }
 
@@ -881,7 +1009,7 @@ class WebrtcDaemonTransport {
       finished_at: finishedAt,
       duration_ms: finishedAt - assembly.startedAt
     });
-    pending.resolve(payload as DaemonResponse);
+    pending.resolve(payload as DaemonResponse | DaemonHelloAck);
   }
 
   private validateAssemblyChunk(
@@ -979,6 +1107,7 @@ class WebrtcDaemonTransport {
     this.connectPromise = undefined;
     this.cryptoKey = undefined;
     this.encryptedStreamReady = false;
+    this.helloPromise = undefined;
     this.clearAssemblies();
     if (this.dropNextInboundEntityFrameState.state === "armed") {
       this.clearDropNextInboundEntityFrameTimeout();
@@ -1067,6 +1196,72 @@ class WebrtcDaemonTransport {
       });
     });
     return subscription.ready;
+  }
+
+  private async receiveTerminalFrame(payload: unknown, generation: number): Promise<void> {
+    if (generation !== this.peerGeneration) {
+      recordLiveHarnessEvent("webrtc_terminal_frame_discarded", {
+        reason: "stale_peer_generation",
+        generation
+      });
+      return;
+    }
+    const event = parseTerminalEvent(payload);
+    const listeners = [...this.terminalStreamListeners].filter(
+      (listener) =>
+        !listener.closed &&
+        listener.sessionId === event.session_id &&
+        listener.subscriptionId === event.subscription_id
+    );
+    if (listeners.length === 0) {
+      recordLiveHarnessEvent("webrtc_terminal_frame_discarded", {
+        reason: "stale_generation_or_subscription",
+        generation,
+        session_id: event.session_id,
+        subscription_id: event.subscription_id,
+        type: event.type
+      });
+      return;
+    }
+    recordLiveHarnessEvent("daemon_terminal_event", event);
+    for (const listener of listeners) {
+      await listener.onEvent(event);
+    }
+  }
+
+  private async receiveHostEvent(payload: unknown, generation: number): Promise<void> {
+    if (generation !== this.peerGeneration) {
+      recordLiveHarnessEvent("webrtc_daemon_event_discarded", {
+        reason: "stale_peer_generation",
+        generation
+      });
+      return;
+    }
+    const event = payload as DaemonEvent;
+    recordLiveHarnessEvent("daemon_event", event);
+    if (event.type === "terminal_subscription_closed") {
+      const listeners = [...this.terminalStreamListeners].filter(
+        (listener) =>
+          !listener.closed &&
+          listener.sessionId === event.session_id &&
+          listener.subscriptionId === event.subscription_id &&
+          listener.coreGeneration === event.generation
+      );
+      if (listeners.length === 0) {
+        recordLiveHarnessEvent("webrtc_daemon_event_discarded", {
+          reason: "stale_generation_or_subscription",
+          generation,
+          session_id: event.session_id,
+          subscription_id: event.subscription_id,
+          core_generation: event.generation
+        });
+        return;
+      }
+      for (const listener of listeners) {
+        await listener.onEvent(event);
+      }
+      return;
+    }
   }
 
   private receiveEntityFrame(frame: DaemonEntityFrame, generation: number): void {
@@ -1202,7 +1397,12 @@ function parseDeliveryChunk(frame: string): DaemonLocalWebrtcDeliveryChunk {
   if (chunk.version !== 2) {
     throw webrtcFailure("data-plane", "local WebRTC delivery chunk version is unsupported");
   }
-  if (chunk.delivery_kind !== "daemon_response" && chunk.delivery_kind !== "daemon_entity_frame") {
+  if (
+    chunk.delivery_kind !== "daemon_response" &&
+    chunk.delivery_kind !== "daemon_entity_frame" &&
+    chunk.delivery_kind !== "daemon_terminal_frame" &&
+    chunk.delivery_kind !== "daemon_event"
+  ) {
     throw webrtcFailure("data-plane", "local WebRTC delivery chunk kind is unsupported");
   }
   if (typeof chunk.message_id !== "string" || chunk.message_id.length === 0) {
@@ -1239,9 +1439,9 @@ function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
-async function encryptDaemonRequest(key: CryptoKey, request: DaemonRequest): Promise<AesGcmEnvelope> {
+async function encryptJsonPayload(key: CryptoKey, payload: unknown): Promise<AesGcmEnvelope> {
   const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const plaintext = new TextEncoder().encode(JSON.stringify(request));
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
   const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv: toArrayBuffer(nonce) }, key, plaintext);
   return {
     nonce: base64Encode(nonce),
@@ -1250,17 +1450,64 @@ async function encryptDaemonRequest(key: CryptoKey, request: DaemonRequest): Pro
   };
 }
 
-async function decryptDaemonPayload<T extends DaemonResponse | DaemonEntityFrame>(
+function parseTerminalEvent(value: unknown): TerminalEvent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw webrtcFailure("data-plane", "terminal frame must be a JSON object");
+  }
+  const type = (value as { type?: unknown }).type;
+  if (
+    type !== "snapshot" &&
+    type !== "terminal_output" &&
+    type !== "process_exit" &&
+    type !== "attach_state"
+  ) {
+    throw webrtcFailure("data-plane", `unsupported terminal frame type ${String(type)}`);
+  }
+  return value as TerminalEvent;
+}
+
+function isTerminalBodyEvent(event: DaemonEvent): boolean {
+  return (
+    event.type === "snapshot" ||
+    event.type === "terminal_output" ||
+    event.type === "process_exit" ||
+    event.type === "attach_state" ||
+    event.type === "scrollback"
+  );
+}
+
+function isTerminalCompatibilityAccepted(
+  compatibility: DaemonHelloAck["terminal_compatibility"]
+): boolean {
+  if (!compatibility) return false;
+  if (compatibility.protocol !== terminalCompatibilityRequirement.protocol) return false;
+  if (compatibility.protocol_version < terminalCompatibilityRequirement.protocol_version) return false;
+  if (compatibility.conformance_fixture_revision < terminalCompatibilityRequirement.minimum_conformance_fixture_revision) {
+    return false;
+  }
+  return terminalCompatibilityRequirement.required_features.every((feature) =>
+    compatibility.features.includes(feature)
+  );
+}
+
+function describeTerminalCompatibility(
+  compatibility: DaemonHelloAck["terminal_compatibility"]
+): string {
+  if (!compatibility) return "DaemonHelloAck omitted terminal_compatibility";
+  return `${compatibility.protocol} v${compatibility.protocol_version} rev ${compatibility.conformance_fixture_revision}`;
+}
+
+async function decryptDaemonPayload(
   key: CryptoKey,
   envelopeJson: string
-): Promise<T> {
+): Promise<unknown> {
   const envelope = JSON.parse(envelopeJson) as AesGcmEnvelope;
   const plaintext = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: toArrayBuffer(base64Decode(envelope.nonce)) },
     key,
     toArrayBuffer(base64Decode(envelope.ciphertext))
   );
-  return JSON.parse(new TextDecoder().decode(plaintext)) as T;
+  return JSON.parse(new TextDecoder().decode(plaintext));
 }
 
 async function importStreamKey(secret: string): Promise<CryptoKey> {
@@ -1310,13 +1557,22 @@ function recordLiveHarnessEvent(kind: string, payload: unknown): void {
  *   disarmDropNextInboundEntityFrame — intentional one-shot drop of a real inbound entity
  *   delta so production sequence_gap resubscribe can be proven without store injection
  */
-function installLiveHarnessTransportControl(transport: WebrtcDaemonTransport): void {
+function installLiveHarnessTransportControl(
+  transport: WebrtcDaemonTransport,
+  client: DaemonBridgeClient
+): void {
   if (!liveHarnessInstalled()) return;
 
   const harness = (window as typeof window & {
     __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
       transportControl?: {
         closeDataChannel(): boolean;
+        request(request: DaemonRequest): Promise<DaemonResponse>;
+        streamTerminal(
+          sessionId: string,
+          subscriptionId: string,
+          onEvent: (event: TerminalStreamEvent) => void | Promise<void>
+        ): { ready: Promise<void>; abandon(): void; unsubscribe(): void };
         armDropNextInboundEntityFrame(
           filter: DropNextInboundEntityFrameFilter,
           options?: { timeout_ms?: number }
@@ -1330,6 +1586,13 @@ function installLiveHarnessTransportControl(transport: WebrtcDaemonTransport): v
 
   harness.transportControl = {
     closeDataChannel: () => transport.closeDataChannelForLiveHarness(),
+    request: (request) => transport.request(request),
+    streamTerminal: (sessionId, subscriptionId, onEvent) => {
+      if (!client.streamTerminal) {
+        throw new Error("WebRTC client does not expose terminal streaming.");
+      }
+      return client.streamTerminal(sessionId, subscriptionId, onEvent);
+    },
     armDropNextInboundEntityFrame: (filter, options) =>
       transport.armDropNextInboundEntityFrame(filter, options),
     getDropNextInboundEntityFrameState: () => transport.getDropNextInboundEntityFrameState(),

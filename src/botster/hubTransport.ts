@@ -12,6 +12,7 @@ import type {
   HubControlFrameHandler,
   HubControlTransport
 } from "./protocol";
+import type { TerminalEvent } from "@trybotster/terminal-protocol";
 import type {
   DaemonApp,
   DaemonDiagnostic,
@@ -36,6 +37,13 @@ import type {
 } from "./realHubDaemonDto";
 
 export const hubTerminalSubscriptionId = "botster-web-terminal";
+
+export type TerminalSubscriptionClosedEvent = Extract<
+  DaemonEvent,
+  { type: "terminal_subscription_closed" }
+>;
+
+export type TerminalStreamEvent = TerminalEvent | TerminalSubscriptionClosedEvent;
 
 const sessionFamily = "session";
 const sessionTypeFamily = "session_type";
@@ -68,20 +76,20 @@ export interface DaemonBridgeClient {
   streamTerminal?(
     sessionId: string,
     subscriptionId: string,
-    onEvent: (event: DaemonEvent) => void | Promise<void>
+    onEvent: (event: TerminalStreamEvent) => void | Promise<void>
   ): DaemonTerminalStreamSubscription;
 }
 
 /**
  * Terminal stream handle from `streamTerminal`.
- * `abandon` stops local drain without a detach RPC (dead-channel recovery).
- * `unsubscribe` stops drain and best-effort detaches; detach rejections must not throw.
+ * `abandon` stops local frame delivery without a detach RPC (dead-channel recovery).
+ * `unsubscribe` stops delivery and best-effort detaches; detach rejections must not throw.
  */
 export interface DaemonTerminalStreamSubscription {
-  /** Resolves after Web delivers the attach response and the first drain response in order. */
+  /** Resolves after Web delivers the attach response. */
   ready: Promise<void>;
   unsubscribe(): void;
-  /** Stop local drain only — no detach request. Used when the data channel is already dead. */
+  /** Stop local frame delivery only — no detach request. Used when the data channel is already dead. */
   abandon(): void;
 }
 

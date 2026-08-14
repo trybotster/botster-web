@@ -309,6 +309,7 @@ try {
   await waitForTerminalSession(page, productionSessionId);
   responseAssemblyTelemetry.push({ cycle: 0, ...await waitForAutomaticTerminalRestore(page) });
   await proveLiveTerminalAfterAttach(page, `${attachProbe}-0`);
+  await proveSiblingSlowClientAndHostStayUp(page, productionSessionId);
   attachChronology.push({ cycle: 0, ...await assertTerminalAttachChronology(page, productionSessionId) });
   await proveExternalSessionLifecycle(page);
 
@@ -5646,13 +5647,12 @@ async function assertCurrentHubCompatibilityAndSchema(page) {
   const features = Array.isArray(compatibility?.features) ? compatibility.features : [];
   const requiredFeatures = [
     "sessions",
-    "terminal_streaming",
-    "resize",
     "terminal_readback",
     "plugin_surface_render",
     "plugin_surface_action",
     "mode_gated_input",
-    "snapshot_delivery=ready_then_history"
+    "webrtc_terminal_adapter",
+    "terminal_subscription_closed"
   ];
   const missingFeatures = requiredFeatures.filter((feature) => !features.includes(feature));
   // Schema is a floor, not an equality. The previous `!== 2` assertion failed against a
@@ -5665,7 +5665,7 @@ async function assertCurrentHubCompatibilityAndSchema(page) {
     !Number.isInteger(protocolVersion) ||
     protocolVersion < 6 ||
     !Number.isInteger(revision) ||
-    revision < 38 ||
+    revision < 41 ||
     missingFeatures.length > 0
   ) {
     throw new Error(
@@ -6504,8 +6504,84 @@ async function proveByteFaithfulLiveTerminal(page) {
   await waitForResttyBoundBytes(page, [0x00, 0x1b, 0x5b, 0x30, 0x6d, 0xff], "nul/esc/invalid");
 }
 
+async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
+  const proof = await page.evaluate(async ({ siblingSessionId: liveSessionId }) => {
+    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
+    if (!control?.request || !control.streamTerminal) {
+      return { ok: false, reason: "transportControl missing request/streamTerminal" };
+    }
+    const floodSessionId = `web-flood-${Date.now().toString(36)}`;
+    const floodSubscriptionId = `${floodSessionId}-sub`;
+    const events = [];
+    await control.request({
+      type: "spawn",
+      session_id: floodSessionId,
+      command: "yes write-budget-stall"
+    });
+    const stream = control.streamTerminal(floodSessionId, floodSubscriptionId, (event) => {
+      events.push(event);
+    });
+    await stream.ready;
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      const closed = events.find((event) =>
+        event.type === "terminal_subscription_closed" &&
+        event.reason === "core_adapter_closed" &&
+        event.session_id === floodSessionId &&
+        event.subscription_id === floodSubscriptionId
+      );
+      if (closed) {
+        const status = await control.request({ type: "status" });
+        stream.abandon();
+        return {
+          ok: true,
+          closed,
+          statusKind: status.kind,
+          siblingSessionId: liveSessionId
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    stream.abandon();
+    return { ok: false, reason: "timed out waiting for core_adapter_closed", events: events.slice(-8) };
+  }, { siblingSessionId });
+  if (!proof.ok) {
+    throw new Error(`slow-client sibling proof failed: ${JSON.stringify(proof)}`);
+  }
+  await proveLiveTerminalAfterAttach(page, `sibling-still-live-${Date.now().toString(36)}`);
+  recordProofNote("slow_client_sibling", proof);
+}
+
 async function proveLiveTerminalAfterAttach(page, probe) {
   await waitForTerminalAttachState(page, ["attached"]);
+  const helloProof = await page.evaluate(() => {
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    const hello = events.find((entry) => entry.kind === "daemon_hello")?.payload;
+    const terminalFrame = events.some((entry) => entry.kind === "webrtc_terminal_frame_assembly");
+    const drainBodies = events.some((entry) =>
+      entry.kind === "daemon_request" &&
+      entry.payload?.type === "drain"
+    );
+    return { hello, terminalFrame, drainBodies };
+  });
+  if (!helloProof.hello?.compatibility?.required_features?.includes("webrtc_terminal_adapter")) {
+    throw new Error(`production attach missing DataChannel Hello: ${JSON.stringify(helloProof.hello)}`);
+  }
+  if (!helloProof.hello.compatibility.required_features.includes("terminal_subscription_closed")) {
+    throw new Error("host Hello omitted terminal_subscription_closed");
+  }
+  if (helloProof.hello.compatibility.required_features.includes("snapshot_delivery=ready_then_history")) {
+    throw new Error("host Hello still lists a Core terminal token");
+  }
+  if (!helloProof.hello.terminal_compatibility?.required_features?.includes("snapshot_delivery=ready_then_history")) {
+    throw new Error("terminal Hello omitted Core snapshot_delivery token");
+  }
+  if (!helloProof.terminalFrame) {
+    throw new Error("production attach never assembled a daemon_terminal_frame");
+  }
+  if (helloProof.drainBodies) {
+    throw new Error("production attach still requested Drain");
+  }
   await callTerminalControl(page, "writeInput", `${probe}\n`);
   await waitForHarnessEvent(
     page,
@@ -6824,6 +6900,9 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
       (entry) => entry.kind === "ghostsnp_install" || entry.kind === "restty_load_binary_snapshot"
     ).length
   );
+  const helloBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) => entry.kind === "daemon_hello").length
+  );
   const subscriptionBefore = await page.evaluate(() => {
     const attaches = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
       (entry) => entry.kind === "attach" && entry.payload?.subscription_id
@@ -6884,6 +6963,17 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
     { timeout: 30_000 }
   ).catch((error) => {
     throw new Error(`in-page terminal reconnect never reinstalled GHOSTSNP: ${error.message}`);
+  });
+
+  await page.waitForFunction(
+    ({ before }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+        (entry) => entry.kind === "daemon_hello"
+      ).length > before,
+    { before: helloBefore },
+    { timeout: 30_000 }
+  ).catch((error) => {
+    throw new Error(`in-page terminal reconnect never sent a new DataChannel Hello: ${error.message}`);
   });
 
   const subscriptionAfter = await page.evaluate(() => {

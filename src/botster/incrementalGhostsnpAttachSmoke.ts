@@ -1,5 +1,7 @@
 import { createHubTerminalDataPlane } from "./hubTerminalDataPlane";
-import type { DaemonEvent, DaemonRequest } from "./realHubDaemonDto";
+import type { SnapshotPhase, TerminalEvent } from "@trybotster/terminal-protocol";
+import type { DaemonRequest } from "./realHubDaemonDto";
+import type { TerminalStreamEvent } from "./hubTransport";
 import { ResttyTerminalRenderer } from "./resttyRenderer";
 import { ResttyWasm } from "../vendor/restty/internal.js";
 import type { TerminalAttachmentStatus } from "./terminal";
@@ -22,7 +24,7 @@ ResttyWasm.prototype.create = function create(columns, rows, maxScrollback) {
   return handle;
 };
 
-let deliverEvent: ((event: DaemonEvent) => void | Promise<void>) | undefined;
+let deliverEvent: ((event: TerminalStreamEvent) => void | Promise<void>) | undefined;
 const requests: DaemonRequest[] = [];
 const statuses: TerminalAttachmentStatus[] = [];
 const dataPlane = createHubTerminalDataPlane({
@@ -77,18 +79,19 @@ renderer.mount(root);
 renderer.attachDataPlane(dataPlane);
 dataPlane.subscribeStatus?.((status) => statuses.push({ ...status }));
 
-function snapshotEvent(bytes: Uint8Array): DaemonEvent {
+function snapshotEvent(bytes: Uint8Array, phase: SnapshotPhase): TerminalEvent {
   return {
     type: "snapshot",
     session_id: sessionId,
     subscription_id: subscriptionId,
     payload_base64: bytesToBase64(bytes),
     payload_encoding: "base64",
-    bytes: bytes.byteLength
+    bytes: bytes.byteLength,
+    phase
   };
 }
 
-function outputEvent(bytes: Uint8Array): DaemonEvent {
+function outputEvent(bytes: Uint8Array): TerminalEvent {
   return {
     type: "terminal_output",
     session_id: sessionId,
@@ -99,7 +102,7 @@ function outputEvent(bytes: Uint8Array): DaemonEvent {
   };
 }
 
-async function deliver(event: DaemonEvent): Promise<void> {
+async function deliver(event: TerminalStreamEvent): Promise<void> {
   if (!deliverEvent) throw new Error("Incremental attach stream is not ready.");
   await deliverEvent(event);
 }
@@ -142,7 +145,7 @@ type IncrementalAttachSmoke = {
 
 const harness: IncrementalAttachSmoke = {
   deliverAttaching: () => deliver({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" }),
-  deliverSnapshot: (bytes) => deliver(snapshotEvent(Uint8Array.from(bytes))),
+  deliverSnapshot: (bytes) => deliver(snapshotEvent(Uint8Array.from(bytes), "ready")),
   deliverHistoryIncomplete: () => deliver({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "snapshot_history_incomplete" }),
   deliverAttached: () => deliver({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" }),
   deliverOutput: (bytes) => deliver(outputEvent(Uint8Array.from(bytes))),

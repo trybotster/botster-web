@@ -815,6 +815,7 @@ const [
   hubTransport,
   hubTerminalDataPlane,
   webrtcDaemonClient,
+  protocolPlanes,
   connectionDiagnostics,
   connectionDiagnosticsPanel,
   localHubFirstScreen,
@@ -854,6 +855,7 @@ const [
   readFile(new URL("./botster/hubTransport.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/hubTerminalDataPlane.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/webrtcDaemonClient.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/protocolPlanes.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/connectionDiagnostics.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/ConnectionDiagnosticsPanel.tsx", import.meta.url), "utf8"),
   readFile(new URL("./botster/LocalHubFirstScreen.tsx", import.meta.url), "utf8"),
@@ -1842,6 +1844,11 @@ assert.doesNotMatch(hubTransport, /["']view_surface["']|["']settings_surface["']
 assert.match(hubTerminalDataPlane, /streamTerminal/);
 assert.match(hubTransport, /ready: Promise<void>/);
 assert.match(webrtcDaemonClient, /await onEvent\(event\)/);
+assert.match(webrtcDaemonClient, /daemon_hello/);
+assert.match(webrtcDaemonClient, /daemon_terminal_frame/);
+assert.match(webrtcDaemonClient, /terminal_subscription_closed/);
+assert.doesNotMatch(webrtcDaemonClient, /for_webrtc_terminal_subscription_closed/);
+assert.match(webrtcDaemonClient, /host drain returned a terminal body/);
 assert.match(hubTerminalDataPlane, /this\.ensureHydration\(attachmentGeneration\)[\s\S]*streamTerminal/);
 assert.match(hubTerminalDataPlane, /progress === "finish"[\s\S]*await this\.flushPendingResize\(attachmentGeneration\)/);
 assert.match(hubTerminalDataPlane, /terminalEventQueue/);
@@ -1963,8 +1970,12 @@ assert.match(liveProtocolHarnessScript, /assertCurrentHubCompatibilityAndSchema/
 assert.match(liveProtocolHarnessScript, /assertCurrentHubSchemaPresentation/);
 assert.match(liveProtocolHarnessScript, /status\.schema_version < 3/);
 assert.match(liveProtocolHarnessScript, /protocolVersion < 6/);
-assert.match(liveProtocolHarnessScript, /revision < 38/);
-assert.match(liveProtocolHarnessScript, /snapshot_delivery=ready_then_history/);
+assert.match(liveProtocolHarnessScript, /revision < 41/);
+assert.match(liveProtocolHarnessScript, /webrtc_terminal_adapter/);
+assert.match(liveProtocolHarnessScript, /terminal_subscription_closed/);
+assert.doesNotMatch(connectionDiagnostics, /snapshot_delivery=ready_then_history/);
+assert.match(protocolPlanes, /FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY/);
+assert.match(protocolPlanes, /webrtc_terminal_adapter/);
 // Shared detach decision + constants — no residual none-placeholder oracle.
 assert.match(liveProtocolHarnessScript, /isTerminalDetached/);
 assert.match(liveProtocolHarnessScript, /HOST_CHROME/);
@@ -2279,13 +2290,15 @@ const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.2");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.32");
-assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.32");
+assert.equal(hubTestSupportMetadata.package_version, "0.1.36");
+assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.36");
+assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], "0.1.0");
 assert.equal(hubTestSupportMetadata.protocol_version, 7);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 38);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 41);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
+  `@trybotster/terminal-protocol@0.1.0`,
   `revision-${hubTestSupportMetadata.conformance_fixture_revision}`
 ];
 for (const document of [readme, architecture]) {
@@ -2845,11 +2858,43 @@ await rm(compiledRoot, { recursive: true, force: true });
 await mkdir(join(compiledRoot, "botster"), { recursive: true });
 await mkdir(join(compiledRoot, "botster/__fixtures__"), { recursive: true });
 
+const terminalProtocolModule = await import("@trybotster/terminal-protocol");
+await mkdir(join(compiledRoot, "node_modules/@trybotster/terminal-protocol"), { recursive: true });
+await mkdir(join(compiledRoot, "node_modules/@trybotster/hub-test-support"), { recursive: true });
+await writeFile(
+  join(compiledRoot, "node_modules/@trybotster/terminal-protocol/package.json"),
+  JSON.stringify({ name: "@trybotster/terminal-protocol", main: "index.cjs", type: "commonjs" })
+);
+await writeFile(
+  join(compiledRoot, "node_modules/@trybotster/terminal-protocol/index.cjs"),
+  `module.exports = ${JSON.stringify({
+    PROTOCOL: terminalProtocolModule.PROTOCOL,
+    PROTOCOL_VERSION: terminalProtocolModule.PROTOCOL_VERSION,
+    CONFORMANCE_FIXTURE_REVISION: terminalProtocolModule.CONFORMANCE_FIXTURE_REVISION,
+    FEATURE_TERMINAL_STREAMING: terminalProtocolModule.FEATURE_TERMINAL_STREAMING,
+    FEATURE_RESIZE: terminalProtocolModule.FEATURE_RESIZE,
+    FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY: terminalProtocolModule.FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY
+  })};\n`
+);
+await writeFile(
+  join(compiledRoot, "node_modules/@trybotster/hub-test-support/package.json"),
+  JSON.stringify({
+    name: "@trybotster/hub-test-support",
+    type: "commonjs",
+    exports: { "./metadata": "./metadata.json" }
+  })
+);
+await writeFile(
+  join(compiledRoot, "node_modules/@trybotster/hub-test-support/metadata.json"),
+  JSON.stringify(hubTestSupportMetadata)
+);
+
 await Promise.all([
   compileTsModule("botster/__fixtures__/generatedDaemonProtocol.ts", join(compiledRoot, "botster/__fixtures__/generatedDaemonProtocol.js")),
   compileTsModule("botster/actions.ts", join(compiledRoot, "botster/actions.js")),
   compileTsModule("botster/capabilities.ts", join(compiledRoot, "botster/capabilities.js")),
   compileTsModule("botster/client.ts", join(compiledRoot, "botster/client.js")),
+  compileTsModule("botster/protocolPlanes.ts", join(compiledRoot, "botster/protocolPlanes.js")),
   compileTsModule("botster/connectionDiagnostics.ts", join(compiledRoot, "botster/connectionDiagnostics.js")),
   compileTsModule("botster/hubRuntime.ts", join(compiledRoot, "botster/hubRuntime.js")),
   compileTsModule("botster/entities.ts", join(compiledRoot, "botster/entities.js")),
@@ -2949,9 +2994,11 @@ const ghostsnpFixturePayloadBase64 = 'R0hPU1RTTlABAAEAmQMAACJWCmBQABgAAAAAAAAAAA
 const ghostsnpFixtureBytes = 1176;
 
 const {
+  applyAssemblyTimeoutCleanup,
   createLocalWebrtcBootstrapRefresher,
   createWebrtcDaemonClient,
   localWebrtcResponseChunkLimits,
+  setApplyAssemblyTimeoutCleanup,
   WebrtcDaemonClientError,
   webRtcDaemonLifecycleEventName
 } = requireRuntime("./botster/webrtcDaemonClient.js");
@@ -4624,6 +4671,8 @@ try {
       grant_secret: localWebrtcBootstrapFixture.grant_secret.replace(/0/g, "2")
     }
   ];
+  installAutoHelloAck(dataChannels[0], refreshedBootstraps[0].grant_secret);
+  installAutoHelloAck(dataChannels[1], refreshedBootstraps[1].grant_secret);
   let refreshBootstrapCalls = 0;
   const webrtcClient = createWebrtcDaemonClient({
     bootstrap: localWebrtcBootstrapFixture,
@@ -4657,7 +4706,7 @@ try {
   );
   await waitForTestCondition(() => dataChannel.sent.length > 0);
   assert.equal(
-    lifecycleEvents.some((event) => event.detail.type === "encrypted-stream-ready" && event.detail.requestType === "status"),
+    lifecycleEvents.some((event) => event.detail.type === "encrypted-stream-ready" && event.detail.requestType === "hello"),
     true
   );
   assert.equal(
@@ -5799,12 +5848,6 @@ try {
           session_id: "ordered-webrtc-session",
           subscription_id: "ordered-webrtc-subscription",
           state: "attaching"
-        },
-        {
-          type: "attach_state",
-          session_id: "ordered-webrtc-session",
-          subscription_id: "ordered-webrtc-subscription",
-          state: "attached"
         }
       ]
     },
@@ -5814,21 +5857,37 @@ try {
   assert.deepEqual(orderedAttachTimeline, ["start:attach_state"]);
   assert.equal(attachReadySettled, false);
   releaseFirstAttachEvent();
-  await waitForTestCondition(() => orderedAttachChannel.sent.length === 2);
-  assert.equal(attachReadySettled, false);
+  await orderedAttachment.ready;
+  assert.deepEqual(orderedAttachTimeline, [
+    "start:attach_state",
+    "end:attach_state"
+  ]);
   await emitChunkedTestResponse(
     orderedAttachChannel,
     localWebrtcBootstrapFixture.grant_secret,
-    { kind: "events", events: [] },
-    { messageId: "ordered-first-drain-response" }
+    {
+      type: "attach_state",
+      session_id: "ordered-webrtc-session",
+      subscription_id: "ordered-webrtc-subscription",
+      state: "attached"
+    },
+    { messageId: "ordered-attached-frame", deliveryKind: "daemon_terminal_frame" }
   );
-  await orderedAttachment.ready;
+  await waitForTestCondition(() => orderedAttachTimeline.includes("end:attach_state") && orderedAttachTimeline.length === 4);
   assert.deepEqual(orderedAttachTimeline, [
     "start:attach_state",
     "end:attach_state",
     "start:attach_state",
     "end:attach_state"
   ]);
+  const helloPayload = await decryptTestEnvelope(
+    localWebrtcBootstrapFixture.grant_secret,
+    orderedAttachChannel.helloSent[0]
+  );
+  assert.equal(helloPayload.protocol, "botster-hub-daemon-v1");
+  assert.deepEqual(helloPayload.compatibility.required_features, [...requiredDaemonFeatures]);
+  assert.ok(helloPayload.terminal_compatibility.required_features.includes("snapshot_delivery=ready_then_history"));
+  assert.ok(!helloPayload.compatibility.required_features.includes("snapshot_delivery=ready_then_history"));
   orderedAttachment.abandon();
 
   const staleAttachChannel = createFakeDataChannel();
@@ -5848,11 +5907,10 @@ try {
     {
       kind: "events",
       events: [{
-        type: "snapshot",
+        type: "attach_state",
         session_id: "stale-attach-session",
         subscription_id: "stale-attach-subscription",
-        data: "must-not-render",
-        bytes: 15
+        state: "attaching"
       }]
     },
     { messageId: "stale-attach-response" }
@@ -5860,11 +5918,179 @@ try {
   await emitChunkedTestResponse(
     staleAttachChannel,
     localWebrtcBootstrapFixture.grant_secret,
-    { kind: "events", events: [] },
-    { messageId: "stale-detach-response" }
+    {
+      type: "snapshot",
+      session_id: "stale-attach-session",
+      subscription_id: "stale-attach-subscription",
+      payload_base64: Buffer.from("must-not-render").toString("base64"),
+      payload_encoding: "base64",
+      bytes: 15,
+      phase: "ready"
+    },
+    { messageId: "stale-snapshot-frame", deliveryKind: "daemon_terminal_frame" }
   );
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(staleAttachEvents, []);
+
+  const bodyOnAttachChannel = createFakeDataChannel();
+  const bodyOnAttachClient = createWebrtcTestClient([bodyOnAttachChannel], localWebrtcBootstrapFixture);
+  const bodyOnAttach = bodyOnAttachClient.streamTerminal(
+    "body-attach-session",
+    "body-attach-subscription",
+    () => undefined
+  );
+  await waitForTestCondition(() => bodyOnAttachChannel.sent.length === 1);
+  const bodyOnAttachRejection = assert.rejects(
+    bodyOnAttach.ready,
+    (error) => error instanceof WebrtcDaemonClientError && /attach response contained a terminal body/.test(error.message)
+  );
+  await emitChunkedTestResponse(
+    bodyOnAttachChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "events",
+      events: [{
+        type: "snapshot",
+        session_id: "body-attach-session",
+        subscription_id: "body-attach-subscription",
+        payload_base64: "YQ==",
+        payload_encoding: "base64",
+        bytes: 1
+      }]
+    },
+    { messageId: "body-on-attach-response" }
+  );
+  await bodyOnAttachRejection;
+
+  const siblingChannel = createFakeDataChannel();
+  const siblingClient = createWebrtcTestClient([siblingChannel], localWebrtcBootstrapFixture);
+  const siblingA = [];
+  const siblingB = [];
+  const streamA = siblingClient.streamTerminal("session-a", "sub-a", (event) => { siblingA.push(event.type); });
+  const streamB = siblingClient.streamTerminal("session-b", "sub-b", (event) => { siblingB.push(event.type); });
+  await waitForTestCondition(() => siblingChannel.sent.length === 2);
+  await emitChunkedTestResponse(
+    siblingChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "events", events: [{ type: "attach_state", session_id: "session-a", subscription_id: "sub-a", state: "attaching" }] },
+    { messageId: "sibling-a-attach" }
+  );
+  await emitChunkedTestResponse(
+    siblingChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "events", events: [{ type: "attach_state", session_id: "session-b", subscription_id: "sub-b", state: "attaching" }] },
+    { messageId: "sibling-b-attach" }
+  );
+  await streamA.ready;
+  await streamB.ready;
+  await emitChunkedTestResponse(
+    siblingChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "terminal_subscription_closed",
+      session_id: "session-a",
+      subscription_id: "sub-a",
+      generation: 1,
+      reason: "core_adapter_closed"
+    },
+    { messageId: "sibling-a-close", deliveryKind: "daemon_event" }
+  );
+  await emitChunkedTestResponse(
+    siblingChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "terminal_output",
+      session_id: "session-b",
+      subscription_id: "sub-b",
+      payload_base64: Buffer.from("live-b").toString("base64"),
+      payload_encoding: "base64",
+      bytes: 6
+    },
+    { messageId: "sibling-b-live", deliveryKind: "daemon_terminal_frame" }
+  );
+  await waitForTestCondition(() => siblingB.includes("terminal_output"));
+  assert.deepEqual(siblingA, ["attach_state", "terminal_subscription_closed"]);
+  assert.deepEqual(siblingB, ["attach_state", "terminal_output"]);
+  streamA.abandon();
+  const replacedA = siblingClient.streamTerminal("session-a", "sub-a", (event) => { siblingA.push(`n+1:${event.type}:${event.generation ?? ""}`); });
+  await waitForTestCondition(() => siblingChannel.sent.length === 3);
+  await emitChunkedTestResponse(
+    siblingChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "events", events: [{ type: "attach_state", session_id: "session-a", subscription_id: "sub-a", state: "attaching" }] },
+    { messageId: "sibling-a-prime-attach" }
+  );
+  await replacedA.ready;
+  await emitChunkedTestResponse(
+    siblingChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "terminal_subscription_closed",
+      session_id: "session-a",
+      subscription_id: "sub-a",
+      generation: 1,
+      reason: "core_adapter_closed"
+    },
+    { messageId: "stale-generation-close", deliveryKind: "daemon_event" }
+  );
+  await emitChunkedTestResponse(
+    siblingChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "terminal_output",
+      session_id: "session-a",
+      subscription_id: "sub-a",
+      payload_base64: Buffer.from("prime").toString("base64"),
+      payload_encoding: "base64",
+      bytes: 5
+    },
+    { messageId: "a-prime-live", deliveryKind: "daemon_terminal_frame" }
+  );
+  await waitForTestCondition(() => siblingA.includes("n+1:terminal_output:"));
+  assert.equal(siblingA.includes("n+1:terminal_subscription_closed:1"), false);
+  streamA.abandon();
+  streamB.abandon();
+  replacedA.abandon();
+
+  const timeoutAblationChannel = createFakeDataChannel();
+  const timeoutAblationClient = createWebrtcTestClient([timeoutAblationChannel], localWebrtcBootstrapFixture);
+  const originalApplyAssemblyTimeoutCleanup = applyAssemblyTimeoutCleanup;
+  const originalWindowSetTimeout2 = globalThis.window.setTimeout;
+  const originalWindowClearTimeout2 = globalThis.window.clearTimeout;
+  const ablationTimers = new Map();
+  let nextAblationTimer = 0;
+  globalThis.window.setTimeout = (callback) => {
+    const timer = ++nextAblationTimer;
+    ablationTimers.set(timer, callback);
+    return timer;
+  };
+  globalThis.window.clearTimeout = (timer) => ablationTimers.delete(timer);
+  try {
+    setApplyAssemblyTimeoutCleanup(false);
+    const ablationPromise = timeoutAblationClient.request({ type: "status" });
+    await waitForTestCondition(() => timeoutAblationChannel.sent.length === 1);
+    timeoutAblationChannel.emitMessage(JSON.stringify({
+      version: 2,
+      delivery_kind: "daemon_response",
+      message_id: "ablation-incomplete",
+      chunk_index: 0,
+      chunk_count: 2,
+      total_bytes: 2,
+      payload: "x"
+    }));
+    await flushMicrotasks();
+    const ablationTimeout = [...ablationTimers.values()].at(-1);
+    assert.equal(typeof ablationTimeout, "function");
+    ablationTimeout();
+    let settled = false;
+    void ablationPromise.finally(() => { settled = true; });
+    await flushMicrotasks();
+    assert.equal(settled, false);
+  } finally {
+    setApplyAssemblyTimeoutCleanup(originalApplyAssemblyTimeoutCleanup);
+    globalThis.window.setTimeout = originalWindowSetTimeout2;
+    globalThis.window.clearTimeout = originalWindowClearTimeout2;
+  }
 
   const invalidBootstrapClient = createWebrtcDaemonClient({
     bootstrap: {
@@ -5938,6 +6164,7 @@ globalThis.window = {
 };
 try {
   const mountedRealWebrtcDataChannel = createFakeDataChannel();
+  installAutoHelloAck(mountedRealWebrtcDataChannel, localWebrtcBootstrapFixture.grant_secret);
   const mountedRealWebrtcBridgeClient = createWebrtcDaemonClient({
     bootstrap: localWebrtcBootstrapFixture,
     peerConnectionFactory: () => createFakePeerConnection(mountedRealWebrtcDataChannel),
@@ -7115,7 +7342,7 @@ const missingCapabilityDiagnostic = compatibilityDiagnosticsFromFrame({
   }
 })[0];
 assert.equal(missingCapabilityDiagnostic.title, "Hub capability missing");
-assert.match(missingCapabilityDiagnostic.detail, /terminal_streaming/);
+assert.match(missingCapabilityDiagnostic.detail, /webrtc_terminal_adapter/);
 assert.match(missingCapabilityDiagnostic.detail, /terminal_readback/);
 assert.equal(missingCapabilityDiagnostic.id, "hub-compatibility");
 
@@ -7164,7 +7391,7 @@ const outdatedConformanceDiagnostic = compatibilityDiagnosticsFromFrame({
   }
 })[0];
 assert.equal(outdatedConformanceDiagnostic.title, "Hub conformance fixture mismatch");
-assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 38/);
+assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 41/);
 
 const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -7188,21 +7415,20 @@ const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
 const [compatibleDescriptorDiagnostic] = compatibleDescriptorDiagnostics;
 assert.deepEqual(requiredDaemonFeatures, [
   "sessions",
-  "terminal_streaming",
-  "resize",
   "terminal_readback",
   "plugin_surface_render",
   "plugin_surface_action",
   "mode_gated_input",
-  "snapshot_delivery=ready_then_history"
+  "webrtc_terminal_adapter",
+  "terminal_subscription_closed"
 ]);
-assert.equal(minimumConformanceFixtureRevision, 38);
+assert.equal(minimumConformanceFixtureRevision, 41);
 assert.equal(minimumDaemonProtocolVersion, 1);
 assert.equal(compatibleDescriptorDiagnostics.length, 1);
 assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
 assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
 
-// Protocol 6 remains compatible when the Hub also meets conformance revision 38.
+// Protocol 6 remains compatible when the Hub also meets conformance revision 41.
 const protocolSixHubStatusRecord = {
   id: "local-hub",
   schema_version: 3,
@@ -7212,7 +7438,7 @@ const protocolSixHubStatusRecord = {
     protocol: "botster-hub-daemon-v1",
     protocol_version: 6,
     features: [...requiredDaemonFeatures],
-    conformance_fixture_revision: 38
+    conformance_fixture_revision: 41
   }
 };
 const protocolSixDiagnostics = compatibilityDiagnosticsFromFrame({
@@ -7230,9 +7456,9 @@ assert.match(protocolSixDiagnostics[0].detail, /Protocol botster-hub-daemon-v1 v
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /mismatch/i.test(diagnostic.title)), false);
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /unsupported_feature/.test(JSON.stringify(diagnostic))), false);
 assert.equal(minimumDaemonProtocolVersion, 1);
-assert.equal(minimumConformanceFixtureRevision, 38);
+assert.equal(minimumConformanceFixtureRevision, 41);
 
-// Pre-envelope conformance revisions fail closed under the revision 38 floor.
+// Pre-envelope conformance revisions fail closed under the revision 41 floor.
 const preGhostsnpDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
   payload: {
@@ -14620,6 +14846,9 @@ function createFakePeerConnection(dataChannel) {
 
 function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
   let nextDataChannel = 0;
+  for (const channel of dataChannels) {
+    installAutoHelloAck(channel, bootstrap.grant_secret);
+  }
   return createWebrtcDaemonClient({
     ...options,
     bootstrap,
@@ -14636,6 +14865,53 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
       })
     })
   });
+}
+
+function installAutoHelloAck(dataChannel, secret) {
+  if (dataChannel.autoHelloInstalled) return;
+  dataChannel.autoHelloInstalled = true;
+  dataChannel.helloSent = [];
+  const originalSend = dataChannel.send.bind(dataChannel);
+  let helloAcked = false;
+  dataChannel.send = (data) => {
+    if (!helloAcked) {
+      helloAcked = true;
+      dataChannel.helloSent.push(data);
+      void emitChunkedTestResponse(dataChannel, secret, {
+        protocol: "botster-hub-daemon-v1",
+        compatibility: {
+          protocol: "botster-hub-daemon-v1",
+          protocol_version: 7,
+          features: [
+            "sessions",
+            "terminal_readback",
+            "plugin_surface_render",
+            "plugin_surface_action",
+            "mode_gated_input",
+            "webrtc_terminal_adapter",
+            "terminal_subscription_closed",
+            "terminal_streaming",
+            "resize",
+            "snapshot_delivery=ready_then_history"
+          ],
+          conformance_fixture_revision: 41
+        },
+        terminal_compatibility: {
+          protocol: "botster-terminal-v1",
+          protocol_version: 1,
+          features: [
+            "terminal_streaming",
+            "resize",
+            "snapshot_delivery=ready_then_history"
+          ],
+          conformance_fixture_revision: 1
+        },
+        diagnostics: []
+      }, { messageId: `hello-ack-${dataChannel.helloSent.length}` });
+      return;
+    }
+    originalSend(data);
+  };
 }
 
 function repeatUtf8Pattern(pattern, totalBytes) {

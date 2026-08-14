@@ -8,14 +8,14 @@
 - `src/botster/hubRuntime.ts` composes the single production WebRTC runtime. A missing bootstrap grant fails closed into a rendered danger diagnostic.
 - `src/botster/webrtcDaemonClient.ts` owns bootstrap refresh, signaling, encrypted ordered data-channel delivery, reconnect generations, and session entity subscriptions.
 - `src/botster/hubTransport.ts` consumes canonical package-surface types from `@trybotster/ui-contract` and projects Hub-sanitized daemon package/navigation responses plus unmodified session DTO fields into canonical entity family `session`. Manifest parsing, admission, and lifecycle classification remain Hub-owned.
-- `src/botster/hubTerminalDataPlane.ts` adapts WebRTC daemon requests and drained terminal events into `TerminalDataPlaneAttachment`.
+- `src/botster/hubTerminalDataPlane.ts` adapts WebRTC daemon requests and Core `TerminalEvent`s from `daemon_terminal_frame` into `TerminalDataPlaneAttachment`.
 - `src/botster/entities.ts`, `uiNodes.ts`, and `actions.ts` implement the canonical read, render, and semantic-dispatch seams. `uiNodes.ts` imports the Hub-owned declarations from `@trybotster/ui-contract`; it does not redeclare a browser wire grammar.
 - `src/botster/uiPresentation.ts` owns the browser-local presentation projection, scoped by Hub/package/surface. Only correlated accepted `UiActionResult` operations mutate it.
 - `src/botster/TerminalViewHost.tsx` mounts Restty and forwards measured input, resize, attach, detach, and readback operations.
 
 ## Production transport
 
-Installed package runtime uses one ordered WebRTC data channel. Generated `DaemonLocalWebrtcDeliveryChunk` frames multiplex correlated daemon responses and unsolicited entity frames. Encrypted payloads remain generated `DaemonRequest`, `DaemonResponse`, or `DaemonEntityFrame` DTOs.
+Installed package runtime uses one ordered WebRTC data channel. The first encrypted send after AES-GCM is `DaemonHello` with independent host and Core terminal compatibility. Generated `DaemonLocalWebrtcDeliveryChunk` frames multiplex correlated daemon responses, unsolicited entity frames, Core `daemon_terminal_frame`s, and host `daemon_event`s. Encrypted payloads remain generated `DaemonRequest`, `DaemonResponse`, `DaemonHello`/`DaemonHelloAck`, `DaemonEntityFrame`, Core `TerminalEvent`, or host `DaemonEvent` DTOs.
 
 Session state uses a held entity subscription and canonical family `session`:
 
@@ -27,7 +27,7 @@ Session state uses a held entity subscription and canonical family `session`:
 
 There is no HTTP daemon client, SSE terminal stream, polling, `list_sessions` hydration, or lifecycle-event projection fallback.
 
-Terminal data stays outside `HubControlFrame`. The WebRTC client attaches and drains terminal events. The Hub terminal data plane imports authoritative GHOSTSNP Snapshot bytes into Restty (H0–H5), buffers live output across install, reads mode flags for ModeGatedInput, and never imports Scrollback as renderer state. ReadScreen is an optional supplement only. Restty mounts as a pure renderer (`readOnly`) and does not answer OSC color queries in the browser.
+Terminal data stays outside `HubControlFrame`. After Hello, the WebRTC client attaches and consumes Core terminal frames. The Hub terminal data plane imports authoritative GHOSTSNP Snapshot bytes into Restty (H0–H5), buffers live output across install, reads mode flags for ModeGatedInput, and never imports Scrollback as renderer state. ReadScreen is an optional supplement only. Restty mounts as a pure renderer (`readOnly`) and does not answer OSC color queries in the browser. A lost PAGE starts a fresh attach on a new decoder. `terminal_subscription_closed` arrives only as `daemon_event`.
 
 Hub identity is a `DaemonStatus` projection on family `botster-web.hub_status`, never a package row. `software`, `installation`, `host_id`, `schema_version`, and `compatibility` all come from the status response, and `check_hub_update` is the only Hub self-update read. The family is registered as an active pull and replayed when the data channel reopens, so protocol, conformance, and schema facts do not regress after reconnect. `DaemonHubUpdate` has exactly three states — `current`, `available`, `unavailable`. Offline and error are rejected-action-result outcomes, never a fourth state.
 
@@ -52,10 +52,10 @@ reads the generic entity store, including nested row context, while
 Bind-list identity has one materialization order. The direct item-template root
 retains its item-relative `$bind`; after that root becomes a nonblank literal,
 `bind_list_descendant_id` children call the runtime helper exported by
-`@trybotster/ui-contract@0.3.2`. The generated declarations and revision-38
-shared conformance fixtures come from `@trybotster/hub-test-support@0.1.32`.
-That package comes from approved Hub main revision
-`8b54c686408e9bba41fd3e3b7a8c7dc8be43a2cf`.
+`@trybotster/ui-contract@0.3.2`. Host DTOs and revision-41 shared conformance
+fixtures come from `@trybotster/hub-test-support@0.1.36`. Core terminal types
+and feature tokens come from `@trybotster/terminal-protocol@0.1.0`. Web does
+not pin a Hub Git revision for terminal compatibility.
 Nested bind lists establish a new nearest-row context. Web never encodes,
 parses, normalizes, indexes, or repairs those identities.
 
