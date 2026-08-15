@@ -6119,6 +6119,189 @@ try {
     }
   }
 
+  const overflowChannels = [
+    createFakeDataChannel(),
+    createFakeDataChannel(),
+    createFakeDataChannel(),
+    createFakeDataChannel(),
+    createFakeDataChannel()
+  ];
+  const overflowClient = createWebrtcTestClient(overflowChannels, localWebrtcBootstrapFixture);
+  const overflowPrimary = [];
+  const overflowSibling = [];
+  const overflowRecovered = [];
+  let releaseOverflowConsumer;
+  let markOverflowConsumerStarted;
+  const overflowConsumerGate = new Promise((resolve) => {
+    releaseOverflowConsumer = resolve;
+  });
+  const overflowConsumerStarted = new Promise((resolve) => {
+    markOverflowConsumerStarted = resolve;
+  });
+  const overflowLifecycleBefore = lifecycleEvents.length;
+  const overflowPrimaryStream = overflowClient.streamTerminal(
+    "overflow-primary",
+    "overflow-primary-sub",
+    async (event) => {
+      overflowPrimary.push(event.type);
+      if (event.type === "snapshot") {
+        markOverflowConsumerStarted();
+        await overflowConsumerGate;
+      }
+    }
+  );
+  const overflowSiblingStream = overflowClient.streamTerminal(
+    "overflow-sibling",
+    "overflow-sibling-sub",
+    (event) => overflowSibling.push(event.type)
+  );
+  await waitFor(() => overflowChannels[0].sent.length >= 2);
+  await emitChunkedTestResponse(
+    overflowChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "events",
+      events: [
+        {
+          type: "attach_state",
+          session_id: "overflow-primary",
+          subscription_id: "overflow-primary-sub",
+          state: "attaching"
+        }
+      ]
+    },
+    { messageId: "overflow-primary-attach" }
+  );
+  await emitChunkedTestResponse(
+    overflowChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "events",
+      events: [
+        {
+          type: "attach_state",
+          session_id: "overflow-sibling",
+          subscription_id: "overflow-sibling-sub",
+          state: "attaching"
+        }
+      ]
+    },
+    { messageId: "overflow-sibling-attach" }
+  );
+  await overflowPrimaryStream.ready;
+  await overflowSiblingStream.ready;
+  await emitChunkedTestResponse(
+    overflowChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "snapshot",
+      session_id: "overflow-primary",
+      subscription_id: "overflow-primary-sub",
+      payload_base64: Buffer.from("hold").toString("base64"),
+      payload_encoding: "base64",
+      bytes: 4,
+      phase: "ready"
+    },
+    { messageId: "overflow-held", deliveryKind: "daemon_terminal_frame" }
+  );
+  await overflowConsumerStarted;
+  for (let index = 0; index < localWebrtcResponseChunkLimits.maximumTerminalDeliveryBacklog; index += 1) {
+    await emitChunkedTestResponse(
+      overflowChannels[0],
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        type: "terminal_output",
+        session_id: "overflow-primary",
+        subscription_id: "overflow-primary-sub",
+        payload_base64: Buffer.from("qx").toString("base64"),
+        payload_encoding: "base64",
+        bytes: 2
+      },
+      { messageId: `overflow-queued-${index}`, deliveryKind: "daemon_terminal_frame" }
+    );
+  }
+  await waitFor(() =>
+    lifecycleEvents.slice(overflowLifecycleBefore).some((event) => event.detail?.type === "data-channel-error")
+  );
+  const recoveredPrimary = overflowClient.streamTerminal(
+    "overflow-primary",
+    "overflow-primary-recovered",
+    (event) => overflowRecovered.push(event.type)
+  );
+  const recoveredDeadline = Date.now() + 5_000;
+  let recoveredChannel;
+  while (Date.now() < recoveredDeadline) {
+    recoveredChannel = overflowChannels
+      .slice(1)
+      .reduce((best, channel) => (channel.sent.length > (best?.sent.length ?? 0) ? channel : best), undefined);
+    if (recoveredChannel?.sent.length >= 2) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!recoveredChannel || recoveredChannel.sent.length < 1) {
+    throw new Error("overflow recovery never sent a replacement Hello");
+  }
+  await waitFor(() =>
+    lifecycleEvents.slice(overflowLifecycleBefore).some((event) => event.detail?.type === "encrypted-stream-ready")
+  );
+  const attachDeadline = Date.now() + 3_000;
+  while (Date.now() < attachDeadline && recoveredChannel.sent.length < 2) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (recoveredChannel.sent.length < 2) {
+    void overflowClient
+      .request({
+        type: "attach",
+        session_id: "overflow-primary",
+        subscription_id: "overflow-primary-recovered"
+      })
+      .catch(() => undefined);
+    const extraAttachDeadline = Date.now() + 3_000;
+    while (Date.now() < extraAttachDeadline && recoveredChannel.sent.length < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  if (recoveredChannel.sent.length < 2) {
+    throw new Error(`overflow recovery Hello happened but Attach did not: sent=${recoveredChannel.sent.length}`);
+  }
+  await emitChunkedTestResponse(
+    recoveredChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "events",
+      events: [
+        {
+          type: "attach_state",
+          session_id: "overflow-primary",
+          subscription_id: "overflow-primary-recovered",
+          state: "attaching"
+        }
+      ]
+    },
+    { messageId: "overflow-primary-recovered-attach" }
+  );
+  await recoveredPrimary.ready;
+  await emitChunkedTestResponse(
+    recoveredChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "terminal_output",
+      session_id: "overflow-primary",
+      subscription_id: "overflow-primary-recovered",
+      payload_base64: Buffer.from("new-a").toString("base64"),
+      payload_encoding: "base64",
+      bytes: 5
+    },
+    { messageId: "overflow-recovered-primary-live", deliveryKind: "daemon_terminal_frame" }
+  );
+  await waitFor(() => overflowRecovered.includes("terminal_output"));
+  assert.deepEqual(overflowRecovered, ["attach_state", "terminal_output"]);
+  assert.equal(overflowPrimary.includes("terminal_output"), false);
+  assert.equal(overflowSibling.includes("terminal_output"), false);
+  releaseOverflowConsumer();
+  overflowPrimaryStream.abandon();
+  overflowSiblingStream.abandon();
+  recoveredPrimary.abandon();
+
   const staleAttachChannel = createFakeDataChannel();
   const staleAttachClient = createWebrtcTestClient([staleAttachChannel], localWebrtcBootstrapFixture);
   const staleAttachEvents = [];
@@ -15165,7 +15348,14 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
   return createWebrtcDaemonClient({
     ...options,
     bootstrap,
-    peerConnectionFactory: () => createFakePeerConnection(dataChannels[nextDataChannel++]),
+    peerConnectionFactory: () => {
+      if (nextDataChannel >= dataChannels.length) {
+        const extra = createFakeDataChannel();
+        installAutoHelloAck(extra, bootstrap.grant_secret);
+        dataChannels.push(extra);
+      }
+      return createFakePeerConnection(dataChannels[nextDataChannel++]);
+    },
     fetchImpl: async () => ({
       ok: true,
       json: async () => ({

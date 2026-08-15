@@ -2,11 +2,18 @@
 
 Ticket: `ticket_1786661008_897067`
 Run: `run_1786722987_966285`
-Step: `botster_stack_implement` / `run_step_1786750943_786076`
+Step: `botster_stack_implement` / `run_step_1786751977_753338`
 
 ## Review return
 
-Review `review_1786750930_418832` sent Implement back after `8dc2610`. Two new findings:
+Review `review_1786751962_720856` sent Implement back after `3742af6`. Two new findings:
+
+| Finding | Response |
+| --- | --- |
+| `finding_1786751962_128763` Route overflow through transport recovery | Queue overflow and other `failPeerGeneration` paths emit `data-channel-error` before reset, then take the ordinary transport-loss reconnect path. A unit test blocks one consumer, overflows the queue, and proves transport loss, replacement Hello/Attach, new-generation delivery, and sibling recovery. |
+| `finding_1786751962_858839` Update the report for the attached resize barrier | This report now states that hydration completes after FINISH or incomplete history plus Core `attach_state=attached`, and that resize and input stay blocked until attached. |
+
+Review `review_1786750930_418832` sent Implement back after `8dc2610`. Two findings from that visit:
 
 | Finding | Response |
 | --- | --- |
@@ -61,9 +68,9 @@ Convention conflicts: none.
 - `src/botster/protocolPlanes.ts` — host Hello from published hub-test-support metadata plus feature literals; terminal Hello from `@trybotster/terminal-protocol`
 - `src/botster/hubTestSupportMetadata.d.ts` — types for the metadata JSON export
 - `src/botster/connectionDiagnostics.ts` — host required features no longer include Core terminal tokens; conformance floor 41
-- `src/botster/webrtcDaemonClient.ts` — first encrypted send is Hello; assemble `daemon_terminal_frame` and `daemon_event`; stop terminal Drain; HelloAck before stream-ready; do not block the host message queue on Restty install
+- `src/botster/webrtcDaemonClient.ts` — first encrypted send is Hello; assemble `daemon_terminal_frame` and `daemon_event`; stop terminal Drain; HelloAck before stream-ready; generation-scoped terminal delivery queue; overflow and other peer failures emit transport-loss and reconnect
 - `src/botster/hubTransport.ts` — stream handle is Attach + Core frames, not Drain
-- `src/botster/hubTerminalDataPlane.ts` — consume Core `TerminalEvent`; generation-tagged close; lost-PAGE fresh attach; complete hydration on FINISH; optional ReadModeFlags/ReadScreen/resize stay in the background
+- `src/botster/hubTerminalDataPlane.ts` — consume Core `TerminalEvent`; generation-tagged close; lost-PAGE fresh attach; complete hydration after FINISH or incomplete history plus Core `attach_state=attached`; optional ReadModeFlags/ReadScreen stay in the background
 - `src/botster/incrementalGhostsnpAttachSmoke.ts` — Core snapshot phase on authentic Restty reader
 - `src/App.test.mjs` — Hello literals, delivery kinds, sibling/close/timeout ablation, pin claims, mixed-family oracle selection
 - `scripts/live-packaged-protocol-harness.mjs` — production Hello + `daemon_terminal_event` body oracles; host close on `daemon_event`; reconnect Hello; slow-client sibling
@@ -122,14 +129,14 @@ BOTSTER_SESSION_WORKER_BIN=$BOTSTER_SESSION_WORKER_BIN \
 npm run smoke:live-packaged-protocol
 ```
 
-Results after the third Review return:
+Results after the fourth Review return:
 
 - `npm test` passed (includes `scripts/check-daemon-protocol-drift.mjs` against published hub-test-support 0.1.36).
 - Typecheck passed.
 - Lint passed (pre-existing `IonicUiNodeRenderer` fast-refresh warning only).
-- `npm run smoke:incremental-ghostsnp-attach` passed: READY paint before FINISH, resize after FINISH, input only after attached.
+- `npm run smoke:incremental-ghostsnp-attach` passed: READY paint before FINISH; resize and input only after Core `attach_state=attached`.
 - Production build passed as part of `npm run smoke:live-packaged-protocol`.
-- Exact live command above, with binaries rebuilt from Hub `279d828ca377d23e743ae3e724a1ac9ce81520e2`, exited 0.
+- Exact live command above, with binaries rebuilt from Hub `279d828ca377d23e743ae3e724a1ac9ce81520e2`, exited 0 on the previous visit. This visit's unit test covers overflow recovery; the live happy path was not re-run after the overflow-recovery change.
 - Restoration observed `read_mode_flags` plus `ghostsnp_install` and attached status with snapshot history.
 - Terminal-body chronology used `daemon_terminal_event` (attaching, snapshots, attached, live output).
 - Slow-client sibling proof observed `daemon_event` `terminal_subscription_closed` with `reason=core_adapter_closed` while `web-prod` stayed live.

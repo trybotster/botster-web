@@ -377,6 +377,7 @@ class WebrtcDaemonTransport {
   private terminalDeliveryQueue: Promise<void> = Promise.resolve();
   private terminalDeliveryBacklog = 0;
   private terminalDeliveryEpoch = 0;
+  private peerFailed = false;
   private readonly responseAssemblies = new Map<string, ResponseAssembly>();
   private readonly completedMessageIds = new Set<string>();
   private readonly entitySubscriptions = new Set<EntitySubscription>();
@@ -741,6 +742,7 @@ class WebrtcDaemonTransport {
   }
 
   private async open(): Promise<void> {
+    this.peerFailed = false;
     this.resetPeerState();
     const bootstrap = await this.resolveBootstrap();
     try {
@@ -1096,9 +1098,10 @@ class WebrtcDaemonTransport {
   }
 
   private failPeerGeneration(generation: number, error: unknown): void {
-    if (generation !== this.peerGeneration) return;
-    this.resetPeerState();
-    this.failPending(error);
+    if (generation !== this.peerGeneration || this.peerFailed) return;
+    this.peerFailed = true;
+    this.emitLifecycle({ type: "data-channel-error" });
+    this.handleTransportClosed(error);
   }
 
   private failPending(error: unknown): void {
@@ -1110,7 +1113,10 @@ class WebrtcDaemonTransport {
   private handleTransportClosed(error: unknown): void {
     this.resetPeerState();
     this.failPending(error);
-    if (!this.disconnected && this.entitySubscriptions.size > 0) {
+    if (
+      !this.disconnected &&
+      (this.entitySubscriptions.size > 0 || this.terminalStreamListeners.size > 0)
+    ) {
       queueMicrotask(() => void this.reconnectEntitySubscriptions());
     }
   }
