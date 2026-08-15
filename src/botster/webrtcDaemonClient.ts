@@ -785,14 +785,22 @@ class WebrtcDaemonTransport {
     dataChannel.addEventListener("close", () => {
       if (!this.isCurrentPeer(generation, peerConnection, dataChannel)) return;
       recordLiveHarnessEvent("webrtc_data_channel", { state: "closed" });
+      const shouldReconnect = this.hasReconnectDemand();
       this.emitLifecycle({ type: "data-channel-closed" });
-      this.handleTransportClosed(webrtcFailure("transport", "local WebRTC data channel closed"));
+      this.handleTransportClosed(
+        webrtcFailure("transport", "local WebRTC data channel closed"),
+        shouldReconnect
+      );
     });
     dataChannel.addEventListener("error", () => {
       if (!this.isCurrentPeer(generation, peerConnection, dataChannel)) return;
       recordLiveHarnessEvent("webrtc_data_channel", { state: "error" });
+      const shouldReconnect = this.hasReconnectDemand();
       this.emitLifecycle({ type: "data-channel-error" });
-      this.handleTransportClosed(webrtcFailure("transport", "local WebRTC data channel failed"));
+      this.handleTransportClosed(
+        webrtcFailure("transport", "local WebRTC data channel failed"),
+        shouldReconnect
+      );
     });
 
     let offer: RTCSessionDescriptionInit;
@@ -1100,8 +1108,11 @@ class WebrtcDaemonTransport {
   private failPeerGeneration(generation: number, error: unknown): void {
     if (generation !== this.peerGeneration || this.peerFailed) return;
     this.peerFailed = true;
+    // Snapshot before emitLifecycle. HubTerminalDataPlane.handleTransportLost
+    // abandons the current stream and removes its TerminalStreamListener.
+    const shouldReconnect = this.hasReconnectDemand();
     this.emitLifecycle({ type: "data-channel-error" });
-    this.handleTransportClosed(error);
+    this.handleTransportClosed(error, shouldReconnect);
   }
 
   private failPending(error: unknown): void {
@@ -1110,13 +1121,14 @@ class WebrtcDaemonTransport {
     }
   }
 
-  private handleTransportClosed(error: unknown): void {
+  private hasReconnectDemand(): boolean {
+    return this.entitySubscriptions.size > 0 || this.terminalStreamListeners.size > 0;
+  }
+
+  private handleTransportClosed(error: unknown, shouldReconnect = this.hasReconnectDemand()): void {
     this.resetPeerState();
     this.failPending(error);
-    if (
-      !this.disconnected &&
-      (this.entitySubscriptions.size > 0 || this.terminalStreamListeners.size > 0)
-    ) {
+    if (!this.disconnected && shouldReconnect) {
       queueMicrotask(() => void this.reconnectEntitySubscriptions());
     }
   }

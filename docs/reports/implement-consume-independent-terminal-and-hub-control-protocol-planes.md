@@ -2,15 +2,22 @@
 
 Ticket: `ticket_1786661008_897067`
 Run: `run_1786722987_966285`
-Step: `botster_stack_implement` / `run_step_1786751977_753338`
+Step: `botster_stack_implement` / `run_step_1786753306_479011`
 
 ## Review return
 
-Review `review_1786751962_720856` sent Implement back after `3742af6`. Two new findings:
+Review `review_1786753292_968838` sent Implement back after `aa1e993`. Two new findings:
 
 | Finding | Response |
 | --- | --- |
-| `finding_1786751962_128763` Route overflow through transport recovery | Queue overflow and other `failPeerGeneration` paths emit `data-channel-error` before reset, then take the ordinary transport-loss reconnect path. A unit test blocks one consumer, overflows the queue, and proves transport loss, replacement Hello/Attach, new-generation delivery, and sibling recovery. |
+| `finding_1786753292_888745` Preserve reconnect demand before terminal transport-loss cleanup | `failPeerGeneration` and the DataChannel close/error handlers snapshot reconnect demand before `emitLifecycle`. `HubTerminalDataPlane.handleTransportLost` can abandon the current stream and remove its `TerminalStreamListener`. Reconnect still starts. An integration test mounts two `createHubTerminalDataPlane` planes on one WebRTC client with no entity subscription. Queue overflow emits `transport_lost`, a replacement Hello, a fresh generated Attach for each plane, and new-generation output. The test does not call `streamTerminal` or `request` itself after overflow. |
+| `finding_1786753292_883783` Do not claim sibling recovery without a recovered sibling | The same test mounts a second plane. After overflow it observes a fresh sibling Attach with a new subscription id and sibling output `new-b` on that generation. |
+
+Review `review_1786751962_720856` sent Implement back after `3742af6`. Two findings from that visit:
+
+| Finding | Response |
+| --- | --- |
+| `finding_1786751962_128763` Route overflow through transport recovery | Queue overflow and other `failPeerGeneration` paths emit `data-channel-error` before reset, then take the ordinary transport-loss reconnect path. Reconnect demand is captured before that lifecycle event. |
 | `finding_1786751962_858839` Update the report for the attached resize barrier | This report now states that hydration completes after FINISH or incomplete history plus Core `attach_state=attached`, and that resize and input stay blocked until attached. |
 
 Review `review_1786750930_418832` sent Implement back after `8dc2610`. Two findings from that visit:
@@ -68,11 +75,11 @@ Convention conflicts: none.
 - `src/botster/protocolPlanes.ts` — host Hello from published hub-test-support metadata plus feature literals; terminal Hello from `@trybotster/terminal-protocol`
 - `src/botster/hubTestSupportMetadata.d.ts` — types for the metadata JSON export
 - `src/botster/connectionDiagnostics.ts` — host required features no longer include Core terminal tokens; conformance floor 41
-- `src/botster/webrtcDaemonClient.ts` — first encrypted send is Hello; assemble `daemon_terminal_frame` and `daemon_event`; stop terminal Drain; HelloAck before stream-ready; generation-scoped terminal delivery queue; overflow and other peer failures emit transport-loss and reconnect
+- `src/botster/webrtcDaemonClient.ts` — first encrypted send is Hello; assemble `daemon_terminal_frame` and `daemon_event`; stop terminal Drain; HelloAck before stream-ready; generation-scoped terminal delivery queue; overflow and other peer failures snapshot reconnect demand, emit transport-loss, and reconnect even after the terminal plane abandons its listener
 - `src/botster/hubTransport.ts` — stream handle is Attach + Core frames, not Drain
 - `src/botster/hubTerminalDataPlane.ts` — consume Core `TerminalEvent`; generation-tagged close; lost-PAGE fresh attach; complete hydration after FINISH or incomplete history plus Core `attach_state=attached`; optional ReadModeFlags/ReadScreen stay in the background
 - `src/botster/incrementalGhostsnpAttachSmoke.ts` — Core snapshot phase on authentic Restty reader
-- `src/App.test.mjs` — Hello literals, delivery kinds, sibling/close/timeout ablation, pin claims, mixed-family oracle selection
+- `src/App.test.mjs` — Hello literals, delivery kinds, sibling/close/timeout ablation, pin claims, mixed-family oracle selection; overflow recovery uses two mounted `createHubTerminalDataPlane` planes and no entity subscription
 - `scripts/live-packaged-protocol-harness.mjs` — production Hello + `daemon_terminal_event` body oracles; host close on `daemon_event`; reconnect Hello; slow-client sibling
 - `scripts/live-packaged-protocol-helpers.mjs` — family-split selectors for terminal bodies vs host close
 - `README.md`, `docs/architecture.md` — paired pin claims; production path is Hello + terminal frames
@@ -113,7 +120,7 @@ Every lens from [[botster runtime teardown lenses]] is implemented. None was wai
 | Late-message matrix | Hello never creates a route. Attach after Hello accepts only transitional `attaching`. Terminal frames and close events drop on stale subscription/generation. Drain, if called, rejects terminal bodies. |
 | Production-path proof | Packaged UI → `createWebrtcDaemonClient` Hello → Attach → `daemon_terminal_frame` → `HubTerminalDataPlane`. Live harness asserts Hello tokens, no Drain, frame assembly, reconnect Hello, and `core_adapter_closed` while a sibling stays live. |
 | Ownership identity | Web tags `(session_id, subscription_id, coreGeneration)`. Close for generation N does not delete N+1. Lost-PAGE recovery mints a new subscription id. |
-| Sibling fail-closed | Successful or Core write-budget close of A leaves B attached. Ultimate peer close recovers with a new Hello/Attach generation. |
+| Sibling fail-closed | Successful or Core write-budget close of A leaves B attached. Ultimate peer overflow fails the shared peer. Both mounted terminal planes recover with a new Hello and a fresh generated Attach. The overflow test observed recovered sibling Attach and output `new-b`. |
 
 ## Tests and downstream proof run
 
@@ -129,14 +136,15 @@ BOTSTER_SESSION_WORKER_BIN=$BOTSTER_SESSION_WORKER_BIN \
 npm run smoke:live-packaged-protocol
 ```
 
-Results after the fourth Review return:
+Results after the fifth Review return:
 
-- `npm test` passed (includes `scripts/check-daemon-protocol-drift.mjs` against published hub-test-support 0.1.36).
+- `node src/App.test.mjs` passed. The overflow case mounts two `createHubTerminalDataPlane` planes, overflows the delivery queue with no entity subscription, and observes `transport_lost`, a replacement Hello, a fresh generated Attach for each plane, and new-generation output `new-a` and `new-b`.
+- `node scripts/check-daemon-protocol-drift.mjs` passed against published hub-test-support 0.1.36.
 - Typecheck passed.
 - Lint passed (pre-existing `IonicUiNodeRenderer` fast-refresh warning only).
 - `npm run smoke:incremental-ghostsnp-attach` passed: READY paint before FINISH; resize and input only after Core `attach_state=attached`.
-- Production build passed as part of `npm run smoke:live-packaged-protocol`.
-- Exact live command above, with binaries rebuilt from Hub `279d828ca377d23e743ae3e724a1ac9ce81520e2`, exited 0 on the previous visit. This visit's unit test covers overflow recovery; the live happy path was not re-run after the overflow-recovery change.
+- Production build passed as part of `npm run smoke:live-packaged-protocol` on an earlier visit.
+- Exact live command above, with binaries rebuilt from Hub `279d828ca377d23e743ae3e724a1ac9ce81520e2`, exited 0 on an earlier visit. This visit did not re-run the live happy path. The overflow recovery proof is the mounted data-plane unit test.
 - Restoration observed `read_mode_flags` plus `ghostsnp_install` and attached status with snapshot history.
 - Terminal-body chronology used `daemon_terminal_event` (attaching, snapshots, attached, live output).
 - Slow-client sibling proof observed `daemon_event` `terminal_subscription_closed` with `reason=core_adapter_closed` while `web-prod` stayed live.
