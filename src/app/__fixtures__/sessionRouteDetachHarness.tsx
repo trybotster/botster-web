@@ -6,8 +6,6 @@ import type { EntityFrame, EntityFrameStore } from "../../botster/entities";
 import type {
   TerminalAttachmentStatus,
   TerminalDataPlaneAttachment,
-  TerminalInput,
-  TerminalOutput,
   TerminalSubscription,
   TerminalViewBridge,
   TerminalViewDescriptor,
@@ -37,14 +35,33 @@ export interface SessionRouteDetachApi {
   emitProcessExit(sessionId: string): void;
 }
 
+export interface SessionDetachTeardownLedger {
+  unmounts: string[];
+  detaches: string[];
+  dataPlaneDetaches: string[];
+  statusUnsubscribes: string[];
+}
+
+export function createSessionDetachTeardownLedger(): SessionDetachTeardownLedger {
+  return {
+    unmounts: [],
+    detaches: [],
+    dataPlaneDetaches: [],
+    statusUnsubscribes: []
+  };
+}
+
 export class SessionDetachTestDataPlane implements TerminalDataPlaneAttachment {
   private readonly statusListeners = new Set<(status: TerminalAttachmentStatus) => void>();
 
-  constructor(readonly sessionId: string) {}
+  constructor(
+    readonly sessionId: string,
+    private readonly ledger: SessionDetachTeardownLedger
+  ) {}
 
-  writeInput(_data: TerminalInput): void {}
+  writeInput(): void {}
 
-  subscribeOutput(_listener: (data: TerminalOutput) => void): TerminalSubscription {
+  subscribeOutput(): TerminalSubscription {
     return { unsubscribe() {} };
   }
 
@@ -57,6 +74,7 @@ export class SessionDetachTestDataPlane implements TerminalDataPlaneAttachment {
     return {
       unsubscribe: () => {
         this.statusListeners.delete(listener);
+        this.ledger.statusUnsubscribes.push(this.sessionId);
       }
     };
   }
@@ -69,36 +87,57 @@ export class SessionDetachTestDataPlane implements TerminalDataPlaneAttachment {
       });
     }
   }
+
+  detach(): void {
+    this.ledger.dataPlaneDetaches.push(this.sessionId);
+    this.statusListeners.clear();
+  }
 }
 
-export const sessionDetachTestBridge: TerminalViewBridge = {
-  async mount(container: HTMLElement, descriptor: TerminalViewDescriptor): Promise<TerminalViewMount> {
-    container.dataset.terminalMount = "mounted";
-    container.dataset.terminalSessionId = descriptor.sessionId;
-    return { sessionId: descriptor.sessionId, mountId: 1 };
-  },
-  async unmount(): Promise<void> {},
-  async attach(): Promise<void> {},
-  async detach(): Promise<void> {},
-  async resize(): Promise<void> {},
-  async focus(): Promise<void> {},
-  async writeInput(): Promise<void> {}
-};
+export function createSessionDetachTestBridge(
+  ledger: SessionDetachTeardownLedger,
+  dataPlanes: Map<string, SessionDetachTestDataPlane>
+): TerminalViewBridge {
+  return {
+    async mount(container: HTMLElement, descriptor: TerminalViewDescriptor): Promise<TerminalViewMount> {
+      container.dataset.terminalMount = "mounted";
+      container.dataset.terminalSessionId = descriptor.sessionId;
+      return { sessionId: descriptor.sessionId, mountId: 1 };
+    },
+    async unmount(descriptor: TerminalViewDescriptor): Promise<void> {
+      ledger.unmounts.push(descriptor.sessionId);
+      await this.detach(descriptor);
+    },
+    async attach(): Promise<void> {},
+    async detach(descriptor: TerminalViewDescriptor): Promise<void> {
+      ledger.detaches.push(descriptor.sessionId);
+      dataPlanes.get(descriptor.sessionId)?.detach();
+    },
+    async resize(): Promise<void> {},
+    async focus(): Promise<void> {},
+    async writeInput(): Promise<void> {}
+  };
+}
 
-export function sessionDetachTestDataPlane(sessionId: string): SessionDetachTestDataPlane {
-  return new SessionDetachTestDataPlane(sessionId);
+export function sessionDetachTestDataPlane(
+  sessionId: string,
+  ledger: SessionDetachTeardownLedger
+): SessionDetachTestDataPlane {
+  return new SessionDetachTestDataPlane(sessionId, ledger);
 }
 
 export function SessionRouteDetachHarness({
   store,
   initialSessionId,
   dataPlanes,
+  bridge,
   onState,
   onReady
 }: {
   store: EntityFrameStore;
   initialSessionId?: string;
   dataPlanes: Map<string, SessionDetachTestDataPlane>;
+  bridge: TerminalViewBridge;
   onState: (state: SessionRouteDetachState) => void;
   onReady?: (api: SessionRouteDetachApi) => void;
 }) {
@@ -162,7 +201,7 @@ export function SessionRouteDetachHarness({
 
   const terminalPanel = terminalDescriptor && terminalDataPlane ? (
     <TerminalViewHost
-      bridge={sessionDetachTestBridge}
+      bridge={bridge}
       dataPlane={terminalDataPlane}
       descriptor={terminalDescriptor}
       onExit={releaseTerminalSession}

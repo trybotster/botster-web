@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -23,6 +23,7 @@ import {
   HOST_CHROME,
   htmlAssetUrls,
   isTerminalDetached,
+  sessionDetachIsolationProof,
   latestAcceptedWorkspacesUiTree,
   packageRuntimeNavigation,
   packageEnsureDecision,
@@ -416,8 +417,7 @@ try {
   await proveInPageTerminalDataChannelReconnect(page, productionSessionId);
 
   // Rendered-DOM re-check after two WebRTC generations and the full terminal exercise: the
-  // General section must still show the authoritative identity, not "Not reported". Placed
-  // before the terminal shutdown/detach steps, which fail on main for unrelated reasons.
+  // General section must still show the authoritative identity, not "Not reported".
   const finalHubStatus = await assertCurrentHubCompatibilityAndSchema(page);
   const finalHubIdentity = await assertAuthoritativeHubIdentity(page, finalHubStatus, "after reconnect cycles");
   for (const [field, value] of Object.entries(initialHubIdentity)) {
@@ -434,7 +434,13 @@ try {
   await callTerminalControl(page, "writeInput", "botster-web-production-exit\n");
   await waitForTerminalOutput(page, "botster-web-production-exiting");
   await shutdownProductionSession();
-  await waitForTerminalDetached(page, productionSessionId);
+  const terminalDetachWait = await waitForTerminalDetached(page, productionSessionId);
+  const entityDetachProof = await proveEntityDrivenProductionDetach(
+    page,
+    productionSessionId,
+    terminalDetachWait
+  );
+  const postDetachPeerProof = await provePostDetachPeerAndSiblingFamily(page, productionSessionId);
 
   await assertNoUnknownSession(page);
   assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
@@ -444,6 +450,8 @@ try {
     "live packaged protocol harness passed (webrtc) " +
       JSON.stringify({
         binary_provenance: binaryProvenance,
+        entity_detach_proof: entityDetachProof,
+        post_detach_peer_proof: postDetachPeerProof,
         hub_identity: initialHubIdentity,
         hub_identity_in_page_reconnect: inPageReconnect,
         hub_identity_across_reconnects: hubIdentityAcrossReconnects,
@@ -7669,7 +7677,13 @@ async function waitForTerminalDetached(page, sessionId, { timeoutMs = 15_000 } =
       sessionContainerIds: snapshot.sessionContainerIds,
       dashboardPresent: snapshot.dashboardPresent
     }, sessionId)) {
-      return;
+      return {
+        sessionId,
+        exitedObserved,
+        lastObservedAttachState,
+        lastSessionContainerIds,
+        lastDashboardPresent
+      };
     }
 
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -7684,6 +7698,134 @@ async function waitForTerminalDetached(page, sessionId, { timeoutMs = 15_000 } =
       ` dashboardPresent=${lastDashboardPresent}` +
       ` sessionContainerIds=${JSON.stringify(lastSessionContainerIds)}`
   );
+}
+
+async function proveEntityDrivenProductionDetach(page, sessionId, detachWait) {
+  const evidence = await page.evaluate(({ expectedSessionId }) => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ ?? {};
+    const sessions = typeof harness.listEntities === "function" ? harness.listEntities("session") : [];
+    const sessionTypes = typeof harness.listEntities === "function" ? harness.listEntities("session_type") : [];
+    const sessionRow = sessions.find((record) =>
+      record.id === expectedSessionId || record.session_uuid === expectedSessionId
+    );
+    const processExitEvents = [];
+    (harness.terminal ?? []).forEach((entry, index) => {
+      if (entry?.kind === "process_exit") {
+        processExitEvents.push({ source: "terminal", index, payload: entry.payload });
+      }
+    });
+    (harness.events ?? []).forEach((entry, index) => {
+      if (
+        entry?.kind === "daemon_terminal_event" &&
+        entry.payload?.type === "process_exit" &&
+        entry.payload?.session_id === expectedSessionId
+      ) {
+        processExitEvents.push({ source: "daemon_terminal_event", index, payload: entry.payload });
+      }
+    });
+    const entityLifecycleEvents = [];
+    (harness.events ?? []).forEach((entry, index) => {
+      if (entry?.kind !== "hub_frame") return;
+      const frame = entry.payload ?? {};
+      if (!["entity_snapshot", "entity_upsert", "entity_patch"].includes(frame.kind)) return;
+      const family = frame.payload?.family ?? frame.payload?.key?.family;
+      if (family !== "session") return;
+      const records = frame.kind === "entity_snapshot"
+        ? (frame.payload?.records ?? [])
+        : [frame.payload?.record];
+      for (const record of records) {
+        const id = record?.id ?? record?.session_uuid;
+        if (id !== expectedSessionId) continue;
+        if (record?.lifecycle === "exited" || record?.lifecycle === "failed") {
+          entityLifecycleEvents.push({
+            index,
+            kind: frame.kind,
+            lifecycle: record.lifecycle
+          });
+        }
+      }
+    });
+    return {
+      sessionRow,
+      sessionIds: sessions.map((record) => record.id),
+      sessionTypeIds: sessionTypes.map((record) => record.id),
+      processExitEvents,
+      entityLifecycleEvents
+    };
+  }, { expectedSessionId: sessionId });
+
+  const isolation = sessionDetachIsolationProof({
+    sessionId,
+    sessionRow: evidence.sessionRow,
+    entityLifecycleEvents: evidence.entityLifecycleEvents,
+    processExitEvents: evidence.processExitEvents,
+    detachWait
+  });
+  if (!isolation.ok) {
+    throw new Error(`entity-driven detach isolation failed: ${JSON.stringify({ isolation, evidence, detachWait })}`);
+  }
+  console.log(`entity-driven production detach isolated ${JSON.stringify(isolation)}`);
+  return {
+    ...isolation,
+    entityLifecycleEvents: evidence.entityLifecycleEvents,
+    processExitEvents: evidence.processExitEvents,
+    sessionTypeIds: evidence.sessionTypeIds,
+    detachWait
+  };
+}
+
+async function provePostDetachPeerAndSiblingFamily(page, sessionId) {
+  const statusRequestsBefore = await daemonRequestCount(page, { type: "status" });
+  const status = await page.evaluate(async () => {
+    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
+    if (!control?.request) {
+      throw new Error("post-detach peer proof missing transportControl.request");
+    }
+    return control.request({ type: "status" });
+  });
+  if (status?.kind !== "status") {
+    throw new Error(`post-detach peer status request failed: ${JSON.stringify(status)}`);
+  }
+  await page.waitForFunction(
+    ({ before }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) =>
+        entry.kind === "daemon_request" && entry.payload?.type === "status"
+      ).length > before,
+    { before: statusRequestsBefore },
+    { timeout: 10_000 }
+  ).catch((error) => {
+    throw new Error(`post-detach peer never recorded a new status request: ${error.message}`);
+  });
+  const families = await page.evaluate(({ expectedSessionId }) => {
+    const list = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities;
+    if (typeof list !== "function") {
+      throw new Error("post-detach sibling proof missing listEntities");
+    }
+    return {
+      sessionIds: list("session").map((record) => record.id),
+      sessionTypeIds: list("session_type").map((record) => record.id),
+      productionLifecycle: list("session").find((record) =>
+        record.id === expectedSessionId || record.session_uuid === expectedSessionId
+      )?.lifecycle
+    };
+  }, { expectedSessionId: sessionId });
+  const siblingSessionIds = (families.sessionIds ?? []).filter((id) => id !== sessionId);
+  if (siblingSessionIds.length === 0 && (!Array.isArray(families.sessionTypeIds) || families.sessionTypeIds.length === 0)) {
+    throw new Error(`post-detach sibling family missing: ${JSON.stringify(families)}`);
+  }
+  console.log(`post-detach peer and sibling family survived ${JSON.stringify({
+    statusKind: status.kind,
+    siblingSessionCount: siblingSessionIds.length,
+    sessionTypeCount: families.sessionTypeIds.length,
+    productionLifecycle: families.productionLifecycle
+  })}`);
+  return {
+    statusKind: status.kind,
+    siblingSessionIds,
+    sessionTypeIds: families.sessionTypeIds,
+    sessionIds: families.sessionIds,
+    productionLifecycle: families.productionLifecycle
+  };
 }
 
 async function terminalOutputCount(page) {
@@ -8089,15 +8231,31 @@ async function binaryProvenanceFor(binaryPath, label) {
     throw new Error(`${label} provenance binary does not exist: path=${resolvedPath}`);
   }
   if (!existsSync(manifestPath)) {
-    return { path: resolvedPath, package_version: null, package_version_source: null };
+    return {
+      path: resolvedPath,
+      package_version: null,
+      package_version_source: null,
+      git_head: gitHeadForCargoRoot(resolve(dirname(resolvedPath), "../.."))
+    };
   }
   const manifest = readFileSync(manifestPath, "utf8");
   const packageVersion = manifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? null;
   return {
     path: resolvedPath,
     package_version: packageVersion,
-    package_version_source: packageVersion ? manifestPath : null
+    package_version_source: packageVersion ? manifestPath : null,
+    git_head: gitHeadForCargoRoot(resolve(dirname(resolvedPath), "../.."))
   };
+}
+
+function gitHeadForCargoRoot(repoRoot) {
+  try {
+    return execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], {
+      encoding: "utf8"
+    }).trim();
+  } catch {
+    return null;
+  }
 }
 
 function spawnHubProcess(dataDir) {

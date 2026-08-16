@@ -85,6 +85,44 @@ export function isTerminalDetached({ sessionContainerIds, dashboardPresent }, se
   return dashboardPresent === true && !ids.includes(sessionId);
 }
 
+/**
+ * Isolate entity-driven detach from the retained terminal process_exit path.
+ * Destination detach is already decided by isTerminalDetached.
+ */
+export function sessionDetachIsolationProof({
+  sessionId,
+  sessionRow,
+  entityLifecycleEvents,
+  processExitEvents,
+  detachWait
+}) {
+  const lifecycle = typeof sessionRow?.lifecycle === "string" ? sessionRow.lifecycle : undefined;
+  const entityDriven = lifecycle === "exited" || lifecycle === "failed";
+  const processExitCausedDetach = detachWait?.exitedObserved === true;
+  const entityEvents = Array.isArray(entityLifecycleEvents) ? entityLifecycleEvents : [];
+  const processExits = Array.isArray(processExitEvents) ? processExitEvents : [];
+  const processExitBeforeDetach = processExits.some((entry) =>
+    typeof entry?.index === "number" &&
+    typeof entityEvents[0]?.index === "number" &&
+    entry.index < entityEvents[0].index
+  );
+  return {
+    ok: Boolean(
+      sessionId &&
+      entityDriven &&
+      !processExitCausedDetach &&
+      !processExitBeforeDetach &&
+      entityEvents.length > 0
+    ),
+    sessionId,
+    lifecycle,
+    processExitCausedDetach,
+    processExitBeforeDetach,
+    entityLifecycleEventCount: entityEvents.length,
+    processExitEventCount: processExits.length
+  };
+}
+
 /** Extract terminal container session ids from renderToStaticMarkup HTML using shared attr names. */
 export function extractTerminalSessionIdsFromMarkup(markup) {
   const attr = HOST_CHROME.terminalSessionIdAttr;

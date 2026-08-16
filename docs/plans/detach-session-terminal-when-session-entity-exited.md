@@ -163,7 +163,7 @@ If Implement proves the Hub candidate does not publish the exited session entity
 
 ## Assumptions and unknowns
 
-- Determined fact: `list_spawn_targets` resolves `tgt_40abcf71ccf049f4ac0c99953a799869` to `/Users/jasonconigliari/Projects/botster-web` and repo `trybotster/botster-web`.
+- Determined fact: `list_spawn_targets` resolves `tgt_40abcf71ccf049f4ac0c99953a799869` to the botster-web spawn target named `booster-web` and repo `trybotster/botster-web`.
 - Determined fact: this worktree is Web `8c87c35`, the same SHA Review used.
 - Determined fact: this ticket is not a Hub session-type eligibility consumer.
 - Assumption: Hub candidate `23440a4` already publishes the mounted session entity with `lifecycle` `exited` after production exit and `ShutdownSession`. The ticket states that as the Hub-owned fact.
@@ -247,6 +247,10 @@ Run that command twice. Both runs must:
 - observe `botster-web-production-exiting`
 - call `ShutdownSession`
 - pass `waitForTerminalDetached` for that session
+- require the matching Hub session entity `lifecycle` `exited` or `failed`
+- prove terminal-plane `process_exit` did not cause that accepted detach (`exitedObserved` stays false and no `process_exit` is recorded before destination detach)
+- record raw entity versus `process_exit` event order plus Hub and worker git provenance
+- after detach, prove the same WebRTC peer still answers a `status` request and a sibling session or held `session_type` family remains
 
 Record harness mode, branch marker, Hub SHA, Core SHA, and Web SHA. These two candidate-pair runs are the required product proof.
 
@@ -271,8 +275,9 @@ Add a real `createRoot` + `act` route-state test that uses the production detach
 4. A-to-B race: mount A, navigate to B, then deliver late A `lifecycle` `exited` and late A `process_exit`. B stays mounted. A's host is absent.
 5. `entity_remove` of A while A is mounted does not detach A.
 6. After A detaches, sibling session row C remains in the entity store and a held `session_type` family remains available. The test must not close or drop a sibling peer/session subscription as part of A's detach.
+7. Entity detach of A records production-shaped teardown: bridge `unmount`, bridge `detach`, and data-plane `detach` for A only.
 
-Source regexes alone do not satisfy items 1-6.
+Source regexes alone do not satisfy items 1-7.
 
 Those route-state tests are not a substitute for the two live candidate-pair runs. The live pair remains the production-path hard-stop proof for one exited session on the packaged peer. The route-state tests are the required request-race, ownership-identity, and sibling-isolation proof.
 

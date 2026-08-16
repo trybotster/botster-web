@@ -52,6 +52,7 @@ import {
   HOST_CHROME_CONTRACTS,
   htmlAssetUrls,
   isTerminalDetached,
+  sessionDetachIsolationProof,
   latestAcceptedWorkspacesUiTree,
   markupContainsDiagnosticId,
   markupContainsTestId,
@@ -2022,6 +2023,9 @@ assert.match(protocolPlanes, /webrtc_terminal_adapter/);
 assert.match(liveProtocolHarnessScript, /isTerminalDetached/);
 assert.match(liveProtocolHarnessScript, /HOST_CHROME/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalDetached\(page, productionSessionId\)/);
+assert.match(liveProtocolHarnessScript, /proveEntityDrivenProductionDetach/);
+assert.match(liveProtocolHarnessScript, /provePostDetachPeerAndSiblingFamily/);
+assert.equal(typeof sessionDetachIsolationProof, "function");
 assert.doesNotMatch(liveProtocolHarnessScript, /data-terminal-session-id=['"]none['"]/);
 assert.equal(HOST_CHROME.schemaFloorSourcePin, "status.schema_version < 3");
 assert.match(liveProtocolHarnessScript, new RegExp(HOST_CHROME.schemaFloorSourcePin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -10152,6 +10156,8 @@ try {
   {
     const {
       SessionRouteDetachHarness,
+      createSessionDetachTestBridge,
+      createSessionDetachTeardownLedger,
       sessionDetachTestDataPlane
     } = await vite.ssrLoadModule("/src/app/__fixtures__/sessionRouteDetachHarness.tsx");
 
@@ -10191,7 +10197,9 @@ try {
     async function mountDetachProbe(store, initialSessionId, sessionIds) {
       let state;
       let api;
-      const dataPlanes = new Map(sessionIds.map((id) => [id, sessionDetachTestDataPlane(id)]));
+      const ledger = createSessionDetachTeardownLedger();
+      const dataPlanes = new Map(sessionIds.map((id) => [id, sessionDetachTestDataPlane(id, ledger)]));
+      const bridge = createSessionDetachTestBridge(ledger, dataPlanes);
       const rootEl = globalThis.document.createElement("div");
       globalThis.document.body.appendChild(rootEl);
       const root = createRoot(rootEl);
@@ -10200,6 +10208,7 @@ try {
           store,
           initialSessionId,
           dataPlanes,
+          bridge,
           onState: (next) => { state = next; },
           onReady: (next) => { api = next; }
         }));
@@ -10209,6 +10218,7 @@ try {
       return {
         get state() { return state; },
         get api() { return api; },
+        ledger,
         async apply(frame) {
           await act(async () => {
             api.applyEntityFrame(frame);
@@ -10254,6 +10264,9 @@ try {
       assert.equal(probe.state.renderedSessionId, undefined);
       assert.deepEqual(probe.state.sessionIds, ["sess-a", "sess-c"]);
       assert.deepEqual(probe.state.sessionTypeIds, ["type-shell"]);
+      assert.deepEqual(probe.ledger.unmounts, ["sess-a"]);
+      assert.deepEqual(probe.ledger.detaches, ["sess-a"]);
+      assert.deepEqual(probe.ledger.dataPlaneDetaches, ["sess-a"]);
       await probe.unmount();
     }
 
@@ -10270,6 +10283,8 @@ try {
       assert.equal(probe.state.renderedSessionId, undefined);
       assert.deepEqual(probe.state.sessionIds, ["sess-a", "sess-c"]);
       assert.deepEqual(probe.state.sessionTypeIds, ["type-shell"]);
+      assert.deepEqual(probe.ledger.unmounts, ["sess-a"]);
+      assert.deepEqual(probe.ledger.detaches, ["sess-a"]);
       await probe.unmount();
     }
 
@@ -10327,6 +10342,7 @@ try {
       const probe = await mountDetachProbe(store, "sess-a", ["sess-a", "sess-b", "sess-c"]);
       await probe.navigateToSession("sess-b");
       assert.equal(probe.state.renderedSessionId, "sess-b");
+      assert.deepEqual(probe.ledger.unmounts, ["sess-a"]);
       await probe.apply({
         operation: "entity_patch",
         key: { family: "session", id: "sess-a" },
@@ -10339,6 +10355,8 @@ try {
       assert.equal(probe.state.renderedSessionId, "sess-b");
       assert.ok(probe.state.sessionIds.includes("sess-c"));
       assert.deepEqual(probe.state.sessionTypeIds, ["type-shell"]);
+      assert.deepEqual(probe.ledger.unmounts, ["sess-a"]);
+      assert.equal(probe.ledger.unmounts.includes("sess-b"), false);
       await probe.unmount();
     }
 
@@ -10349,6 +10367,7 @@ try {
         sessionRow("sess-c", "running")
       ]);
       const probe = await mountDetachProbe(store, "sess-a", ["sess-a", "sess-c"]);
+      assert.deepEqual(probe.ledger.unmounts, []);
       await probe.apply({
         operation: "entity_remove",
         key: { family: "session", id: "sess-a" }
@@ -10358,6 +10377,7 @@ try {
       assert.equal(probe.state.requiresDetach, false);
       assert.deepEqual(probe.state.sessionIds, ["sess-c"]);
       assert.deepEqual(probe.state.sessionTypeIds, ["type-shell"]);
+      assert.deepEqual(probe.ledger.unmounts, []);
       await probe.unmount();
     }
   }
@@ -10770,6 +10790,27 @@ try {
     }, "web-prod"),
     false
   );
+  assert.equal(sessionDetachIsolationProof({
+    sessionId: "web-prod",
+    sessionRow: { id: "web-prod", lifecycle: "exited" },
+    entityLifecycleEvents: [{ index: 4, lifecycle: "exited" }],
+    processExitEvents: [],
+    detachWait: { exitedObserved: false }
+  }).ok, true);
+  assert.equal(sessionDetachIsolationProof({
+    sessionId: "web-prod",
+    sessionRow: { id: "web-prod", lifecycle: "exited" },
+    entityLifecycleEvents: [{ index: 4, lifecycle: "exited" }],
+    processExitEvents: [],
+    detachWait: { exitedObserved: true }
+  }).ok, false);
+  assert.equal(sessionDetachIsolationProof({
+    sessionId: "web-prod",
+    sessionRow: { id: "web-prod", lifecycle: "running" },
+    entityLifecycleEvents: [],
+    processExitEvents: [{ index: 1 }],
+    detachWait: { exitedObserved: false }
+  }).ok, false);
   markHostChromeContract("terminal-detached");
   markHostChromeContract("dashboard-view");
 

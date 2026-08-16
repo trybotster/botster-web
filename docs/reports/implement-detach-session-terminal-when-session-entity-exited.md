@@ -2,8 +2,18 @@
 
 Ticket: `ticket_1786848959_308437`
 Run: `run_1786848964_511286`
-Step: `botster_stack_implement` / `run_step_1786849920_835399`
+Step: `botster_stack_implement` / `run_step_1786851545_429190`
 Plan: `docs/plans/detach-session-terminal-when-session-entity-exited.md`
+
+## Review return
+
+Review `review_1786851532_276855` sent Implement back after `6f68632`. Three findings:
+
+| Finding | Response |
+| --- | --- |
+| `finding_1786851532_802262` Live proof does not isolate entity-driven detach | Default live sequence now requires the Hub session row `lifecycle` `exited` or `failed`, records entity versus `process_exit` order, and fails if `exitedObserved` is true or if `process_exit` precedes the entity event. Both consecutive runs isolated `web-prod` with `lifecycle=exited`, `processExitEventCount=0`, and `exitedObserved=false`. After detach, the same peer answered `status` and two sibling sessions remained. Route tests now record production-shaped bridge `unmount`/`detach` and data-plane `detach`. |
+| `finding_1786851532_659166` Committed plan leaks a local absolute home path | Replaced the spawn-target home path with a path-neutral phrase. The plan no longer contains a local home path. |
+| `finding_1786851532_140594` New route harness fails lint | Removed unused parameter names. `eslint --quiet` on the new TypeScript files reports zero errors. Full lint still reports two pre-existing `no-useless-assignment` errors in `scripts/live-packaged-protocol-harness.mjs` at lines 6907 and 6925 from base `8c87c35`. Those lines are unchanged on this branch. |
 
 ## Target repository and target_id
 
@@ -72,9 +82,11 @@ Convention conflicts: none.
 - `src/botster/terminalSession.ts` — add `sessionEntityRequiresDetach` for Hub `lifecycle` values `exited` and `failed`; add `isMountedSessionRoute` so both App and tests share the mounted-id guard
 - `src/app/useSessionEntityDetach.ts` — production detach effect used by App
 - `src/App.tsx` — read the mounted session from `runtimeClient.entities.get("session", routeSessionId)` and call `releaseTerminalSession` when that record requires detach; keep `onExit={releaseTerminalSession}`
-- `src/app/__fixtures__/sessionRouteDetachHarness.tsx` — focused `createRoot` harness that uses the production detach helpers, SessionRouteView, and TerminalViewHost `onExit`
-- `src/App.test.mjs` — predicate coverage, App wiring regexes, and route-state races for both first-arrival orders, late A after B, `entity_remove` non-detach, and sibling survival
-- `docs/plans/detach-session-terminal-when-session-entity-exited.md` — approved plan
+- `src/app/__fixtures__/sessionRouteDetachHarness.tsx` — focused `createRoot` harness that uses the production detach helpers and records a teardown ledger
+- `src/App.test.mjs` — predicate coverage, App wiring regexes, route-state races, teardown-ledger assertions, and isolation-helper unit tests
+- `scripts/live-packaged-protocol-helpers.mjs` — `sessionDetachIsolationProof` decision
+- `scripts/live-packaged-protocol-harness.mjs` — entity-driven detach isolation, post-detach peer/sibling proof, and binary `git_head` provenance
+- `docs/plans/detach-session-terminal-when-session-entity-exited.md` — approved plan, path-neutral spawn-target wording, and Review-required isolation acceptance
 - `docs/reports/implement-detach-session-terminal-when-session-entity-exited.md` — this report
 
 ## Ownership boundaries preserved
@@ -100,6 +112,7 @@ Live proof used parent Hub worktree HEAD `bee15e7`. That candidate published `li
 - Parent Hub SHA at proof time is `bee15e7`, not finding-time `23440a4`. The plan required recording the SHA that actually ran. `23440a4` is an ancestor of `bee15e7`.
 - The App detach watch lives in `useSessionEntityDetach`, which App calls. This keeps one detach policy for App and the route-state harness. It is not a product-scope change.
 - This Implement visit commits to the ticket branch and does not merge to `main`. The pipeline merge policy remains direct. Review still has to run. No pull request was opened.
+- Review `review_1786851532_276855` required a discriminating live isolation oracle and a production-shaped teardown ledger. The committed plan acceptance checks now require those proofs.
 
 ## Runtime-teardown lenses
 
@@ -110,9 +123,9 @@ Every lens from [[botster runtime teardown lenses]] is implemented. None was dro
 | Isolation | Detach owns one mounted route session id and its TerminalViewHost. Session A events do not unmount session B. |
 | Bounds | `releaseTerminalSession` is a route change. Unmount already unsubscribes and calls `bridge.unmount`. `waitForTerminalDetached` stays at 15 seconds. No `block_on` or extra drain wait. |
 | Late-message matrix | `entity_patch` / `entity_upsert` with `lifecycle` `exited` or `failed` detaches the mounted id. `entity_remove`, empty snapshot, and missing row do not detach. Late A entity or `process_exit` after B mounts is a no-op. Terminal-plane `process_exit` remains a valid first or late path for the mounted id. |
-| Production-path proof | Two consecutive default-mode `npm run smoke:live-packaged-protocol` runs passed `waitForTerminalDetached` after `botster-web-production-exit` and `ShutdownSession`. |
+| Production-path proof | Two consecutive default-mode `npm run smoke:live-packaged-protocol` runs passed `waitForTerminalDetached` after `botster-web-production-exit` and `ShutdownSession`, then isolated entity-driven detach: Hub row `lifecycle=exited`, no `process_exit`, `exitedObserved=false`. |
 | Ownership identity | Web detaches by mounted route `sessionId`. Terminal-plane ownership stays on the host generation. |
-| Sibling and fail-closed | After A detaches, sibling session C and a held `session_type` family remain. The peer is not closed. On detach failure the 15-second oracle fails the harness; siblings stay up. |
+| Sibling and fail-closed | After A detaches, sibling session C and a held `session_type` family remain in route tests. Live proof then issued a same-peer `status` request and observed two remaining sibling sessions. The peer is not closed. On detach failure the 15-second oracle fails the harness; siblings stay up. |
 
 ## Tests and downstream proof run
 
@@ -121,6 +134,8 @@ Charter gates:
 - `npm run typecheck` — pass
 - `npm test` — pass
 - `npm run build` — pass, as part of each live smoke
+- `eslint --quiet` on new TypeScript files — zero errors
+- Full `npm run lint` — two pre-existing harness `no-useless-assignment` errors on unchanged base lines 6907 and 6925
 
 Route-state `createRoot` + `act` tests prove:
 
@@ -139,10 +154,10 @@ BOTSTER_SESSION_WORKER_BIN=<core-fc541a59-session-worker> \
 npm run smoke:live-packaged-protocol
 ```
 
-| Run | Exit | Alternate-screen cycle 0 | Detach |
+| Run | Exit | Alternate-screen cycle 0 | Detach isolation |
 | --- | --- | --- | --- |
-| 1 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `waitForTerminalDetached` reached; harness passed `(webrtc)` |
-| 2 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `waitForTerminalDetached` reached; harness passed `(webrtc)` |
+| 1 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `lifecycle=exited`, `processExitEventCount=0`, `exitedObserved=false`, same-peer `status`, 2 sibling sessions |
+| 2 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `lifecycle=exited`, `processExitEventCount=0`, `exitedObserved=false`, same-peer `status`, 2 sibling sessions |
 
 Recorded SHAs:
 
@@ -153,8 +168,8 @@ Recorded SHAs:
 
 ## Unverified behavior or residual risk
 
-- The live pair proves one exited production session on the packaged peer. Request-race, ownership identity, and sibling isolation are proved by the route-state tests, not by a two-session live pair.
-- The live pair does not inspect the raw Hub entity row after `ShutdownSession`. The candidate allowed detach, so no Hub ticket was registered.
+- The live pair now inspects the Hub session row and the raw `entity_patch` order. It does not mount two first-party Restty hosts at once. Multi-session race coverage remains in the route-state tests.
+- Live `session_type` rows are empty after the harness session-type CRUD cleanup. Sibling proof on the live pair uses remaining session rows plus a same-peer `status` request.
 - `local WebRTC data channel close failed: data channel closed` still appears during harness teardown. That is existing peer-close noise, not this detach path.
 
 ## Missing vault guidance discovered
