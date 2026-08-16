@@ -128,7 +128,7 @@ Fail-closed driver:
 - data dir only → exit 1
 - `BOTSTER_LIVE_SHARED_HUB_DRIVER=1` + `BOTSTER_SHARED_SESSION_ID` → exit 1
 
-Live caller-owned proof (twice):
+Live caller-owned proof (three runs):
 
 ```sh
 BOTSTER_HUB_BIN=<hub debug at c72712e> \
@@ -143,7 +143,7 @@ npm run smoke:live-packaged-protocol:shared-session
 | 2 (`55a81af`) | 0 | ~763s | `got 0` | three `live-shared-session-cancel-passed` with `detach_count: 1` |
 | 3 (review return) | 0 | ~1532s | `got 0` | three `live-shared-session-cancel-passed` with `detach_count: 1` |
 
-Both runs printed:
+All three runs printed:
 
 - `live-shared-session-cancel-ablation-passed` with first failure `got 0`
 - two `live-shared-session-keep-alive-passed`
@@ -163,4 +163,4 @@ Both runs printed:
 
 ## Missing vault guidance discovered
 
-Captured inbox note: in-flight cancel can emit 0 or 2 Web Detaches when stream `unsubscribe` and public `detach()` are separate owners, and when `subscribeOutput` or a new attach clears the once-flag. Path: `~/knowledge/inbox/in-flight-cancel-needs-one-web-detach-owner.md`.
+Captured durable note: [[in-flight cancel needs one Web Detach owner]] — in-flight cancel can emit 0 or 2 Web Detaches when stream `unsubscribe` and public `detach()` are separate owners, and when `subscribeOutput` or a new attach clears the once-flag.
