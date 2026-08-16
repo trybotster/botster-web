@@ -183,15 +183,17 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     state.inputSubscription?.unsubscribe();
     state.inputSubscription = undefined;
 
-    if (state.dataPlane?.detach) {
-      await state.dataPlane.detach();
+    try {
+      if (state.dataPlane?.detach) {
+        await state.dataPlane.detach();
+      }
+    } finally {
+      state.dataPlane = undefined;
+      state.outputSubscription?.unsubscribe();
+      state.rendererDataPlaneSubscription?.unsubscribe();
+      state.outputSubscription = undefined;
+      state.rendererDataPlaneSubscription = undefined;
     }
-    state.dataPlane = undefined;
-
-    state.outputSubscription?.unsubscribe();
-    state.rendererDataPlaneSubscription?.unsubscribe();
-    state.outputSubscription = undefined;
-    state.rendererDataPlaneSubscription = undefined;
   }
 
   async unmount(descriptor: TerminalViewDescriptor, mount?: TerminalViewMount): Promise<void> {
@@ -201,9 +203,12 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
       return;
     }
 
-    await this.detach(descriptor);
-    await state.renderer.destroy();
-    this.mounts.delete(descriptor.sessionId);
+    try {
+      await this.detach(descriptor);
+    } finally {
+      await state.renderer.destroy();
+      this.mounts.delete(descriptor.sessionId);
+    }
   }
 
   async resize(

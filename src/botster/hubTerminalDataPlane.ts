@@ -80,6 +80,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private detached = false;
   private transportLost = false;
   private attachmentGeneration = 0;
+  private detachSentForSubscriptionId: string | undefined;
   private hydration: ScreenHydration | undefined;
   private restoredVisibleScreenGeneration: number | undefined;
   private modeFlags: DaemonModeFlags | undefined;
@@ -373,6 +374,10 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.statusListeners.clear();
     this.uninstallLifecycleListener();
 
+    if (this.detachSentForSubscriptionId === this.subscriptionId) {
+      return;
+    }
+    this.detachSentForSubscriptionId = this.subscriptionId;
     await this.options.bridge.request({
       type: "detach",
       session_id: this.sessionId,
@@ -551,6 +556,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       return;
     }
     this.streamSubscription = streamSubscription;
+    this.detachSentForSubscriptionId = undefined;
     recordLiveHarnessTerminal("attach", {
       attempt: 1,
       generation: attachmentGeneration,
@@ -594,7 +600,11 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   private closeStream(): void {
-    this.streamSubscription?.unsubscribe();
+    const stream = this.streamSubscription;
+    if (stream) {
+      this.detachSentForSubscriptionId = this.subscriptionId;
+      stream.unsubscribe();
+    }
     this.streamSubscription = undefined;
     this.attachPromise = undefined;
     this.attachmentGeneration += 1;

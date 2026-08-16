@@ -2725,10 +2725,12 @@ assert.match(hubTerminalDataPlane, /reader_cancel/);
 assert.match(hubTerminalDataPlane, /ablateCancelDetach/);
 assert.match(hubTerminalDataPlane, /if \(this\.detached\) return;/);
 assert.match(hubTerminalDataPlane, /listeners\.size === 0 && !this\.detached\) \{\s*this\.closeStream\(\);/);
+assert.match(hubTerminalDataPlane, /detachSentForSubscriptionId === this\.subscriptionId/);
 assert.match(
   terminal,
-  /state\.inputSubscription\?\.unsubscribe\(\);\s*state\.inputSubscription = undefined;\s*if \(state\.dataPlane\?\.detach\) \{\s*await state\.dataPlane\.detach\(\);/s
+  /try \{\s*if \(state\.dataPlane\?\.detach\) \{\s*await state\.dataPlane\.detach\(\);\s*\}\s*\} finally \{/s
 );
+assert.match(terminal, /try \{\s*await this\.detach\(descriptor\);\s*\} finally \{/s);
 assert.match(liveProtocolHarnessScript, /expected exactly one detach for held subscription/);
 assert.match(liveSharedSessionCoordinatorScript, /BOTSTER_LIVE_ABLATE_CANCEL_DETACH/);
 assert.match(liveSharedSessionCoordinatorScript, /assertCancelAblation/);
@@ -8350,7 +8352,10 @@ terminalStatusSubscription.unsubscribe();
 assert.equal(bridgeTerminalStreams.some((stream) => stream.sessionId === activeHubSessionId), true);
 assert.equal(bridgeRequests.some((request) => request.type === "send_input" && request.data === "ping\n"), true);
 assert.equal(bridgeRequests.some((request) => request.type === "resize" && request.rows === 24 && request.cols === 80), true);
-assert.equal(bridgeRequests.some((request) => request.type === "detach"), true);
+assert.equal(
+  bridgeRequests.filter((request) => request.type === "detach").length,
+  detachRequestsBeforeListenerClose
+);
 assert.equal(bridgeRequests.some((request) => request.type === "read_mode_flags"), true);
 assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
 assert.equal(terminalInstalls.length >= 1, true);
@@ -8396,6 +8401,16 @@ assert.equal(terminalStatuses.some((status) => status.state === "attached" && st
     detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
     [{ type: "detach", subscription_id: "last-listener-one-detach-sub", source: "stream" }]
   );
+  const statuses = [];
+  plane.subscribeStatus((status) => statuses.push(status));
+  const statusCountBeforeDetach = statuses.length;
+  await plane.detach();
+  await plane.detach();
+  assert.deepEqual(
+    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
+    [{ type: "detach", subscription_id: "last-listener-one-detach-sub", source: "stream" }]
+  );
+  assert.equal(statuses.length, statusCountBeforeDetach);
 }
 
 {
@@ -8465,6 +8480,89 @@ assert.equal(terminalStatuses.some((status) => status.state === "attached" && st
     detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
     [{ type: "detach", subscription_id: subscriptionId, source: "request" }]
   );
+}
+
+{
+  const detachRequests = [];
+  const sessionId = "bridge-unmount-reject-cleanup";
+  const subscriptionId = "bridge-unmount-reject-cleanup-sub";
+  let outputUnsubscribed = false;
+  let destroyCount = 0;
+  const plane = createHubTerminalDataPlane({
+    sessionId,
+    subscriptionId,
+    bridge: {
+      async request(request) {
+        if (request.type === "detach") {
+          detachRequests.push({ ...request, source: "request" });
+          throw new Error("detach transport lost");
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal(nextSessionId, nextSubscriptionId) {
+        return {
+          unsubscribe() {
+            detachRequests.push({
+              type: "detach",
+              session_id: nextSessionId,
+              subscription_id: nextSubscriptionId,
+              source: "stream"
+            });
+          },
+          abandon() {}
+        };
+      }
+    }
+  });
+  const viewBridge = new DefaultTerminalViewBridge(() => ({
+    mount() {},
+    attachDataPlane(dataPlane) {
+      const subscription = dataPlane.subscribeOutput(() => undefined);
+      return {
+        unsubscribe() {
+          outputUnsubscribed = true;
+          subscription.unsubscribe();
+        }
+      };
+    },
+    onInput() {
+      return { unsubscribe() {} };
+    },
+    write() {},
+    resize() {},
+    focus() {},
+    destroy() {
+      destroyCount += 1;
+    }
+  }));
+  const descriptor = { sessionId, renderer: "restty" };
+  const container = {
+    dataset: {},
+    childNodes: [],
+    appendChild() {
+      return undefined;
+    },
+    remove() {
+      return undefined;
+    },
+    querySelector() {
+      return null;
+    }
+  };
+  await viewBridge.mount(container, descriptor);
+  await viewBridge.attach(descriptor, plane);
+  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+  await assert.rejects(viewBridge.unmount(descriptor), /detach transport lost/);
+  for (let i = 0; i < 4; i += 1) await flushMicrotasks();
+  assert.equal(outputUnsubscribed, true);
+  assert.equal(destroyCount, 1);
+  assert.deepEqual(
+    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
+    [{ type: "detach", subscription_id: subscriptionId, source: "request" }]
+  );
+  await viewBridge.unmount(descriptor);
+  assert.equal(destroyCount, 1);
+  assert.equal(detachRequests.length, 1);
 }
 
 const readbackRequests = [];

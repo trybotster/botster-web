@@ -76,7 +76,7 @@ export function TerminalViewHost({
       .then(async (nextMount) => {
         mount = nextMount;
         if (cancelled) {
-          await bridge.unmount(descriptor, mount);
+          await bridge.unmount(descriptor, mount).catch(() => undefined);
           return;
         }
 
@@ -100,7 +100,7 @@ export function TerminalViewHost({
         setMountDiagnostic(error instanceof Error ? error.message : String(error));
         onDiagnosticRef.current?.(error);
         if (mount) {
-          void bridge.unmount(descriptor, mount);
+          void bridge.unmount(descriptor, mount).catch(() => undefined);
         }
       });
 
@@ -109,7 +109,7 @@ export function TerminalViewHost({
       statusSubscription?.unsubscribe();
       uninstallLiveHarnessTerminalControls?.();
       if (mount) {
-        void bridge.unmount(descriptor, mount);
+        void bridge.unmount(descriptor, mount).catch(() => undefined);
       }
     };
   }, [bridge, descriptor, terminalDataPlane]);

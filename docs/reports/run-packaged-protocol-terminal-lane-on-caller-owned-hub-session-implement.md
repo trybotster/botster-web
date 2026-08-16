@@ -2,7 +2,7 @@
 
 Ticket: `ticket_1786868596_331812`
 Run: `run_1786868607_597988`
-Step: `botster_stack_implement` / `run_step_1786899762_819757`
+Step: `botster_stack_implement` / `run_step_1786900505_919709`
 Plan: `docs/plans/run-packaged-protocol-terminal-lane-on-caller-owned-hub-session.md` revision 4
 Product decision: `question_1786868962_323590` option **C**
 
@@ -15,8 +15,9 @@ Product decision: `question_1786868962_323590` option **C**
 | Spawn-target name | `booster-web` (display typo; Git identity is `trybotster/botster-web`) |
 | Branch | `project-pipelines/ticket_1786868596_331812` |
 | Web base | `30d961cd78154ad95477c46cb9410b4b8edae48f` |
-| Hub at live proof | `60b79b814df0af234c8b4d6429b6c577b52c6dd6` (`origin/main`) |
-| Core pin | `fc541a59338d0591ba4fb3fa522a030d212d26d0` |
+| Hub at live proof | `c72712e2606b8abe77e1b91c2a736791036fadd8` (descendant of `60b79b8`) |
+| Session worker at live proof | Hub-tree debug `botster-session-worker` paired with that Hub |
+| Lockfile Core pin | `fc541a59338d0591ba4fb3fa522a030d212d26d0` |
 | Session id | `north-star-shared` |
 | Teardown class | yes |
 | Merge policy | direct into `main`; no PR |
@@ -67,6 +68,7 @@ Targeted notes:
 - `src/App.test.mjs`
 - `src/botster/hubTerminalDataPlane.ts`
 - `src/botster/terminal.ts`
+- `src/botster/TerminalViewHost.tsx`
 - `docs/reports/run-packaged-protocol-terminal-lane-on-caller-owned-hub-session-implement.md`
 
 ## Ownership boundaries preserved
@@ -75,7 +77,7 @@ This run stayed in `botster-web`. It did not edit Hub, TUI, or Core. IsolatedHub
 
 ## Cross-repo dependencies or separately routed work
 
-None opened. Parent Hub ticket already depends on this Web target. Live proof used current Hub main and the lockfile Core worker. No Hub or Core defect required a new ticket.
+None opened. Parent Hub ticket already depends on this Web target. A first live attempt pairing Hub `c72712e` with the lockfile Core `fc541a5` worker failed at shared-session spawn (`spawn_failed` before start). The successful coordinator used the Hub tree's matching debug session-worker. No Hub or Core ticket was opened.
 
 ## Review return
 
@@ -92,12 +94,21 @@ Review `review_1786899753_646191` sent Implement back after `71d5ee9`:
 | --- | --- |
 | `finding_1786899753_286268` Last output unsubscribe no longer releases the server subscription | Last output listener calls `closeStream()` again, so WebRTC `stream.unsubscribe()` sends Detach. `DefaultTerminalViewBridge.detach` now stops input, calls `dataPlane.detach()` once, then releases renderer/output subscriptions after the plane has cleared the stream. Unit test `last-listener-one-detach` expects exactly one stream Detach and no later request. Unit test `bridge-unmount-one-detach` expects exactly one request Detach and no stream Detach. |
 
+Review `review_1786900496_133407` sent Implement back after `3a683df`:
+
+| Finding | Response |
+| --- | --- |
+| `finding_1786900496_948548` Sequential public cleanup can send two Detach requests | `closeStream()` records `detachSentForSubscriptionId`. Later `detach()` still clears listeners, status, and the lifecycle listener, but skips a second request for that subscription. A new attach clears the mark. Unit `last-listener-one-detach` now unsubscribes, then `detach()` twice, and still records one stream Detach. |
+| `finding_1786900496_305971` A rejected Detach request stops local view cleanup | `DefaultTerminalViewBridge.detach` and `unmount` use `finally` so the data-plane reference, output subscriptions, renderer, and mount map are released after a rejected Detach. Fire-and-forget `TerminalViewHost` unmounts catch the rejection. Unit `bridge-unmount-reject-cleanup` proves one request Detach, output unsubscribe, renderer destroy, mount removal, and no second Detach. |
+| `finding_1786900496_203307` The changed production unmount order has no live proof | Re-ran the complete shared-session coordinator after these teardown fixes. Exit 0 in 577s. Ablation first failure `got 0`. Two keep-alives and the exit pass each record `detach_count: 1`. |
+
 ## Deviations from plan
 
 1. Opt-in exit pass uses `proveSharedSessionExitDetach` instead of IsolatedHub `proveEntityDrivenProductionDetach`. Producer exit delivers `process_exit` before the session-entity patch. That is a valid first-arriving detach path. IsolatedHub entity-only isolation is unchanged.
 2. Shared session remounts after `proveExternalSessionLifecycle` because reload cycles 1 and 2 are skipped. IsolatedHub remounts inside those cycles.
 3. Exclusive IsolatedHub modes (`BOTSTER_LIVE_SURFACE_ONLY`, contract matrix, entity-options, Workspaces lifecycle, durable, require-workspaces) fail closed with this lane so they cannot `requestDaemonShutdown` the caller Hub.
 4. Merge to `main` waits for Review/Verify. Implement commits on the ticket branch and does not create a PR.
+5. Live coordinator on this return used the Hub-tree debug session-worker with Hub `c72712e`. The lockfile Core `fc541a5` worker failed spawn against that Hub.
 
 ## Runtime-teardown lenses implemented
 
@@ -106,7 +117,7 @@ Review `review_1786899753_646191` sent Implement back after `71d5ee9`:
 | Isolation | DataChannel close / Detach retires this client's subscription and decoder. Default path keeps `north-star-shared` running. Sibling flood sessions stay independent. Opt-in exit ends only the supplied session; the coordinator Hub stays up until coordinator shutdown. |
 | Bounds | Snapshot hold is released in `finally`. Driver does not `block_on` Hub close. Coordinator bounds Hub shutdown. Missing `local_url` / HTML shell fails closed after a 15s retry. |
 | Late-message matrix | Attach/Detach/Hello/input/resize stay on the production DataPlane. Default path forbids `shutdown_session` for the supplied id. Detach is idempotent on one plane. Late Home unmount cannot `ShutdownSession`. |
-| Production-path proof | Cancel: Home unmount → `armSnapshotInstallHold` → remount → new `snapshot_install_held` → Home → `TerminalViewHost` cleanup → `DefaultTerminalViewBridge.unmount` → stop input → `HubTerminalDataPlane.detach` (one request Detach + decoder cancel) → then release output subscriptions. Standalone last-listener `unsubscribe` uses `closeStream()` (stream Detach). Reconnect: in-page `closeDataChannel` on a surviving document. Exit: producer exit → ProcessExited and entity `exited` → `waitForTerminalDetached`. |
+| Production-path proof | Cancel: Home unmount → `armSnapshotInstallHold` → remount → new `snapshot_install_held` → Home → `TerminalViewHost` cleanup → `DefaultTerminalViewBridge.unmount` (`finally` destroys renderer) → stop input → `HubTerminalDataPlane.detach` (one request Detach + decoder cancel, even if the request rejects) → then release output subscriptions. Standalone last-listener `unsubscribe` uses `closeStream()` (stream Detach). A later `detach()` on the same subscription is local cleanup only. Reconnect: in-page `closeDataChannel` on a surviving document. Exit: producer exit → ProcessExited and entity `exited` → `waitForTerminalDetached`. |
 | Ownership identity | Core identity is session + subscription + generation. Cancel remount requires a new `subscription_id`. Baseline completed subscription is not treated as the held one. |
 | Sibling fail-closed | Successful close keeps the supplied session running. Flood sibling isolation still runs. Opt-in exit ends this session only. |
 
@@ -119,7 +130,7 @@ npm run build
 npm run lint
 ```
 
-`npm test`, `typecheck`, `build`, and `lint` exit 0 after `finding_1786899753_286268`. Lint still reports only the pre-existing `react-refresh/only-export-components` warnings.
+`npm test`, `typecheck`, `build`, and `lint` exit 0 after `finding_1786900496_948548` / `305971` / `203307`. Lint still reports only the pre-existing `react-refresh/only-export-components` warnings.
 
 Fail-closed driver (no Chromium):
 
@@ -130,15 +141,15 @@ Fail-closed driver (no Chromium):
 - `BOTSTER_LIVE_SHARED_HUB_DRIVER=1` plus shared session id → exit 1
 - `BOTSTER_LIVE_ALLOW_SURFACE_SKIP=1` → exit 1
 
-Standalone live coordinator:
+Standalone live coordinator after the teardown fixes:
 
 ```sh
-BOTSTER_HUB_BIN=<hub-main 60b79b8> \
-BOTSTER_SESSION_WORKER_BIN=<lockfile Core fc541a5> \
+BOTSTER_HUB_BIN=<hub debug at c72712e> \
+BOTSTER_SESSION_WORKER_BIN=<matching hub-tree debug session-worker> \
 npm run smoke:live-packaged-protocol:shared-session
 ```
 
-Result: exit 0 in 572s after Review return.
+Result: exit 0 in 577s.
 
 | Marker | Count / value |
 | --- | --- |
@@ -146,7 +157,7 @@ Result: exit 0 in 572s after Review return.
 | `live-shared-session-keep-alive-passed` | 2, session `north-star-shared` |
 | `live-shared-session-cancel-passed` | 3, each with `detach_count: 1` |
 | `live-shared-session-terminal-lane-passed` | 3 |
-| `live-shared-session-exit-passed` | 1, `process_exit=true`, `entity_lifecycle=exited`, dashboard present, terminal gone |
+| `live-shared-session-exit-passed` | 1, `process_exit=true`, entity proof `lifecycle=exited`, `process_exit_before_entity=true` |
 | `live-shared-session-coordinator-passed` | `keep_alive_runs=2`, `cancel_ablation=true`, `exit_pass=true` |
 | Workspaces early-exit summary | absent |
 | IsolatedHub completion string | absent |
@@ -158,7 +169,7 @@ Hello still required `webrtc_terminal_adapter` and `terminal_subscription_closed
 
 - Opt-in exit observed ProcessExited before the entity patch. Entity-only IsolatedHub isolation was not reused for that pass.
 - Coordinator `requestDaemonShutdown` after the exit pass is coordinator-owned Hub teardown, not the driver default path.
-- This return did not re-run the live coordinator. The mounted cancel path still issues one request Detach; the order is now detach-then-unsubscribe. Last-listener Detach is unit-proved via `stream.unsubscribe`. A non-bridge caller that unsubscribes the last listener and then calls `dataPlane.detach()` can still emit a stream Detach plus a request Detach. Production `DefaultTerminalViewBridge` does not do that.
+- Live coordinator used the Hub-tree debug session-worker, not the lockfile Core `fc541a5` worker, because that pairing failed at spawn.
 
 ## Missing vault guidance discovered
 
