@@ -2,17 +2,32 @@
 
 import { useEffect } from "react";
 
-import { sessionEntityRequiresDetach } from "../botster/terminalSession";
+import {
+  sessionEntityRequiresDetach,
+  sessionRecordForRoute
+} from "../botster/terminalSession";
 
 export function useSessionEntityDetach(
   sessionId: string | undefined,
-  sessionRecord: Record<string, unknown> | undefined,
+  entities: {
+    get(family: string, id: string): Record<string, unknown> | undefined;
+    list(family: string): Record<string, unknown>[];
+  },
+  hub: {
+    onFrame(handler: (frame?: unknown) => void): () => void;
+  },
   releaseTerminalSession: (sessionId: string) => void
 ): void {
-  const requiresDetach = sessionEntityRequiresDetach(sessionRecord);
-
   useEffect(() => {
-    if (!sessionId || !requiresDetach) return;
-    releaseTerminalSession(sessionId);
-  }, [sessionId, requiresDetach, releaseTerminalSession]);
+    if (!sessionId) return;
+
+    const tryRelease = () => {
+      if (sessionEntityRequiresDetach(sessionRecordForRoute(entities, sessionId))) {
+        releaseTerminalSession(sessionId);
+      }
+    };
+
+    tryRelease();
+    return hub.onFrame(tryRelease);
+  }, [entities, hub, releaseTerminalSession, sessionId]);
 }

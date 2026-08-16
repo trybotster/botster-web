@@ -125,7 +125,7 @@ Current Web production path:
 ## Scope
 
 1. Add a Hub-authored predicate for a session entity that requires detach. Use `DaemonSessionEntity.lifecycle` values `exited` and `failed`. Do not infer from `registry_state`. Do not invent a local heuristic.
-2. In `App.tsx`, read the mounted session from the full `session` family, not from `currentDashboardSessions`. When that record requires detach, call the existing `releaseTerminalSession`.
+2. In `App.tsx`, watch Hub frames for the mounted session id. Resolve that row from the full `session` family by `id`, `session_uuid`, or `session_id`, not from `currentDashboardSessions`. When that record requires detach, call the existing `releaseTerminalSession`.
 3. Keep `TerminalViewHost` `onExit={releaseTerminalSession}` for terminal-plane `process_exit`.
 4. Keep attachment `failed` as a detach path.
 5. Keep Restty unmount as the existing `TerminalViewHost` cleanup. Do not add a second renderer teardown.
@@ -248,7 +248,7 @@ Run that command twice. Both runs must:
 - call `ShutdownSession`
 - pass `waitForTerminalDetached` for that session
 - require the matching Hub session entity `lifecycle` `exited` or `failed`
-- prove terminal-plane `process_exit` did not cause that accepted detach (`exitedObserved` stays false and no `process_exit` is recorded before destination detach)
+- prove terminal-plane `process_exit` did not cause that accepted detach (`exitedObserved` stays false and the first shared `events` ledger `process_exit` does not precede the entity `exited`/`failed` frame)
 - record raw entity versus `process_exit` event order plus Hub and worker git provenance
 - after detach, prove the same WebRTC peer still answers a `status` request and a sibling session or held `session_type` family remains
 

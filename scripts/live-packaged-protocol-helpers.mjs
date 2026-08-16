@@ -101,25 +101,26 @@ export function sessionDetachIsolationProof({
   const processExitCausedDetach = detachWait?.exitedObserved === true;
   const entityEvents = Array.isArray(entityLifecycleEvents) ? entityLifecycleEvents : [];
   const processExits = Array.isArray(processExitEvents) ? processExitEvents : [];
-  const processExitBeforeDetach = processExits.some((entry) =>
+  const firstEntityIndex = entityEvents[0]?.index;
+  const processExitBeforeEntity = processExits.some((entry) =>
     typeof entry?.index === "number" &&
-    typeof entityEvents[0]?.index === "number" &&
-    entry.index < entityEvents[0].index
+    typeof firstEntityIndex === "number" &&
+    entry.index < firstEntityIndex
   );
   return {
     ok: Boolean(
       sessionId &&
       entityDriven &&
       !processExitCausedDetach &&
-      !processExitBeforeDetach &&
-      entityEvents.length > 0
+      entityEvents.length > 0 &&
+      !processExitBeforeEntity
     ),
     sessionId,
     lifecycle,
     processExitCausedDetach,
-    processExitBeforeDetach,
-    entityLifecycleEventCount: entityEvents.length,
-    processExitEventCount: processExits.length
+    processExitBeforeEntity,
+    processExitEventCount: processExits.length,
+    entityLifecycleEventCount: entityEvents.length
   };
 }
 

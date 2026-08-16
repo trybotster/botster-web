@@ -23,6 +23,22 @@ export function isMountedSessionRoute(
   return route?.view === "session" && route.sessionId === sessionId;
 }
 
+export function sessionRecordForRoute(
+  entities: {
+    get(family: string, id: string): Record<string, unknown> | undefined;
+    list(family: string): Record<string, unknown>[];
+  },
+  sessionId: string
+): Record<string, unknown> | undefined {
+  const exact = entities.get("session", sessionId);
+  if (exact) return exact;
+  return entities.list("session").find((record) =>
+    record.id === sessionId ||
+    record.session_uuid === sessionId ||
+    record.session_id === sessionId
+  );
+}
+
 export function sessionDisplayTitle(record: Record<string, unknown>): string {
   return typeof record.session_uuid === "string"
     ? record.session_uuid

@@ -951,7 +951,7 @@ const app = [appShell, ...appFeatureSources]
 assert.match(appShell, /currentDashboardSessions\(/);
 assert.match(appFeatureSources.join("\n"), /export function currentDashboardSessions/);
 assert.match(appFeatureSources.join("\n"), /export function useSessionEntityDetach/);
-assert.match(appFeatureSources.join("\n"), /sessionEntityRequiresDetach\(sessionRecord\)/);
+assert.match(appFeatureSources.join("\n"), /sessionEntityRequiresDetach\(sessionRecordForRoute\(entities, sessionId\)\)/);
 assert.match(appShell, /from "\.\/app\/dashboardSessions"/);
 assert.match(appFeatureSources.join("\n"), /lifecycle_class === "current"/);
 assert.doesNotMatch(appShell, /export function appRouteFromPathname/);
@@ -1680,8 +1680,9 @@ assert.match(app, /dataPlane=\{terminalDataPlane\}/);
 assert.match(app, /onAttachmentStatus=\{recordTerminalAttachmentStatus\}/);
 assert.match(app, /onExit=\{releaseTerminalSession\}/);
 assert.match(app, /useSessionEntityDetach/);
-assert.match(appShell, /runtimeClient\.entities\.get\("session", routeSessionId\)/);
-assert.match(appShell, /useSessionEntityDetach\(routeSessionId, mountedSessionRecord, releaseTerminalSession\)/);
+assert.match(appShell, /useSessionEntityDetach\(\s*routeSessionId,\s*runtimeClient\.entities,\s*runtimeClient\.hub,\s*releaseTerminalSession\s*\)/);
+assert.match(appFeatureSources.join("\n"), /sessionRecordForRoute\(entities, sessionId\)/);
+assert.match(appFeatureSources.join("\n"), /hub\.onFrame\(tryRelease\)/);
 assert.match(appShell, /isMountedSessionRoute\(activeRoute, sessionId\)/);
 assert.doesNotMatch(appShell, /sessionEntityRequiresDetach\(currentDashboardSessions/);
 assert.doesNotMatch(appShell, /entity_remove/);
@@ -1984,7 +1985,8 @@ assert.match(liveProtocolHarnessScript, /const attachProbe = "botster-web-produc
 assert.match(liveProtocolHarnessScript, /\$\{attachProbe\}-/);
 assert.match(liveProtocolHarnessScript, /sequence: initialEvents\.map/);
 assert.doesNotMatch(liveProtocolHarnessScript, /unwrappedReadScreenText|replace\(\/\[\\r\\n\]\//);
-assert.match(liveProtocolHarnessScript, /package_version: packageVersion/);
+assert.match(liveProtocolHarnessScript, /lock_core_rev: lockCoreRev/);
+assert.match(liveProtocolHarnessScript, /hub_lock_core_rev: lockCoreRev/);
 assert.doesNotMatch(webrtcDaemonClient, /terminal_stream_batch/);
 assert.match(webrtcDaemonClient, /terminal_stream_error/);
 assert.match(liveProtocolHarnessScript, /page\.reload/);
@@ -2521,7 +2523,8 @@ assert.match(liveProtocolHarnessScript, /@trybotster\/hub-test-support/);
 assert.match(liveProtocolHarnessScript, /materializePluginContractMatrixFixture/);
 assert.match(liveProtocolHarnessScript, /assertTerminalAttachChronology/);
 assert.match(liveProtocolHarnessScript, /event\.type === "attach_state" \? `\$\{event\.type\}:\$\{event\.state\}`/);
-assert.match(liveProtocolHarnessScript, /binaryProvenanceFor/);
+assert.match(liveProtocolHarnessScript, /loadBinaryProvenance/);
+assert.match(liveProtocolHarnessScript, /lockPackageRevision/);
 assert.match(liveProtocolHarnessScript, /requiredProvenanceField\(compatibility, "protocol"/);
 assert.match(liveProtocolHarnessScript, /if \(!sharedHubDriverMode\)/);
 assert.match(liveProtocolHarnessScript, /live packaged protocol binary provenance/);
@@ -9934,7 +9937,7 @@ try {
       replaceAcceptedSurface
     },
     { configurationFieldType, configurationSaveAction, configurationSubmitValues },
-    { isAttachableSession, isMountedSessionRoute, sessionDisplayStatus, sessionDisplayTitle, sessionEntityRequiresDetach },
+    { isAttachableSession, isMountedSessionRoute, sessionDisplayStatus, sessionDisplayTitle, sessionEntityRequiresDetach, sessionRecordForRoute },
     { UiNodeSurface },
     { sessionBindingVariantSnapshot },
     { pluginSurfaceActionRequest },
@@ -10152,6 +10155,16 @@ try {
   assert.equal(isMountedSessionRoute({ view: "session", sessionId: "sess-a" }, "sess-a"), true);
   assert.equal(isMountedSessionRoute({ view: "session", sessionId: "sess-b" }, "sess-a"), false);
   assert.equal(isMountedSessionRoute({ view: "dashboard" }, "sess-a"), false);
+  {
+    const store = createInMemoryEntityFrameStore([{
+      operation: "entity_snapshot",
+      family: "session",
+      records: [{ id: "uuid-a", session_uuid: "uuid-a", session_id: "web-prod", lifecycle: "exited" }]
+    }]);
+    assert.equal(sessionRecordForRoute(store, "uuid-a")?.lifecycle, "exited");
+    assert.equal(sessionRecordForRoute(store, "web-prod")?.id, "uuid-a");
+    assert.equal(sessionRecordForRoute(store, "missing"), undefined);
+  }
 
   {
     const {
@@ -10809,6 +10822,20 @@ try {
     sessionRow: { id: "web-prod", lifecycle: "running" },
     entityLifecycleEvents: [],
     processExitEvents: [{ index: 1 }],
+    detachWait: { exitedObserved: false }
+  }).ok, false);
+  assert.equal(sessionDetachIsolationProof({
+    sessionId: "web-prod",
+    sessionRow: { id: "web-prod", lifecycle: "exited" },
+    entityLifecycleEvents: [{ index: 4, lifecycle: "exited" }],
+    processExitEvents: [{ index: 8 }],
+    detachWait: { exitedObserved: false }
+  }).ok, true);
+  assert.equal(sessionDetachIsolationProof({
+    sessionId: "web-prod",
+    sessionRow: { id: "web-prod", lifecycle: "exited" },
+    entityLifecycleEvents: [{ index: 8, lifecycle: "exited" }],
+    processExitEvents: [{ index: 4 }],
     detachWait: { exitedObserved: false }
   }).ok, false);
   markHostChromeContract("terminal-detached");

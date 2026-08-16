@@ -7690,13 +7690,33 @@ async function waitForTerminalDetached(page, sessionId, { timeoutMs = 15_000 } =
   }
 
   const sessionContainerPresent = lastSessionContainerIds.includes(sessionId);
+  const entityEvidence = await page.evaluate(({ expectedSessionId }) => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ ?? {};
+    const sessions = typeof harness.listEntities === "function" ? harness.listEntities("session") : [];
+    const row = sessions.find((record) =>
+      record.id === expectedSessionId ||
+      record.session_uuid === expectedSessionId ||
+      record.session_id === expectedSessionId
+    );
+    return {
+      sessionIds: sessions.map((record) => record.id),
+      row: row ?? null,
+      lastEntityFrames: (harness.events ?? []).filter((entry) => {
+        if (entry?.kind !== "hub_frame") return false;
+        const frame = entry.payload ?? {};
+        const family = frame.payload?.family ?? frame.payload?.key?.family;
+        return family === "session";
+      }).slice(-5)
+    };
+  }, { expectedSessionId: sessionId }).catch((error) => ({ error: error.message }));
   throw new Error(
     `timed out waiting for terminal detach: sessionId=${sessionId}` +
       ` exitedObserved=${exitedObserved}` +
       ` lastObservedAttachState=${String(lastObservedAttachState)}` +
       ` sessionContainerPresent=${sessionContainerPresent}` +
       ` dashboardPresent=${lastDashboardPresent}` +
-      ` sessionContainerIds=${JSON.stringify(lastSessionContainerIds)}`
+      ` sessionContainerIds=${JSON.stringify(lastSessionContainerIds)}` +
+      ` entityEvidence=${JSON.stringify(entityEvidence)}`
   );
 }
 
@@ -7709,11 +7729,6 @@ async function proveEntityDrivenProductionDetach(page, sessionId, detachWait) {
       record.id === expectedSessionId || record.session_uuid === expectedSessionId
     );
     const processExitEvents = [];
-    (harness.terminal ?? []).forEach((entry, index) => {
-      if (entry?.kind === "process_exit") {
-        processExitEvents.push({ source: "terminal", index, payload: entry.payload });
-      }
-    });
     (harness.events ?? []).forEach((entry, index) => {
       if (
         entry?.kind === "daemon_terminal_event" &&
@@ -8218,34 +8233,37 @@ async function loadBinaryProvenance() {
     );
   }
 
+  const hubPath = resolve(process.env.BOTSTER_HUB_BIN);
+  const workerPath = resolve(process.env.BOTSTER_SESSION_WORKER_BIN);
+  if (!existsSync(hubPath)) {
+    throw new Error(`botster-hub provenance binary does not exist: path=${hubPath}`);
+  }
+  if (!existsSync(workerPath)) {
+    throw new Error(`botster-session-worker provenance binary does not exist: path=${workerPath}`);
+  }
+  const hubRoot = resolve(dirname(hubPath), "../..");
+  const lockCoreRev = lockPackageRevision(join(hubRoot, "Cargo.lock"), "botster-core");
   return {
-    hub: await binaryProvenanceFor(process.env.BOTSTER_HUB_BIN, "botster-hub"),
-    session_worker: await binaryProvenanceFor(process.env.BOTSTER_SESSION_WORKER_BIN, "botster-session-worker")
+    hub: {
+      path: hubPath,
+      git_head: gitHeadForCargoRoot(hubRoot),
+      lock_core_rev: lockCoreRev
+    },
+    session_worker: {
+      path: workerPath,
+      hub_lock_core_rev: lockCoreRev
+    }
   };
 }
 
-async function binaryProvenanceFor(binaryPath, label) {
-  const resolvedPath = resolve(binaryPath);
-  const manifestPath = resolve(dirname(resolvedPath), "../..", "Cargo.toml");
-  if (!existsSync(resolvedPath)) {
-    throw new Error(`${label} provenance binary does not exist: path=${resolvedPath}`);
-  }
-  if (!existsSync(manifestPath)) {
-    return {
-      path: resolvedPath,
-      package_version: null,
-      package_version_source: null,
-      git_head: gitHeadForCargoRoot(resolve(dirname(resolvedPath), "../.."))
-    };
-  }
-  const manifest = readFileSync(manifestPath, "utf8");
-  const packageVersion = manifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? null;
-  return {
-    path: resolvedPath,
-    package_version: packageVersion,
-    package_version_source: packageVersion ? manifestPath : null,
-    git_head: gitHeadForCargoRoot(resolve(dirname(resolvedPath), "../.."))
-  };
+function lockPackageRevision(lockPath, packageName) {
+  if (!existsSync(lockPath)) return null;
+  const text = readFileSync(lockPath, "utf8");
+  const pattern = new RegExp(
+    `name = "${packageName}"[\\s\\S]*?source = "git\\+[^"]*[?&]rev=([0-9a-f]+)`,
+    "m"
+  );
+  return text.match(pattern)?.[1] ?? null;
 }
 
 function gitHeadForCargoRoot(repoRoot) {

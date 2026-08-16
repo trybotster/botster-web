@@ -290,10 +290,12 @@ export default function App() {
   );
 
   const routeSessionId = activeRoute.view === "session" ? activeRoute.sessionId : undefined;
-  const mountedSessionRecord = routeSessionId
-    ? runtimeClient.entities.get("session", routeSessionId)
-    : undefined;
-  useSessionEntityDetach(routeSessionId, mountedSessionRecord, releaseTerminalSession);
+  useSessionEntityDetach(
+    routeSessionId,
+    runtimeClient.entities,
+    runtimeClient.hub,
+    releaseTerminalSession
+  );
   const terminalDescriptor: TerminalViewDescriptor | undefined = useMemo(
     () => terminalDescriptorForSessionId(routeSessionId),
     [routeSessionId]

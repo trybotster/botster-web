@@ -2,12 +2,20 @@
 
 Ticket: `ticket_1786848959_308437`
 Run: `run_1786848964_511286`
-Step: `botster_stack_implement` / `run_step_1786851545_429190`
+Step: `botster_stack_implement` / `run_step_1786853375_261808`
 Plan: `docs/plans/detach-session-terminal-when-session-entity-exited.md`
 
 ## Review return
 
-Review `review_1786851532_276855` sent Implement back after `6f68632`. Three findings:
+Review `review_1786853348_302095` sent Implement back after `f5804da`. Three new findings:
+
+| Finding | Response |
+| --- | --- |
+| `finding_1786853348_739632` Production terminal does not detach in two Review live runs | Review used the Hub-checkout worker, not the Core checkout worker. The production hook now reads the session store on every Hub frame through `sessionRecordForRoute` and `hub.onFrame`. Two consecutive default-mode smokes against Hub `bee15e7` and that same Hub-checkout worker passed `waitForTerminalDetached` and isolated `lifecycle=exited` with `exitedObserved=false`. |
+| `finding_1786853348_927164` Isolation oracle can accept a process-exit-assisted detach | Isolation now uses one `events` ledger. A later `process_exit` does not fail the proof. A `process_exit` with a lower shared index than the entity frame fails. Unit tests cover both orders. |
+| `finding_1786853348_822970` Worker provenance reports the Hub revision as Core | Provenance now records Hub `git_head` and `lock_core_rev` from the Hub `Cargo.lock` `botster-core` rev. The worker row records that lock rev, not a `../..` git head. |
+
+Earlier Review `review_1786851532_276855` sent Implement back after `6f68632`. Three findings:
 
 | Finding | Response |
 | --- | --- |
@@ -113,6 +121,7 @@ Live proof used parent Hub worktree HEAD `bee15e7`. That candidate published `li
 - The App detach watch lives in `useSessionEntityDetach`, which App calls. This keeps one detach policy for App and the route-state harness. It is not a product-scope change.
 - This Implement visit commits to the ticket branch and does not merge to `main`. The pipeline merge policy remains direct. Review still has to run. No pull request was opened.
 - Review `review_1786851532_276855` required a discriminating live isolation oracle and a production-shaped teardown ledger. The committed plan acceptance checks now require those proofs.
+- Review `review_1786853348_302095` required a production-frame store watch, a shared-events isolation ledger, and Hub lock-based Core provenance. The production hook now uses `hub.onFrame` plus `sessionRecordForRoute`.
 
 ## Runtime-teardown lenses
 
@@ -154,10 +163,12 @@ BOTSTER_SESSION_WORKER_BIN=<core-fc541a59-session-worker> \
 npm run smoke:live-packaged-protocol
 ```
 
+Review-pair binaries: Hub checkout `botster-hub` at `bee15e7` and that checkout's `botster-session-worker`. Hub `Cargo.lock` `botster-core` rev is `fc541a59`.
+
 | Run | Exit | Alternate-screen cycle 0 | Detach isolation |
 | --- | --- | --- | --- |
-| 1 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `lifecycle=exited`, `processExitEventCount=0`, `exitedObserved=false`, same-peer `status`, 2 sibling sessions |
-| 2 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `lifecycle=exited`, `processExitEventCount=0`, `exitedObserved=false`, same-peer `status`, 2 sibling sessions |
+| 1 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `lifecycle=exited`, `processExitBeforeEntity=false`, `exitedObserved=false`, same-peer `status`, 2 sibling sessions |
+| 2 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `lifecycle=exited`, `processExitBeforeEntity=false`, `exitedObserved=false`, same-peer `status`, 2 sibling sessions |
 
 Recorded SHAs:
 

@@ -1,6 +1,6 @@
 /** Mount harness for production session-route detach race tests. */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { EntityFrame, EntityFrameStore } from "../../botster/entities";
 import type {
@@ -159,7 +159,17 @@ export function SessionRouteDetachHarness({
   const mountedSessionRecord = routeSessionId
     ? store.get("session", routeSessionId)
     : undefined;
-  useSessionEntityDetach(routeSessionId, mountedSessionRecord, releaseTerminalSession);
+  const frameListeners = useRef(new Set<() => void>());
+  const hub = useMemo(() => ({
+    onFrame(handler: (frame?: unknown) => void) {
+      const listener = () => handler();
+      frameListeners.current.add(listener);
+      return () => {
+        frameListeners.current.delete(listener);
+      };
+    }
+  }), []);
+  useSessionEntityDetach(routeSessionId, store, hub, releaseTerminalSession);
 
   const terminalDescriptor = useMemo(
     () => terminalDescriptorForSessionId(routeSessionId),
@@ -170,6 +180,9 @@ export function SessionRouteDetachHarness({
   const applyEntityFrame = useCallback((frame: EntityFrame) => {
     store.apply(frame);
     setRevision((current) => current + 1);
+    for (const handler of frameListeners.current) {
+      handler();
+    }
   }, [store]);
 
   const navigateToSession = useCallback((sessionId: string) => {
