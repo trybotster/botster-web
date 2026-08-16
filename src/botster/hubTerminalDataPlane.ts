@@ -300,8 +300,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return {
       unsubscribe: () => {
         this.listeners.delete(listener);
-        if (this.listeners.size === 0) {
-          this.closeStreamWithoutDetachRequest();
+        if (this.listeners.size === 0 && !this.detached) {
+          this.closeStream();
         }
       }
     };

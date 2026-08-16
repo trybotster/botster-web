@@ -181,16 +181,17 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     if (!state) return;
 
     state.inputSubscription?.unsubscribe();
-    state.outputSubscription?.unsubscribe();
-    state.rendererDataPlaneSubscription?.unsubscribe();
     state.inputSubscription = undefined;
-    state.outputSubscription = undefined;
-    state.rendererDataPlaneSubscription = undefined;
 
     if (state.dataPlane?.detach) {
       await state.dataPlane.detach();
     }
     state.dataPlane = undefined;
+
+    state.outputSubscription?.unsubscribe();
+    state.rendererDataPlaneSubscription?.unsubscribe();
+    state.outputSubscription = undefined;
+    state.rendererDataPlaneSubscription = undefined;
   }
 
   async unmount(descriptor: TerminalViewDescriptor, mount?: TerminalViewMount): Promise<void> {

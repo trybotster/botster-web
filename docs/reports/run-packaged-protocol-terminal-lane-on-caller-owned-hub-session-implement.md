@@ -2,7 +2,7 @@
 
 Ticket: `ticket_1786868596_331812`
 Run: `run_1786868607_597988`
-Step: `botster_stack_implement` / `run_step_1786870825_617266`
+Step: `botster_stack_implement` / `run_step_1786899762_819757`
 Plan: `docs/plans/run-packaged-protocol-terminal-lane-on-caller-owned-hub-session.md` revision 4
 Product decision: `question_1786868962_323590` option **C**
 
@@ -50,6 +50,7 @@ Targeted notes:
 - [[Web detaches the mounted terminal when the session entity is exited]]
 - [[observe-first attached Drain can return SessionLifecycle without ProcessExit]]
 - [[canceling incremental attach aborts the decoder and sends Detach]]
+- [[Core terminal subscription ownership is session, subscription, and generation]]
 - [[leftover mouse CSI can prefix the next PTY line and skip a producer case arm]]
 - [[incremental GHOSTSNP clients defer resize and input until FINISH and attached]]
 - [[botster web attach installs GHOSTSNP before buffered live bytes]]
@@ -65,6 +66,7 @@ Targeted notes:
 - `README.md`
 - `src/App.test.mjs`
 - `src/botster/hubTerminalDataPlane.ts`
+- `src/botster/terminal.ts`
 - `docs/reports/run-packaged-protocol-terminal-lane-on-caller-owned-hub-session-implement.md`
 
 ## Ownership boundaries preserved
@@ -81,8 +83,14 @@ Review `review_1786874869_811589` sent Implement back after `77d39c7`. Two findi
 
 | Finding | Response |
 | --- | --- |
-| `finding_1786874869_948891` Cancellation accepts two Detach requests | Last output-listener close now calls `closeStreamWithoutDetachRequest()`. `HubTerminalDataPlane.detach()` sends the one `detach` RPC. Live keep-alive and exit cancel markers record `detach_count: 1`. The oracle requires `detach_count === 1`. A unit test fails if the last listener sends Detach or if `detach()` runs twice. |
+| `finding_1786874869_948891` Cancellation accepts two Detach requests | Resolved on `71d5ee9` for the mounted unmount path: `detach_count === 1`. The last-listener abandon used to get that count created `finding_1786899753_286268`. |
 | `finding_1786874869_927008` Cancellation ablation has no valid result | The coordinator now runs `BOTSTER_LIVE_ABLATE_CANCEL_DETACH=1` first, through session types and the Option A picker. That pass exits 1 at `expected exactly one detach ... got 0`. Marker: `live-shared-session-cancel-ablation-passed`. |
+
+Review `review_1786899753_646191` sent Implement back after `71d5ee9`:
+
+| Finding | Response |
+| --- | --- |
+| `finding_1786899753_286268` Last output unsubscribe no longer releases the server subscription | Last output listener calls `closeStream()` again, so WebRTC `stream.unsubscribe()` sends Detach. `DefaultTerminalViewBridge.detach` now stops input, calls `dataPlane.detach()` once, then releases renderer/output subscriptions after the plane has cleared the stream. Unit test `last-listener-one-detach` expects exactly one stream Detach and no later request. Unit test `bridge-unmount-one-detach` expects exactly one request Detach and no stream Detach. |
 
 ## Deviations from plan
 
@@ -98,7 +106,7 @@ Review `review_1786874869_811589` sent Implement back after `77d39c7`. Two findi
 | Isolation | DataChannel close / Detach retires this client's subscription and decoder. Default path keeps `north-star-shared` running. Sibling flood sessions stay independent. Opt-in exit ends only the supplied session; the coordinator Hub stays up until coordinator shutdown. |
 | Bounds | Snapshot hold is released in `finally`. Driver does not `block_on` Hub close. Coordinator bounds Hub shutdown. Missing `local_url` / HTML shell fails closed after a 15s retry. |
 | Late-message matrix | Attach/Detach/Hello/input/resize stay on the production DataPlane. Default path forbids `shutdown_session` for the supplied id. Detach is idempotent on one plane. Late Home unmount cannot `ShutdownSession`. |
-| Production-path proof | Cancel: Home unmount → `armSnapshotInstallHold` → remount → new `snapshot_install_held` → Home → `TerminalViewHost` cleanup → `DefaultTerminalViewBridge.unmount/detach` → `HubTerminalDataPlane.detach` → `reader.cancel` + Detach → remount. Reconnect: in-page `closeDataChannel` on a surviving document. Exit: producer exit → ProcessExited and entity `exited` → `waitForTerminalDetached`. |
+| Production-path proof | Cancel: Home unmount → `armSnapshotInstallHold` → remount → new `snapshot_install_held` → Home → `TerminalViewHost` cleanup → `DefaultTerminalViewBridge.unmount` → stop input → `HubTerminalDataPlane.detach` (one request Detach + decoder cancel) → then release output subscriptions. Standalone last-listener `unsubscribe` uses `closeStream()` (stream Detach). Reconnect: in-page `closeDataChannel` on a surviving document. Exit: producer exit → ProcessExited and entity `exited` → `waitForTerminalDetached`. |
 | Ownership identity | Core identity is session + subscription + generation. Cancel remount requires a new `subscription_id`. Baseline completed subscription is not treated as the held one. |
 | Sibling fail-closed | Successful close keeps the supplied session running. Flood sibling isolation still runs. Opt-in exit ends this session only. |
 
@@ -111,7 +119,7 @@ npm run build
 npm run lint
 ```
 
-`npm test`, `typecheck`, `build`, and `lint` exit 0. Lint no longer reports `no-useless-assignment` at the former harness assignments.
+`npm test`, `typecheck`, `build`, and `lint` exit 0 after `finding_1786899753_286268`. Lint still reports only the pre-existing `react-refresh/only-export-components` warnings.
 
 Fail-closed driver (no Chromium):
 
@@ -150,6 +158,7 @@ Hello still required `webrtc_terminal_adapter` and `terminal_subscription_closed
 
 - Opt-in exit observed ProcessExited before the entity patch. Entity-only IsolatedHub isolation was not reused for that pass.
 - Coordinator `requestDaemonShutdown` after the exit pass is coordinator-owned Hub teardown, not the driver default path.
+- This return did not re-run the live coordinator. The mounted cancel path still issues one request Detach; the order is now detach-then-unsubscribe. Last-listener Detach is unit-proved via `stream.unsubscribe`. A non-bridge caller that unsubscribes the last listener and then calls `dataPlane.detach()` can still emit a stream Detach plus a request Detach. Production `DefaultTerminalViewBridge` does not do that.
 
 ## Missing vault guidance discovered
 

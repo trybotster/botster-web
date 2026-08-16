@@ -2724,7 +2724,11 @@ assert.doesNotMatch(
 assert.match(hubTerminalDataPlane, /reader_cancel/);
 assert.match(hubTerminalDataPlane, /ablateCancelDetach/);
 assert.match(hubTerminalDataPlane, /if \(this\.detached\) return;/);
-assert.match(hubTerminalDataPlane, /listeners\.size === 0\) \{\s*this\.closeStreamWithoutDetachRequest\(\);/);
+assert.match(hubTerminalDataPlane, /listeners\.size === 0 && !this\.detached\) \{\s*this\.closeStream\(\);/);
+assert.match(
+  terminal,
+  /state\.inputSubscription\?\.unsubscribe\(\);\s*state\.inputSubscription = undefined;\s*if \(state\.dataPlane\?\.detach\) \{\s*await state\.dataPlane\.detach\(\);/s
+);
 assert.match(liveProtocolHarnessScript, /expected exactly one detach for held subscription/);
 assert.match(liveSharedSessionCoordinatorScript, /BOTSTER_LIVE_ABLATE_CANCEL_DETACH/);
 assert.match(liveSharedSessionCoordinatorScript, /assertCancelAblation/);
@@ -8360,8 +8364,8 @@ assert.equal(terminalStatuses.some((status) => status.state === "attached" && st
 {
   const detachRequests = [];
   const plane = createHubTerminalDataPlane({
-    sessionId: "cancel-one-detach",
-    subscriptionId: "cancel-one-detach-sub",
+    sessionId: "last-listener-one-detach",
+    subscriptionId: "last-listener-one-detach-sub",
     bridge: {
       async request(request) {
         if (request.type === "detach") {
@@ -8388,39 +8392,79 @@ assert.equal(terminalStatuses.some((status) => status.state === "attached" && st
   for (let i = 0; i < 8; i += 1) await flushMicrotasks();
   output.unsubscribe();
   for (let i = 0; i < 4; i += 1) await flushMicrotasks();
-  assert.equal(
-    detachRequests.length,
-    0,
-    `last output listener sent Detach before dataPlane.detach: ${JSON.stringify(detachRequests)}`
-  );
-  await plane.detach();
   assert.deepEqual(
     detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [{ type: "detach", subscription_id: "cancel-one-detach-sub", source: "request" }]
+    [{ type: "detach", subscription_id: "last-listener-one-detach-sub", source: "stream" }]
   );
-  await plane.detach();
-  assert.equal(detachRequests.length, 1);
 }
 
 {
   const detachRequests = [];
+  const sessionId = "bridge-unmount-one-detach";
+  const subscriptionId = "bridge-unmount-one-detach-sub";
   const plane = createHubTerminalDataPlane({
-    sessionId: "cancel-zero-detach",
-    subscriptionId: "cancel-zero-detach-sub",
+    sessionId,
+    subscriptionId,
     bridge: {
       async request(request) {
-        if (request.type === "detach") detachRequests.push({ ...request });
+        if (request.type === "detach") {
+          detachRequests.push({ ...request, source: "request" });
+        }
         return { kind: "events", events: [] };
       },
-      streamTerminal() {
-        return { unsubscribe() {}, abandon() {} };
+      streamTerminal(nextSessionId, nextSubscriptionId) {
+        return {
+          unsubscribe() {
+            detachRequests.push({
+              type: "detach",
+              session_id: nextSessionId,
+              subscription_id: nextSubscriptionId,
+              source: "stream"
+            });
+          },
+          abandon() {}
+        };
       }
     }
   });
-  const output = plane.subscribeOutput(() => undefined);
+  const viewBridge = new DefaultTerminalViewBridge(() => ({
+    mount() {},
+    attachDataPlane(dataPlane) {
+      return dataPlane.subscribeOutput(() => undefined);
+    },
+    onInput() {
+      return { unsubscribe() {} };
+    },
+    write() {},
+    resize() {},
+    focus() {},
+    destroy() {}
+  }));
+  const descriptor = { sessionId, renderer: "restty" };
+  await viewBridge.mount(
+    {
+      dataset: {},
+      childNodes: [],
+      appendChild() {
+        return undefined;
+      },
+      remove() {
+        return undefined;
+      },
+      querySelector() {
+        return null;
+      }
+    },
+    descriptor
+  );
+  await viewBridge.attach(descriptor, plane);
   for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  output.unsubscribe();
-  assert.equal(detachRequests.length, 0);
+  await viewBridge.unmount(descriptor);
+  for (let i = 0; i < 4; i += 1) await flushMicrotasks();
+  assert.deepEqual(
+    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
+    [{ type: "detach", subscription_id: subscriptionId, source: "request" }]
+  );
 }
 
 const readbackRequests = [];
