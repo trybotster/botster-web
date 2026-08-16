@@ -933,6 +933,7 @@ const appFeatureSources = await Promise.all([
   readFile(new URL("./app/useProductionHubConnection.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/useSessionTypeControl.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/useSessionControl.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/useSessionEntityDetach.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/useSpawnControl.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/WorkbenchShell.tsx", import.meta.url), "utf8"),
   readFile(new URL("./app/values.ts", import.meta.url), "utf8"),
@@ -948,6 +949,8 @@ const app = [appShell, ...appFeatureSources]
   .join("\n");
 assert.match(appShell, /currentDashboardSessions\(/);
 assert.match(appFeatureSources.join("\n"), /export function currentDashboardSessions/);
+assert.match(appFeatureSources.join("\n"), /export function useSessionEntityDetach/);
+assert.match(appFeatureSources.join("\n"), /sessionEntityRequiresDetach\(sessionRecord\)/);
 assert.match(appShell, /from "\.\/app\/dashboardSessions"/);
 assert.match(appFeatureSources.join("\n"), /lifecycle_class === "current"/);
 assert.doesNotMatch(appShell, /export function appRouteFromPathname/);
@@ -967,6 +970,7 @@ assert.match(appFeatureSources.join("\n"), /PluginNavigationShortcuts/);
 assert.match(appFeatureSources.join("\n"), /PluginSurfaceRoutePage/);
 assert.match(appShell, /from "\.\/app\/useSessionTypeControl"/);
 assert.match(appShell, /from "\.\/app\/useSessionControl"/);
+assert.match(appShell, /from "\.\/app\/useSessionEntityDetach"/);
 assert.match(appFeatureSources.join("\n"), /SessionTypeAdvancedOptions/);
 assert.match(appShell, /from "\.\/app\/useSpawnControl"/);
 assert.match(appShell, /from "\.\/app\/spawnTargets"/);
@@ -987,6 +991,7 @@ assert.match(appShell, /usePackageOpenControls\(/);
 assert.match(appShell, /useSpawnControl\(/);
 assert.match(appShell, /useSessionTypeControl\(/);
 assert.match(appShell, /useSessionControl\(/);
+assert.match(appShell, /useSessionEntityDetach\(/);
 assert.match(appShell, /onStopSession=\{sessionControl\.stopSession\}/);
 assert.match(appShell, /<WorkbenchShell/);
 assert.doesNotMatch(appShell, /export function DashboardView/);
@@ -1103,6 +1108,7 @@ assert.match(appFeatureSources.join("\n"), /hubUpdateOutcomeFromResult\(result\)
             this.innerHTML = "";
             this.className = "";
             this.id = "";
+            this.dataset = {};
           }
           setAttribute(k, v) { this.attributes[k] = String(v); }
           getAttribute(k) { return Object.hasOwn(this.attributes, k) ? this.attributes[k] : null; }
@@ -1672,6 +1678,12 @@ assert.match(app, /descriptor=\{terminalDescriptor\}/);
 assert.match(app, /dataPlane=\{terminalDataPlane\}/);
 assert.match(app, /onAttachmentStatus=\{recordTerminalAttachmentStatus\}/);
 assert.match(app, /onExit=\{releaseTerminalSession\}/);
+assert.match(app, /useSessionEntityDetach/);
+assert.match(appShell, /runtimeClient\.entities\.get\("session", routeSessionId\)/);
+assert.match(appShell, /useSessionEntityDetach\(routeSessionId, mountedSessionRecord, releaseTerminalSession\)/);
+assert.match(appShell, /isMountedSessionRoute\(activeRoute, sessionId\)/);
+assert.doesNotMatch(appShell, /sessionEntityRequiresDetach\(currentDashboardSessions/);
+assert.doesNotMatch(appShell, /entity_remove/);
 assert.match(app, /onDiagnostic=\{recordTerminalDiagnostic\}/);
 assert.doesNotMatch(app, /terminal-placeholder/);
 assert.match(client, /export const botsterWebClientContract/);
@@ -9918,7 +9930,7 @@ try {
       replaceAcceptedSurface
     },
     { configurationFieldType, configurationSaveAction, configurationSubmitValues },
-    { isAttachableSession, sessionDisplayStatus, sessionDisplayTitle },
+    { isAttachableSession, isMountedSessionRoute, sessionDisplayStatus, sessionDisplayTitle, sessionEntityRequiresDetach },
     { UiNodeSurface },
     { sessionBindingVariantSnapshot },
     { pluginSurfaceActionRequest },
@@ -10127,6 +10139,229 @@ try {
   assert.equal(isAttachableSession(runningTerminalSession), true);
   assert.equal(isAttachableSession(indeterminateTerminalSession), false);
   assert.equal(isAttachableSession(contradictoryTerminalSession), false);
+  assert.equal(sessionEntityRequiresDetach({ id: "exited-session", lifecycle: "exited" }), true);
+  assert.equal(sessionEntityRequiresDetach({ id: "failed-session", lifecycle: "failed" }), true);
+  assert.equal(sessionEntityRequiresDetach(runningTerminalSession), false);
+  assert.equal(sessionEntityRequiresDetach({ id: "no-lifecycle" }), false);
+  assert.equal(sessionEntityRequiresDetach(undefined), false);
+  assert.equal(sessionEntityRequiresDetach({ id: "current-exited", lifecycle: "exited", lifecycle_class: "current" }), true);
+  assert.equal(isMountedSessionRoute({ view: "session", sessionId: "sess-a" }, "sess-a"), true);
+  assert.equal(isMountedSessionRoute({ view: "session", sessionId: "sess-b" }, "sess-a"), false);
+  assert.equal(isMountedSessionRoute({ view: "dashboard" }, "sess-a"), false);
+
+  {
+    const {
+      SessionRouteDetachHarness,
+      sessionDetachTestDataPlane
+    } = await vite.ssrLoadModule("/src/app/__fixtures__/sessionRouteDetachHarness.tsx");
+
+    if (!globalThis.document?.__botsterMinimalDom) {
+      throw new Error("minimal DOM required for session detach route-state tests");
+    }
+
+    function sessionRow(id, lifecycle, extras = {}) {
+      return {
+        id,
+        session_uuid: id,
+        registry_state: "active",
+        lifecycle,
+        lifecycle_class: lifecycle === "running" ? "current" : "ended",
+        rows: 24,
+        cols: 80,
+        updated_at: 1,
+        ...extras
+      };
+    }
+
+    function seedDetachStore(rows) {
+      return createInMemoryEntityFrameStore([
+        {
+          operation: "entity_snapshot",
+          family: "session",
+          records: rows
+        },
+        {
+          operation: "entity_snapshot",
+          family: "session_type",
+          records: [{ id: "type-shell", label: "Shell" }]
+        }
+      ]);
+    }
+
+    async function mountDetachProbe(store, initialSessionId, sessionIds) {
+      let state;
+      let api;
+      const dataPlanes = new Map(sessionIds.map((id) => [id, sessionDetachTestDataPlane(id)]));
+      const rootEl = globalThis.document.createElement("div");
+      globalThis.document.body.appendChild(rootEl);
+      const root = createRoot(rootEl);
+      await act(async () => {
+        root.render(createElement(SessionRouteDetachHarness, {
+          store,
+          initialSessionId,
+          dataPlanes,
+          onState: (next) => { state = next; },
+          onReady: (next) => { api = next; }
+        }));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      return {
+        get state() { return state; },
+        get api() { return api; },
+        async apply(frame) {
+          await act(async () => {
+            api.applyEntityFrame(frame);
+            await Promise.resolve();
+          });
+        },
+        async navigateToSession(sessionId) {
+          await act(async () => {
+            api.navigateToSession(sessionId);
+            await Promise.resolve();
+          });
+        },
+        async emitProcessExit(sessionId) {
+          await act(async () => {
+            api.emitProcessExit(sessionId);
+            await Promise.resolve();
+          });
+        },
+        async unmount() {
+          await act(async () => {
+            root.unmount();
+          });
+          if (rootEl.parentNode) rootEl.parentNode.removeChild(rootEl);
+        }
+      };
+    }
+
+    // First arrival: mounted A plus entity exited for A navigates home.
+    {
+      const store = seedDetachStore([
+        sessionRow("sess-a", "running"),
+        sessionRow("sess-c", "running")
+      ]);
+      const probe = await mountDetachProbe(store, "sess-a", ["sess-a", "sess-b", "sess-c"]);
+      assert.equal(probe.state.view, "session");
+      assert.equal(probe.state.renderedSessionId, "sess-a");
+      await probe.apply({
+        operation: "entity_patch",
+        key: { family: "session", id: "sess-a" },
+        record: { id: "sess-a", lifecycle: "exited" }
+      });
+      assert.equal(probe.state.view, "dashboard");
+      assert.equal(probe.state.renderedSessionId, undefined);
+      assert.deepEqual(probe.state.sessionIds, ["sess-a", "sess-c"]);
+      assert.deepEqual(probe.state.sessionTypeIds, ["type-shell"]);
+      await probe.unmount();
+    }
+
+    // First arrival: mounted A plus terminal-plane process_exit for A navigates home.
+    {
+      const store = seedDetachStore([
+        sessionRow("sess-a", "running"),
+        sessionRow("sess-c", "running")
+      ]);
+      const probe = await mountDetachProbe(store, "sess-a", ["sess-a", "sess-c"]);
+      assert.equal(probe.state.renderedSessionId, "sess-a");
+      await probe.emitProcessExit("sess-a");
+      assert.equal(probe.state.view, "dashboard");
+      assert.equal(probe.state.renderedSessionId, undefined);
+      assert.deepEqual(probe.state.sessionIds, ["sess-a", "sess-c"]);
+      assert.deepEqual(probe.state.sessionTypeIds, ["type-shell"]);
+      await probe.unmount();
+    }
+
+    // Either order: the second A event after the first detach is a no-op.
+    {
+      const store = seedDetachStore([
+        sessionRow("sess-a", "running"),
+        sessionRow("sess-c", "running")
+      ]);
+      const probe = await mountDetachProbe(store, "sess-a", ["sess-a", "sess-c"]);
+      await probe.apply({
+        operation: "entity_patch",
+        key: { family: "session", id: "sess-a" },
+        record: { id: "sess-a", lifecycle: "exited" }
+      });
+      assert.equal(probe.state.view, "dashboard");
+      await probe.emitProcessExit("sess-a");
+      assert.equal(probe.state.view, "dashboard");
+      assert.equal(probe.state.renderedSessionId, undefined);
+      await probe.apply({
+        operation: "entity_patch",
+        key: { family: "session", id: "sess-a" },
+        record: { id: "sess-a", lifecycle: "failed" }
+      });
+      assert.equal(probe.state.view, "dashboard");
+      assert.equal(probe.state.renderedSessionId, undefined);
+      await probe.unmount();
+    }
+
+    {
+      const store = seedDetachStore([
+        sessionRow("sess-a", "running"),
+        sessionRow("sess-c", "running")
+      ]);
+      const probe = await mountDetachProbe(store, "sess-a", ["sess-a", "sess-c"]);
+      await probe.emitProcessExit("sess-a");
+      assert.equal(probe.state.view, "dashboard");
+      await probe.apply({
+        operation: "entity_patch",
+        key: { family: "session", id: "sess-a" },
+        record: { id: "sess-a", lifecycle: "exited" }
+      });
+      assert.equal(probe.state.view, "dashboard");
+      assert.equal(probe.state.renderedSessionId, undefined);
+      await probe.unmount();
+    }
+
+    // A-to-B race: late A entity and process_exit must not detach B.
+    {
+      const store = seedDetachStore([
+        sessionRow("sess-a", "running"),
+        sessionRow("sess-b", "running"),
+        sessionRow("sess-c", "running")
+      ]);
+      const probe = await mountDetachProbe(store, "sess-a", ["sess-a", "sess-b", "sess-c"]);
+      await probe.navigateToSession("sess-b");
+      assert.equal(probe.state.renderedSessionId, "sess-b");
+      await probe.apply({
+        operation: "entity_patch",
+        key: { family: "session", id: "sess-a" },
+        record: { id: "sess-a", lifecycle: "exited" }
+      });
+      assert.equal(probe.state.view, "session");
+      assert.equal(probe.state.renderedSessionId, "sess-b");
+      await probe.emitProcessExit("sess-a");
+      assert.equal(probe.state.view, "session");
+      assert.equal(probe.state.renderedSessionId, "sess-b");
+      assert.ok(probe.state.sessionIds.includes("sess-c"));
+      assert.deepEqual(probe.state.sessionTypeIds, ["type-shell"]);
+      await probe.unmount();
+    }
+
+    // entity_remove of A while A is mounted does not detach A.
+    {
+      const store = seedDetachStore([
+        sessionRow("sess-a", "running"),
+        sessionRow("sess-c", "running")
+      ]);
+      const probe = await mountDetachProbe(store, "sess-a", ["sess-a", "sess-c"]);
+      await probe.apply({
+        operation: "entity_remove",
+        key: { family: "session", id: "sess-a" }
+      });
+      assert.equal(probe.state.view, "session");
+      assert.equal(probe.state.renderedSessionId, "sess-a");
+      assert.equal(probe.state.requiresDetach, false);
+      assert.deepEqual(probe.state.sessionIds, ["sess-c"]);
+      assert.deepEqual(probe.state.sessionTypeIds, ["type-shell"]);
+      await probe.unmount();
+    }
+  }
+
   assert.deepEqual(stopSessionAction(activeHubSessionId), {
     id: "botster.session.stop",
     target: activeHubSessionId,

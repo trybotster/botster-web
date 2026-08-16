@@ -9,6 +9,20 @@ export function isAttachableSession(
   );
 }
 
+/** Hub-authored session lifecycle values that require the mounted terminal to detach. */
+export function sessionEntityRequiresDetach(
+  record: Record<string, unknown> | undefined
+): boolean {
+  return record?.lifecycle === "exited" || record?.lifecycle === "failed";
+}
+
+export function isMountedSessionRoute(
+  route: { view?: string; sessionId?: string } | undefined,
+  sessionId: string
+): boolean {
+  return route?.view === "session" && route.sessionId === sessionId;
+}
+
 export function sessionDisplayTitle(record: Record<string, unknown>): string {
   return typeof record.session_uuid === "string"
     ? record.session_uuid

@@ -19,6 +19,7 @@ import type { HubEntityLoadStatus } from "./botster/LocalHubFirstScreen";
 import type { TerminalAttachmentStatus, TerminalViewDescriptor } from "./botster/terminal";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
 import { TerminalViewHost } from "./botster/TerminalViewHost";
+import { isMountedSessionRoute } from "./botster/terminalSession";
 
 import { AppsRouteView } from "./app/AppsRouteView";
 import { DashboardView } from "./app/dashboard";
@@ -33,6 +34,7 @@ import { SessionRouteView } from "./app/sessionRoute";
 import { compareSpawnTargetRows } from "./app/spawnTargets";
 import { terminalDescriptorForSessionId, terminalReleaseToast } from "./app/terminalChrome";
 import { useAppNavigation } from "./app/useAppNavigation";
+import { useSessionEntityDetach } from "./app/useSessionEntityDetach";
 import { useHubActions } from "./app/useHubActions";
 import { usePackageInstall } from "./app/usePackageInstall";
 import { usePackageOpenControls } from "./app/usePackageOpenControls";
@@ -270,7 +272,7 @@ export default function App() {
     sessionId: string,
     status?: TerminalAttachmentStatus
   ) => {
-    if (activeRoute.view !== "session" || activeRoute.sessionId !== sessionId) return;
+    if (!isMountedSessionRoute(activeRoute, sessionId)) return;
     actions.setPackageActionToast(terminalReleaseToast(sessionId, status));
     navigateToView("dashboard");
   }, [activeRoute, actions, navigateToView]);
@@ -288,6 +290,10 @@ export default function App() {
   );
 
   const routeSessionId = activeRoute.view === "session" ? activeRoute.sessionId : undefined;
+  const mountedSessionRecord = routeSessionId
+    ? runtimeClient.entities.get("session", routeSessionId)
+    : undefined;
+  useSessionEntityDetach(routeSessionId, mountedSessionRecord, releaseTerminalSession);
   const terminalDescriptor: TerminalViewDescriptor | undefined = useMemo(
     () => terminalDescriptorForSessionId(routeSessionId),
     [routeSessionId]
