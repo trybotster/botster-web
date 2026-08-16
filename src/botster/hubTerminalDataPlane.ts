@@ -19,12 +19,19 @@ import type {
   DaemonReadScreen
 } from "./realHubDaemonDto";
 import {
+  localWebrtcResponseChunkLimits,
   webRtcDaemonLifecycleEventName,
   type WebrtcDaemonLifecycleEvent
 } from "./webrtcDaemonClient";
 
 const maxHydrationBufferBytes = 16_777_216;
 let nextSubscriptionSequence = 1;
+
+/**
+ * Bound for the awaited public Detach request. Matches production WebRTC
+ * `requestTimeoutMs` so unmount cannot hang on a never-resolving bridge.
+ */
+export const DETACH_REQUEST_BOUND_MS = localWebrtcResponseChunkLimits.requestTimeoutMs;
 
 /**
  * Optional hooks that pause ownership-creating async boundaries so isolation
@@ -37,6 +44,8 @@ export interface HubTerminalDataPlaneTestHooks {
   beforeResize?: () => Promise<void> | void;
   beforeModeGatedInput?: () => Promise<void> | void;
   beforeListenerDelivery?: () => Promise<void> | void;
+  /** Test-only shorter race for the public Detach hang bound. */
+  detachRequestBoundMs?: number;
 }
 
 interface ScreenHydration {
@@ -283,7 +292,15 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription {
     this.listeners.add(listener);
-    this.detached = false;
+    // A publicly detached plane must not resurrect. Remount uses a new plane or
+    // a new subscription generation, not a cleared `detached` flag on this id.
+    if (this.detached) {
+      return {
+        unsubscribe: () => {
+          this.listeners.delete(listener);
+        }
+      };
+    }
     this.emitStatus({
       state: "attaching",
       message: "Attaching terminal stream."
@@ -359,10 +376,11 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     if (this.detached) return;
     this.detached = true;
     this.transportLost = false;
+    const heldSubscriptionId = this.subscriptionId;
     if (liveHarness()?.ablateCancelDetach === true) {
       recordLiveHarnessTerminal("cancel_detach_ablated", {
         sessionId: this.sessionId,
-        subscription_id: this.subscriptionId
+        subscription_id: heldSubscriptionId
       });
       this.listeners.clear();
       this.statusListeners.clear();
@@ -373,16 +391,9 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.listeners.clear();
     this.statusListeners.clear();
     this.uninstallLifecycleListener();
-
-    if (this.detachSentForSubscriptionId === this.subscriptionId) {
-      return;
-    }
-    this.detachSentForSubscriptionId = this.subscriptionId;
-    await this.options.bridge.request({
-      type: "detach",
-      session_id: this.sessionId,
-      subscription_id: this.subscriptionId
-    });
+    // One Detach owner for the held subscription id (and any abandoned prior id
+    // still recorded on this plane after transport recovery remint).
+    await this.sendDetachRequestOnce(heldSubscriptionId);
   }
 
   private uninstallLifecycleListener(): void {
@@ -438,11 +449,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       // Best-effort detach of the abandoned subscription now that the channel is alive.
       if (previousSubscriptionId && previousSubscriptionId !== this.subscriptionId) {
         try {
-          await this.options.bridge.request({
-            type: "detach",
-            session_id: this.sessionId,
-            subscription_id: previousSubscriptionId
-          });
+          await this.sendDetachRequestOnce(previousSubscriptionId);
         } catch (error: unknown) {
           recordLiveHarnessTerminal("stale_detach_ignored", {
             message: error instanceof Error ? error.message : String(error),
@@ -465,9 +472,9 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   private closeStreamWithoutDetachRequest(): void {
-    // Drop the local stream handle without a detach RPC on a dead channel.
-    // Prefer typed abandon(); fall back to unsubscribe with explicit rejection capture
-    // for older test bridges that only implement unsubscribe.
+    // Drop the local stream handle without owning the Detach request. Prefer typed
+    // abandon(); fall back to unsubscribe for older test bridges. Do not set the
+    // once-flag here — public detach / closeStream own sendDetachRequestOnce.
     const sub = this.streamSubscription;
     if (sub) {
       if (typeof sub.abandon === "function") {
@@ -552,11 +559,23 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       (event) => this.enqueueTerminalEvent(event, attachmentGeneration)
     );
     if (!this.isCurrentAttachment(attachmentGeneration)) {
-      streamSubscription.unsubscribe();
+      // Public cancel owns Detach. Abandon the leftover stream; do not unsubscribe
+      // as a second Detach emitter for this subscription id.
+      if (typeof streamSubscription.abandon === "function") {
+        streamSubscription.abandon();
+      } else if (this.detachSentForSubscriptionId !== this.subscriptionId) {
+        this.abandonStreamHandle(streamSubscription);
+      }
+      if (!this.detached && this.detachSentForSubscriptionId !== this.subscriptionId) {
+        void this.sendDetachRequestOnce(this.subscriptionId).catch(() => undefined);
+      }
       return;
     }
     this.streamSubscription = streamSubscription;
-    this.detachSentForSubscriptionId = undefined;
+    // Do not clear the once-flag for a subscription id that already sent Detach.
+    if (this.detachSentForSubscriptionId !== this.subscriptionId) {
+      this.detachSentForSubscriptionId = undefined;
+    }
     recordLiveHarnessTerminal("attach", {
       attempt: 1,
       generation: attachmentGeneration,
@@ -601,9 +620,25 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   private closeStream(): void {
     const stream = this.streamSubscription;
+    const subscriptionId = this.subscriptionId;
     if (stream) {
-      this.detachSentForSubscriptionId = this.subscriptionId;
-      stream.unsubscribe();
+      if (typeof stream.abandon === "function") {
+        stream.abandon();
+        // Last-listener and fail paths share the same Detach owner as public detach.
+        void this.sendDetachRequestOnce(subscriptionId).catch(() => undefined);
+      } else {
+        // Older bridges without abandon: unsubscribe stops delivery and is the
+        // historical Detach emitter. Mark once so public detach does not double.
+        this.detachSentForSubscriptionId = subscriptionId;
+        try {
+          stream.unsubscribe();
+        } catch (unsubscribeError: unknown) {
+          recordLiveHarnessTerminal("stream_unsubscribe_error", {
+            message:
+              unsubscribeError instanceof Error ? unsubscribeError.message : String(unsubscribeError)
+          });
+        }
+      }
     }
     this.streamSubscription = undefined;
     this.attachPromise = undefined;
@@ -622,6 +657,62 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.terminalInputQueue = Promise.resolve();
     this.restoredVisibleScreenGeneration = undefined;
     this.modeFlags = undefined;
+  }
+
+  /**
+   * One Detach owner for a subscription id. Marks the once-flag before await so
+   * concurrent emitters skip. Races the bridge request against DETACH_REQUEST_BOUND_MS
+   * (or testHooks.detachRequestBoundMs) so unmount cannot hang forever.
+   */
+  private async sendDetachRequestOnce(subscriptionId: string): Promise<void> {
+    if (this.detachSentForSubscriptionId === subscriptionId) {
+      return;
+    }
+    this.detachSentForSubscriptionId = subscriptionId;
+    const boundMs = this.testHooks?.detachRequestBoundMs ?? DETACH_REQUEST_BOUND_MS;
+    const requestPromise = this.options.bridge.request({
+      type: "detach",
+      session_id: this.sessionId,
+      subscription_id: subscriptionId
+    });
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(`detach request exceeded ${boundMs}ms bound`));
+      }, boundMs);
+    });
+    try {
+      await Promise.race([requestPromise, timeoutPromise]);
+    } catch (error: unknown) {
+      // Keep the once-flag so a late resolve cannot send a second Detach.
+      void requestPromise.catch(() => undefined);
+      throw error;
+    } finally {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  private abandonStreamHandle(sub: DaemonTerminalStreamSubscription): void {
+    if (typeof sub.abandon === "function") {
+      sub.abandon();
+      return;
+    }
+    // Older test bridges only implement unsubscribe. When the once-owner already
+    // sent Detach for this id, skip unsubscribe so it cannot emit a second request.
+    if (this.detachSentForSubscriptionId === this.subscriptionId) {
+      return;
+    }
+    try {
+      sub.unsubscribe();
+      this.detachSentForSubscriptionId = this.subscriptionId;
+    } catch (unsubscribeError: unknown) {
+      recordLiveHarnessTerminal("stream_unsubscribe_error", {
+        message:
+          unsubscribeError instanceof Error ? unsubscribeError.message : String(unsubscribeError)
+      });
+    }
   }
 
   private async flushPendingResize(attachmentGeneration: number): Promise<void> {
