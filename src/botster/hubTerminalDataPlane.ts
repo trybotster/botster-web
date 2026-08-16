@@ -355,9 +355,20 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   async detach(): Promise<void> {
+    if (this.detached) return;
     this.detached = true;
     this.transportLost = false;
-    this.closeStream();
+    if (liveHarness()?.ablateCancelDetach === true) {
+      recordLiveHarnessTerminal("cancel_detach_ablated", {
+        sessionId: this.sessionId,
+        subscription_id: this.subscriptionId
+      });
+      this.listeners.clear();
+      this.statusListeners.clear();
+      this.uninstallLifecycleListener();
+      return;
+    }
+    this.closeStreamWithoutDetachRequest();
     this.listeners.clear();
     this.statusListeners.clear();
     this.uninstallLifecycleListener();
@@ -470,7 +481,14 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.streamSubscription = undefined;
     this.attachPromise = undefined;
     this.attachmentGeneration += 1;
-    this.hydration?.reader?.cancel();
+    if (this.hydration?.reader) {
+      recordLiveHarnessTerminal("reader_cancel", {
+        generation: this.hydration.generation,
+        subscription_id: this.subscriptionId,
+        sessionId: this.sessionId
+      });
+      this.hydration.reader.cancel();
+    }
     this.hydration?.resolveBarrier();
     this.hydration = undefined;
     this.terminalEventQueue = Promise.resolve();
@@ -580,7 +598,14 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.streamSubscription = undefined;
     this.attachPromise = undefined;
     this.attachmentGeneration += 1;
-    this.hydration?.reader?.cancel();
+    if (this.hydration?.reader) {
+      recordLiveHarnessTerminal("reader_cancel", {
+        generation: this.hydration.generation,
+        subscription_id: this.subscriptionId,
+        sessionId: this.sessionId
+      });
+      this.hydration.reader.cancel();
+    }
     this.hydration?.resolveBarrier();
     this.hydration = undefined;
     this.terminalEventQueue = Promise.resolve();
@@ -1210,6 +1235,7 @@ type LiveTerminalHarness = {
   armSnapshotInstallHold?: () => void;
   releaseSnapshotInstall?: () => void;
   snapshotInstallHoldArmed?: boolean;
+  ablateCancelDetach?: boolean;
   terminal?: Array<{ kind: string; payload: unknown }>;
 };
 

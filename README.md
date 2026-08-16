@@ -73,6 +73,24 @@ When `BOTSTER_LIVE_DATA_DIR` is supplied directly without seeded mode, the harne
 
 Run `npm run smoke:live-packaged-protocol:caller-repeatability` with the same Hub and worker variables to execute the caller-owned path twice against one generated data directory and assert package reuse plus configuration restoration. When a Workspaces package path is supplied, the second generation also adopts and proves the single workspace retained by the first generation instead of applying a cold empty-state oracle to reused caller state.
 
+The caller-owned terminal lane attaches the existing packaged-protocol proofs to a supplied Hub session. It is not IsolatedHub `web-prod`, and it is not the Workspaces shared-Hub driver. Missing `BOTSTER_LIVE_DATA_DIR` or `BOTSTER_SHARED_SESSION_ID` fails closed. Combining the pair with `BOTSTER_LIVE_SHARED_HUB_DRIVER=1` or any `BOTSTER_LIVE_ALLOW_*_SKIP` also fails closed. The default path keeps the supplied session alive. `BOTSTER_SHARED_SESSION_PROVE_EXIT=1` is a final opt-in pass that sends the documented producer exit command and waits for ProcessExited or session-entity `exited`/`failed`. It does not `ShutdownSession`.
+
+```bash
+BOTSTER_LIVE_DATA_DIR=/path/to/running-hub-data \
+BOTSTER_SHARED_SESSION_ID=north-star-shared \
+npm run drive:live-packaged-protocol:shared-session
+```
+
+A Web-owned standalone coordinator starts one Hub, spawns the supplied id (default `north-star-shared`) with the production script, runs the driver twice in keep-alive mode, then runs one exit pass:
+
+```bash
+BOTSTER_HUB_BIN=/path/to/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
+npm run smoke:live-packaged-protocol:shared-session
+```
+
+Each keep-alive pass must print `live-shared-session-terminal-lane`, `live-shared-session-cancel-passed`, and `live-shared-session-keep-alive-passed` for the same session id. The exit pass must print `live-shared-session-exit-passed`. Page reload is not reconnect on this lane; reconnect proof closes the DataChannel on the surviving document. `BOTSTER_LIVE_ABLATE_CANCEL_DETACH=1` skips the production `detach` request and reader cancel so the cancel oracle is the first failure.
+
 The plugin contract checks use the same production WebRTC harness. They prove
 Hub-projected package navigation through a visible sidebar control and route
 click, then exercise package list/detail, launch/render, canonical `/session`

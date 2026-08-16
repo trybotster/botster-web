@@ -467,6 +467,90 @@ export function assertWorkspacesLifecycleStateOwnership({
   }
 }
 
+export const DEFAULT_SHARED_SESSION_ID = "north-star-shared";
+
+const allowSkipPattern = /^BOTSTER_LIVE_ALLOW_.*_SKIP$/;
+const exclusiveSharedSessionModes = Object.freeze([
+  ["BOTSTER_LIVE_ENTITY_OPTIONS", "1"],
+  ["BOTSTER_LIVE_CONTRACT_MATRIX", "1"],
+  ["BOTSTER_LIVE_WORKSPACES_LIFECYCLE", "1"],
+  ["BOTSTER_LIVE_SURFACE_ONLY", "1"],
+  ["BOTSTER_LIVE_REQUIRE_WORKSPACES", "1"],
+  ["BOTSTER_LIVE_DURABLE_STATE", "1"]
+]);
+
+export function callerOwnedSharedSessionEnv(environment = process.env) {
+  const dataDir = typeof environment.BOTSTER_LIVE_DATA_DIR === "string"
+    ? environment.BOTSTER_LIVE_DATA_DIR.trim()
+    : "";
+  const sessionId = typeof environment.BOTSTER_SHARED_SESSION_ID === "string"
+    ? environment.BOTSTER_SHARED_SESSION_ID.trim()
+    : "";
+  return {
+    dataDir,
+    sessionId,
+    proveExit: environment.BOTSTER_SHARED_SESSION_PROVE_EXIT === "1",
+    sharedHubDriver: environment.BOTSTER_LIVE_SHARED_HUB_DRIVER === "1",
+    exclusiveModes: exclusiveSharedSessionModes
+      .filter(([name, value]) => environment[name] === value)
+      .map(([name]) => name),
+    skipFlags: Object.entries(environment)
+      .filter(([name, value]) => allowSkipPattern.test(name) && value != null && value !== "0" && value !== "")
+      .map(([name]) => name)
+      .sort()
+  };
+}
+
+export function assertCallerOwnedSharedSessionContract(environment = process.env) {
+  const env = callerOwnedSharedSessionEnv(environment);
+  const selected = env.sessionId.length > 0 || env.proveExit;
+  if (!selected) {
+    return { mode: false, ...env };
+  }
+  if (env.dataDir.length === 0 || env.sessionId.length === 0) {
+    throw new Error(
+      "caller-owned terminal lane requires BOTSTER_LIVE_DATA_DIR and BOTSTER_SHARED_SESSION_ID"
+    );
+  }
+  if (env.sharedHubDriver) {
+    throw new Error(
+      "caller-owned terminal lane cannot combine BOTSTER_SHARED_SESSION_ID with BOTSTER_LIVE_SHARED_HUB_DRIVER=1"
+    );
+  }
+  if (env.skipFlags.length > 0) {
+    throw new Error(
+      `caller-owned terminal lane rejects allow-skip inputs: ${env.skipFlags.join(", ")}`
+    );
+  }
+  if (env.exclusiveModes.length > 0) {
+    throw new Error(
+      `caller-owned terminal lane cannot combine with ${env.exclusiveModes.join(", ")}`
+    );
+  }
+  return { mode: true, ...env };
+}
+
+export function productionSessionScriptSource() {
+  return [
+    "stty -echo 2>/dev/null || true",
+    "echo botster-web-production-ready",
+    "while IFS= read -r line; do",
+    "  case \"$line\" in",
+    "    botster-web-production-size) set -- $(stty size); echo botster-web-production-size:${1}x${2} ;;",
+    "    botster-web-production-exit) echo botster-web-production-exiting; exit 0 ;;",
+    "    botster-web-production-bytes-lead) printf '\\342' ;;",
+    "    botster-web-production-bytes-rest) printf '\\202\\254' ;;",
+    "    botster-web-production-bytes-ctrl) printf '\\000\\033[0m\\377' ;;",
+    "    botster-web-production-bytes-hold) printf '\\250\\001\\377' ;;",
+    "    botster-web-production-mouse-on) printf '\\033[?1000h\\033[?1006h' ;;",
+    "    botster-web-production-bytes-ablate) printf '\\375' ;;",
+    "    *botster-web-production-alt-redraw:*) marker=${line#*botster-web-production-alt-redraw:}; marker=$(printf '%s' \"$marker\" | tr -d '\\r'); printf '\\033[?1000l\\033[?1006l'; set -- $(stty size); rows=$1; printf '\\033[?1049h\\033[2J\\033[H'; row=1; while [ \"$row\" -le \"$rows\" ]; do printf '\\033[%s;1H%s-row-%s-of-%s' \"$row\" \"$marker\" \"$row\" \"$rows\"; row=$((row + 1)); done; printf '\\033[%s;1H%s-final-row-%s' \"$rows\" \"$marker\" \"$rows\" ;;",
+    "    *) echo botster-web-production-echo:$line ;;",
+    "  esac",
+    "done"
+  ].join("\n");
+}
+
 export function convergeEntityFamily(events, family) {
   const records = new Map();
   const chronology = [];

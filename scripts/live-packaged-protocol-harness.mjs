@@ -30,6 +30,8 @@ import {
   packageRuntimeNavigation,
   packageEnsureDecision,
   reconnectGenerationEvidence,
+  assertCallerOwnedSharedSessionContract,
+  productionSessionScriptSource,
   workspacesLifecycleAbsenceResult,
   workspacesLifecycleDomResult,
   workspacesLifecycleMaterializationResult,
@@ -59,6 +61,9 @@ const packageRoot = process.cwd();
 const durableStateMode = process.env.BOTSTER_LIVE_DURABLE_STATE === "1";
 const suppliedDataDir = process.env.BOTSTER_LIVE_DATA_DIR;
 const sharedHubDriverMode = process.env.BOTSTER_LIVE_SHARED_HUB_DRIVER === "1";
+const sharedSessionContract = assertCallerOwnedSharedSessionContract();
+const sharedSessionMode = sharedSessionContract.mode;
+const sharedSessionProveExit = sharedSessionContract.proveExit;
 const sharedHubAssignment = sharedHubDriverMode
   ? parseWorkspacesSpawnAssignment(process.env.BOTSTER_WORKSPACES_SPAWN_CASES)
   : undefined;
@@ -102,11 +107,11 @@ const entityOptionsPackagePath = entityOptionsMode
   : undefined;
 const echoProbe = "keys";
 const attachProbe = "botster-web-production-attach-probe";
-const productionSessionId = "web-prod";
+const productionSessionId = sharedSessionMode ? sharedSessionContract.sessionId : "web-prod";
 const hydrateHoldBytes = [0xa8, 0x01, 0xff];
 const ablateOracleBytes = [0xfd];
 
-if (!sharedHubDriverMode && !process.env.BOTSTER_HUB_BIN) {
+if (!sharedHubDriverMode && !sharedSessionMode && !process.env.BOTSTER_HUB_BIN) {
   throw new Error(
     "Live packaged protocol harness requires BOTSTER_HUB_BIN. " +
       "Use BOTSTER_HUB_BIN with BOTSTER_SESSION_WORKER_BIN for an isolated spawned hub."
@@ -166,14 +171,17 @@ let workspacesCompatibilityProofCount = 0;
 let workspacesCompatibilityState;
 
 try {
-  binaryProvenance = sharedHubDriverMode
+  binaryProvenance = sharedHubDriverMode || sharedSessionMode
     ? { hub: { path: null, source: "caller-owned" }, session_worker: { path: null, source: "caller-owned" } }
     : await loadBinaryProvenance();
-  if (!sharedHubDriverMode) {
+  if (!sharedHubDriverMode && !sharedSessionMode) {
     console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
   }
   appUrl = await startWebrtcPackageRuntime();
-  if (sharedHubDriverMode) {
+  if (sharedSessionMode) {
+    await assertSuppliedSessionRunningOnDaemon();
+  }
+  if (sharedHubDriverMode || sharedSessionMode) {
     console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
   }
 
@@ -250,6 +258,12 @@ try {
     await flushWritable(process.stdout);
     process.exit(0);
   }
+  if (sharedSessionMode) {
+    console.log(`live-shared-session-terminal-lane ${JSON.stringify({
+      session_id: productionSessionId,
+      prove_exit: sharedSessionProveExit
+    })}`);
+  }
   await openAppsView(page);
   await assertRemoteAccessSettingsDispatch(page, originalRemoteAccessValue);
   if (entityOptionsMode) {
@@ -305,7 +319,11 @@ try {
   if (durableStateMode) {
     await assertDurableSeededSessionsVisible(page);
   }
-  await startProductionSession();
+  if (sharedSessionMode) {
+    await assertSuppliedSessionRunningOnDaemon();
+  } else {
+    await startProductionSession();
+  }
   await waitForSessionStatus(page, "running");
   await openSessionTerminal(page, productionSessionId);
   await waitForRunningSessionFrame(page);
@@ -319,7 +337,7 @@ try {
   const hubIdentityAcrossReconnects = [];
   let previousGrantId = await latestLocalWebrtcGrantId(page);
   let previousEntitySubscriptionId = await latestSessionEntitySubscriptionId(page);
-  for (const cycle of [1, 2]) {
+  for (const cycle of sharedSessionMode ? [] : [1, 2]) {
     const reconnect = await navigatePackageRuntimeAndAssertWebrtc(
       page,
       {
@@ -352,6 +370,18 @@ try {
         initialHubIdentity,
         `reconnect cycle ${cycle}`
       )
+    });
+  }
+
+  if (await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).count() === 0) {
+    await openHomeView(page);
+    await waitForSessionStatus(page, "running");
+    await openSessionTerminal(page, productionSessionId);
+    await waitForRunningSessionFrame(page);
+    await waitForTerminalSession(page, productionSessionId);
+    responseAssemblyTelemetry.push({
+      cycle: sharedSessionMode ? "shared-resume" : "post-external",
+      ...await waitForAutomaticTerminalRestore(page)
     });
   }
 
@@ -416,18 +446,50 @@ try {
   await provePaletteProjectionAfterOsc(page, productionSessionId);
   await proveRetainedHistoryAfterEcho(page, echoProbe);
   await proveRapidAlternateScreenReattach(page, productionSessionId);
+  if (sharedSessionMode) {
+    await proveInFlightAttachCancellation(page, productionSessionId);
+  }
   await proveInPageTerminalDataChannelReconnect(page, productionSessionId);
 
   // Rendered-DOM re-check after two WebRTC generations and the full terminal exercise: the
   // General section must still show the authoritative identity, not "Not reported".
   const finalHubStatus = await assertCurrentHubCompatibilityAndSchema(page);
-  const finalHubIdentity = await assertAuthoritativeHubIdentity(page, finalHubStatus, "after reconnect cycles");
+  const finalHubIdentity = await assertAuthoritativeHubIdentity(
+    page,
+    finalHubStatus,
+    sharedSessionMode ? "after in-page reconnect" : "after reconnect cycles"
+  );
   for (const [field, value] of Object.entries(initialHubIdentity)) {
     if (String(finalHubIdentity[field]) !== String(value)) {
       throw new Error(
         `Hub identity changed across the reconnect cycles: ${field} ${String(value)} -> ${String(finalHubIdentity[field])}`
       );
     }
+  }
+  if (sharedSessionMode) {
+    await assertNoSuppliedSessionShutdown(page, productionSessionId);
+    if (sharedSessionProveExit) {
+      await proveSharedSessionExit(page, productionSessionId);
+    } else {
+      console.log(`live-shared-session-keep-alive-passed ${JSON.stringify({
+        session_id: productionSessionId
+      })}`);
+    }
+    assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+    assertRequiredWorkspacesProof();
+    console.log(
+      `live-shared-session-terminal-lane-passed ${JSON.stringify({
+        session_id: productionSessionId,
+        prove_exit: sharedSessionProveExit,
+        binary_provenance: binaryProvenance,
+        hub_identity: initialHubIdentity,
+        hub_identity_in_page_reconnect: inPageReconnect,
+        attach_chronology: attachChronology,
+        response_assembly_telemetry: responseAssemblyTelemetry,
+        terminal_proof_notes: proofNotes
+      })}`
+    );
+    process.exit(0);
   }
   await openHomeView(page);
   await openSessionTerminal(page, productionSessionId);
@@ -5516,27 +5578,7 @@ async function assertDurableSeededSessionsVisible(page) {
 async function startProductionSession() {
   if (!webrtcDataDir) throw new Error("production session proof requires a WebRTC hub data directory");
   const scriptPath = join(webrtcDataDir, "botster-web-production-session.sh");
-  await writeFile(
-    scriptPath,
-    [
-      "stty -echo 2>/dev/null || true",
-      "echo botster-web-production-ready",
-      "while IFS= read -r line; do",
-      "  case \"$line\" in",
-      "    botster-web-production-size) set -- $(stty size); echo botster-web-production-size:${1}x${2} ;;",
-      "    botster-web-production-exit) echo botster-web-production-exiting; exit 0 ;;",
-      "    botster-web-production-bytes-lead) printf '\\342' ;;",
-      "    botster-web-production-bytes-rest) printf '\\202\\254' ;;",
-      "    botster-web-production-bytes-ctrl) printf '\\000\\033[0m\\377' ;;",
-      "    botster-web-production-bytes-hold) printf '\\250\\001\\377' ;;",
-      "    botster-web-production-mouse-on) printf '\\033[?1000h\\033[?1006h' ;;",
-      "    botster-web-production-bytes-ablate) printf '\\375' ;;",
-      "    *botster-web-production-alt-redraw:*) marker=${line#*botster-web-production-alt-redraw:}; marker=$(printf '%s' \"$marker\" | tr -d '\\r'); printf '\\033[?1000l\\033[?1006l'; set -- $(stty size); rows=$1; printf '\\033[?1049h\\033[2J\\033[H'; row=1; while [ \"$row\" -le \"$rows\" ]; do printf '\\033[%s;1H%s-row-%s-of-%s' \"$row\" \"$marker\" \"$row\" \"$rows\"; row=$((row + 1)); done; printf '\\033[%s;1H%s-final-row-%s' \"$rows\" \"$marker\" \"$rows\" ;;",
-      "    *) echo botster-web-production-echo:$line ;;",
-      "  esac",
-      "done"
-    ].join("\n")
-  );
+  await writeFile(scriptPath, productionSessionScriptSource());
   const response = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
     type: "spawn",
     session_id: productionSessionId,
@@ -6906,7 +6948,7 @@ async function collectAlternateScreenDifferential({
     }
   );
 
-  let unixReadScreen = null;
+  let unixReadScreen;
   try {
     const reply = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
       type: "read_screen",
@@ -6924,7 +6966,7 @@ async function collectAlternateScreenDifferential({
   }
 
   const scriptPath = join(webrtcDataDir, "botster-web-production-session.sh");
-  let producerScript = null;
+  let producerScript;
   try {
     const script = readFileSync(scriptPath, "utf8");
     producerScript = {
@@ -7096,6 +7138,318 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
         cycles: cycles.length
       })
   );
+}
+
+async function assertSuppliedSessionRunningOnDaemon() {
+  if (!webrtcDataDir) {
+    throw new Error("caller-owned terminal lane requires BOTSTER_LIVE_DATA_DIR");
+  }
+  const response = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), { type: "list_sessions" });
+  const row = (response.sessions ?? []).find((session) => session.session_id === productionSessionId);
+  if (!row || row.lifecycle !== "running") {
+    throw new Error(
+      `caller-owned session ${productionSessionId} is not running: ${JSON.stringify(row ?? null)}`
+    );
+  }
+  return row;
+}
+
+async function assertNoSuppliedSessionShutdown(page, sessionId) {
+  const shutdowns = await page.evaluate(({ expectedSessionId }) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) =>
+      entry.kind === "daemon_request" &&
+      entry.payload?.type === "shutdown_session" &&
+      entry.payload?.session_id === expectedSessionId
+    ), { expectedSessionId: sessionId });
+  if (shutdowns.length > 0) {
+    throw new Error(`caller-owned lane sent shutdown_session for ${sessionId}: ${JSON.stringify(shutdowns)}`);
+  }
+}
+
+async function proveInFlightAttachCancellation(page, sessionId) {
+  const ablate = process.env.BOTSTER_LIVE_ABLATE_CANCEL_DETACH === "1";
+  if (await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).count() > 0) {
+    await openHomeView(page);
+    await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor({ state: "detached" });
+    await page.waitForFunction(
+      ({ expectedSessionId, containerClass, sessionIdAttr }) => {
+        const ids = [...globalThis.document.querySelectorAll(`.${containerClass}`)]
+          .map((node) => node.getAttribute(sessionIdAttr));
+        return !ids.includes(expectedSessionId);
+      },
+      {
+        expectedSessionId: sessionId,
+        containerClass: HOST_CHROME.terminalContainerClass,
+        sessionIdAttr: HOST_CHROME.terminalSessionIdAttr
+      },
+      { timeout: 15_000 }
+    ).catch((error) => {
+      throw new Error(`cancel helper Home unmount did not release session ${sessionId}: ${error.message}`);
+    });
+  }
+
+  const baseline = await page.evaluate(() => {
+    const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+    const attaches = terminal.filter((entry) => entry.kind === "attach" && entry.payload?.subscription_id);
+    return {
+      subscription_id: attaches.at(-1)?.payload?.subscription_id ?? null,
+      held_count: terminal.filter((entry) => entry.kind === "snapshot_install_held").length
+    };
+  });
+
+  const armed = await page.evaluate(() => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    if (typeof harness?.armSnapshotInstallHold !== "function") return false;
+    harness.armSnapshotInstallHold();
+    return true;
+  });
+  if (!armed) {
+    throw new Error("snapshot-install hold unavailable: expose armSnapshotInstallHold on the live harness");
+  }
+
+  try {
+    await openSessionTerminal(page, sessionId);
+    const hold = await page.waitForFunction(
+      ({ baselineSubscriptionId, heldBefore }) => {
+        const held = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+          (entry) => entry.kind === "snapshot_install_held"
+        );
+        if (held.length <= heldBefore) return null;
+        const latest = held.at(-1)?.payload ?? {};
+        if (typeof latest.subscription_id !== "string" || !Number.isInteger(latest.generation)) return null;
+        if (baselineSubscriptionId && latest.subscription_id === baselineSubscriptionId) return null;
+        return latest;
+      },
+      { baselineSubscriptionId: baseline.subscription_id, heldBefore: baseline.held_count },
+      { timeout: 30_000 }
+    ).then((handle) => handle.jsonValue()).catch((error) => {
+      throw new Error(`timed out waiting for a new snapshot_install_held after remount: ${error.message}`);
+    });
+
+    if (ablate) {
+      await page.evaluate(() => {
+        const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+        if (harness) harness.ablateCancelDetach = true;
+      });
+    }
+
+    const detachBefore = await page.evaluate(({ subscriptionId }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) =>
+        entry.kind === "daemon_request" &&
+        entry.payload?.type === "detach" &&
+        entry.payload?.subscription_id === subscriptionId
+      ).length, { subscriptionId: hold.subscription_id });
+
+    await openHomeView(page);
+    await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor({ state: "detached" });
+
+    await page.waitForFunction(
+      ({ subscriptionId, generation }) =>
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) =>
+          (entry.kind === "reader_cancel" || entry.kind === "event_delivery_failed") &&
+          (entry.payload?.subscription_id === subscriptionId || entry.payload?.generation === generation)
+        ),
+      { subscriptionId: hold.subscription_id, generation: hold.generation },
+      { timeout: 15_000 }
+    ).catch((error) => {
+      throw new Error(
+        `cancel oracle missing decoder abort for held generation ${hold.generation}: ${error.message}`
+      );
+    });
+
+    const detachEvidence = await page.evaluate(({ subscriptionId, expectedSessionId, detachBefore: before }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const detach_count = events.filter((entry) =>
+        entry.kind === "daemon_request" &&
+        entry.payload?.type === "detach" &&
+        entry.payload?.subscription_id === subscriptionId
+      ).length - before;
+      return {
+        detach_count,
+        shutdown_count: events.filter((entry) =>
+          entry.kind === "daemon_request" &&
+          entry.payload?.type === "shutdown_session" &&
+          entry.payload?.session_id === expectedSessionId
+        ).length
+      };
+    }, { subscriptionId: hold.subscription_id, expectedSessionId: sessionId, detachBefore });
+    if (detachEvidence.detach_count < 1) {
+      throw new Error(
+        `expected a detach for held subscription ${hold.subscription_id}, got ${detachEvidence.detach_count}`
+      );
+    }
+    if (detachEvidence.shutdown_count !== 0) {
+      throw new Error(`cancel unmount sent shutdown_session for ${sessionId}`);
+    }
+
+    await waitForSessionStatus(page, "running");
+    const lifecycle = await page.evaluate(({ expectedSessionId }) => {
+      const sessions = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("session") ?? [];
+      return sessions.find((row) =>
+        row.id === expectedSessionId ||
+        row.session_uuid === expectedSessionId ||
+        row.session_id === expectedSessionId
+      )?.lifecycle ?? null;
+    }, { expectedSessionId: sessionId });
+    if (lifecycle !== "running") {
+      throw new Error(`supplied session ${sessionId} lifecycle after cancel is ${lifecycle}`);
+    }
+
+    await openSessionTerminal(page, sessionId);
+    await waitForTerminalSession(page, sessionId);
+    await waitForAutomaticTerminalRestore(page);
+    const newSubscriptionId = await page.evaluate(() => {
+      const attaches = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+        (entry) => entry.kind === "attach" && entry.payload?.subscription_id
+      );
+      return attaches.at(-1)?.payload?.subscription_id ?? null;
+    });
+    if (!newSubscriptionId || newSubscriptionId === hold.subscription_id) {
+      throw new Error(`cancel remount reused subscription ${newSubscriptionId}`);
+    }
+
+    const marker = {
+      session_id: sessionId,
+      old_subscription_id: hold.subscription_id,
+      new_subscription_id: newSubscriptionId,
+      held_generation: hold.generation,
+      detach_count: detachEvidence.detach_count
+    };
+    console.log(`live-shared-session-cancel-passed ${JSON.stringify(marker)}`);
+    recordProofNote("in_flight_attach_cancellation", marker);
+    return marker;
+  } finally {
+    await page.evaluate(() => {
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.releaseSnapshotInstall?.();
+      const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+      if (harness) harness.ablateCancelDetach = false;
+    });
+  }
+}
+
+async function proveSharedSessionExit(page, sessionId) {
+  await openHomeView(page);
+  await openSessionTerminal(page, sessionId);
+  await waitForTerminalSession(page, sessionId);
+  await callTerminalControl(page, "writeInput", "botster-web-production-exit\n");
+  const exitEvidence = await page.waitForFunction(
+    ({ expectedSessionId }) => {
+      const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ ?? {};
+      const processExit = (harness.events ?? []).some((entry) =>
+        entry.kind === "daemon_terminal_event" &&
+        entry.payload?.type === "process_exit" &&
+        entry.payload?.session_id === expectedSessionId
+      );
+      const producerExiting = (harness.terminal ?? []).some((entry) => {
+        const encoded = entry.payload?.payload_bytes_base64;
+        if (typeof encoded !== "string") return false;
+        try {
+          return new TextDecoder().decode(
+            Uint8Array.from(globalThis.atob(encoded), (char) => char.charCodeAt(0))
+          ).includes("botster-web-production-exiting");
+        } catch {
+          return false;
+        }
+      });
+      const sessions = typeof harness.listEntities === "function" ? harness.listEntities("session") : [];
+      const row = sessions.find((record) =>
+        record.id === expectedSessionId ||
+        record.session_uuid === expectedSessionId ||
+        record.session_id === expectedSessionId
+      );
+      const entityExit = row?.lifecycle === "exited" || row?.lifecycle === "failed";
+      if (!processExit && !entityExit) return null;
+      return {
+        process_exit: processExit,
+        entity_lifecycle: row?.lifecycle ?? null,
+        producer_exiting: producerExiting
+      };
+    },
+    { expectedSessionId: sessionId },
+    { timeout: 30_000 }
+  ).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(
+      `opt-in exit pass did not observe ProcessExited or session-entity exit for ${sessionId}: ${error.message}`
+    );
+  });
+  const terminalDetachWait = await waitForTerminalDetached(page, sessionId);
+  const entityDetachProof = await proveSharedSessionExitDetach(page, sessionId, terminalDetachWait);
+  await assertNoSuppliedSessionShutdown(page, sessionId);
+  const marker = {
+    session_id: sessionId,
+    ...exitEvidence,
+    entity_detach_proof: entityDetachProof
+  };
+  console.log(`live-shared-session-exit-passed ${JSON.stringify(marker)}`);
+  recordProofNote("shared_session_exit", marker);
+  return marker;
+}
+
+async function proveSharedSessionExitDetach(page, sessionId, detachWait) {
+  const evidence = await page.evaluate(({ expectedSessionId }) => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ ?? {};
+    const sessions = typeof harness.listEntities === "function" ? harness.listEntities("session") : [];
+    const sessionRow = sessions.find((record) =>
+      record.id === expectedSessionId || record.session_uuid === expectedSessionId
+    );
+    const processExitEvents = [];
+    (harness.events ?? []).forEach((entry, index) => {
+      if (
+        entry?.kind === "daemon_terminal_event" &&
+        entry.payload?.type === "process_exit" &&
+        entry.payload?.session_id === expectedSessionId
+      ) {
+        processExitEvents.push({ source: "daemon_terminal_event", index, payload: entry.payload });
+      }
+    });
+    const entityLifecycleEvents = [];
+    (harness.events ?? []).forEach((entry, index) => {
+      if (entry?.kind !== "hub_frame") return;
+      const frame = entry.payload ?? {};
+      if (!["entity_snapshot", "entity_upsert", "entity_patch"].includes(frame.kind)) return;
+      const family = frame.payload?.family ?? frame.payload?.key?.family;
+      if (family !== "session") return;
+      const records = frame.kind === "entity_snapshot"
+        ? (frame.payload?.records ?? [])
+        : [frame.payload?.record];
+      for (const record of records) {
+        const id = record?.id ?? record?.session_uuid;
+        if (id !== expectedSessionId) continue;
+        if (record?.lifecycle === "exited" || record?.lifecycle === "failed") {
+          entityLifecycleEvents.push({ index, kind: frame.kind, lifecycle: record.lifecycle });
+        }
+      }
+    });
+    return { sessionRow, processExitEvents, entityLifecycleEvents };
+  }, { expectedSessionId: sessionId });
+
+  const lifecycle = evidence.sessionRow?.lifecycle;
+  const processExitSeen = evidence.processExitEvents.length > 0;
+  const entityExitSeen = evidence.entityLifecycleEvents.length > 0
+    || lifecycle === "exited"
+    || lifecycle === "failed";
+  if (!processExitSeen && !entityExitSeen) {
+    throw new Error(
+      `opt-in exit pass detached without ProcessExited or session-entity exit: ${JSON.stringify({ evidence, detachWait })}`
+    );
+  }
+  if (!isTerminalDetached({
+    sessionContainerIds: detachWait.lastSessionContainerIds,
+    dashboardPresent: detachWait.lastDashboardPresent
+  }, sessionId)) {
+    throw new Error(`opt-in exit pass did not detach the supplied session: ${JSON.stringify(detachWait)}`);
+  }
+  return {
+    sessionId,
+    lifecycle: lifecycle ?? null,
+    process_exit: processExitSeen,
+    entity_exit: entityExitSeen,
+    process_exit_before_entity: evidence.processExitEvents.some((entry) =>
+      evidence.entityLifecycleEvents[0]
+      && entry.index < evidence.entityLifecycleEvents[0].index
+    ),
+    detachWait
+  };
 }
 
 async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
@@ -7952,19 +8306,29 @@ async function assertNoUnknownSession(page) {
 }
 
 async function startWebrtcPackageRuntime() {
-  if (sharedHubDriverMode) {
-    if (!webrtcDataDir) throw new Error("shared-Hub browser driver requires BOTSTER_LIVE_DATA_DIR");
+  if (sharedHubDriverMode || sharedSessionMode) {
+    if (!webrtcDataDir) {
+      throw new Error(
+        sharedSessionMode
+          ? "caller-owned terminal lane requires BOTSTER_LIVE_DATA_DIR"
+          : "shared-Hub browser driver requires BOTSTER_LIVE_DATA_DIR"
+      );
+    }
     const socketPath = join(webrtcDataDir, "botster-hub.sock");
     await waitForSocket(socketPath);
     const status = await sendDaemonRequest(socketPath, { type: "status" });
     if (status.error) {
-      throw new Error(`shared-Hub browser driver could not handshake with caller-owned Hub: ${JSON.stringify(status)}`);
+      throw new Error(
+        `${sharedSessionMode ? "caller-owned terminal lane" : "shared-Hub browser driver"} could not handshake with caller-owned Hub: ${JSON.stringify(status)}`
+      );
     }
     const packages = await listPackages(socketPath);
     const url = await waitForPackageAppUrl(socketPath);
     await waitForHttpOk(new URL("/health", url).toString());
     const servedHtml = await waitForHtmlShell(url);
-    binaryProvenance = callerOwnedRuntimeProvenance(status, packages, servedHtml);
+    binaryProvenance = callerOwnedRuntimeProvenance(status, packages, servedHtml, {
+      requireWorkspaces: sharedHubDriverMode
+    });
     return url;
   }
   if (!process.env.BOTSTER_HUB_BIN) {
@@ -8014,7 +8378,7 @@ async function startWebrtcPackageRuntime() {
   return url;
 }
 
-function callerOwnedRuntimeProvenance(status, packages, servedHtml) {
+function callerOwnedRuntimeProvenance(status, packages, servedHtml, { requireWorkspaces = true } = {}) {
   const daemonStatus = status.status ?? {};
   const compatibility = daemonStatus.compatibility ?? {};
   const packageEvidence = (packageName) => {
@@ -8045,7 +8409,7 @@ function callerOwnedRuntimeProvenance(status, packages, servedHtml) {
       version: null,
       disposition: "not_exposed_by_daemon_status"
     },
-    workspaces: packageEvidence("botster-workspaces"),
+    ...(requireWorkspaces ? { workspaces: packageEvidence("botster-workspaces") } : {}),
     web: {
       ...packageEvidence("botster-web"),
       build_commit: null,
@@ -8464,12 +8828,22 @@ async function waitForHttpOk(url, exitMessage) {
 }
 
 async function waitForHtmlShell(url) {
-  const response = await fetch(url);
-  const body = await response.text();
-  if (!response.ok || !body.includes("<div id=\"root\"></div>") || !body.includes("__BOTSTER_PACKAGE_RUNTIME__")) {
-    throw new Error(`packaged UI shell was not served from ${url}`);
+  const deadline = Date.now() + 15_000;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url);
+      const body = await response.text();
+      if (response.ok && body.includes("<div id=\"root\"></div>") && body.includes("__BOTSTER_PACKAGE_RUNTIME__")) {
+        return body;
+      }
+      lastError = new Error(`packaged UI shell was not served from ${url}`);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
-  return body;
+  throw lastError ?? new Error(`timed out waiting for packaged UI shell from ${url}`);
 }
 
 function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) {

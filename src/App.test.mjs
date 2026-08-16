@@ -31,6 +31,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { decodeHubConnection, HubConnectionError } from "../scripts/hubConnection.mjs";
 import {
   assertDurableStateOwnership,
+  assertCallerOwnedSharedSessionContract,
+  callerOwnedSharedSessionEnv,
+  DEFAULT_SHARED_SESSION_ID,
+  productionSessionScriptSource,
   assertPackageReused,
   assertWorkspacesLifecycleStateOwnership,
   assertWorkspacesStateOwnership,
@@ -337,6 +341,78 @@ assert.throws(
 );
 assert.doesNotThrow(
   () => assertDurableStateOwnership({ durableStateMode: true, suppliedDataDir: undefined })
+);
+assert.equal(DEFAULT_SHARED_SESSION_ID, "north-star-shared");
+assert.match(productionSessionScriptSource(), /botster-web-production-exit\) echo botster-web-production-exiting; exit 0/);
+assert.equal(
+  assertCallerOwnedSharedSessionContract({}).mode,
+  false
+);
+assert.equal(
+  assertCallerOwnedSharedSessionContract({ BOTSTER_LIVE_DATA_DIR: "/caller/data" }).mode,
+  false
+);
+assert.throws(
+  () => assertCallerOwnedSharedSessionContract({ BOTSTER_SHARED_SESSION_ID: "north-star-shared" }),
+  /requires BOTSTER_LIVE_DATA_DIR and BOTSTER_SHARED_SESSION_ID/
+);
+assert.throws(
+  () => assertCallerOwnedSharedSessionContract({
+    BOTSTER_SHARED_SESSION_PROVE_EXIT: "1"
+  }),
+  /requires BOTSTER_LIVE_DATA_DIR and BOTSTER_SHARED_SESSION_ID/
+);
+assert.throws(
+  () => assertCallerOwnedSharedSessionContract({
+    BOTSTER_LIVE_DATA_DIR: "/caller/data",
+    BOTSTER_SHARED_SESSION_PROVE_EXIT: "1"
+  }),
+  /requires BOTSTER_LIVE_DATA_DIR and BOTSTER_SHARED_SESSION_ID/
+);
+assert.throws(
+  () => assertCallerOwnedSharedSessionContract({
+    BOTSTER_LIVE_DATA_DIR: "/caller/data",
+    BOTSTER_SHARED_SESSION_ID: "north-star-shared",
+    BOTSTER_LIVE_SHARED_HUB_DRIVER: "1"
+  }),
+  /cannot combine BOTSTER_SHARED_SESSION_ID with BOTSTER_LIVE_SHARED_HUB_DRIVER=1/
+);
+assert.throws(
+  () => assertCallerOwnedSharedSessionContract({
+    BOTSTER_LIVE_DATA_DIR: "/caller/data",
+    BOTSTER_SHARED_SESSION_ID: "north-star-shared",
+    BOTSTER_LIVE_ALLOW_SURFACE_SKIP: "1"
+  }),
+  /rejects allow-skip inputs: BOTSTER_LIVE_ALLOW_SURFACE_SKIP/
+);
+assert.throws(
+  () => assertCallerOwnedSharedSessionContract({
+    BOTSTER_LIVE_DATA_DIR: "/caller/data",
+    BOTSTER_SHARED_SESSION_ID: "north-star-shared",
+    BOTSTER_LIVE_SURFACE_ONLY: "1"
+  }),
+  /cannot combine with BOTSTER_LIVE_SURFACE_ONLY/
+);
+assert.deepEqual(
+  callerOwnedSharedSessionEnv({
+    BOTSTER_LIVE_DATA_DIR: " /caller/data ",
+    BOTSTER_SHARED_SESSION_ID: " north-star-shared "
+  }),
+  {
+    dataDir: "/caller/data",
+    sessionId: "north-star-shared",
+    proveExit: false,
+    sharedHubDriver: false,
+    exclusiveModes: [],
+    skipFlags: []
+  }
+);
+assert.equal(
+  assertCallerOwnedSharedSessionContract({
+    BOTSTER_LIVE_DATA_DIR: "/caller/data",
+    BOTSTER_SHARED_SESSION_ID: "north-star-shared"
+  }).mode,
+  true
 );
 assert.doesNotThrow(() =>
   assertWorkspacesStateOwnership({
@@ -847,6 +923,8 @@ const [
   browserRuntimeSmokeScript,
   liveProtocolHarnessScript,
   workspacesSharedHubBrowserSmokeScript,
+  liveSharedSessionDriverScript,
+  liveSharedSessionCoordinatorScript,
   architecture,
   readme,
   uiContractDeclarations,
@@ -887,6 +965,8 @@ const [
   readFile(new URL("../scripts/browser-runtime-smoke.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-packaged-protocol-harness.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/workspaces-shared-hub-browser-smoke.mjs", import.meta.url), "utf8"),
+  readFile(new URL("../scripts/live-shared-session-browser-driver.mjs", import.meta.url), "utf8"),
+  readFile(new URL("../scripts/live-shared-session-coordinator.mjs", import.meta.url), "utf8"),
   readFile(new URL("../docs/architecture.md", import.meta.url), "utf8"),
   readFile(new URL("../README.md", import.meta.url), "utf8"),
   readFile(new URL("../node_modules/@trybotster/ui-contract/index.d.ts", import.meta.url), "utf8"),
@@ -1980,9 +2060,10 @@ assert.match(liveProtocolHarnessScript, /proveRapidAlternateScreenReattach/);
 assert.match(liveProtocolHarnessScript, /const finalRowPrefix = `\$\{marker\}-final-row-`/);
 assert.match(liveProtocolHarnessScript, /finalScreen\?\.text\?\.includes\(finalRowPrefix\)/);
 assert.match(liveProtocolHarnessScript, /lost final row marker \$\{finalRowPrefix\}/);
-assert.match(liveProtocolHarnessScript, /\*botster-web-production-alt-redraw:\*\)/);
-assert.match(liveProtocolHarnessScript, /marker=\$\{line#\*botster-web-production-alt-redraw:\}/);
-assert.match(liveProtocolHarnessScript, /\\nbotster-web-production-alt-redraw:\$\{marker\}\\n/);
+assert.match(productionSessionScriptSource(), /\*botster-web-production-alt-redraw:\*\)/);
+assert.match(productionSessionScriptSource(), /marker=\$\{line#\*botster-web-production-alt-redraw:\}/);
+assert.match(liveProtocolHarnessScript, /productionSessionScriptSource\(\)/);
+assert.match(liveProtocolHarnessScript, /botster-web-production-alt-redraw:\$\{marker\}/);
 assert.match(liveProtocolHarnessScript, /rapid_alternate_screen_reattach passed/);
 assert.match(liveProtocolHarnessScript, /proveLiveTerminalAfterAttach/);
 assert.match(liveProtocolHarnessScript, /const echoProbe = "keys"/);
@@ -2542,7 +2623,7 @@ assert.match(liveProtocolHarnessScript, /event\.type === "attach_state" \? `\$\{
 assert.match(liveProtocolHarnessScript, /loadBinaryProvenance/);
 assert.match(liveProtocolHarnessScript, /lockPackageRevision/);
 assert.match(liveProtocolHarnessScript, /requiredProvenanceField\(compatibility, "protocol"/);
-assert.match(liveProtocolHarnessScript, /if \(!sharedHubDriverMode\)/);
+assert.match(liveProtocolHarnessScript, /if \(!sharedHubDriverMode && !sharedSessionMode\)/);
 assert.match(liveProtocolHarnessScript, /live packaged protocol binary provenance/);
 assert.match(liveProtocolHarnessScript, /locator\(WORKSPACES_SPAWN_OPENER_SELECTOR\)/);
 assert.doesNotMatch(liveProtocolHarnessScript, /hasText:\s*\/\^Spawn\$\//);
@@ -2584,6 +2665,68 @@ assert.equal(
   packageJson.scripts["smoke:live-packaged-protocol:caller-repeatability"],
   "npm run build && node scripts/live-caller-owned-repeatability.mjs"
 );
+assert.equal(
+  packageJson.scripts["drive:live-packaged-protocol:shared-session"],
+  "node scripts/live-shared-session-browser-driver.mjs"
+);
+assert.equal(
+  packageJson.scripts["smoke:live-packaged-protocol:shared-session"],
+  "npm run build && node scripts/live-shared-session-coordinator.mjs"
+);
+assert.match(liveSharedSessionDriverScript, /assertCallerOwnedSharedSessionContract/);
+assert.doesNotMatch(liveSharedSessionDriverScript, /BOTSTER_LIVE_SHARED_HUB_DRIVER = "1"/);
+assert.match(liveSharedSessionCoordinatorScript, /BOTSTER_SHARED_SESSION_PROVE_EXIT/);
+assert.match(liveSharedSessionCoordinatorScript, /live-shared-session-keep-alive-passed/);
+assert.match(liveSharedSessionCoordinatorScript, /live-shared-session-cancel-passed/);
+assert.match(liveSharedSessionCoordinatorScript, /live-shared-session-exit-passed/);
+assert.doesNotMatch(liveSharedSessionCoordinatorScript, /BOTSTER_LIVE_SHARED_HUB_DRIVER=1/);
+assert.match(liveProtocolHarnessScript, /assertCallerOwnedSharedSessionContract/);
+assert.match(liveProtocolHarnessScript, /sharedSessionMode/);
+assert.match(liveProtocolHarnessScript, /if \(sharedHubDriverMode\) \{/);
+assert.match(liveProtocolHarnessScript, /await exerciseSharedHubWorkspaces\(page, sharedHubAssignment\)/);
+assert.doesNotMatch(liveProtocolHarnessScript, /if \(sharedSessionMode\) \{\s*const summary = await exerciseSharedHubWorkspaces/);
+assert.match(liveProtocolHarnessScript, /live-shared-session-terminal-lane/);
+assert.match(liveProtocolHarnessScript, /live-shared-session-keep-alive-passed/);
+assert.match(liveProtocolHarnessScript, /async function proveInFlightAttachCancellation/);
+assert.doesNotMatch(
+  liveProtocolHarnessScript.slice(
+    liveProtocolHarnessScript.indexOf("async function proveInFlightAttachCancellation"),
+    liveProtocolHarnessScript.indexOf("async function proveSharedSessionExit")
+  ),
+  /proveSiblingSlowClientAndHostStayUp/
+);
+assert.match(liveProtocolHarnessScript, /armSnapshotInstallHold/);
+assert.match(liveProtocolHarnessScript, /snapshot_install_held/);
+assert.match(liveProtocolHarnessScript, /held\.length <= heldBefore/);
+assert.match(liveProtocolHarnessScript, /releaseSnapshotInstall/);
+assert.match(liveProtocolHarnessScript, /BOTSTER_LIVE_ABLATE_CANCEL_DETACH/);
+assert.match(liveProtocolHarnessScript, /live-shared-session-cancel-passed/);
+assert.doesNotMatch(liveProtocolHarnessScript, /TerminalSessionManager/);
+assert.match(liveProtocolHarnessScript, /for \(const cycle of sharedSessionMode \? \[\] : \[1, 2\]\)/);
+assert.match(liveProtocolHarnessScript, /cycle: sharedSessionMode \? "shared-resume" : "post-external"/);
+assert.match(liveProtocolHarnessScript, /await assertSuppliedSessionRunningOnDaemon\(\);/);
+assert.match(liveProtocolHarnessScript, /} else {\s*await startProductionSession\(\);\s*}/);
+assert.match(liveProtocolHarnessScript, /sharedSessionMode \? sharedSessionContract.sessionId : "web-prod"/);
+assert.match(liveProtocolHarnessScript, /proveInPageTerminalDataChannelReconnect/);
+assert.match(liveProtocolHarnessScript, /if \(sharedSessionProveExit\)/);
+assert.match(liveProtocolHarnessScript, /async function proveSharedSessionExit/);
+assert.match(liveProtocolHarnessScript, /async function proveSharedSessionExitDetach/);
+assert.match(liveProtocolHarnessScript, /waitForTerminalDetached\(page, productionSessionId\)/);
+assert.match(liveProtocolHarnessScript, /assertNoSuppliedSessionShutdown/);
+assert.match(liveProtocolHarnessScript, /live-shared-session-terminal-lane-passed/);
+assert.doesNotMatch(
+  liveProtocolHarnessScript.slice(
+    liveProtocolHarnessScript.indexOf("live-shared-session-keep-alive-passed"),
+    liveProtocolHarnessScript.indexOf("live-shared-session-terminal-lane-passed")
+  ),
+  /requestDaemonShutdown\(\)/
+);
+assert.match(hubTerminalDataPlane, /reader_cancel/);
+assert.match(hubTerminalDataPlane, /ablateCancelDetach/);
+assert.match(hubTerminalDataPlane, /if \(this\.detached\) return;/);
+assert.match(readme, /drive:live-packaged-protocol:shared-session/);
+assert.match(readme, /BOTSTER_SHARED_SESSION_PROVE_EXIT=1/);
+assert.match(readme, /live-shared-session-cancel-passed/);
 assert.equal(
   packageJson.scripts["smoke:workspaces-lifecycle"],
   "npm run build && BOTSTER_LIVE_WORKSPACES_LIFECYCLE=1 node scripts/live-packaged-protocol-harness.mjs"
@@ -9788,7 +9931,7 @@ assert.match(liveProtocolHarnessScript, /requiredSubscriptionId|disableTerminalT
 assert.match(liveProtocolHarnessScript, /armSnapshotInstallHold|snapshot_install_held/);
 assert.match(liveProtocolHarnessScript, /entry\.kind !== "renderer_write"/);
 assert.match(hubTerminalDataPlane, /holdLiveSnapshotInstallIfArmed|armSnapshotInstallHold/);
-assert.match(liveProtocolHarnessScript, /1000h|1006h/);
+assert.match(productionSessionScriptSource(), /1000h|1006h/);
 
 assert.equal(
   decodeDaemonByteEnvelope(ghostsnpFixturePayloadBase64, "base64", ghostsnpFixtureBytes).byteLength,
