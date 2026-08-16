@@ -13,13 +13,22 @@ Base: `origin/main` at `ebb6677902ff5920ebb75685a74bba30b9b81b87`
 | Target id | `tgt_40abcf71ccf049f4ac0c99953a799869` |
 | Spawn-target name | `booster-web` (display typo; Git identity is `trybotster/botster-web`) |
 | Authoritative path | spawn-target `tgt_40abcf71ccf049f4ac0c99953a799869` → `trybotster/botster-web` |
-| Worktree | this run worktree; HEAD is `ebb6677` |
+| Worktree | this run worktree; base `ebb6677`; plan rev 1 `72fa8d8` |
 | Repository playbook | [[botster-web-playbook]] |
 | Teardown class | yes |
 | Session-type eligibility consumer | yes (keep parent pins; do not expand spawn/list work) |
 | Merge policy | direct into `main`; no pull request |
+| Plan revision | 2 — addresses `finding_1786915171_790980` |
 
 Independent `list_spawn_targets` maps `tgt_40abcf71ccf049f4ac0c99953a799869` to `trybotster/botster-web`. The ticket forbids a Hub-target fix.
+
+## Plan Review return
+
+Review `review_1786915170_162609` sent Plan back. Product finding `finding_1786915171_790980`: rev 1 said Detach must have a fail path, but it did not name the bound, the owner, or a never-resolving request test. A hanging `bridge.request({ type: "detach" })` can keep `DefaultTerminalViewBridge.unmount` waiting.
+
+Process finding `finding_1786915171_352858` is not a product re-plan. Keep `checklist_1786914838_140775`. Do not create another vault checklist. The two later records came from timed-out retries.
+
+Rev 2 adds the named bound below. Other product scope stays.
 
 ## Repository playbook loaded
 
@@ -131,8 +140,26 @@ Surgical production change, in this order:
    - `attachToAuthoritativeSession` must not set `detachSentForSubscriptionId = undefined` for an id that already sent Detach.
 4. Public `detach()` must release the held attached id.
    - If transport recovery minted a later id, detach the abandoned held id through the same once-owner (the existing stale-detach path). Do not send two Detaches for the held id.
-5. Keep current unmount `finally` cleanup. A rejected or hung Detach must still destroy the renderer, delete the mount, and abort the decoder.
-6. Bound the Detach request on the browser side. Do not wait without a fail path. Local unmount must finish if the request rejects.
+5. Keep current unmount `finally` cleanup. A rejected or timed-out Detach must still destroy the renderer, delete the mount, and abort the decoder.
+6. Bound the awaited Detach request. See Named Detach hang bound.
+
+### Named Detach hang bound
+
+This is the answer to `finding_1786915171_790980`.
+
+| Field | Value |
+| --- | --- |
+| Owner | `HubTerminalDataPlane.detach()` — the function `DefaultTerminalViewBridge.unmount` awaits |
+| Primitive | `Promise.race` of the single `bridge.request({ type: "detach" })` against `window.setTimeout` |
+| Constant | Export `DETACH_REQUEST_BOUND_MS` from `src/botster/hubTerminalDataPlane.ts` |
+| Value | `localWebrtcResponseChunkLimits.requestTimeoutMs` (`10_000`) |
+| Why this value | Production `WebrtcDaemonTransport.sendEncrypted` already uses that 10 s request timeout. Do not invent a second product number. The data-plane race still applies when a test or non-transport bridge never resolves. |
+| Timeout action | Treat timeout as request failure. Do not retry. Keep the once-flag set so a late resolve cannot send a second Detach. Continue local cleanup. |
+| Test injection | `HubTerminalDataPlaneTestHooks.detachRequestBoundMs` may shorten the race in unit tests. Production default stays `DETACH_REQUEST_BOUND_MS`. The hang test must use the same `Promise.race` path. |
+
+`streamTerminal.unsubscribe` stays fire-and-forget. Public cancel must not await that path. The hang owner is the awaited public `detach()` request.
+
+Transport `requestTimeoutMs` alone is not enough. `detach()` awaits `options.bridge.request`. A mock or future bridge without that timer can hang unmount.
 
 Oracle and harness:
 
@@ -189,11 +216,11 @@ If Implement finds a Hub occupancy leak for the held id after exactly one Web De
 
 Likely:
 
-- `src/botster/hubTerminalDataPlane.ts` — one Detach owner; stop `detached` resurrection; stop once-flag clear on a detached id; stale attach uses `abandon`.
-- `src/botster/webrtcDaemonClient.ts` — only if stream `unsubscribe` / `abandon` must share the same request owner. Prefer to keep Detach counting in the data plane.
+- `src/botster/hubTerminalDataPlane.ts` — one Detach owner; `DETACH_REQUEST_BOUND_MS`; `Promise.race` around the awaited detach request; stop `detached` resurrection; stop once-flag clear on a detached id; stale attach uses `abandon`.
+- `src/botster/webrtcDaemonClient.ts` — only if stream `unsubscribe` / `abandon` must share the same request owner. Prefer to keep Detach counting in the data plane. Do not change `requestTimeoutMs`.
 - `src/botster/terminal.ts` — only if unmount/attach order still lets last-listener run before public detach. Do not reorder unless a unit test requires it.
 - `src/botster/TerminalViewHost.tsx` — only if cancelled-mount and effect cleanup still start two public detaches after the data-plane once-owner exists. Prefer to leave the host if the plane is sufficient.
-- `src/App.test.mjs` — in-flight hold + detach; last-listener then detach; stale attach abort + detach; subscribeOutput after detach; remount new subscription.
+- `src/App.test.mjs` — in-flight hold + detach; last-listener then detach; stale attach abort + detach; subscribeOutput after detach; remount new subscription; never-resolving detach hang.
 - `docs/reports/caller-owned-cancel-oracle-exactly-one-detach-implement.md` — Implement report (repo prior art is `docs/reports/`).
 
 Do not change IsolatedHub-only branches in `scripts/live-packaged-protocol-harness.mjs` unless a shared helper breaks. The oracle stays exact-one.
@@ -206,6 +233,7 @@ Do not change IsolatedHub-only branches in `scripts/live-packaged-protocol-harne
 - Counting only request Detach while last-listener still uses stream Detach can look like `got 0` if the request path is skipped.
 - Changing IsolatedHub shared helpers can break `smoke:live-packaged-protocol`.
 - Live proof against the lockfile Core worker may fail spawn, as on the parent Web ticket. Record the exact Hub and worker binaries.
+- A late Detach response after timeout must not send a second request. The once-flag must stay set.
 
 ## Runtime-teardown lens answers
 
@@ -213,7 +241,7 @@ Do not change IsolatedHub-only branches in `scripts/live-packaged-protocol-harne
 
 `teardown_isolation`: One cancel unmount retires this client's `(session_id, subscription_id, generation)`, its decoder, and its mount. The WebRTC peer stays. Sibling entity families stay. The supplied host session stays `running`. Sibling flood sessions stay independent.
 
-`teardown_bounds`: Detach request must have a fail path. Unmount `finally` already destroys the renderer and deletes the mount after reject. Do not `block_on` Hub close. Snapshot hold stays released in the oracle `finally`. Missing live identifiers stay fail-closed.
+`teardown_bounds`: `HubTerminalDataPlane.detach()` owns the wait. It races the single `bridge.request({ type: "detach" })` against `window.setTimeout(DETACH_REQUEST_BOUND_MS)` where `DETACH_REQUEST_BOUND_MS === localWebrtcResponseChunkLimits.requestTimeoutMs` (`10_000`). Timeout is request failure. Do not retry. Do not `block_on` Hub close. Unmount `finally` still destroys the renderer and deletes the mount after reject or timeout. Snapshot hold stays released in the oracle `finally`. Missing live identifiers stay fail-closed. A never-resolving request must not keep `unmount` waiting past the bound.
 
 `late_message_matrix`:
 
@@ -227,11 +255,11 @@ Do not change IsolatedHub-only branches in `scripts/live-packaged-protocol-harne
 | `Hello` / DataChannel recovery | peer generation | recovery may mint a new terminal subscription | stale detach of the old id uses the once-owner; do not recreate the cancelled mount |
 | `shutdown_session` | session id | forbidden on keep-alive | fail the oracle if emitted |
 
-`production_path_proof`: Home → `TerminalViewHost` cleanup → `DefaultTerminalViewBridge.unmount` → `HubTerminalDataPlane.detach` → one `daemon_request` detach for the held id + `reader_cancel` or `event_delivery_failed` for that generation → session entity `running` → remount with a new `subscription_id`. Live oracle: `proveInFlightAttachCancellation` on two consecutive keep-alive runs. Ablation: `BOTSTER_LIVE_ABLATE_CANCEL_DETACH=1` first failure `got 0`. Do not treat a unit call or a terminal JSON file as sufficient.
+`production_path_proof`: Home → `TerminalViewHost` cleanup → `DefaultTerminalViewBridge.unmount` → `HubTerminalDataPlane.detach` → one `daemon_request` detach for the held id, raced against `DETACH_REQUEST_BOUND_MS` → `reader_cancel` or `event_delivery_failed` for that generation → session entity `running` → remount with a new `subscription_id`. Hang proof: production `detach()` + `unmount()` against a never-resolving `bridge.request`. Live oracle: `proveInFlightAttachCancellation` on two consecutive keep-alive runs. Ablation: `BOTSTER_LIVE_ABLATE_CANCEL_DETACH=1` first failure `got 0`. Do not treat a unit helper that skips `detach()` as sufficient.
 
 `ownership_identity`: Core identity is `(session_id, subscription_id, generation)`. Web `subscription_id` is minted per plane, or reminted on surviving-document recovery. Cancel remount must use a new `subscription_id`. A delayed Detach for the old id must not be counted as, or applied to, the new id.
 
-`sibling_fail_closed_policy`: Success: supplied session stays up; sibling flood stays independent; peer stays. Ultimate Detach failure: local mount and decoder still die; session stays up; no sibling sacrifice. Test both the reject path (already present) and the in-flight cancel path.
+`sibling_fail_closed_policy`: Success: supplied session stays up; sibling flood stays independent; peer stays. Ultimate Detach failure or Detach hang: local mount and decoder still die; session stays up; no sibling sacrifice. Test the reject path, the never-resolving hang path, and the in-flight cancel path.
 
 ## Acceptance checks and tests
 
@@ -252,6 +280,7 @@ Focused unit proof (production classes, not harness-only helpers):
 - `subscribeOutput` after public detach does not send a second Detach for the same id.
 - Rejected Detach still unmounts, destroys, and deletes the mount (keep existing test).
 - Remount uses a new `subscription_id`.
+- Never-resolving Detach hang (`finding_1786915171_790980`): `bridge.request({ type: "detach" })` returns a Promise that never resolves. Use `testHooks.detachRequestBoundMs` of 25 ms so the test drives the same `Promise.race` as production. `DefaultTerminalViewBridge.unmount` must settle within that bound plus a small slack (for example 100 ms). Assert reader cancel, renderer destroy, mount deletion, exactly one Detach attempt, later unmount is a no-op, a sibling plane on another session stays attached, and no `shutdown_session`. Do not treat a rejected request as this test.
 
 Live caller-owned proof (required, not residual):
 
@@ -288,10 +317,11 @@ No convention conflict. Rails fat-model conventions do not apply here.
 
 ## Implement sequence
 
-1. Add failing unit tests for the in-flight hold + detach matrix before production edits.
+1. Add failing unit tests for the in-flight hold + detach matrix and the never-resolving Detach hang before production edits.
 2. Collapse Detach emission to one subscription-scoped owner.
-3. Keep decoder abort and unmount `finally`.
-4. Run unit, typecheck, lint, and build.
-5. Run two consecutive caller-owned live coordinators. Record Hub SHA, worker binary, and markers.
-6. Write `docs/reports/caller-owned-cancel-oracle-exactly-one-detach-implement.md`.
-7. Commit on this ticket branch. Do not create a pull request.
+3. Wrap the awaited detach request in `Promise.race` against `DETACH_REQUEST_BOUND_MS`.
+4. Keep decoder abort and unmount `finally`.
+5. Run unit, typecheck, lint, and build.
+6. Run two consecutive caller-owned live coordinators. Record Hub SHA, worker binary, and markers.
+7. Write `docs/reports/caller-owned-cancel-oracle-exactly-one-detach-implement.md`.
+8. Commit on this ticket branch. Do not create a pull request.
