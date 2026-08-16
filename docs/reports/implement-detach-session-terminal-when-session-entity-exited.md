@@ -2,16 +2,23 @@
 
 Ticket: `ticket_1786848959_308437`
 Run: `run_1786848964_511286`
-Step: `botster_stack_implement` / `run_step_1786853375_261808`
+Step: `botster_stack_implement` / `run_step_1786855895_522506`
 Plan: `docs/plans/detach-session-terminal-when-session-entity-exited.md`
 
 ## Review return
 
-Review `review_1786853348_302095` sent Implement back after `f5804da`. Three new findings:
+Review `review_1786855869_299201` sent Implement back after `a7fafc5`. Two new findings:
 
 | Finding | Response |
 | --- | --- |
-| `finding_1786853348_739632` Production terminal does not detach in two Review live runs | Review used the Hub-checkout worker, not the Core checkout worker. The production hook now reads the session store on every Hub frame through `sessionRecordForRoute` and `hub.onFrame`. Two consecutive default-mode smokes against Hub `bee15e7` and that same Hub-checkout worker passed `waitForTerminalDetached` and isolated `lifecycle=exited` with `exitedObserved=false`. |
+| `finding_1786855869_590133` The Implement report gives a false cause for the prior live failures | Removed the worker-path claim. `f5804da` failed twice with the same candidate binaries that later passed. `a7fafc5` fixed the production store lookup and the Hub-frame trigger path. |
+| `finding_1786855869_397365` Binary provenance still does not enforce the candidate build boundary | `loadBinaryProvenance` now uses `realpath`. Both real paths must sit under the real candidate checkout `target` directory. Missing Hub or locked Core revisions fail. A clean checkout records the two locked build commands. A matching build receipt is the alternative. |
+
+Review `review_1786853348_302095` sent Implement back after `f5804da`. Three findings:
+
+| Finding | Response |
+| --- | --- |
+| `finding_1786853348_739632` Production terminal does not detach in two Review live runs | Independent Review ran `f5804da` twice with the same Hub-checkout binaries that later passed. Both runs stayed mounted. `a7fafc5` added `hub.onFrame` and `sessionRecordForRoute`. After that change, the same candidate pair detached. |
 | `finding_1786853348_927164` Isolation oracle can accept a process-exit-assisted detach | Isolation now uses one `events` ledger. A later `process_exit` does not fail the proof. A `process_exit` with a lower shared index than the entity frame fails. Unit tests cover both orders. |
 | `finding_1786853348_822970` Worker provenance reports the Hub revision as Core | Provenance now records Hub `git_head` and `lock_core_rev` from the Hub `Cargo.lock` `botster-core` rev. The worker row records that lock rev, not a `../..` git head. |
 
@@ -80,6 +87,8 @@ Targeted atomic notes:
 - [[botster web hub frame entity snapshots omit subscription identity]]
 - [[a cold cut field rename can be a value shape change not only a key change]]
 - [[cross repo dependency registration must use dependency repo target]]
+- [[live hub proof records distinct hub and locked core binary provenance]]
+- [[Web detaches the mounted terminal when the session entity is exited]]
 
 Not loaded: [[project-pipelines-playbook]]. This visit did not change Project Pipelines package or plugin paths.
 
@@ -92,9 +101,9 @@ Convention conflicts: none.
 - `src/App.tsx` — read the mounted session from `runtimeClient.entities.get("session", routeSessionId)` and call `releaseTerminalSession` when that record requires detach; keep `onExit={releaseTerminalSession}`
 - `src/app/__fixtures__/sessionRouteDetachHarness.tsx` — focused `createRoot` harness that uses the production detach helpers and records a teardown ledger
 - `src/App.test.mjs` — predicate coverage, App wiring regexes, route-state races, teardown-ledger assertions, and isolation-helper unit tests
-- `scripts/live-packaged-protocol-helpers.mjs` — `sessionDetachIsolationProof` decision
-- `scripts/live-packaged-protocol-harness.mjs` — entity-driven detach isolation, post-detach peer/sibling proof, and binary `git_head` provenance
-- `docs/plans/detach-session-terminal-when-session-entity-exited.md` — approved plan, path-neutral spawn-target wording, and Review-required isolation acceptance
+- `scripts/live-packaged-protocol-helpers.mjs` — `sessionDetachIsolationProof` decision and `candidateBinaryProvenance` realpath boundary
+- `scripts/live-packaged-protocol-harness.mjs` — entity-driven detach isolation, post-detach peer/sibling proof, and realpath target-directory provenance
+- `docs/plans/detach-session-terminal-when-session-entity-exited.md` — approved plan, path-neutral spawn-target wording, isolation acceptance, and realpath provenance acceptance
 - `docs/reports/implement-detach-session-terminal-when-session-entity-exited.md` — this report
 
 ## Ownership boundaries preserved
@@ -122,6 +131,7 @@ Live proof used parent Hub worktree HEAD `bee15e7`. That candidate published `li
 - This Implement visit commits to the ticket branch and does not merge to `main`. The pipeline merge policy remains direct. Review still has to run. No pull request was opened.
 - Review `review_1786851532_276855` required a discriminating live isolation oracle and a production-shaped teardown ledger. The committed plan acceptance checks now require those proofs.
 - Review `review_1786853348_302095` required a production-frame store watch, a shared-events isolation ledger, and Hub lock-based Core provenance. The production hook now uses `hub.onFrame` plus `sessionRecordForRoute`.
+- Review `review_1786855869_299201` required realpath target-directory provenance and a corrected cause for the `f5804da` live failures. This visit does not change the product detach path.
 
 ## Runtime-teardown lenses
 
@@ -158,17 +168,22 @@ Route-state `createRoot` + `act` tests prove:
 Required live pair, default harness mode `webrtc`, not the shared-Hub shim:
 
 ```bash
-BOTSTER_HUB_BIN=<hub-candidate-bee15e7> \
-BOTSTER_SESSION_WORKER_BIN=<core-fc541a59-session-worker> \
+BOTSTER_HUB_BIN=<hub-candidate-bee15e7-realpath> \
+BOTSTER_SESSION_WORKER_BIN=<hub-checkout-locked-core-daemon-worker-realpath> \
 npm run smoke:live-packaged-protocol
 ```
 
-Review-pair binaries: Hub checkout `botster-hub` at `bee15e7` and that checkout's `botster-session-worker`. Hub `Cargo.lock` `botster-core` rev is `fc541a59`.
+This visit recorded a clean Hub candidate checkout at `bee15e7` and ran the two locked build commands before the live pair:
 
-| Run | Exit | Alternate-screen cycle 0 | Detach isolation |
-| --- | --- | --- | --- |
-| 1 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `lifecycle=exited`, `processExitBeforeEntity=false`, `exitedObserved=false`, same-peer `status`, 2 sibling sessions |
-| 2 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `lifecycle=exited`, `processExitBeforeEntity=false`, `exitedObserved=false`, same-peer `status`, 2 sibling sessions |
+- `cargo build --locked --bin botster-hub`
+- `cargo build --locked -p botster-core-daemon --bin botster-session-worker`
+
+Both executable realpaths sit under that checkout `target` directory. Hub `Cargo.lock` `botster-core` rev is `fc541a59`. No build receipt was required because the checkout was clean.
+
+| Run | Exit | Alternate-screen cycle 0 | Detach isolation | Provenance |
+| --- | --- | --- | --- | --- |
+| 1 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `lifecycle=exited`, one `entity_patch`, `processExitEventCount=0`, `exitedObserved=false`, same-peer `status`, 2 sibling sessions | checkout `clean=true`, locked Hub and `botster-core-daemon` worker commands |
+| 2 | 0 | `cycle_0_final_row_present=true`, 20 cycles | `lifecycle=exited`, one `entity_patch`, `processExitEventCount=0`, `exitedObserved=false`, same-peer `status`, 2 sibling sessions | same clean checkout and same locked commands |
 
 Recorded SHAs:
 
@@ -185,4 +200,6 @@ Recorded SHAs:
 
 ## Missing vault guidance discovered
 
-No current Web-owned note stated that a first-party client must detach when the subscribed session entity is `exited` or `failed`. After the live pair passed, that claim was captured to the vault inbox as `web-detaches-the-mounted-terminal-when-the-session-entity-is-exited.md`. Candidate title matches the plan: `Web detaches the mounted terminal when the session entity is exited`.
+[[Web detaches the mounted terminal when the session entity is exited]] now exists and matches this ticket.
+
+[[live hub proof records distinct hub and locked core binary provenance]] still names `cargo build --locked -p botster-core --bin botster-session-worker`. The Hub candidate at `bee15e7` documents and builds `cargo build --locked -p botster-core-daemon --bin botster-session-worker`. This visit used the Hub-documented command.

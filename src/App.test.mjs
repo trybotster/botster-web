@@ -52,7 +52,12 @@ import {
   HOST_CHROME_CONTRACTS,
   htmlAssetUrls,
   isTerminalDetached,
+  candidateBinaryProvenance,
+  candidateTargetDirectoryFromHubRealPath,
+  realPathIsInside,
   sessionDetachIsolationProof,
+  LOCKED_HUB_BUILD_COMMAND,
+  LOCKED_SESSION_WORKER_BUILD_COMMAND,
   latestAcceptedWorkspacesUiTree,
   markupContainsDiagnosticId,
   markupContainsTestId,
@@ -1985,8 +1990,19 @@ assert.match(liveProtocolHarnessScript, /const attachProbe = "botster-web-produc
 assert.match(liveProtocolHarnessScript, /\$\{attachProbe\}-/);
 assert.match(liveProtocolHarnessScript, /sequence: initialEvents\.map/);
 assert.doesNotMatch(liveProtocolHarnessScript, /unwrappedReadScreenText|replace\(\/\[\\r\\n\]\//);
-assert.match(liveProtocolHarnessScript, /lock_core_rev: lockCoreRev/);
-assert.match(liveProtocolHarnessScript, /hub_lock_core_rev: lockCoreRev/);
+assert.match(liveProtocolHarnessScript, /lockCoreRev/);
+assert.match(liveProtocolHarnessScript, /realpathSync/);
+assert.match(liveProtocolHarnessScript, /candidateBinaryProvenance/);
+assert.match(liveProtocolHarnessScript, /candidateTargetDirectoryFromHubRealPath/);
+const loadBinaryProvenanceSource = liveProtocolHarnessScript.slice(
+  liveProtocolHarnessScript.indexOf("async function loadBinaryProvenance"),
+  liveProtocolHarnessScript.indexOf("function gitCheckoutIsClean")
+);
+assert.match(loadBinaryProvenanceSource, /const hubPath = realpathSync\(suppliedHub\)/);
+assert.match(loadBinaryProvenanceSource, /const workerPath = realpathSync\(suppliedWorker\)/);
+assert.doesNotMatch(loadBinaryProvenanceSource, /const hubPath = resolve\(/);
+assert.doesNotMatch(loadBinaryProvenanceSource, /const workerPath = resolve\(/);
+assert.doesNotMatch(loadBinaryProvenanceSource, /dirname\(hubPath\), "\.\.\/\.\."/);
 assert.doesNotMatch(webrtcDaemonClient, /terminal_stream_batch/);
 assert.match(webrtcDaemonClient, /terminal_stream_error/);
 assert.match(liveProtocolHarnessScript, /page\.reload/);
@@ -10838,6 +10854,104 @@ try {
     processExitEvents: [{ index: 4 }],
     detachWait: { exitedObserved: false }
   }).ok, false);
+  const candidateTargetDir = "/checkout/target";
+  const acceptedProvenance = candidateBinaryProvenance({
+    hubRealPath: `${candidateTargetDir}/debug/botster-hub`,
+    workerRealPath: `${candidateTargetDir}/debug/botster-session-worker`,
+    targetDirRealPath: candidateTargetDir,
+    hubGitHead: "bee15e7a0404a588bb3c368232e778a180c0f399",
+    lockCoreRev: "fc541a59338d0591ba4fb3fa522a030d212d26d0",
+    checkoutClean: true
+  });
+  assert.equal(acceptedProvenance.hub.lock_core_rev, "fc541a59338d0591ba4fb3fa522a030d212d26d0");
+  assert.equal(acceptedProvenance.session_worker.hub_lock_core_rev, "fc541a59338d0591ba4fb3fa522a030d212d26d0");
+  assert.equal(acceptedProvenance.hub.build_command, LOCKED_HUB_BUILD_COMMAND);
+  assert.equal(acceptedProvenance.session_worker.build_command, LOCKED_SESSION_WORKER_BUILD_COMMAND);
+  assert.equal(acceptedProvenance.checkout.clean, true);
+  assert.equal(acceptedProvenance.checkout.build_receipt, false);
+  assert.equal(
+    candidateTargetDirectoryFromHubRealPath(`${candidateTargetDir}/debug/botster-hub`),
+    candidateTargetDir
+  );
+  assert.equal(realPathIsInside(`${candidateTargetDir}/debug/botster-hub`, candidateTargetDir), true);
+  assert.equal(realPathIsInside("/other-checkout/target/debug/botster-session-worker", candidateTargetDir), false);
+  assert.throws(
+    () => candidateBinaryProvenance({
+      hubRealPath: `${candidateTargetDir}/debug/botster-hub`,
+      workerRealPath: "/other-checkout/target/debug/botster-session-worker",
+      targetDirRealPath: candidateTargetDir,
+      hubGitHead: "bee15e7a0404a588bb3c368232e778a180c0f399",
+      lockCoreRev: "fc541a59338d0591ba4fb3fa522a030d212d26d0",
+      checkoutClean: true
+    }),
+    /outside the candidate checkout target directory/
+  );
+  assert.throws(
+    () => candidateBinaryProvenance({
+      hubRealPath: `${candidateTargetDir}/debug/botster-hub`,
+      workerRealPath: `${candidateTargetDir}/debug/botster-session-worker`,
+      targetDirRealPath: candidateTargetDir,
+      hubGitHead: "",
+      lockCoreRev: "fc541a59338d0591ba4fb3fa522a030d212d26d0",
+      checkoutClean: true
+    }),
+    /missing Hub revision/
+  );
+  assert.throws(
+    () => candidateBinaryProvenance({
+      hubRealPath: `${candidateTargetDir}/debug/botster-hub`,
+      workerRealPath: `${candidateTargetDir}/debug/botster-session-worker`,
+      targetDirRealPath: candidateTargetDir,
+      hubGitHead: "bee15e7a0404a588bb3c368232e778a180c0f399",
+      lockCoreRev: "",
+      checkoutClean: true
+    }),
+    /missing locked Core revision/
+  );
+  assert.throws(
+    () => candidateBinaryProvenance({
+      hubRealPath: `${candidateTargetDir}/debug/botster-hub`,
+      workerRealPath: `${candidateTargetDir}/debug/botster-session-worker`,
+      targetDirRealPath: candidateTargetDir,
+      hubGitHead: "bee15e7a0404a588bb3c368232e778a180c0f399",
+      lockCoreRev: "fc541a59338d0591ba4fb3fa522a030d212d26d0",
+      checkoutClean: false
+    }),
+    /not clean and no build receipt/
+  );
+  const receiptProvenance = candidateBinaryProvenance({
+    hubRealPath: `${candidateTargetDir}/debug/botster-hub`,
+    workerRealPath: `${candidateTargetDir}/debug/botster-session-worker`,
+    targetDirRealPath: candidateTargetDir,
+    hubGitHead: "bee15e7a0404a588bb3c368232e778a180c0f399",
+    lockCoreRev: "fc541a59338d0591ba4fb3fa522a030d212d26d0",
+    checkoutClean: false,
+    buildReceipt: {
+      hub_git_head: "bee15e7a0404a588bb3c368232e778a180c0f399",
+      lock_core_rev: "fc541a59338d0591ba4fb3fa522a030d212d26d0",
+      hub_build_command: LOCKED_HUB_BUILD_COMMAND,
+      worker_build_command: LOCKED_SESSION_WORKER_BUILD_COMMAND
+    }
+  });
+  assert.equal(receiptProvenance.checkout.clean, false);
+  assert.equal(receiptProvenance.checkout.build_receipt, true);
+  assert.throws(
+    () => candidateBinaryProvenance({
+      hubRealPath: `${candidateTargetDir}/debug/botster-hub`,
+      workerRealPath: `${candidateTargetDir}/debug/botster-session-worker`,
+      targetDirRealPath: candidateTargetDir,
+      hubGitHead: "bee15e7a0404a588bb3c368232e778a180c0f399",
+      lockCoreRev: "fc541a59338d0591ba4fb3fa522a030d212d26d0",
+      checkoutClean: false,
+      buildReceipt: {
+        hub_git_head: "bee15e7a0404a588bb3c368232e778a180c0f399",
+        lock_core_rev: "deadbeef",
+        hub_build_command: LOCKED_HUB_BUILD_COMMAND,
+        worker_build_command: LOCKED_SESSION_WORKER_BUILD_COMMAND
+      }
+    }),
+    /does not match Cargo.lock/
+  );
   markHostChromeContract("terminal-detached");
   markHostChromeContract("dashboard-view");
 

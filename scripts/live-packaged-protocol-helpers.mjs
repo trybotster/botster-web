@@ -89,6 +89,133 @@ export function isTerminalDetached({ sessionContainerIds, dashboardPresent }, se
  * Isolate entity-driven detach from the retained terminal process_exit path.
  * Destination detach is already decided by isTerminalDetached.
  */
+export const LOCKED_HUB_BUILD_COMMAND = "cargo build --locked --bin botster-hub";
+export const LOCKED_SESSION_WORKER_BUILD_COMMAND =
+  "cargo build --locked -p botster-core-daemon --bin botster-session-worker";
+
+export function realPathIsInside(childRealPath, parentRealPath) {
+  if (typeof childRealPath !== "string" || typeof parentRealPath !== "string") {
+    return false;
+  }
+  if (!childRealPath || !parentRealPath) {
+    return false;
+  }
+  if (childRealPath === parentRealPath) {
+    return true;
+  }
+  const prefix = parentRealPath.endsWith("/") ? parentRealPath : `${parentRealPath}/`;
+  return childRealPath.startsWith(prefix);
+}
+
+export function candidateTargetDirectoryFromHubRealPath(hubRealPath) {
+  const path = typeof hubRealPath === "string" ? hubRealPath : "";
+  const marker = "/target/";
+  const index = path.lastIndexOf(marker);
+  if (index === -1) {
+    throw new Error(
+      `hub binary real path is not under a cargo target directory: path=${hubRealPath}`
+    );
+  }
+  return `${path.slice(0, index)}/target`;
+}
+
+function normalizeBuildReceipt(buildReceipt) {
+  if (!buildReceipt || typeof buildReceipt !== "object") {
+    return null;
+  }
+  return {
+    hub_git_head: buildReceipt.hub_git_head,
+    lock_core_rev: buildReceipt.lock_core_rev,
+    hub_build_command: buildReceipt.hub_build_command,
+    worker_build_command: buildReceipt.worker_build_command
+  };
+}
+
+/**
+ * Require Hub and worker real paths under the candidate checkout target directory.
+ * Reject missing Hub or locked Core revisions. Accept a clean checkout plus the
+ * two locked build commands, or a matching build receipt.
+ */
+export function candidateBinaryProvenance({
+  hubRealPath,
+  workerRealPath,
+  targetDirRealPath,
+  hubGitHead,
+  lockCoreRev,
+  checkoutClean,
+  buildReceipt
+}) {
+  if (!hubRealPath) {
+    throw new Error("hub binary real path is required");
+  }
+  if (!workerRealPath) {
+    throw new Error("session worker real path is required");
+  }
+  if (!targetDirRealPath) {
+    throw new Error("candidate checkout target directory real path is required");
+  }
+  if (!realPathIsInside(hubRealPath, targetDirRealPath)) {
+    throw new Error(
+      `hub binary real path is outside the candidate checkout target directory: path=${hubRealPath} target=${targetDirRealPath}`
+    );
+  }
+  if (!realPathIsInside(workerRealPath, targetDirRealPath)) {
+    throw new Error(
+      `session worker real path is outside the candidate checkout target directory: path=${workerRealPath} target=${targetDirRealPath}`
+    );
+  }
+  if (!hubGitHead) {
+    throw new Error("missing Hub revision for candidate checkout");
+  }
+  if (!lockCoreRev) {
+    throw new Error("missing locked Core revision in candidate Cargo.lock");
+  }
+
+  const receipt = normalizeBuildReceipt(buildReceipt);
+  if (receipt) {
+    if (!receipt.hub_git_head) {
+      throw new Error("build receipt is missing Hub revision");
+    }
+    if (!receipt.lock_core_rev) {
+      throw new Error("build receipt is missing locked Core revision");
+    }
+    if (!receipt.hub_build_command || !receipt.worker_build_command) {
+      throw new Error("build receipt must include both locked build commands");
+    }
+    if (receipt.hub_git_head !== hubGitHead) {
+      throw new Error(
+        `build receipt Hub revision does not match checkout: receipt=${receipt.hub_git_head} checkout=${hubGitHead}`
+      );
+    }
+    if (receipt.lock_core_rev !== lockCoreRev) {
+      throw new Error(
+        `build receipt locked Core revision does not match Cargo.lock: receipt=${receipt.lock_core_rev} lock=${lockCoreRev}`
+      );
+    }
+  } else if (checkoutClean !== true) {
+    throw new Error("candidate checkout is not clean and no build receipt was supplied");
+  }
+
+  return {
+    hub: {
+      path: hubRealPath,
+      git_head: hubGitHead,
+      lock_core_rev: lockCoreRev,
+      build_command: receipt?.hub_build_command ?? LOCKED_HUB_BUILD_COMMAND
+    },
+    session_worker: {
+      path: workerRealPath,
+      hub_lock_core_rev: lockCoreRev,
+      build_command: receipt?.worker_build_command ?? LOCKED_SESSION_WORKER_BUILD_COMMAND
+    },
+    checkout: {
+      target_dir: targetDirRealPath,
+      clean: checkoutClean === true,
+      build_receipt: Boolean(receipt)
+    }
+  };
+}
+
 export function sessionDetachIsolationProof({
   sessionId,
   sessionRow,

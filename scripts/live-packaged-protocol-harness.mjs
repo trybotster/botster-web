@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -23,6 +23,8 @@ import {
   HOST_CHROME,
   htmlAssetUrls,
   isTerminalDetached,
+  candidateBinaryProvenance,
+  candidateTargetDirectoryFromHubRealPath,
   sessionDetachIsolationProof,
   latestAcceptedWorkspacesUiTree,
   packageRuntimeNavigation,
@@ -8233,27 +8235,51 @@ async function loadBinaryProvenance() {
     );
   }
 
-  const hubPath = resolve(process.env.BOTSTER_HUB_BIN);
-  const workerPath = resolve(process.env.BOTSTER_SESSION_WORKER_BIN);
-  if (!existsSync(hubPath)) {
-    throw new Error(`botster-hub provenance binary does not exist: path=${hubPath}`);
+  const suppliedHub = process.env.BOTSTER_HUB_BIN;
+  const suppliedWorker = process.env.BOTSTER_SESSION_WORKER_BIN;
+  if (!existsSync(suppliedHub)) {
+    throw new Error(`botster-hub provenance binary does not exist: path=${suppliedHub}`);
   }
-  if (!existsSync(workerPath)) {
-    throw new Error(`botster-session-worker provenance binary does not exist: path=${workerPath}`);
+  if (!existsSync(suppliedWorker)) {
+    throw new Error(`botster-session-worker provenance binary does not exist: path=${suppliedWorker}`);
   }
-  const hubRoot = resolve(dirname(hubPath), "../..");
-  const lockCoreRev = lockPackageRevision(join(hubRoot, "Cargo.lock"), "botster-core");
-  return {
-    hub: {
-      path: hubPath,
-      git_head: gitHeadForCargoRoot(hubRoot),
-      lock_core_rev: lockCoreRev
-    },
-    session_worker: {
-      path: workerPath,
-      hub_lock_core_rev: lockCoreRev
-    }
-  };
+
+  const hubPath = realpathSync(suppliedHub);
+  const workerPath = realpathSync(suppliedWorker);
+  const targetDir = realpathSync(candidateTargetDirectoryFromHubRealPath(hubPath));
+  const checkoutRoot = dirname(targetDir);
+  const lockCoreRev = lockPackageRevision(join(checkoutRoot, "Cargo.lock"), "botster-core");
+  return candidateBinaryProvenance({
+    hubRealPath: hubPath,
+    workerRealPath: workerPath,
+    targetDirRealPath: targetDir,
+    hubGitHead: gitHeadForCargoRoot(checkoutRoot),
+    lockCoreRev,
+    checkoutClean: gitCheckoutIsClean(checkoutRoot),
+    buildReceipt: loadOptionalBuildReceipt()
+  });
+}
+
+function gitCheckoutIsClean(repoRoot) {
+  try {
+    const output = execFileSync("git", ["-C", repoRoot, "status", "--porcelain"], {
+      encoding: "utf8"
+    });
+    return output.trim() === "";
+  } catch {
+    return false;
+  }
+}
+
+function loadOptionalBuildReceipt() {
+  const receiptPath = process.env.BOTSTER_BINARY_BUILD_RECEIPT;
+  if (!receiptPath) {
+    return null;
+  }
+  if (!existsSync(receiptPath)) {
+    throw new Error(`binary build receipt does not exist: path=${receiptPath}`);
+  }
+  return JSON.parse(readFileSync(receiptPath, "utf8"));
 }
 
 function lockPackageRevision(lockPath, packageName) {
