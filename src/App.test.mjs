@@ -10952,6 +10952,40 @@ try {
     }),
     /does not match Cargo.lock/
   );
+  assert.throws(
+    () => candidateBinaryProvenance({
+      hubRealPath: `${candidateTargetDir}/debug/botster-hub`,
+      workerRealPath: `${candidateTargetDir}/debug/botster-session-worker`,
+      targetDirRealPath: candidateTargetDir,
+      hubGitHead: "bee15e7a0404a588bb3c368232e778a180c0f399",
+      lockCoreRev: "fc541a59338d0591ba4fb3fa522a030d212d26d0",
+      checkoutClean: false,
+      buildReceipt: {
+        hub_git_head: "bee15e7a0404a588bb3c368232e778a180c0f399",
+        lock_core_rev: "fc541a59338d0591ba4fb3fa522a030d212d26d0",
+        hub_build_command: "cargo build",
+        worker_build_command: LOCKED_SESSION_WORKER_BUILD_COMMAND
+      }
+    }),
+    /Hub command is not the locked command/
+  );
+  assert.throws(
+    () => candidateBinaryProvenance({
+      hubRealPath: `${candidateTargetDir}/debug/botster-hub`,
+      workerRealPath: `${candidateTargetDir}/debug/botster-session-worker`,
+      targetDirRealPath: candidateTargetDir,
+      hubGitHead: "bee15e7a0404a588bb3c368232e778a180c0f399",
+      lockCoreRev: "fc541a59338d0591ba4fb3fa522a030d212d26d0",
+      checkoutClean: false,
+      buildReceipt: {
+        hub_git_head: "bee15e7a0404a588bb3c368232e778a180c0f399",
+        lock_core_rev: "fc541a59338d0591ba4fb3fa522a030d212d26d0",
+        hub_build_command: LOCKED_HUB_BUILD_COMMAND,
+        worker_build_command: "cp /tmp/stale-worker target/debug/botster-session-worker"
+      }
+    }),
+    /worker command is not the locked command/
+  );
   markHostChromeContract("terminal-detached");
   markHostChromeContract("dashboard-view");
 

@@ -134,7 +134,7 @@ function normalizeBuildReceipt(buildReceipt) {
 /**
  * Require Hub and worker real paths under the candidate checkout target directory.
  * Reject missing Hub or locked Core revisions. Accept a clean checkout plus the
- * two locked build commands, or a matching build receipt.
+ * two locked build commands, or a receipt whose commands equal those locked commands.
  */
 export function candidateBinaryProvenance({
   hubRealPath,
@@ -179,8 +179,15 @@ export function candidateBinaryProvenance({
     if (!receipt.lock_core_rev) {
       throw new Error("build receipt is missing locked Core revision");
     }
-    if (!receipt.hub_build_command || !receipt.worker_build_command) {
-      throw new Error("build receipt must include both locked build commands");
+    if (receipt.hub_build_command !== LOCKED_HUB_BUILD_COMMAND) {
+      throw new Error(
+        `build receipt Hub command is not the locked command: receipt=${receipt.hub_build_command}`
+      );
+    }
+    if (receipt.worker_build_command !== LOCKED_SESSION_WORKER_BUILD_COMMAND) {
+      throw new Error(
+        `build receipt worker command is not the locked command: receipt=${receipt.worker_build_command}`
+      );
     }
     if (receipt.hub_git_head !== hubGitHead) {
       throw new Error(

@@ -249,7 +249,7 @@ Run that command twice. Both runs must:
 - pass `waitForTerminalDetached` for that session
 - require the matching Hub session entity `lifecycle` `exited` or `failed`
 - prove terminal-plane `process_exit` did not cause that accepted detach (`exitedObserved` stays false and the first shared `events` ledger `process_exit` does not precede the entity `exited`/`failed` frame)
-- record raw entity versus `process_exit` event order plus Hub and worker provenance: both realpaths under the candidate checkout target directory, Hub revision, locked Core revision, and either a clean checkout plus the two locked build commands or a matching build receipt
+- record raw entity versus `process_exit` event order plus Hub and worker provenance: both realpaths under the candidate checkout target directory, Hub revision, locked Core revision, and either a clean checkout plus the two locked build commands or a receipt whose commands equal those locked commands
 - after detach, prove the same WebRTC peer still answers a `status` request and a sibling session or held `session_type` family remains
 
 Record harness mode, branch marker, Hub SHA, Core SHA, and Web SHA. These two candidate-pair runs are the required product proof.

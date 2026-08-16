@@ -2,17 +2,23 @@
 
 Ticket: `ticket_1786848959_308437`
 Run: `run_1786848964_511286`
-Step: `botster_stack_implement` / `run_step_1786855895_522506`
+Step: `botster_stack_implement` / `run_step_1786857468_693559`
 Plan: `docs/plans/detach-session-terminal-when-session-entity-exited.md`
 
 ## Review return
 
-Review `review_1786855869_299201` sent Implement back after `a7fafc5`. Two new findings:
+Review `review_1786857456_490488` sent Implement back after `20c3377`. One new finding:
+
+| Finding | Response |
+| --- | --- |
+| `finding_1786857456_581297` The build receipt accepts unlocked or stale-worker commands | A receipt now fails unless both command fields equal `LOCKED_HUB_BUILD_COMMAND` and `LOCKED_SESSION_WORKER_BUILD_COMMAND`. Unit tests reject `cargo build` and a `cp` stale-worker command. |
+
+Review `review_1786855869_299201` sent Implement back after `a7fafc5`. Two findings:
 
 | Finding | Response |
 | --- | --- |
 | `finding_1786855869_590133` The Implement report gives a false cause for the prior live failures | Removed the worker-path claim. `f5804da` failed twice with the same candidate binaries that later passed. `a7fafc5` fixed the production store lookup and the Hub-frame trigger path. |
-| `finding_1786855869_397365` Binary provenance still does not enforce the candidate build boundary | `loadBinaryProvenance` now uses `realpath`. Both real paths must sit under the real candidate checkout `target` directory. Missing Hub or locked Core revisions fail. A clean checkout records the two locked build commands. A matching build receipt is the alternative. |
+| `finding_1786855869_397365` Binary provenance still does not enforce the candidate build boundary | `loadBinaryProvenance` now uses `realpath`. Both real paths must sit under the real candidate checkout `target` directory. Missing Hub or locked Core revisions fail. A clean checkout records the two locked build commands. A receipt is accepted only when its commands equal those locked commands. |
 
 Review `review_1786853348_302095` sent Implement back after `f5804da`. Three findings:
 
@@ -132,6 +138,7 @@ Live proof used parent Hub worktree HEAD `bee15e7`. That candidate published `li
 - Review `review_1786851532_276855` required a discriminating live isolation oracle and a production-shaped teardown ledger. The committed plan acceptance checks now require those proofs.
 - Review `review_1786853348_302095` required a production-frame store watch, a shared-events isolation ledger, and Hub lock-based Core provenance. The production hook now uses `hub.onFrame` plus `sessionRecordForRoute`.
 - Review `review_1786855869_299201` required realpath target-directory provenance and a corrected cause for the `f5804da` live failures. This visit does not change the product detach path.
+- Review `review_1786857456_490488` required receipt commands to equal the locked Hub and worker builds. This visit does not change the product detach path and does not rerun the live pair. Independent Review already passed that pair on `20c3377`.
 
 ## Runtime-teardown lenses
 
