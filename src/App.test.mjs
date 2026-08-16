@@ -1957,6 +1957,14 @@ assert.doesNotMatch(pluginSurfaceRouteDescriptorSource, /package_name \?\? recor
 assert.match(liveProtocolHarnessScript, /events\.slice\(sinceIndex\)\.some/);
 assert.match(liveProtocolHarnessScript, /openContractAppFromNavigation/);
 assert.match(liveProtocolHarnessScript, /getByLabel\("Admitted plugin navigation"\)/);
+assert.match(liveProtocolHarnessScript, /proveRapidAlternateScreenReattach/);
+assert.match(liveProtocolHarnessScript, /const finalRowPrefix = `\$\{marker\}-final-row-`/);
+assert.match(liveProtocolHarnessScript, /finalScreen\?\.text\?\.includes\(finalRowPrefix\)/);
+assert.match(liveProtocolHarnessScript, /lost final row marker \$\{finalRowPrefix\}/);
+assert.match(liveProtocolHarnessScript, /\*botster-web-production-alt-redraw:\*\)/);
+assert.match(liveProtocolHarnessScript, /marker=\$\{line#\*botster-web-production-alt-redraw:\}/);
+assert.match(liveProtocolHarnessScript, /\\nbotster-web-production-alt-redraw:\$\{marker\}\\n/);
+assert.match(liveProtocolHarnessScript, /rapid_alternate_screen_reattach passed/);
 assert.match(liveProtocolHarnessScript, /proveLiveTerminalAfterAttach/);
 assert.match(liveProtocolHarnessScript, /const echoProbe = "keys"/);
 assert.match(liveProtocolHarnessScript, /const attachProbe = "botster-web-production-attach-probe"/);

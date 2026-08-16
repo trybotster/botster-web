@@ -485,6 +485,9 @@ try {
       diagnosticMessage += `\nhub stdout:\n${hubStdout}\nhub stderr:\n${hubStderr}`;
     }
   }
+  if (proofNotes.length > 0) {
+    diagnosticMessage += `\nterminal proof notes:\n${JSON.stringify(proofNotes)}`;
+  }
   if (harnessState && !error.compactLifecycleEvidence) {
     const terminalStreamEvents = harnessState.events?.filter((entry) => entry.kind.startsWith("terminal_stream_")) ?? [];
     if (terminalStreamEvents.length > 0) {
@@ -5518,7 +5521,7 @@ async function startProductionSession() {
       "    botster-web-production-bytes-hold) printf '\\250\\001\\377' ;;",
       "    botster-web-production-mouse-on) printf '\\033[?1000h\\033[?1006h' ;;",
       "    botster-web-production-bytes-ablate) printf '\\375' ;;",
-      "    botster-web-production-alt-redraw:*) marker=${line#*:}; set -- $(stty size); rows=$1; printf '\\033[?1049h\\033[2J\\033[H'; row=1; while [ \"$row\" -le \"$rows\" ]; do printf '\\033[%s;1H%s-row-%s-of-%s' \"$row\" \"$marker\" \"$row\" \"$rows\"; row=$((row + 1)); done; printf '\\033[%s;1H%s-final-row-%s' \"$rows\" \"$marker\" \"$rows\" ;;",
+      "    *botster-web-production-alt-redraw:*) marker=${line#*botster-web-production-alt-redraw:}; marker=$(printf '%s' \"$marker\" | tr -d '\\r'); printf '\\033[?1000l\\033[?1006l'; set -- $(stty size); rows=$1; printf '\\033[?1049h\\033[2J\\033[H'; row=1; while [ \"$row\" -le \"$rows\" ]; do printf '\\033[%s;1H%s-row-%s-of-%s' \"$row\" \"$marker\" \"$row\" \"$rows\"; row=$((row + 1)); done; printf '\\033[%s;1H%s-final-row-%s' \"$rows\" \"$marker\" \"$rows\" ;;",
       "    *) echo botster-web-production-echo:$line ;;",
       "  esac",
       "done"
@@ -6799,6 +6802,147 @@ async function proveRetainedHistoryAfterEcho(page, echoProbe) {
   recordProofNote("retained_history", { echoProbe, install_bytes: install.payload?.bytes ?? null });
 }
 
+function summarizeReadScreenBody(screen, finalRowPrefix, rowPrefix, liveMarker) {
+  const text = typeof screen?.text === "string" ? screen.text : null;
+  return {
+    defined: screen != null,
+    session_id: typeof screen?.session_id === "string" ? screen.session_id : null,
+    text_kind: text === null ? (screen == null ? "undefined" : "missing_text") : text.length === 0 ? "empty" : "text",
+    text_length: text?.length ?? 0,
+    has_final_row: Boolean(text?.includes(finalRowPrefix)),
+    has_any_row: Boolean(text?.includes(rowPrefix)),
+    has_live_echo: Boolean(text?.includes(liveMarker)),
+    has_command_echo: Boolean(text?.includes("botster-web-production-alt-redraw:")),
+    sample: text ? text.slice(0, 240) : null
+  };
+}
+
+function collapseReadScreenPolls(pollSummaries) {
+  const counts = { defined: 0, undefined: 0, empty: 0, missing_text: 0, text: 0, has_final_row: 0, has_any_row: 0, has_live_echo: 0 };
+  for (const sample of pollSummaries) {
+    if (sample.defined) counts.defined += 1;
+    else counts.undefined += 1;
+    counts[sample.text_kind] += 1;
+    if (sample.has_final_row) counts.has_final_row += 1;
+    if (sample.has_any_row) counts.has_any_row += 1;
+    if (sample.has_live_echo) counts.has_live_echo += 1;
+  }
+  return {
+    polls: pollSummaries.length,
+    counts,
+    first: pollSummaries[0] ?? null,
+    last: pollSummaries.at(-1) ?? null
+  };
+}
+
+async function collectAlternateScreenDifferential({
+  page,
+  sessionId,
+  attachment,
+  marker,
+  finalRowPrefix,
+  rowPrefix,
+  liveMarker,
+  finalScreen,
+  pollSummaries
+}) {
+  const remount = await page.evaluate(
+    ({ attachIndex, subscriptionId, command }) => {
+      const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const afterAttach = terminal.slice(attachIndex);
+      const finishIndex = afterAttach.findIndex(
+        (entry) =>
+          entry.kind === "ghostsnp_install" &&
+          entry.payload?.subscription_id === subscriptionId &&
+          entry.payload?.progress === "finish"
+      );
+      const attachedIndex = afterAttach.findIndex(
+        (entry) => entry.kind === "attach_state" && entry.payload?.state === "attached"
+      );
+      const firstResizeIndex = afterAttach.findIndex((entry) => entry.kind === "resize");
+      const firstInputIndex = afterAttach.findIndex((entry) => entry.kind === "input");
+      const supplement = [...afterAttach].reverse().find((entry) => entry.kind === "read_screen_supplement");
+      const inputTelemetry = terminal.filter(
+        (entry) => entry.kind === "input" && typeof entry.payload?.data === "string" && entry.payload.data.includes(command)
+      );
+      const sendInputRequests = events.filter(
+        (entry) =>
+          entry.kind === "daemon_request" &&
+          entry.payload?.type === "send_input" &&
+          typeof entry.payload?.data === "string" &&
+          entry.payload.data.includes(command)
+      );
+      return {
+        finishIndex,
+        attachedIndex,
+        firstResizeIndex,
+        firstInputIndex,
+        resize_before_finish: firstResizeIndex >= 0 && (finishIndex < 0 || firstResizeIndex < finishIndex),
+        input_before_finish: firstInputIndex >= 0 && (finishIndex < 0 || firstInputIndex < finishIndex),
+        resize_before_attached: firstResizeIndex >= 0 && (attachedIndex < 0 || firstResizeIndex < attachedIndex),
+        input_before_attached: firstInputIndex >= 0 && (attachedIndex < 0 || firstInputIndex < attachedIndex),
+        read_screen_supplement_sample:
+          typeof supplement?.payload?.text === "string" ? supplement.payload.text.slice(0, 240) : supplement?.payload?.text ?? null,
+        alt_redraw_input_telemetry: inputTelemetry.length,
+        alt_redraw_send_input_requests: sendInputRequests.length,
+        last_input_path: inputTelemetry.at(-1)?.payload?.path ?? null
+      };
+    },
+    {
+      attachIndex: attachment.attachIndex,
+      subscriptionId: attachment.subscriptionId,
+      command: `botster-web-production-alt-redraw:${marker}`
+    }
+  );
+
+  let unixReadScreen = null;
+  try {
+    const reply = await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
+      type: "read_screen",
+      session_id: sessionId
+    });
+    unixReadScreen = {
+      error: reply.error ?? null,
+      body: summarizeReadScreenBody(reply.read_screen, finalRowPrefix, rowPrefix, liveMarker)
+    };
+  } catch (error) {
+    unixReadScreen = {
+      error: error instanceof Error ? error.message : String(error),
+      body: null
+    };
+  }
+
+  const scriptPath = join(webrtcDataDir, "botster-web-production-session.sh");
+  let producerScript = null;
+  try {
+    const script = readFileSync(scriptPath, "utf8");
+    producerScript = {
+      path: scriptPath,
+      has_alt_redraw_arm: script.includes("*botster-web-production-alt-redraw:*)"),
+      alt_redraw_line: script.split("\n").find((line) => line.includes("alt-redraw")) ?? null
+    };
+  } catch (error) {
+    producerScript = {
+      path: scriptPath,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+
+  return {
+    marker,
+    subscription_id: attachment.subscriptionId,
+    producer_script: producerScript,
+    browser_last: {
+      ...summarizeReadScreenBody(finalScreen, finalRowPrefix, rowPrefix, liveMarker),
+      text: typeof finalScreen?.text === "string" ? finalScreen.text : null
+    },
+    browser_polls: collapseReadScreenPolls(pollSummaries),
+    remount,
+    unix_read_screen: unixReadScreen
+  };
+}
+
 async function proveRapidAlternateScreenReattach(page, sessionId) {
   const iterations = 20;
   const cycles = [];
@@ -6815,7 +6959,8 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
 
     // The producer writes one alternate-screen row at a time. Navigate immediately.
     // The harness does not issue an extra recovery resize.
-    await callTerminalControl(page, "writeInput", `botster-web-production-alt-redraw:${marker}\n`);
+    // Flush any leftover mouse CSI so it cannot prefix the alt-redraw line.
+    await callTerminalControl(page, "writeInput", `\nbotster-web-production-alt-redraw:${marker}\n`);
     await openHomeView(page);
     await openSessionTerminal(page, sessionId);
     await waitForTerminalSession(page, sessionId);
@@ -6852,15 +6997,32 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
     await waitForTerminalRendererWrite(page, liveMarker);
 
     const finalRowPrefix = `${marker}-final-row-`;
+    const rowPrefix = `${marker}-row-`;
     let finalScreen;
+    const pollSummaries = [];
     const screenDeadline = Date.now() + 20_000;
     while (Date.now() < screenDeadline) {
       finalScreen = await callTerminalControl(page, "readScreen");
+      pollSummaries.push(summarizeReadScreenBody(finalScreen, finalRowPrefix, rowPrefix, liveMarker));
       if (finalScreen?.text?.includes(finalRowPrefix)) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     if (!finalScreen?.text?.includes(finalRowPrefix)) {
-      throw new Error(`alternate-screen cycle ${cycle} lost final row marker ${finalRowPrefix}`);
+      const differential = await collectAlternateScreenDifferential({
+        page,
+        sessionId,
+        attachment,
+        marker,
+        finalRowPrefix,
+        rowPrefix,
+        liveMarker,
+        finalScreen,
+        pollSummaries
+      });
+      recordProofNote("rapid_alternate_screen_reattach_failure", differential);
+      throw new Error(
+        `alternate-screen cycle ${cycle} lost final row marker ${finalRowPrefix}: ${JSON.stringify(differential)}`
+      );
     }
 
     const chronology = await page.evaluate(
@@ -6916,6 +7078,14 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
     recovery_resize_issued_by_harness: false,
     cycles
   });
+  console.log(
+    "rapid_alternate_screen_reattach passed " +
+      JSON.stringify({
+        iterations,
+        cycle_0_final_row_present: cycles[0]?.final_row_present === true,
+        cycles: cycles.length
+      })
+  );
 }
 
 async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
