@@ -2,7 +2,7 @@
 
 Ticket: `ticket_1786912123_916503`
 Run: `run_1786914339_154671`
-Step: `botster_stack_implement` / `run_step_1786915626_597589`
+Step: `botster_stack_implement` / `run_step_1786918879_698264` (review return after `run_step_1786915626_597589`)
 Plan: `docs/plans/caller-owned-cancel-oracle-exactly-one-detach.md` revision 2 (`artifact_1786915342_247683`)
 
 ## Target repository and target_id
@@ -69,8 +69,8 @@ Targeted notes:
 
 ## Files changed
 
-- `src/botster/hubTerminalDataPlane.ts` — one Detach owner (`sendDetachRequestOnce`); `DETACH_REQUEST_BOUND_MS=10000`; hang `Promise.race`; stop `detached` resurrection; stop once-flag clear on a detached id; stale attach uses `abandon`; transport recovery uses the same owner
-- `src/App.test.mjs` — in-flight hold + detach; last-listener then detach (request owner); stale attach; no-resurrect; remount new id; never-resolving hang; reattach uses a new plane
+- `src/botster/hubTerminalDataPlane.ts` — one Detach owner keyed by subscription id and admitted generation; `DETACH_REQUEST_BOUND_MS=10000`; hang `Promise.race`; stop `detached` resurrection; public cancel still owns the held id; stale attach uses `abandon`; transport recovery uses the same owner
+- `src/App.test.mjs` — in-flight hold + detach; last-listener then detach; two admitted generations each Detach; stale attach; no-resurrect; remount new id; never-resolving hang with shared-bridge sibling `readScreen`
 - `docs/plans/caller-owned-cancel-oracle-exactly-one-detach.md` — already on branch (Plan rev 2)
 - `docs/reports/caller-owned-cancel-oracle-exactly-one-detach-implement.md` — this report
 
@@ -88,6 +88,16 @@ None opened. Parent Hub ticket `ticket_1786661010_115885` already depends on thi
 2. The post-detach reattach unit path now creates a new `HubTerminalDataPlane` instead of resurrecting a publicly detached plane via `subscribeOutput`. That matches the plan's no-resurrect rule.
 3. Last-listener Detach is now a data-plane `request` Detach when `abandon` exists (production shape). Stream `unsubscribe` remains the fallback emitter only for older bridges without `abandon`.
 4. Merge to `main` waits for Review/Verify. Implement commits on the ticket branch and does not create a PR.
+5. Review `review_1786918867_346204` required Detach ownership by subscription id **and** admitted attachment generation. Plan rev 2 said not to clear the once-flag for an id that already sent Detach. This visit clears that flag only when a new attach is admitted and the plane is **not** publicly detached. Public cancel still suppresses later Detach for that subscription id.
+
+## Review return
+
+Review `review_1786918867_346204` sent Implement back after `55a81af`.
+
+| Finding | Response |
+| --- | --- |
+| `finding_1786918867_846423` Reset Detach ownership for each admitted attachment generation | `detachSentFor` is `{ subscriptionId, generation }`. Last-listener `closeStream()` Detach is once per generation. A later `subscribeOutput()` that admits a new attach while `detached === false` clears the once state. Public `detach()` still skips further Detach for that subscription id after generation bump. Unit `two-generation-one-detach-each` uses production `abandon()` and expects two request Detaches for two subscribe/unsubscribe cycles on one plane and `subscription_id`. |
+| `finding_1786918867_809277` Prove sibling progress through the same bridge after a hung Detach | Hang test now uses one shared bridge. Only the target session Detach never resolves. After unmount fails within 25 ms + slack, sibling `readScreen()` returns `sibling-alive`. Target Detach count stays 1. Sibling Detach and `shutdown_session` stay 0. |
 
 ## Runtime-teardown lenses implemented
 
@@ -97,8 +107,8 @@ None opened. Parent Hub ticket `ticket_1786661010_115885` already depends on thi
 | Bounds | `HubTerminalDataPlane.detach()` races the single detach request against `DETACH_REQUEST_BOUND_MS` (10_000; test hook may shorten). Timeout is failure; once-flag stays set; unmount `finally` still destroys and deletes. |
 | Late-message matrix | Attach/Detach/stream listener/resize/input covered. Stale attach abandons without a second Detach. Recovery remints id and stale-detaches through the once-owner. Keep-alive forbids `shutdown_session`. |
 | Production-path proof | Home unmount → `DefaultTerminalViewBridge.unmount` → `HubTerminalDataPlane.detach` → one `daemon_request` detach → decoder abort → remount new `subscription_id`. Hang unit uses never-resolving request + 25 ms bound. Live oracle: two consecutive shared-session coordinators. |
-| Ownership identity | Cancel remount requires a new `subscription_id`. Once-flag is per subscription id and is not cleared for an id that already sent Detach. |
-| Sibling fail-closed | Hang and reject paths keep a sibling plane attached; session stays up; no sibling sacrifice. |
+| Ownership identity | Core identity is `(session_id, subscription_id, generation)`. Detach once-key is subscription id plus admitted generation. Public cancel also blocks later Detach for that subscription id. Cancel remount uses a new plane or a new `subscription_id`. |
+| Sibling fail-closed | Hang path keeps a sibling plane on the same bridge able to complete `readScreen`. Session stays up. No sibling Detach or `shutdown_session`. |
 
 ## Tests and downstream proof run
 
@@ -124,13 +134,14 @@ Live caller-owned proof (twice):
 BOTSTER_HUB_BIN=<hub debug at c72712e> \
 BOTSTER_SESSION_WORKER_BIN=<matching hub-tree debug session-worker> \
 npm run smoke:live-packaged-protocol:shared-session
-# second run: node scripts/live-shared-session-coordinator.mjs
+# second run and review-return run: node scripts/live-shared-session-coordinator.mjs
 ```
 
 | Run | Exit | Elapsed | Ablation first failure | Cancel markers |
 | --- | --- | --- | --- | --- |
-| 1 | 0 | ~952s | `got 0` | three `live-shared-session-cancel-passed` with `detach_count: 1` |
-| 2 | 0 | ~763s | `got 0` | three `live-shared-session-cancel-passed` with `detach_count: 1` |
+| 1 (`55a81af`) | 0 | ~952s | `got 0` | three `live-shared-session-cancel-passed` with `detach_count: 1` |
+| 2 (`55a81af`) | 0 | ~763s | `got 0` | three `live-shared-session-cancel-passed` with `detach_count: 1` |
+| 3 (review return) | 0 | ~1532s | `got 0` | three `live-shared-session-cancel-passed` with `detach_count: 1` |
 
 Both runs printed:
 

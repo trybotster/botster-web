@@ -89,7 +89,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private detached = false;
   private transportLost = false;
   private attachmentGeneration = 0;
-  private detachSentForSubscriptionId: string | undefined;
+  private detachSentFor: { subscriptionId: string; generation: number } | undefined;
+  private lastAbandonedDetach: { subscriptionId: string; generation: number } | undefined;
   private hydration: ScreenHydration | undefined;
   private restoredVisibleScreenGeneration: number | undefined;
   private modeFlags: DaemonModeFlags | undefined;
@@ -387,13 +388,14 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       this.uninstallLifecycleListener();
       return;
     }
+    const heldGeneration = this.hydration?.generation ?? this.attachmentGeneration;
     this.closeStreamWithoutDetachRequest();
     this.listeners.clear();
     this.statusListeners.clear();
     this.uninstallLifecycleListener();
-    // One Detach owner for the held subscription id (and any abandoned prior id
-    // still recorded on this plane after transport recovery remint).
-    await this.sendDetachRequestOnce(heldSubscriptionId);
+    // One Detach owner for the held subscription generation. Public cancel also
+    // blocks later Detach for this subscription id even after generation bump.
+    await this.sendDetachRequestOnce(heldSubscriptionId, heldGeneration);
   }
 
   private uninstallLifecycleListener(): void {
@@ -411,6 +413,11 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     if (this.detached) return;
     this.transportLost = true;
     const previousSubscriptionId = this.subscriptionId;
+    const previousGeneration = this.hydration?.generation ?? this.attachmentGeneration;
+    this.lastAbandonedDetach = {
+      subscriptionId: previousSubscriptionId,
+      generation: previousGeneration
+    };
     this.closeStreamWithoutDetachRequest();
     this.emitStatus({
       state: "attaching",
@@ -418,7 +425,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     });
     recordLiveHarnessTerminal("transport_lost", {
       sessionId: this.sessionId,
-      subscription_id: previousSubscriptionId
+      subscription_id: previousSubscriptionId,
+      generation: previousGeneration
     });
   }
 
@@ -449,7 +457,13 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       // Best-effort detach of the abandoned subscription now that the channel is alive.
       if (previousSubscriptionId && previousSubscriptionId !== this.subscriptionId) {
         try {
-          await this.sendDetachRequestOnce(previousSubscriptionId);
+          const abandoned = this.lastAbandonedDetach;
+          await this.sendDetachRequestOnce(
+            previousSubscriptionId,
+            abandoned?.subscriptionId === previousSubscriptionId
+              ? abandoned.generation
+              : this.attachmentGeneration
+          );
         } catch (error: unknown) {
           recordLiveHarnessTerminal("stale_detach_ignored", {
             message: error instanceof Error ? error.message : String(error),
@@ -563,18 +577,19 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       // as a second Detach emitter for this subscription id.
       if (typeof streamSubscription.abandon === "function") {
         streamSubscription.abandon();
-      } else if (this.detachSentForSubscriptionId !== this.subscriptionId) {
-        this.abandonStreamHandle(streamSubscription);
+      } else if (!this.hasSentDetachFor(this.subscriptionId, attachmentGeneration)) {
+        this.abandonStreamHandle(streamSubscription, attachmentGeneration);
       }
-      if (!this.detached && this.detachSentForSubscriptionId !== this.subscriptionId) {
-        void this.sendDetachRequestOnce(this.subscriptionId).catch(() => undefined);
+      if (!this.detached && !this.hasSentDetachFor(this.subscriptionId, attachmentGeneration)) {
+        void this.sendDetachRequestOnce(this.subscriptionId, attachmentGeneration).catch(() => undefined);
       }
       return;
     }
     this.streamSubscription = streamSubscription;
-    // Do not clear the once-flag for a subscription id that already sent Detach.
-    if (this.detachSentForSubscriptionId !== this.subscriptionId) {
-      this.detachSentForSubscriptionId = undefined;
+    // A newly admitted generation while the plane is not publicly detached must
+    // own its own Detach. Public cancel keeps the once-flag for this subscription id.
+    if (!this.detached) {
+      this.detachSentFor = undefined;
     }
     recordLiveHarnessTerminal("attach", {
       attempt: 1,
@@ -621,15 +636,16 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private closeStream(): void {
     const stream = this.streamSubscription;
     const subscriptionId = this.subscriptionId;
+    const generation = this.hydration?.generation ?? this.attachmentGeneration;
     if (stream) {
       if (typeof stream.abandon === "function") {
         stream.abandon();
         // Last-listener and fail paths share the same Detach owner as public detach.
-        void this.sendDetachRequestOnce(subscriptionId).catch(() => undefined);
+        void this.sendDetachRequestOnce(subscriptionId, generation).catch(() => undefined);
       } else {
         // Older bridges without abandon: unsubscribe stops delivery and is the
         // historical Detach emitter. Mark once so public detach does not double.
-        this.detachSentForSubscriptionId = subscriptionId;
+        this.detachSentFor = { subscriptionId, generation };
         try {
           stream.unsubscribe();
         } catch (unsubscribeError: unknown) {
@@ -660,15 +676,15 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   /**
-   * One Detach owner for a subscription id. Marks the once-flag before await so
-   * concurrent emitters skip. Races the bridge request against DETACH_REQUEST_BOUND_MS
-   * (or testHooks.detachRequestBoundMs) so unmount cannot hang forever.
+   * One Detach owner for a subscription generation. Marks the once-flag before await
+   * so concurrent emitters skip. Public cancel also suppresses later Detach for that
+   * subscription id. Races the bridge request against DETACH_REQUEST_BOUND_MS.
    */
-  private async sendDetachRequestOnce(subscriptionId: string): Promise<void> {
-    if (this.detachSentForSubscriptionId === subscriptionId) {
+  private async sendDetachRequestOnce(subscriptionId: string, generation: number): Promise<void> {
+    if (this.hasSentDetachFor(subscriptionId, generation)) {
       return;
     }
-    this.detachSentForSubscriptionId = subscriptionId;
+    this.detachSentFor = { subscriptionId, generation };
     const boundMs = this.testHooks?.detachRequestBoundMs ?? DETACH_REQUEST_BOUND_MS;
     const requestPromise = this.options.bridge.request({
       type: "detach",
@@ -694,19 +710,30 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
   }
 
-  private abandonStreamHandle(sub: DaemonTerminalStreamSubscription): void {
+  private hasSentDetachFor(subscriptionId: string, generation: number): boolean {
+    if (!this.detachSentFor) return false;
+    if (this.detached && this.detachSentFor.subscriptionId === subscriptionId) {
+      return true;
+    }
+    return (
+      this.detachSentFor.subscriptionId === subscriptionId &&
+      this.detachSentFor.generation === generation
+    );
+  }
+
+  private abandonStreamHandle(sub: DaemonTerminalStreamSubscription, generation: number): void {
     if (typeof sub.abandon === "function") {
       sub.abandon();
       return;
     }
     // Older test bridges only implement unsubscribe. When the once-owner already
-    // sent Detach for this id, skip unsubscribe so it cannot emit a second request.
-    if (this.detachSentForSubscriptionId === this.subscriptionId) {
+    // sent Detach for this generation, skip unsubscribe so it cannot emit a second request.
+    if (this.hasSentDetachFor(this.subscriptionId, generation)) {
       return;
     }
     try {
       sub.unsubscribe();
-      this.detachSentForSubscriptionId = this.subscriptionId;
+      this.detachSentFor = { subscriptionId: this.subscriptionId, generation };
     } catch (unsubscribeError: unknown) {
       recordLiveHarnessTerminal("stream_unsubscribe_error", {
         message:

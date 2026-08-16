@@ -2725,7 +2725,8 @@ assert.match(hubTerminalDataPlane, /reader_cancel/);
 assert.match(hubTerminalDataPlane, /ablateCancelDetach/);
 assert.match(hubTerminalDataPlane, /if \(this\.detached\) return;/);
 assert.match(hubTerminalDataPlane, /listeners\.size === 0 && !this\.detached\) \{\s*this\.closeStream\(\);/);
-assert.match(hubTerminalDataPlane, /detachSentForSubscriptionId === this\.subscriptionId/);
+assert.match(hubTerminalDataPlane, /hasSentDetachFor/);
+assert.match(hubTerminalDataPlane, /if \(!this\.detached\) \{\s*this\.detachSentFor = undefined;/);
 assert.match(hubTerminalDataPlane, /DETACH_REQUEST_BOUND_MS/);
 assert.match(hubTerminalDataPlane, /detachRequestBoundMs/);
 assert.match(hubTerminalDataPlane, /sendDetachRequestOnce/);
@@ -8422,6 +8423,58 @@ assert.equal(terminalStatuses.some((status) => status.state === "attached" && st
 }
 
 {
+  // Two admitted generations on one plane and subscription_id each send Detach.
+  const detachRequests = [];
+  let streamCount = 0;
+  const subscriptionId = "two-generation-sub";
+  const plane = createHubTerminalDataPlane({
+    sessionId: "two-generation-one-detach-each",
+    subscriptionId,
+    bridge: {
+      async request(request) {
+        if (request.type === "detach") {
+          detachRequests.push({ ...request, source: "request" });
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal(sessionId, nextSubscriptionId) {
+        streamCount += 1;
+        return {
+          abandon() {},
+          unsubscribe() {
+            detachRequests.push({
+              type: "detach",
+              session_id: sessionId,
+              subscription_id: nextSubscriptionId,
+              source: "stream"
+            });
+          }
+        };
+      }
+    }
+  });
+  const first = plane.subscribeOutput(() => undefined);
+  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+  first.unsubscribe();
+  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+  const second = plane.subscribeOutput(() => undefined);
+  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+  second.unsubscribe();
+  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+  assert.equal(streamCount, 2);
+  assert.deepEqual(
+    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
+    [
+      { type: "detach", subscription_id: subscriptionId, source: "request" },
+      { type: "detach", subscription_id: subscriptionId, source: "request" }
+    ]
+  );
+  await plane.detach();
+  await plane.detach();
+  assert.equal(detachRequests.length, 2);
+}
+
+{
   const detachRequests = [];
   const sessionId = "bridge-unmount-one-detach";
   const subscriptionId = "bridge-unmount-one-detach-sub";
@@ -8894,7 +8947,8 @@ assert.equal(terminalStatuses.some((status) => status.state === "attached" && st
 
 {
   // Never-resolving Detach hang: same Promise.race path as production, shortened bound.
-  const detachRequests = [];
+  // Sibling progress uses the same bridge; only the target Detach hangs.
+  const sharedRequests = [];
   const sessionId = "detach-hang-bound";
   const subscriptionId = "detach-hang-bound-sub";
   const siblingSessionId = "detach-hang-sibling";
@@ -8902,25 +8956,39 @@ assert.equal(terminalStatuses.some((status) => status.state === "attached" && st
   let hangDetachAttempts = 0;
   let readerCancelCount = 0;
   let destroyCount = 0;
+  const siblingOutput = [];
+  const sharedBridge = {
+    async request(request) {
+      sharedRequests.push({ ...request });
+      if (request.type === "detach" && request.session_id === sessionId) {
+        hangDetachAttempts += 1;
+        return new Promise(() => undefined);
+      }
+      if (request.type === "read_screen" && request.session_id === siblingSessionId) {
+        return {
+          kind: "read_screen",
+          read_screen: { session_id: siblingSessionId, text: "sibling-alive" },
+          events: []
+        };
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(nextSessionId, nextSubscriptionId, onEvent) {
+      if (nextSessionId === siblingSessionId && typeof onEvent === "function") {
+        queueMicrotask(() => {
+          onEvent(liveOutputEvent(nextSessionId, nextSubscriptionId, "sibling-live\r\n"));
+        });
+      }
+      return { abandon() {}, unsubscribe() {} };
+    }
+  };
   const plane = createHubTerminalDataPlane({
     sessionId,
     subscriptionId,
     testHooks: {
       detachRequestBoundMs: 25
     },
-    bridge: {
-      async request(request) {
-        if (request.type === "detach") {
-          hangDetachAttempts += 1;
-          detachRequests.push({ ...request, source: "request" });
-          return new Promise(() => undefined);
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal() {
-        return { abandon() {}, unsubscribe() {} };
-      }
-    }
+    bridge: sharedBridge
   });
   plane.bindIncrementalSnapshotReader(() => ({
     read() {
@@ -8930,23 +8998,12 @@ assert.equal(terminalStatuses.some((status) => status.state === "attached" && st
       readerCancelCount += 1;
     }
   }));
-  const siblingDetachRequests = [];
   const siblingPlane = createHubTerminalDataPlane({
     sessionId: siblingSessionId,
     subscriptionId: siblingSubscriptionId,
-    bridge: {
-      async request(request) {
-        if (request.type === "detach") {
-          siblingDetachRequests.push(request);
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal() {
-        return { abandon() {}, unsubscribe() {} };
-      }
-    }
+    bridge: sharedBridge
   });
-  siblingPlane.subscribeOutput(() => undefined);
+  siblingPlane.subscribeOutput((data) => siblingOutput.push(data));
   const viewBridge = new DefaultTerminalViewBridge(() => ({
     mount() {},
     attachDataPlane(dataPlane) {
@@ -8986,14 +9043,22 @@ assert.equal(terminalStatuses.some((status) => status.state === "attached" && st
   const elapsedMs = Date.now() - startedAt;
   assert.equal(elapsedMs < 125, true, `unmount hung for ${elapsedMs}ms`);
   assert.equal(hangDetachAttempts, 1);
-  assert.equal(detachRequests.length, 1);
   assert.equal(destroyCount, 1);
   assert.equal(readerCancelCount >= 1, true);
+  const siblingScreen = await siblingPlane.readScreen();
+  assert.equal(siblingScreen?.text, "sibling-alive");
   await viewBridge.unmount(descriptor);
   assert.equal(hangDetachAttempts, 1);
-  assert.equal(siblingDetachRequests.length, 0);
   assert.equal(
-    detachRequests.some((request) => request.type === "shutdown_session"),
+    sharedRequests.filter((request) => request.type === "detach" && request.session_id === sessionId).length,
+    1
+  );
+  assert.equal(
+    sharedRequests.filter((request) => request.type === "detach" && request.session_id === siblingSessionId).length,
+    0
+  );
+  assert.equal(
+    sharedRequests.some((request) => request.type === "shutdown_session"),
     false
   );
 }
