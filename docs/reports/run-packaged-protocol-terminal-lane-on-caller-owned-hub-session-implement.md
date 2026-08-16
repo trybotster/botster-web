@@ -2,7 +2,7 @@
 
 Ticket: `ticket_1786868596_331812`
 Run: `run_1786868607_597988`
-Step: `botster_stack_implement` / `run_step_1786900505_919709`
+Step: `botster_stack_implement` / `run_step_1786901647_697653`
 Plan: `docs/plans/run-packaged-protocol-terminal-lane-on-caller-owned-hub-session.md` revision 4
 Product decision: `question_1786868962_323590` option **C**
 
@@ -102,6 +102,12 @@ Review `review_1786900496_133407` sent Implement back after `3a683df`:
 | `finding_1786900496_305971` A rejected Detach request stops local view cleanup | `DefaultTerminalViewBridge.detach` and `unmount` use `finally` so the data-plane reference, output subscriptions, renderer, and mount map are released after a rejected Detach. Fire-and-forget `TerminalViewHost` unmounts catch the rejection. Unit `bridge-unmount-reject-cleanup` proves one request Detach, output unsubscribe, renderer destroy, mount removal, and no second Detach. |
 | `finding_1786900496_203307` The changed production unmount order has no live proof | Re-ran the complete shared-session coordinator after these teardown fixes. Exit 0 in 577s. Ablation first failure `got 0`. Two keep-alives and the exit pass each record `detach_count: 1`. |
 
+Review `review_1786901636_166708` sent Implement back after `68a1126`:
+
+| Finding | Response |
+| --- | --- |
+| `finding_1786901636_894520` Renderer destruction failure leaves the mount registered | `unmount` now records a Detach error, destroys the renderer, and deletes the mount in a nested `finally`. If both fail, the Detach error is thrown. Unit `bridge-unmount-destroy-reject` rejects with the Detach error, deletes the mount (later unmount is a no-op), records one Detach, and remounts a later generation that can unmount again. |
+
 ## Deviations from plan
 
 1. Opt-in exit pass uses `proveSharedSessionExitDetach` instead of IsolatedHub `proveEntityDrivenProductionDetach`. Producer exit delivers `process_exit` before the session-entity patch. That is a valid first-arriving detach path. IsolatedHub entity-only isolation is unchanged.
@@ -117,7 +123,7 @@ Review `review_1786900496_133407` sent Implement back after `3a683df`:
 | Isolation | DataChannel close / Detach retires this client's subscription and decoder. Default path keeps `north-star-shared` running. Sibling flood sessions stay independent. Opt-in exit ends only the supplied session; the coordinator Hub stays up until coordinator shutdown. |
 | Bounds | Snapshot hold is released in `finally`. Driver does not `block_on` Hub close. Coordinator bounds Hub shutdown. Missing `local_url` / HTML shell fails closed after a 15s retry. |
 | Late-message matrix | Attach/Detach/Hello/input/resize stay on the production DataPlane. Default path forbids `shutdown_session` for the supplied id. Detach is idempotent on one plane. Late Home unmount cannot `ShutdownSession`. |
-| Production-path proof | Cancel: Home unmount → `armSnapshotInstallHold` → remount → new `snapshot_install_held` → Home → `TerminalViewHost` cleanup → `DefaultTerminalViewBridge.unmount` (`finally` destroys renderer) → stop input → `HubTerminalDataPlane.detach` (one request Detach + decoder cancel, even if the request rejects) → then release output subscriptions. Standalone last-listener `unsubscribe` uses `closeStream()` (stream Detach). A later `detach()` on the same subscription is local cleanup only. Reconnect: in-page `closeDataChannel` on a surviving document. Exit: producer exit → ProcessExited and entity `exited` → `waitForTerminalDetached`. |
+| Production-path proof | Cancel: Home unmount → `armSnapshotInstallHold` → remount → new `snapshot_install_held` → Home → `TerminalViewHost` cleanup → `DefaultTerminalViewBridge.unmount` (nested `finally` always deletes the mount; Detach error wins if destroy also fails) → stop input → `HubTerminalDataPlane.detach` (one request Detach + decoder cancel, even if the request rejects) → then release output subscriptions. Standalone last-listener `unsubscribe` uses `closeStream()` (stream Detach). A later `detach()` on the same subscription is local cleanup only. Reconnect: in-page `closeDataChannel` on a surviving document. Exit: producer exit → ProcessExited and entity `exited` → `waitForTerminalDetached`. |
 | Ownership identity | Core identity is session + subscription + generation. Cancel remount requires a new `subscription_id`. Baseline completed subscription is not treated as the held one. |
 | Sibling fail-closed | Successful close keeps the supplied session running. Flood sibling isolation still runs. Opt-in exit ends this session only. |
 
@@ -130,7 +136,7 @@ npm run build
 npm run lint
 ```
 
-`npm test`, `typecheck`, `build`, and `lint` exit 0 after `finding_1786900496_948548` / `305971` / `203307`. Lint still reports only the pre-existing `react-refresh/only-export-components` warnings.
+`npm test`, `typecheck`, `build`, and `lint` exit 0 after `finding_1786901636_894520`. Lint still reports only the pre-existing `react-refresh/only-export-components` warnings. This return did not re-run the live coordinator; the finding is a unit-proven destroy-rejection path. The 577s coordinator result on `68a1126` remains the live unmount-order proof.
 
 Fail-closed driver (no Chromium):
 
@@ -170,6 +176,7 @@ Hello still required `webrtc_terminal_adapter` and `terminal_subscription_closed
 - Opt-in exit observed ProcessExited before the entity patch. Entity-only IsolatedHub isolation was not reused for that pass.
 - Coordinator `requestDaemonShutdown` after the exit pass is coordinator-owned Hub teardown, not the driver default path.
 - Live coordinator used the Hub-tree debug session-worker, not the lockfile Core `fc541a5` worker, because that pairing failed at spawn.
+- This return did not re-run the live coordinator. Destroy-rejection cleanup is unit-proved.
 
 ## Missing vault guidance discovered
 

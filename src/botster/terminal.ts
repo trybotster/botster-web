@@ -203,11 +203,26 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
       return;
     }
 
+    let detachError: unknown;
+    let destroyError: unknown;
     try {
       await this.detach(descriptor);
+    } catch (error) {
+      detachError = error;
     } finally {
-      await state.renderer.destroy();
-      this.mounts.delete(descriptor.sessionId);
+      try {
+        await state.renderer.destroy();
+      } catch (error) {
+        destroyError = error;
+      } finally {
+        this.mounts.delete(descriptor.sessionId);
+      }
+    }
+    if (detachError !== undefined) {
+      throw detachError;
+    }
+    if (destroyError !== undefined) {
+      throw destroyError;
     }
   }
 

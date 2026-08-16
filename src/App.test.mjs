@@ -2730,7 +2730,9 @@ assert.match(
   terminal,
   /try \{\s*if \(state\.dataPlane\?\.detach\) \{\s*await state\.dataPlane\.detach\(\);\s*\}\s*\} finally \{/s
 );
-assert.match(terminal, /try \{\s*await this\.detach\(descriptor\);\s*\} finally \{/s);
+assert.match(terminal, /try \{\s*await this\.detach\(descriptor\);\s*\} catch \(error\) \{\s*detachError = error;\s*\} finally \{/s);
+assert.match(terminal, /if \(detachError !== undefined\) \{\s*throw detachError;/s);
+assert.match(terminal, /this\.mounts\.delete\(descriptor\.sessionId\)/);
 assert.match(liveProtocolHarnessScript, /expected exactly one detach for held subscription/);
 assert.match(liveSharedSessionCoordinatorScript, /BOTSTER_LIVE_ABLATE_CANCEL_DETACH/);
 assert.match(liveSharedSessionCoordinatorScript, /assertCancelAblation/);
@@ -8563,6 +8565,108 @@ assert.equal(terminalStatuses.some((status) => status.state === "attached" && st
   await viewBridge.unmount(descriptor);
   assert.equal(destroyCount, 1);
   assert.equal(detachRequests.length, 1);
+}
+
+{
+  const detachRequests = [];
+  const sessionId = "bridge-unmount-destroy-reject";
+  const firstSubscriptionId = "bridge-unmount-destroy-reject-sub";
+  const laterSubscriptionId = "bridge-unmount-destroy-reject-later-sub";
+  let rendererGeneration = 0;
+  let firstDestroyCount = 0;
+  let laterDestroyCount = 0;
+  function makePlane(subscriptionId) {
+    return createHubTerminalDataPlane({
+      sessionId,
+      subscriptionId,
+      bridge: {
+        async request(request) {
+          if (request.type === "detach") {
+            detachRequests.push({ ...request, source: "request", subscription_id: subscriptionId });
+            throw new Error("detach transport lost");
+          }
+          return { kind: "events", events: [] };
+        },
+        streamTerminal(nextSessionId, nextSubscriptionId) {
+          return {
+            unsubscribe() {
+              detachRequests.push({
+                type: "detach",
+                session_id: nextSessionId,
+                subscription_id: nextSubscriptionId,
+                source: "stream"
+              });
+            },
+            abandon() {}
+          };
+        }
+      }
+    });
+  }
+  function makeContainer() {
+    return {
+      dataset: {},
+      childNodes: [],
+      appendChild() {
+        return undefined;
+      },
+      remove() {
+        return undefined;
+      },
+      querySelector() {
+        return null;
+      }
+    };
+  }
+  const viewBridge = new DefaultTerminalViewBridge(() => {
+    const generation = rendererGeneration;
+    rendererGeneration += 1;
+    return {
+      mount() {},
+      attachDataPlane(dataPlane) {
+        return dataPlane.subscribeOutput(() => undefined);
+      },
+      onInput() {
+        return { unsubscribe() {} };
+      },
+      write() {},
+      resize() {},
+      focus() {},
+      async destroy() {
+        if (generation === 0) {
+          firstDestroyCount += 1;
+          throw new Error("renderer destroy failed");
+        }
+        laterDestroyCount += 1;
+      }
+    };
+  });
+  const descriptor = { sessionId, renderer: "restty" };
+  const firstPlane = makePlane(firstSubscriptionId);
+  await viewBridge.mount(makeContainer(), descriptor);
+  await viewBridge.attach(descriptor, firstPlane);
+  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+  await assert.rejects(viewBridge.unmount(descriptor), /detach transport lost/);
+  await viewBridge.unmount(descriptor);
+  assert.equal(firstDestroyCount, 1);
+  assert.deepEqual(
+    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
+    [{ type: "detach", subscription_id: firstSubscriptionId, source: "request" }]
+  );
+  const laterPlane = makePlane(laterSubscriptionId);
+  await viewBridge.mount(makeContainer(), descriptor);
+  await viewBridge.attach(descriptor, laterPlane);
+  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+  await assert.rejects(viewBridge.unmount(descriptor), /detach transport lost/);
+  assert.equal(laterDestroyCount, 1);
+  assert.equal(firstDestroyCount, 1);
+  assert.deepEqual(
+    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
+    [
+      { type: "detach", subscription_id: firstSubscriptionId, source: "request" },
+      { type: "detach", subscription_id: laterSubscriptionId, source: "request" }
+    ]
+  );
 }
 
 const readbackRequests = [];
