@@ -75,14 +75,21 @@ This run stayed in `botster-web`. It did not edit Hub, TUI, or Core. IsolatedHub
 
 None opened. Parent Hub ticket already depends on this Web target. Live proof used current Hub main and the lockfile Core worker. No Hub or Core defect required a new ticket.
 
+## Review return
+
+Review `review_1786874869_811589` sent Implement back after `77d39c7`. Two findings:
+
+| Finding | Response |
+| --- | --- |
+| `finding_1786874869_948891` Cancellation accepts two Detach requests | Last output-listener close now calls `closeStreamWithoutDetachRequest()`. `HubTerminalDataPlane.detach()` sends the one `detach` RPC. Live keep-alive and exit cancel markers record `detach_count: 1`. The oracle requires `detach_count === 1`. A unit test fails if the last listener sends Detach or if `detach()` runs twice. |
+| `finding_1786874869_927008` Cancellation ablation has no valid result | The coordinator now runs `BOTSTER_LIVE_ABLATE_CANCEL_DETACH=1` first, through session types and the Option A picker. That pass exits 1 at `expected exactly one detach ... got 0`. Marker: `live-shared-session-cancel-ablation-passed`. |
+
 ## Deviations from plan
 
-1. Cancel oracle requires at least one `detach` for the held subscription, not exactly one. Home unmount still records two `daemon_request` `detach` events for that subscription. Hub treats Detach as idempotent. Ablation still fails at zero. Marker records the observed `detach_count`.
-2. Opt-in exit pass uses `proveSharedSessionExitDetach` instead of IsolatedHub `proveEntityDrivenProductionDetach`. Producer exit delivers `process_exit` before the session-entity patch. That is a valid first-arriving detach path. IsolatedHub entity-only isolation is unchanged.
-3. Shared session remounts after `proveExternalSessionLifecycle` because reload cycles 1 and 2 are skipped. IsolatedHub remounts inside those cycles.
-4. `HubTerminalDataPlane.detach()` is idempotent and uses `closeStreamWithoutDetachRequest()` plus one explicit `detach` RPC so the stream `unsubscribe` path does not send a second RPC by itself.
-5. Exclusive IsolatedHub modes (`BOTSTER_LIVE_SURFACE_ONLY`, contract matrix, entity-options, Workspaces lifecycle, durable, require-workspaces) fail closed with this lane so they cannot `requestDaemonShutdown` the caller Hub.
-6. Merge to `main` waits for Review/Verify. Implement commits on the ticket branch and does not create a PR.
+1. Opt-in exit pass uses `proveSharedSessionExitDetach` instead of IsolatedHub `proveEntityDrivenProductionDetach`. Producer exit delivers `process_exit` before the session-entity patch. That is a valid first-arriving detach path. IsolatedHub entity-only isolation is unchanged.
+2. Shared session remounts after `proveExternalSessionLifecycle` because reload cycles 1 and 2 are skipped. IsolatedHub remounts inside those cycles.
+3. Exclusive IsolatedHub modes (`BOTSTER_LIVE_SURFACE_ONLY`, contract matrix, entity-options, Workspaces lifecycle, durable, require-workspaces) fail closed with this lane so they cannot `requestDaemonShutdown` the caller Hub.
+4. Merge to `main` waits for Review/Verify. Implement commits on the ticket branch and does not create a PR.
 
 ## Runtime-teardown lenses implemented
 
@@ -123,25 +130,24 @@ BOTSTER_SESSION_WORKER_BIN=<lockfile Core fc541a5> \
 npm run smoke:live-packaged-protocol:shared-session
 ```
 
-Result: exit 0 in 631s.
+Result: exit 0 in 572s after Review return.
 
 | Marker | Count / value |
 | --- | --- |
+| `live-shared-session-cancel-ablation-passed` | 1; first failure `expected exactly one detach ... got 0`; session types and picker ran |
 | `live-shared-session-keep-alive-passed` | 2, session `north-star-shared` |
-| `live-shared-session-cancel-passed` | 3 |
+| `live-shared-session-cancel-passed` | 3, each with `detach_count: 1` |
 | `live-shared-session-terminal-lane-passed` | 3 |
 | `live-shared-session-exit-passed` | 1, `process_exit=true`, `entity_lifecycle=exited`, dashboard present, terminal gone |
-| `live-shared-session-coordinator-passed` | `keep_alive_runs=2`, `exit_pass=true` |
+| `live-shared-session-coordinator-passed` | `keep_alive_runs=2`, `cancel_ablation=true`, `exit_pass=true` |
 | Workspaces early-exit summary | absent |
 | IsolatedHub completion string | absent |
-| `session-type-live-proof` | live on each pass, including Option A picker |
+| `session-type-live-proof` | live on ablation and every later pass, including Option A picker |
 
 Hello still required `webrtc_terminal_adapter` and `terminal_subscription_closed` on host compatibility. `conformance_fixture_revision` was 42.
 
 ## Unverified behavior or residual risk
 
-- `BOTSTER_LIVE_ABLATE_CANCEL_DETACH=1` was not executed as a second red coordinator run. The hook is wired. Review/Verify can set the env and require the cancel oracle to fail first.
-- Cancel `detach_count` is 2 on the live path. The second request is residual and Hub-idempotent. It is not a missing Detach.
 - Opt-in exit observed ProcessExited before the entity patch. Entity-only IsolatedHub isolation was not reused for that pass.
 - Coordinator `requestDaemonShutdown` after the exit pass is coordinator-owned Hub teardown, not the driver default path.
 

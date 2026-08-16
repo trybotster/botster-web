@@ -60,6 +60,10 @@ try {
   }
   await waitForSessionLifecycle(sessionId, "running");
 
+  const ablation = await runDriver({ BOTSTER_LIVE_ABLATE_CANCEL_DETACH: "1" });
+  assertCancelAblation(ablation);
+  await waitForSessionLifecycle(sessionId, "running");
+
   const first = await runDriver();
   assertKeepAlivePass(first, "first");
   await waitForSessionLifecycle(sessionId, "running");
@@ -74,6 +78,7 @@ try {
   console.log(`live-shared-session-coordinator-passed ${JSON.stringify({
     session_id: sessionId,
     keep_alive_runs: 2,
+    cancel_ablation: true,
     exit_pass: true
   })}`);
 } finally {
@@ -90,6 +95,49 @@ try {
     if (hub.exitCode === null) hub.kill("SIGTERM");
   }
   await rm(dataDir, { recursive: true, force: true });
+}
+
+function assertCancelAblation(result) {
+  if (result.code === 0) {
+    throw new Error("cancel ablation stayed green");
+  }
+  if (!result.output.includes("session-type-live-proof ")) {
+    throw new Error("cancel ablation skipped exerciseSessionTypes");
+  }
+  if (!result.output.includes("new-session-picker-live-proof ")) {
+    throw new Error("cancel ablation skipped the Option A picker");
+  }
+  if (!result.output.includes("live-shared-session-terminal-lane ")) {
+    throw new Error("cancel ablation never reached the terminal lane");
+  }
+  if (result.output.includes("live-shared-session-keep-alive-passed ")) {
+    throw new Error("cancel ablation printed the keep-alive completion marker");
+  }
+  if (result.output.includes("live-shared-session-cancel-passed ")) {
+    throw new Error("cancel ablation printed the cancel-passed marker");
+  }
+  const cancelDetach = result.output.match(
+    /expected exactly one detach for held subscription [^\n]+, got 0/
+  );
+  if (!cancelDetach) {
+    throw new Error(
+      `cancel ablation did not fail first at the cancel detach oracle: ${firstThrownMessage(result.output)}`
+    );
+  }
+  console.log(`live-shared-session-cancel-ablation-passed ${JSON.stringify({
+    session_id: sessionId,
+    exit_code: result.code,
+    first_failure: cancelDetach[0]
+  })}`);
+}
+
+function firstThrownMessage(output) {
+  const match = output.match(/\n\n([^\n]+)\n(?:terminal proof notes:|Error:)/);
+  if (match) return match[1];
+  const fallback = output.split("\n").find((line) =>
+    line.includes("timed out") || line.includes("expected ") || line.startsWith("Error:")
+  );
+  return fallback ?? output.slice(-400);
 }
 
 function assertKeepAlivePass(result, label) {
@@ -140,6 +188,7 @@ async function runDriver(overrides = {}) {
     "BOTSTER_SESSION_WORKER_BIN",
     "BOTSTER_LIVE_SHARED_HUB_DRIVER",
     "BOTSTER_SHARED_SESSION_PROVE_EXIT",
+    "BOTSTER_LIVE_ABLATE_CANCEL_DETACH",
     "BOTSTER_LIVE_ALLOW_SURFACE_SKIP",
     "BOTSTER_LIVE_ALLOW_BROWSER_SKIP"
   ]) {

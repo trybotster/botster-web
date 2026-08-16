@@ -2724,6 +2724,11 @@ assert.doesNotMatch(
 assert.match(hubTerminalDataPlane, /reader_cancel/);
 assert.match(hubTerminalDataPlane, /ablateCancelDetach/);
 assert.match(hubTerminalDataPlane, /if \(this\.detached\) return;/);
+assert.match(hubTerminalDataPlane, /listeners\.size === 0\) \{\s*this\.closeStreamWithoutDetachRequest\(\);/);
+assert.match(liveProtocolHarnessScript, /expected exactly one detach for held subscription/);
+assert.match(liveSharedSessionCoordinatorScript, /BOTSTER_LIVE_ABLATE_CANCEL_DETACH/);
+assert.match(liveSharedSessionCoordinatorScript, /assertCancelAblation/);
+assert.match(liveSharedSessionCoordinatorScript, /got 0/);
 assert.match(readme, /drive:live-packaged-protocol:shared-session/);
 assert.match(readme, /BOTSTER_SHARED_SESSION_PROVE_EXIT=1/);
 assert.match(readme, /live-shared-session-cancel-passed/);
@@ -8351,6 +8356,72 @@ assert.deepEqual(terminalOutput.map(outputText), [
 ]);
 assert.equal(outputsIncludeText(terminalOutput, "botster-web-production-ready"), true);
 assert.equal(terminalStatuses.some((status) => status.state === "attached" && status.message.includes("incremental snapshot")), true);
+
+{
+  const detachRequests = [];
+  const plane = createHubTerminalDataPlane({
+    sessionId: "cancel-one-detach",
+    subscriptionId: "cancel-one-detach-sub",
+    bridge: {
+      async request(request) {
+        if (request.type === "detach") {
+          detachRequests.push({ ...request, source: "request" });
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal(sessionId, subscriptionId) {
+        return {
+          unsubscribe() {
+            detachRequests.push({
+              type: "detach",
+              session_id: sessionId,
+              subscription_id: subscriptionId,
+              source: "stream"
+            });
+          },
+          abandon() {}
+        };
+      }
+    }
+  });
+  const output = plane.subscribeOutput(() => undefined);
+  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+  output.unsubscribe();
+  for (let i = 0; i < 4; i += 1) await flushMicrotasks();
+  assert.equal(
+    detachRequests.length,
+    0,
+    `last output listener sent Detach before dataPlane.detach: ${JSON.stringify(detachRequests)}`
+  );
+  await plane.detach();
+  assert.deepEqual(
+    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
+    [{ type: "detach", subscription_id: "cancel-one-detach-sub", source: "request" }]
+  );
+  await plane.detach();
+  assert.equal(detachRequests.length, 1);
+}
+
+{
+  const detachRequests = [];
+  const plane = createHubTerminalDataPlane({
+    sessionId: "cancel-zero-detach",
+    subscriptionId: "cancel-zero-detach-sub",
+    bridge: {
+      async request(request) {
+        if (request.type === "detach") detachRequests.push({ ...request });
+        return { kind: "events", events: [] };
+      },
+      streamTerminal() {
+        return { unsubscribe() {}, abandon() {} };
+      }
+    }
+  });
+  const output = plane.subscribeOutput(() => undefined);
+  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+  output.unsubscribe();
+  assert.equal(detachRequests.length, 0);
+}
 
 const readbackRequests = [];
 const readScreenResponses = [

@@ -7244,18 +7244,18 @@ async function proveInFlightAttachCancellation(page, sessionId) {
     await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor({ state: "detached" });
 
     await page.waitForFunction(
-      ({ subscriptionId, generation }) =>
-        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) =>
-          (entry.kind === "reader_cancel" || entry.kind === "event_delivery_failed") &&
-          (entry.payload?.subscription_id === subscriptionId || entry.payload?.generation === generation)
-        ),
-      { subscriptionId: hold.subscription_id, generation: hold.generation },
+      ({ subscriptionId, before }) => {
+        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+        return events.filter((entry) =>
+          entry.kind === "daemon_request" &&
+          entry.payload?.type === "detach" &&
+          entry.payload?.subscription_id === subscriptionId
+        ).length > before;
+      },
+      { subscriptionId: hold.subscription_id, before: detachBefore },
       { timeout: 15_000 }
-    ).catch((error) => {
-      throw new Error(
-        `cancel oracle missing decoder abort for held generation ${hold.generation}: ${error.message}`
-      );
-    });
+    ).catch(() => undefined);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
 
     const detachEvidence = await page.evaluate(({ subscriptionId, expectedSessionId, detachBefore: before }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
@@ -7273,14 +7273,28 @@ async function proveInFlightAttachCancellation(page, sessionId) {
         ).length
       };
     }, { subscriptionId: hold.subscription_id, expectedSessionId: sessionId, detachBefore });
-    if (detachEvidence.detach_count < 1) {
+    if (detachEvidence.detach_count !== 1) {
       throw new Error(
-        `expected a detach for held subscription ${hold.subscription_id}, got ${detachEvidence.detach_count}`
+        `expected exactly one detach for held subscription ${hold.subscription_id}, got ${detachEvidence.detach_count}`
       );
     }
     if (detachEvidence.shutdown_count !== 0) {
       throw new Error(`cancel unmount sent shutdown_session for ${sessionId}`);
     }
+
+    await page.waitForFunction(
+      ({ subscriptionId, generation }) =>
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) =>
+          (entry.kind === "reader_cancel" || entry.kind === "event_delivery_failed") &&
+          (entry.payload?.subscription_id === subscriptionId || entry.payload?.generation === generation)
+        ),
+      { subscriptionId: hold.subscription_id, generation: hold.generation },
+      { timeout: 15_000 }
+    ).catch((error) => {
+      throw new Error(
+        `cancel oracle missing decoder abort for held generation ${hold.generation}: ${error.message}`
+      );
+    });
 
     await waitForSessionStatus(page, "running");
     const lifecycle = await page.evaluate(({ expectedSessionId }) => {
@@ -7331,6 +7345,8 @@ async function proveSharedSessionExit(page, sessionId) {
   await openHomeView(page);
   await openSessionTerminal(page, sessionId);
   await waitForTerminalSession(page, sessionId);
+  await waitForAutomaticTerminalRestore(page);
+  await waitForTerminalAttachState(page, ["attached"]);
   await callTerminalControl(page, "writeInput", "botster-web-production-exit\n");
   const exitEvidence = await page.waitForFunction(
     ({ expectedSessionId }) => {
