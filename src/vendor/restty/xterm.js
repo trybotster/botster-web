@@ -1,6 +1,6 @@
 import {
   createRestty
-} from "./chunk-t7fqmv0s.js";
+} from "./chunk-3mc71e83.js";
 
 // src/xterm/app-options.ts
 function createCompatAppOptions(userAppOptions, emitData) {
@@ -212,7 +212,8 @@ class Terminal {
     for (let i = 0;i < addons.length; i += 1) {
       try {
         addons[i].dispose();
-      } catch {}
+      } catch {
+      }
     }
     this.pendingOutput.length = 0;
     this.pendingSize = null;
