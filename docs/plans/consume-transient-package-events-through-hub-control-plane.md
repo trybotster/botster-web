@@ -1,6 +1,12 @@
 # Web: consume transient package events through the Hub control plane
 
-Revision 3. Revision 1 received `changes_required` from `review_1787199378_844970`. Revision 2 resolved those seven findings per `review_1787199881_585990`, which added one product finding backed by blocking human answer `question_1787199815_341943`.
+Revision 4. Revision 1 received `changes_required` from `review_1787199378_844970`. Revision 2 resolved those seven findings per `review_1787199881_585990`, which added one product finding backed by blocking human answer `question_1787199815_341943`. Revision 3 implemented that answer; `review_1787200524_407810` found its identity join relied on a field absent from the authoritative dependency, per blocking human answer `question_1787200489_788604`.
+
+## Plan Review response (rev 4)
+
+| Finding | Response |
+| --- | --- |
+| `finding_1787200524_862085` identity join uses an unpublished field | Fixed. Human answer `question_1787200489_788604` rules Project Pipelines 0.3.0 at `beaba94` authoritative; its published `run_step` contract is `{id, run_id, step_id, status}` (`RECORD_REQUIRED_FIELDS`), and the device template 1.1.0 field is runtime evidence, not a dependency. Web truly requires the session binding: no Web route carries workflow identity, so route-only filtering would leave the production notice with no resolvable identity anywhere, contradicting `question_1787199815_341943`. Per the human's conditional, upstream ticket `ticket_1787200634_776665` (Project Pipelines: publish versioned run_step session binding for client identity joins) is created on the Project Pipelines target `tgt_a72ca1a83d504385b8648f71409119ab` and registered as blocking dependency `dependency_1787200640_706784` of this ticket. The identity join consumes only that published, versioned contract. See the revised "Active workflow identity". |
 
 ## Plan Review response (rev 3)
 
@@ -134,12 +140,16 @@ Blocking human answer `question_1787199815_341943`: show the notice only when it
 **Production identity source.** The identity owner is the currently viewed session:
 
 - The session route `/sessions/:sessionId` and the workbench's selected session view resolve to one viewed session uuid through a single selector.
-- The consumer joins that uuid to Project Pipelines entity records already consumable through the shared entity store and generic selectors: a `project-pipelines.run_step` record whose `agent_session_uuid` equals the viewed session uuid yields `run_id` and `step_id`; the matching `project-pipelines.run` record yields `ticket_id`.
+- The consumer joins that uuid to Project Pipelines entity records consumable through the shared entity store and generic selectors: a `project-pipelines.run_step` record whose published session binding (`agent_session_uuid`) equals the viewed session uuid yields `run_id` and `step_id`; the matching `project-pipelines.run` record yields `ticket_id`.
 - While a session view is active, the consumer holds entity demand for `project-pipelines.run_step` and `project-pipelines.run` through the existing generic `entity_pull` / `entity_release` held-subscription mechanism (the entity-options demand path). No new hydration machinery is added.
 
-**Identity lifetime.** The identity derives from the current route/view plus the entity store, recomputes on route or entity change, and clears on navigation or unmount. A late event after navigation resolves no identity and shows nothing. Dashboard, apps, settings, and Project Pipelines surface routes without a viewed session resolve no identity and show no notice; the durable question and attention UI on those surfaces stays package-entity driven and is unaffected.
+**Authoritative binding dependency (human decision `question_1787200489_788604`).** The authoritative Project Pipelines artifact is the registered dependency at commit `beaba94`, package 0.3.0, whose published `run_step` contract is `{id, run_id, step_id, status}` — it does not publish `agent_session_uuid`. The active device template 1.1.0 carries the field but is runtime evidence, not a stable Web dependency. Web truly requires the session binding: no Web route carries workflow identity, so route-only filtering would leave the production notice with no resolvable identity, contradicting `question_1787199815_341943`. Therefore:
 
-**Join-key verification.** `agent_session_uuid` on live `project-pipelines.run_step` records uses the hub session uuid namespace (`sess-...`), which is the same identity Web session views use. Implement must verify this join against one live record before relying on it, and must ask a human if the production join key differs.
+- Upstream ticket `ticket_1787200634_776665` on the Project Pipelines target publishes and versions `agent_session_uuid` on `run_step` entity records. It is registered as blocking dependency `dependency_1787200640_706784` of this ticket; Implement cannot start until it closes.
+- The Web identity join consumes only that published, versioned contract. Implement records the Project Pipelines package version and merge commit that publish the field and verifies the field against that merged source — never against the device template.
+- The live fixture mirrors the dependency's published `run_step` / `run` record shapes and records the dependency's merge commit in its README header.
+
+**Identity lifetime.** The identity derives from the current route/view plus the entity store, recomputes on route or entity change, and clears on navigation or unmount. A late event after navigation resolves no identity and shows nothing. Dashboard, apps, settings, and Project Pipelines surface routes without a viewed session resolve no identity and show no notice; the durable question and attention UI on those surfaces stays package-entity driven and is unaffected.
 
 Unit tests drive the production seam both ways: positive (a payload matching the resolved `run_id` / `ticket_id` / `step_id` produces a notice) and negative (non-matching ids, payloads without workflow ids, and views without identity produce none). The live lane proves the same through the production path (below).
 
@@ -169,16 +179,17 @@ Unit tests drive the production seam both ways: positive (a payload matching the
 | `question.opened` contract, emit-after-commit, client contract policy (`subjects: []` + workflow-id filtering) | botster-project-pipelines | Shipped (`beaba94`, ticket closed); policy recorded in [[project-pipelines-playbook]] |
 | Producer example and gap-forcing env (`examples/event-plane-producer`, `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX`) | botster-hub | Checked in at `7a09292` |
 | Independent Hub control / Core terminal planes in Web | botster-web (parent ticket) | Shipped (closed) |
-| Subscription client lifecycle, reconnect resubscribe, gap handling, filter seam, transient notice UI | botster-web | **This ticket** |
+| Published `run_step` session binding (`agent_session_uuid`) for the identity join | botster-project-pipelines | **Open**: `ticket_1787200634_776665`, registered as blocking dependency `dependency_1787200640_706784`; Implement waits for it |
+| Subscription client lifecycle, reconnect resubscribe, gap handling, identity resolution, filter seam, transient notice UI | botster-web | **This ticket** |
 
-No new cross-repository prerequisite. Live-proof requirement: the harness Hub must be at or after `7a09292` (advertises `package_event_subscriptions`, honors `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX`); the lanes fail with an explicit message otherwise and must spawn a pinned hub, not attach to an ambient one.
+One registered cross-repository prerequisite (the session-binding ticket above), created per human answer `question_1787200489_788604` on the dependency repository target rather than broadening this run. Live-proof requirement: the harness Hub must be at or after `7a09292` (advertises `package_event_subscriptions`, honors `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX`); the lanes fail with an explicit message otherwise and must spawn a pinned hub, not attach to an ambient one.
 
 ## Assumptions and unknowns
 
 1. **Owner string.** The subscription owner is the admitted package name `project-pipelines` (verified via `list_plugins` and the manifest). The ticket's "botster-project-pipelines" is the repository name.
-2. **Fixture producer derivation.** The live fixture package under `fixtures/package-events/` is named `project-pipelines`, derives its producer path from the checked-in Hub `examples/event-plane-producer` at `7a09292` (manifest `events.emitted` declaration plus a handler calling `events.emit(name, payload)` in the plugin worker VM), carries the `question.opened` contract verbatim from `beaba94`, persists a durable question entity record before emitting (commit-then-emit), and adds a surface-action trigger following the `fixtures/entity-options-reactive` precedent so the browser harness drives emission through the production action path. For the identity join, the fixture also publishes `project-pipelines.run_step` and `project-pipelines.run` records binding the harness's viewed session uuid (`agent_session_uuid`) to a known `run_id` / `step_id` / `ticket_id`, mirroring the real plugin's record shape at `beaba94`. Both source commits are recorded in the fixture README header. The harness hub is isolated, so the name cannot collide with a real installation.
+2. **Fixture producer derivation.** The live fixture package under `fixtures/package-events/` is named `project-pipelines`, derives its producer path from the checked-in Hub `examples/event-plane-producer` at `7a09292` (manifest `events.emitted` declaration plus a handler calling `events.emit(name, payload)` in the plugin worker VM), carries the `question.opened` contract verbatim from `beaba94`, persists a durable question entity record before emitting (commit-then-emit), and adds a surface-action trigger following the `fixtures/entity-options-reactive` precedent so the browser harness drives emission through the production action path. For the identity join, the fixture also publishes `project-pipelines.run_step` and `project-pipelines.run` records binding the harness's viewed session uuid (`agent_session_uuid`) to a known `run_id` / `step_id` / `ticket_id`, mirroring the record shape published by the merged `ticket_1787200634_776665` contract (its merge commit recorded in the fixture README header). Both source commits are recorded in the fixture README header. The harness hub is isolated, so the name cannot collide with a real installation.
 3. **Required Hello feature.** `package_event_subscriptions` becomes a required host feature (precedent: `terminal_subscription_closed`; direct-merge lockstep family). New Web refuses pre-`7a09292` Hubs; the failure must read as a Hub-version incompatibility.
-4. **Notice scope is settled, not assumed.** Human answer `question_1787199815_341943` fixes the scope: active-view identity matching, no notice without identity. The remaining assumption is the join key: `project-pipelines.run_step.agent_session_uuid` equals the hub session uuid Web session views use; Implement verifies this against one live record and asks a human if it differs.
+4. **Notice scope and binding are settled, not assumed.** Human answer `question_1787199815_341943` fixes the scope (active-view identity matching, no notice without identity). Human answer `question_1787200489_788604` fixes the binding authority: the registered Project Pipelines dependency, extended by `ticket_1787200634_776665`, publishes the `run_step` session binding Web consumes. Implement verifies the field against that dependency's merged source and recorded package version, never against the device template.
 5. **Notice placement.** The toast mounts beside the existing `WorkbenchNotifications` as a separate `IonToast`; exact placement is an Implement detail.
 
 ## Published budgets (rev 2)
@@ -218,7 +229,7 @@ The flood and gap lanes measure and fail each budget separately, and `docs/archi
 6. **Ambient-hub sensitivity**; lanes spawn a pinned hub (mandatory for the gap env var) and fail loudly on a feature-less hub.
 7. **Gap mis-handling**; diagnostic-only path, unit plus forced-gap live coverage.
 8. **Fixture drift from the shipped producer path**; mitigated by deriving from the checked-in example and recording source commits.
-9. **Identity join risk.** The `agent_session_uuid` join key or the `project-pipelines.run_step` family shape could differ live; Implement verifies against one live record before relying on it and asks a human if it differs. Holding entity demand on session views adds one held generic subscription pair; it reuses the existing demand machinery and releases on unmount.
+9. **Identity binding sequencing.** Implement is blocked until `ticket_1787200634_776665` closes and the published `run_step` contract carries the session binding. The fixture and the join must follow that ticket's merged contract exactly; consuming the device template instead is a reject. Holding entity demand on session views adds one held generic subscription pair; it reuses the existing demand machinery and releases on unmount.
 
 ## Acceptance checks and tests
 
@@ -250,7 +261,8 @@ Live packaged proof (real WebRTC, final independent Hub control and Core termina
 Downstream/documentation proof:
 
 17. `README.md` and `docs/architecture.md` claims match the installed `metadata.json` (source-derived check), and `docs/architecture.md` publishes the event-plane budgets.
-18. Production entry point proof: the subscription is issued from the route-owned production connection path (`useProductionHubConnection`), not only from harness code.
+18. Production entry point proof: the subscription and identity resolution are issued from the route-owned production connection path (`useProductionHubConnection`), not only from harness code.
+19. Dependency contract proof: Implement records the Project Pipelines package version and merge commit from `ticket_1787200634_776665` that publish `run_step.agent_session_uuid`, and verifies the field against that merged source (never the device template) before the join lands.
 
 ## Vault gaps worth capturing
 
