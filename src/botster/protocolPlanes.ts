@@ -19,7 +19,8 @@ export const requiredHostFeatures = [
   "plugin_surface_action",
   "mode_gated_input",
   "webrtc_terminal_adapter",
-  "terminal_subscription_closed"
+  "terminal_subscription_closed",
+  "package_event_subscriptions"
 ] as const;
 
 export const requiredTerminalFeatures = [

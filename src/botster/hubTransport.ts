@@ -69,6 +69,10 @@ export interface DaemonBridgeClient {
   request(request: DaemonRequest): Promise<DaemonResponse>;
   disconnect?(): void;
   subscribeEvents?(onEvent: (event: DaemonEvent) => void): { unsubscribe(): void };
+  subscribePackageEvents?(
+    spec: { owner: string; name: string; subjects: string[] },
+    onEvent: (event: DaemonEvent) => void
+  ): { ready: Promise<void>; unsubscribe(): void };
   subscribeEntityFrames?(
     entityType: string,
     onFrame: (frame: DaemonEntityFrame) => void
@@ -130,6 +134,63 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
     string,
     { refCount: number; subscription: { ready: Promise<void>; unsubscribe(): void } }
   >();
+  const packageEventSubscriptions = new Map<
+    string,
+    { refCount: number; subscription: { ready: Promise<void>; unsubscribe(): void } }
+  >();
+  const packageEventSubscriptionKey = (spec: { owner: string; name: string; subjects: string[] }) =>
+    `${spec.owner}\0${spec.name}\0${JSON.stringify(spec.subjects)}`;
+  const emitPackageEvent = (event: DaemonEvent) => {
+    if (event.type === "package_event") {
+      emit({
+        kind: "package_event",
+        payload: {
+          owner: event.owner,
+          name: event.name,
+          payload: event.payload
+        }
+      });
+      return;
+    }
+    if (event.type === "event_gap") {
+      emit({
+        kind: "event_gap",
+        payload: {
+          owner: event.owner,
+          name: event.name
+        }
+      });
+      emit(connectionDiagnosticFrame({
+        kind: "event_gap",
+        message: `Hub shed live package events for ${event.owner}/${event.name}. Durable package state is unchanged.`,
+        feature: `${event.owner}/${event.name}`,
+        operation: "subscribe_events"
+      }));
+    }
+  };
+  const ensurePackageEventSubscription = (spec: { owner: string; name: string; subjects: string[] }) => {
+    const key = packageEventSubscriptionKey(spec);
+    const existing = packageEventSubscriptions.get(key);
+    if (existing) {
+      existing.refCount += 1;
+      return existing.subscription.ready;
+    }
+    if (!bridge.subscribePackageEvents) {
+      throw new Error("package event subscription requires the WebRTC host-control event path");
+    }
+    const subscription = bridge.subscribePackageEvents(spec, emitPackageEvent);
+    packageEventSubscriptions.set(key, { refCount: 1, subscription });
+    return subscription.ready;
+  };
+  const releasePackageEventSubscription = (spec: { owner: string; name: string; subjects: string[] }) => {
+    const key = packageEventSubscriptionKey(spec);
+    const existing = packageEventSubscriptions.get(key);
+    if (!existing) return;
+    existing.refCount -= 1;
+    if (existing.refCount > 0) return;
+    existing.subscription.unsubscribe();
+    packageEventSubscriptions.delete(key);
+  };
   const ensureSessionEntitySubscription = () => {
     if (!sessionEntitySubscription) {
       if (!bridge.subscribeEntityFrames) {
@@ -203,6 +264,10 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
         entry.subscription.unsubscribe();
       }
       genericEntitySubscriptions.clear();
+      for (const entry of packageEventSubscriptions.values()) {
+        entry.subscription.unsubscribe();
+      }
+      packageEventSubscriptions.clear();
       ingress = undefined;
       bridge.disconnect?.();
     },
@@ -254,6 +319,30 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
         const request = frame.payload as { family?: unknown };
         if (typeof request.family === "string" && request.family.length > 0) {
           releaseGenericEntitySubscription(request.family);
+        }
+        return;
+      }
+
+      if (frame.kind === "events_subscribe") {
+        const request = frame.payload as { owner?: unknown; name?: unknown; subjects?: unknown };
+        if (typeof request.owner === "string" && typeof request.name === "string" && Array.isArray(request.subjects)) {
+          await ensurePackageEventSubscription({
+            owner: request.owner,
+            name: request.name,
+            subjects: request.subjects.filter((subject): subject is string => typeof subject === "string")
+          });
+        }
+        return;
+      }
+
+      if (frame.kind === "events_release") {
+        const request = frame.payload as { owner?: unknown; name?: unknown; subjects?: unknown };
+        if (typeof request.owner === "string" && typeof request.name === "string" && Array.isArray(request.subjects)) {
+          releasePackageEventSubscription({
+            owner: request.owner,
+            name: request.name,
+            subjects: request.subjects.filter((subject): subject is string => typeof subject === "string")
+          });
         }
         return;
       }

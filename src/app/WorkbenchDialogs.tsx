@@ -43,6 +43,9 @@ export interface WorkbenchDialogsProps {
   confirmDeleteSessionType: () => void;
   packageActionToast?: { message: string; color: string };
   setPackageActionToast: (toast: { message: string; color: string } | undefined) => void;
+  packageEventToast?: { message: string };
+  packageEventDurationMs?: number;
+  onPackageEventDismiss?: () => void;
 }
 
 export function WorkbenchDialogs(props: WorkbenchDialogsProps) {
@@ -87,6 +90,9 @@ export function WorkbenchDialogs(props: WorkbenchDialogsProps) {
       <WorkbenchNotifications
         toast={props.packageActionToast}
         onDismiss={() => props.setPackageActionToast(undefined)}
+        packageEventToast={props.packageEventToast}
+        packageEventDurationMs={props.packageEventDurationMs}
+        onPackageEventDismiss={props.onPackageEventDismiss}
       />
     </>
   );

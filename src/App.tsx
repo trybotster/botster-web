@@ -40,7 +40,9 @@ import { usePackageInstall } from "./app/usePackageInstall";
 import { usePackageOpenControls } from "./app/usePackageOpenControls";
 import { usePluginRouteState } from "./app/usePluginRouteState";
 import { usePluginSurfaceDispatch } from "./app/usePluginSurfaceDispatch";
+import { usePackageEventNotices } from "./app/usePackageEventNotices";
 import { useProductionHubConnection } from "./app/useProductionHubConnection";
+import { viewedSessionIdFromRoute } from "./app/packageEventNotices";
 import { useSessionTypeControl } from "./app/useSessionTypeControl";
 import { useSessionControl } from "./app/useSessionControl";
 import { useSpawnControl } from "./app/useSpawnControl";
@@ -289,7 +291,11 @@ export default function App() {
     [recordDiagnostic]
   );
 
-  const routeSessionId = activeRoute.view === "session" ? activeRoute.sessionId : undefined;
+  const routeSessionId = viewedSessionIdFromRoute(activeRoute);
+  const packageEventNotices = usePackageEventNotices({
+    runtimeClient,
+    viewedSessionId: routeSessionId
+  });
   useSessionEntityDetach(
     routeSessionId,
     runtimeClient.entities,
@@ -453,6 +459,9 @@ export default function App() {
       confirmDeleteSessionType={sessionTypes.confirmDeleteSessionType}
       packageActionToast={actions.packageActionToast}
       setPackageActionToast={actions.setPackageActionToast}
+      packageEventToast={packageEventNotices.toast}
+      packageEventDurationMs={packageEventNotices.durationMs}
+      onPackageEventDismiss={packageEventNotices.onDismiss}
     />
   );
 

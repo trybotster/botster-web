@@ -1805,6 +1805,10 @@ assert.match(generatedDaemonProtocol, /\| \{ type: "remove_package"; package_nam
 assert.match(generatedDaemonProtocol, /\| \{ type: "start_package_entrypoint"; package_name: string; entrypoint_id: string; environment_overrides\?: Record<string, string> \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "stop_package_entrypoint"; package_name: string; entrypoint_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "restart_package_entrypoint"; package_name: string; entrypoint_id: string \}/);
+assert.match(generatedDaemonProtocol, /type: "subscribe_events"/);
+assert.match(generatedDaemonProtocol, /type: "unsubscribe_events"/);
+assert.match(generatedDaemonProtocol, /type: "package_event"/);
+assert.match(generatedDaemonProtocol, /type: "event_gap"/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "package_entrypoint_status"; package_name: string; entrypoint_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue \}/);
 assert.match(generatedDaemonProtocol, /import type \{ PackageSurfaceDescriptor, UiActionRequest, UiActionResult, UiNode \} from "@trybotster\/ui-contract"/);
@@ -1867,6 +1871,9 @@ assert.doesNotMatch(generatedDaemonProtocol, /type: "(?:snapshot|scrollback|term
 assert.doesNotMatch(realHubDaemonDto, /compressed\?: boolean|encoding\?: string/);
 assert.doesNotMatch(hubTransport, /createHttpDaemonBridgeClient|EventSource|fetchImpl/);
 assert.match(hubTransport, /subscribeEvents/);
+assert.match(hubTransport, /subscribePackageEvents/);
+assert.match(hubTransport, /events_subscribe/);
+assert.match(hubTransport, /events_release/);
 assert.match(hubTransport, /daemonEventSubscription/);
 assert.match(hubTransport, /recordLiveHarnessEvent\("hub_frame"/);
 assert.match(hubTransport, /recordLiveHarnessEvent\("daemon_response", response\)/);
@@ -2279,11 +2286,16 @@ assert.match(liveProtocolHarnessScript, /entity_remove/);
 assert.match(liveProtocolHarnessScript, /waitForSessionStatus/);
 assert.match(liveProtocolHarnessScript, /hub_frame/);
 assert.match(liveProtocolHarnessScript, /family: "session"/);
+assert.match(liveProtocolHarnessScript, /BOTSTER_LIVE_PACKAGE_EVENTS/);
+assert.match(liveProtocolHarnessScript, /package-events live proof passed/);
 assert.doesNotMatch(liveProtocolHarnessScript, /family: "botster-web\.session"/);
 assert.match(liveProtocolHarnessScript, /runHubCommand\(\["shutdown"/);
 assert.match(liveProtocolHarnessScript, /assertNoBrowserFailures/);
 assert.match(liveProtocolHarnessScript, /browserFailureSummary/);
 assert.match(protocol, /type HubControlFrameKind/);
+assert.match(protocol, /"events_subscribe"/);
+assert.match(protocol, /"package_event"/);
+assert.match(protocol, /"event_gap"/);
 assert.match(protocol, /"action_request"/);
 assert.match(protocol, /"ui_tree_snapshot"/);
 assert.match(protocol, /"entity_snapshot"/);
@@ -2375,6 +2387,14 @@ assert.match(localPackageServerScript, /async function issueLocalWebrtcBootstrap
 assert.match(localPackageServerScript, /__BOTSTER_LOCAL_WEBRTC_BOOTSTRAP__/);
 assert.match(app, /normalizeLocalWebrtcBootstrap/);
 assert.match(webrtcDaemonClient, /createWebrtcDaemonClient/);
+assert.match(webrtcDaemonClient, /subscribePackageEvents/);
+assert.match(webrtcDaemonClient, /packageEventHolders/);
+assert.match(webrtcDaemonClient, /type: "subscribe_events"/);
+assert.match(protocolPlanes, /package_event_subscriptions/);
+assert.match(architecture, /Published Web event-plane budgets/);
+assert.match(architecture, /Terminal delivery backlog/);
+assert.match(appShellSource, /usePackageEventNotices/);
+assert.match(connectionDiagnostics, /Package event gap/);
 assert.match(webrtcDaemonClient, /createLocalWebrtcBootstrapRefresher/);
 assert.match(webrtcDaemonClient, /createDataChannel\("botster-daemon"/);
 assert.match(webrtcDaemonClient, /type: "local_webrtc_signal"/);
@@ -2435,11 +2455,11 @@ const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.2");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.36");
-assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.36");
+assert.equal(hubTestSupportMetadata.package_version, "0.1.39");
+assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.39");
 assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], "0.1.0");
 assert.equal(hubTestSupportMetadata.protocol_version, 7);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 41);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 44);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
@@ -3115,8 +3135,10 @@ await writeFile(
   JSON.stringify(hubTestSupportMetadata)
 );
 
+await mkdir(join(compiledRoot, "app"), { recursive: true });
 await Promise.all([
   compileTsModule("botster/__fixtures__/generatedDaemonProtocol.ts", join(compiledRoot, "botster/__fixtures__/generatedDaemonProtocol.js")),
+  compileTsModule("app/packageEventNotices.ts", join(compiledRoot, "app/packageEventNotices.js")),
   compileTsModule("botster/actions.ts", join(compiledRoot, "botster/actions.js")),
   compileTsModule("botster/capabilities.ts", join(compiledRoot, "botster/capabilities.js")),
   compileTsModule("botster/client.ts", join(compiledRoot, "botster/client.js")),
@@ -3137,6 +3159,12 @@ await Promise.all([
 
 const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
 const { createBotsterWebClient } = requireRuntime("./botster/client.js");
+const {
+  questionOpenedNoticeFromEvent,
+  workflowIdentityFromSessionRecords,
+  questionOpenedSubscribePayload,
+  viewedSessionIdFromRoute
+} = requireRuntime("./app/packageEventNotices.js");
 const { createInMemoryEntityFrameStore } = requireRuntime("./botster/entities.js");
 const { createHubRuntimeConfig, terminalDataPlaneLabel } = requireRuntime("./botster/hubRuntime.js");
 const {
@@ -4103,6 +4131,7 @@ function entrypointActions(package_name, entrypoint_id) {
 const bridgeRequests = [];
 const bridgeTerminalStreams = [];
 const bridgeEntitySubscriptions = [];
+const bridgePackageEventSubscriptions = [];
 let authoritativeSessionItems = [];
 let authoritativeHubUpdate = {
   state: "current",
@@ -4726,6 +4755,16 @@ const bridge = {
 
     return { kind: "events", events: [] };
   },
+  subscribePackageEvents(spec, onEvent) {
+    const subscription = { spec, onEvent, unsubscribed: false };
+    bridgePackageEventSubscriptions.push(subscription);
+    return {
+      ready: Promise.resolve(),
+      unsubscribe() {
+        subscription.unsubscribed = true;
+      }
+    };
+  },
   subscribeEntityFrames(entityType, onFrame) {
     let resolveReady;
     const ready = new Promise((resolve) => {
@@ -5146,6 +5185,249 @@ try {
     { messageId: "entity-unsubscribe-response" }
   );
   entityClient.disconnect();
+
+  assert.deepEqual(questionOpenedSubscribePayload, {
+    owner: "project-pipelines",
+    name: "question.opened",
+    subjects: []
+  });
+  assert.equal(viewedSessionIdFromRoute({ view: "session", sessionId: "web-prod" }), "web-prod");
+  assert.equal(viewedSessionIdFromRoute({ view: "dashboard" }), undefined);
+  const matchingIdentity = workflowIdentityFromSessionRecords(
+    "sess-1",
+    [{ id: "step-1", run_id: "run-1", step_id: "implement", status: "active", agent_session_uuid: "sess-1" }],
+    [{ id: "run-1", ticket_id: "ticket-1", status: "active" }]
+  );
+  assert.deepEqual(matchingIdentity, { run_id: "run-1", step_id: "implement", ticket_id: "ticket-1" });
+  assert.equal(
+    workflowIdentityFromSessionRecords("sess-1", [{ id: "step-1", run_id: "run-1", step_id: "implement", status: "active" }], []),
+    undefined
+  );
+  const validPayload = {
+    question_id: "q1",
+    kind: "human",
+    notice: "Need a decision",
+    run_id: "run-1"
+  };
+  assert.equal(questionOpenedNoticeFromEvent(validPayload, matchingIdentity), "Need a decision");
+  assert.equal(questionOpenedNoticeFromEvent({ ...validPayload, run_id: "other" }, matchingIdentity), undefined);
+  assert.equal(questionOpenedNoticeFromEvent(validPayload, undefined), undefined);
+  assert.equal(questionOpenedNoticeFromEvent({ question_id: "q1", kind: "human" }, matchingIdentity), undefined);
+  assert.equal(questionOpenedNoticeFromEvent({ ...validPayload, run_id: 12 }, matchingIdentity), undefined);
+
+  const packageEventChannels = [createFakeDataChannel(), createFakeDataChannel()];
+  let nextPackageEventSubscriptionId = 0;
+  const packageEventClient = createWebrtcTestClient(packageEventChannels, localWebrtcBootstrapFixture, {
+    eventSubscriptionIdGenerator: (_spec, generation) =>
+      `event-generation-${generation}-${++nextPackageEventSubscriptionId}`
+  });
+  const receivedPackageEvents = [];
+  const packageEventSubscription = packageEventClient.subscribePackageEvents(
+    { owner: "project-pipelines", name: "question.opened", subjects: [] },
+    (event) => receivedPackageEvents.push(event)
+  );
+  await waitForTestCondition(() => packageEventChannels[0].sent.length === 1);
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, packageEventChannels[0].sent[0]),
+    {
+      type: "subscribe_events",
+      subscription_id: "event-generation-1-1",
+      owner: "project-pipelines",
+      name: "question.opened",
+      subjects: []
+    }
+  );
+  await emitChunkedTestResponse(
+    packageEventChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "event_subscribed", events: [], diagnostics: [] },
+    { messageId: "event-subscribe-response" }
+  );
+  await packageEventSubscription.ready;
+  await emitChunkedTestResponse(
+    packageEventChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "package_event",
+      subscription_id: "event-generation-1-1",
+      owner: "project-pipelines",
+      name: "question.opened",
+      payload: validPayload
+    },
+    { deliveryKind: "daemon_event", messageId: "package-event-match" }
+  );
+  await waitForTestCondition(() => receivedPackageEvents.length === 1);
+  await emitChunkedTestResponse(
+    packageEventChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "package_event",
+      subscription_id: "event-generation-1-1",
+      owner: "other-owner",
+      name: "question.opened",
+      payload: validPayload
+    },
+    { deliveryKind: "daemon_event", messageId: "package-event-other-owner" }
+  );
+  assert.equal(receivedPackageEvents.length, 1);
+  await emitChunkedTestResponse(
+    packageEventChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "event_gap",
+      subscription_id: "event-generation-1-1",
+      owner: "project-pipelines",
+      name: "question.opened"
+    },
+    { deliveryKind: "daemon_event", messageId: "package-event-gap" }
+  );
+  await waitForTestCondition(() => receivedPackageEvents.at(-1)?.type === "event_gap");
+  packageEventChannels[0].close();
+  await waitForTestCondition(() => packageEventChannels[1].sent.length === 1);
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, packageEventChannels[1].sent[0]),
+    {
+      type: "subscribe_events",
+      subscription_id: "event-generation-2-2",
+      owner: "project-pipelines",
+      name: "question.opened",
+      subjects: []
+    }
+  );
+  await emitChunkedTestResponse(
+    packageEventChannels[1],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "event_subscribed", events: [], diagnostics: [] },
+    { messageId: "event-reconnect-subscribe-response" }
+  );
+  await emitChunkedTestResponse(
+    packageEventChannels[1],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "package_event",
+      subscription_id: "event-generation-1-1",
+      owner: "project-pipelines",
+      name: "question.opened",
+      payload: validPayload
+    },
+    { deliveryKind: "daemon_event", messageId: "stale-package-event" }
+  );
+  assert.equal(receivedPackageEvents.filter((event) => event.type === "package_event").length, 1);
+  packageEventSubscription.unsubscribe();
+  await waitForTestCondition(() => packageEventChannels[1].sent.length === 2);
+  assert.equal(
+    (await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, packageEventChannels[1].sent[1])).type,
+    "unsubscribe_events"
+  );
+  packageEventClient.disconnect();
+
+  const releaseBeforeAckChannels = [createFakeDataChannel(), createFakeDataChannel()];
+  const releaseBeforeAckClient = createWebrtcTestClient(
+    releaseBeforeAckChannels,
+    localWebrtcBootstrapFixture,
+    { eventSubscriptionIdGenerator: () => "release-before-ack-id" }
+  );
+  const lateEvents = [];
+  const releasedSubscription = releaseBeforeAckClient.subscribePackageEvents(
+    { owner: "project-pipelines", name: "question.opened", subjects: [] },
+    (event) => lateEvents.push(event)
+  );
+  await waitForTestCondition(() => releaseBeforeAckChannels[0].sent.length === 1);
+  releasedSubscription.unsubscribe();
+  await emitChunkedTestResponse(
+    releaseBeforeAckChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "event_subscribed", events: [], diagnostics: [] },
+    { messageId: "late-event-subscribe-ack" }
+  );
+  await emitChunkedTestResponse(
+    releaseBeforeAckChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "package_event",
+      subscription_id: "release-before-ack-id",
+      owner: "project-pipelines",
+      name: "question.opened",
+      payload: validPayload
+    },
+    { deliveryKind: "daemon_event", messageId: "late-package-event-after-release" }
+  );
+  assert.equal(lateEvents.length, 0);
+  releaseBeforeAckChannels[0].close();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(releaseBeforeAckChannels[1].sent.length, 0);
+  releaseBeforeAckClient.disconnect();
+
+  const eventSiblingChannels = [createFakeDataChannel()];
+  const eventSiblingClient = createWebrtcTestClient(eventSiblingChannels, localWebrtcBootstrapFixture, {
+    entitySubscriptionIdGenerator: () => "sibling-entity-id",
+    eventSubscriptionIdGenerator: () => "sibling-event-id"
+  });
+  const siblingEntityFrames = [];
+  const siblingEntity = eventSiblingClient.subscribeEntityFrames("session", (frame) => siblingEntityFrames.push(frame));
+  const siblingEvents = eventSiblingClient.subscribePackageEvents(
+    { owner: "project-pipelines", name: "question.opened", subjects: [] },
+    () => {}
+  );
+  await waitForTestCondition(() => eventSiblingChannels[0].sent.length === 2);
+  await emitChunkedTestResponse(
+    eventSiblingChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_subscribed", events: [], diagnostics: [] },
+    { messageId: "sibling-entity-subscribed" }
+  );
+  await emitChunkedTestResponse(
+    eventSiblingChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "event_subscribed", events: [], diagnostics: [] },
+    { messageId: "sibling-event-subscribed" }
+  );
+  siblingEvents.unsubscribe();
+  await emitChunkedTestResponse(
+    eventSiblingChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_snapshot",
+      subscription_id: "sibling-entity-id",
+      entity_type: "session",
+      snapshot_seq: 0,
+      items: []
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "sibling-entity-snapshot" }
+  );
+  await waitForTestCondition(() => siblingEntityFrames.length === 1);
+  siblingEntity.unsubscribe();
+  eventSiblingClient.disconnect();
+
+  const strictChannels = [createFakeDataChannel()];
+  const strictClient = createWebrtcTestClient(strictChannels, localWebrtcBootstrapFixture, {
+    eventSubscriptionIdGenerator: () => `strict-${strictChannels[0].sent.length + 1}`
+  });
+  const firstStrict = strictClient.subscribePackageEvents(
+    { owner: "project-pipelines", name: "question.opened", subjects: [] },
+    () => {}
+  );
+  firstStrict.unsubscribe();
+  const secondStrict = strictClient.subscribePackageEvents(
+    { owner: "project-pipelines", name: "question.opened", subjects: [] },
+    () => {}
+  );
+  await waitForTestCondition(() => strictChannels[0].sent.length >= 1);
+  const strictRequests = [];
+  for (const envelope of strictChannels[0].sent) {
+    strictRequests.push(await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, envelope));
+  }
+  assert.equal(strictRequests.filter((request) => request.type === "subscribe_events").length, 1);
+  assert.equal(strictRequests.at(-1).type, "subscribe_events");
+  await emitChunkedTestResponse(
+    strictChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "event_subscribed", events: [], diagnostics: [] },
+    { messageId: "strict-event-subscribed" }
+  );
+  await secondStrict.ready;
+  secondStrict.unsubscribe();
+  strictClient.disconnect();
 
   const deltaBeforeSnapshotChannel = createFakeDataChannel();
   let nextResyncSubscriptionId = 0;
@@ -8094,7 +8376,7 @@ const outdatedConformanceDiagnostic = compatibilityDiagnosticsFromFrame({
   }
 })[0];
 assert.equal(outdatedConformanceDiagnostic.title, "Hub conformance fixture mismatch");
-assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 41/);
+assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 44/);
 
 const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -8123,15 +8405,16 @@ assert.deepEqual(requiredDaemonFeatures, [
   "plugin_surface_action",
   "mode_gated_input",
   "webrtc_terminal_adapter",
-  "terminal_subscription_closed"
+  "terminal_subscription_closed",
+  "package_event_subscriptions"
 ]);
-assert.equal(minimumConformanceFixtureRevision, 41);
+assert.equal(minimumConformanceFixtureRevision, 44);
 assert.equal(minimumDaemonProtocolVersion, 1);
 assert.equal(compatibleDescriptorDiagnostics.length, 1);
 assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
 assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
 
-// Protocol 6 remains compatible when the Hub also meets conformance revision 41.
+// Protocol 6 remains compatible when the Hub also meets conformance revision 44.
 const protocolSixHubStatusRecord = {
   id: "local-hub",
   schema_version: 3,
@@ -8141,7 +8424,7 @@ const protocolSixHubStatusRecord = {
     protocol: "botster-hub-daemon-v1",
     protocol_version: 6,
     features: [...requiredDaemonFeatures],
-    conformance_fixture_revision: 41
+    conformance_fixture_revision: 44
   }
 };
 const protocolSixDiagnostics = compatibilityDiagnosticsFromFrame({
@@ -8159,9 +8442,9 @@ assert.match(protocolSixDiagnostics[0].detail, /Protocol botster-hub-daemon-v1 v
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /mismatch/i.test(diagnostic.title)), false);
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /unsupported_feature/.test(JSON.stringify(diagnostic))), false);
 assert.equal(minimumDaemonProtocolVersion, 1);
-assert.equal(minimumConformanceFixtureRevision, 41);
+assert.equal(minimumConformanceFixtureRevision, 44);
 
-// Pre-envelope conformance revisions fail closed under the revision 41 floor.
+// Pre-envelope conformance revisions fail closed under the revision 44 floor.
 const preGhostsnpDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
   payload: {
@@ -16749,11 +17032,12 @@ function installAutoHelloAck(dataChannel, secret) {
             "mode_gated_input",
             "webrtc_terminal_adapter",
             "terminal_subscription_closed",
+            "package_event_subscriptions",
             "terminal_streaming",
             "resize",
             "snapshot_delivery=ready_then_history"
           ],
-          conformance_fixture_revision: 41
+          conformance_fixture_revision: 44
         },
         terminal_compatibility: {
           protocol: "botster-terminal-v1",

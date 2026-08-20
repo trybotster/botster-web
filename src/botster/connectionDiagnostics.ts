@@ -528,6 +528,8 @@ function hubDiagnosticTitle(kind: string): string {
       return "Hub action failed";
     case "daemon_startup_failure":
       return "Hub daemon startup failed";
+    case "event_gap":
+      return "Package event gap";
     default:
       return "Hub runtime observation";
   }

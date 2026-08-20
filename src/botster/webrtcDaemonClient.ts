@@ -32,6 +32,10 @@ export interface WebrtcDaemonClientOptions {
   peerConnectionFactory?: () => RTCPeerConnection;
   onLifecycle?: (event: WebrtcDaemonLifecycleEvent) => void;
   entitySubscriptionIdGenerator?: (entityType: string, generation: number) => string;
+  eventSubscriptionIdGenerator?: (
+    spec: { owner: string; name: string },
+    generation: number
+  ) => string;
 }
 
 export interface LocalWebrtcBootstrapRefreshOptions {
@@ -100,6 +104,19 @@ type EntitySubscription = {
   resolveReady?: () => void;
   rejectReady?: (error: unknown) => void;
   resubscribing: boolean;
+  closed: boolean;
+};
+
+type PackageEventHolder = {
+  owner: string;
+  name: string;
+  subjects: string[];
+  listener(event: DaemonEvent): void;
+  generation?: number;
+  subscriptionId?: string;
+  ready?: Promise<void>;
+  resolveReady?: () => void;
+  rejectReady?: (error: unknown) => void;
   closed: boolean;
 };
 
@@ -294,6 +311,9 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
     subscribeEntityFrames(entityType, onFrame) {
       return transport.subscribeEntityFrames(entityType, onFrame);
     },
+    subscribePackageEvents(spec, onEvent) {
+      return transport.subscribePackageEvents(spec, onEvent);
+    },
     streamTerminal(sessionId, subscriptionId, onEvent) {
       let closed = false;
       const listener = transport.addTerminalStreamListener(sessionId, subscriptionId, async (event) => {
@@ -381,6 +401,7 @@ class WebrtcDaemonTransport {
   private readonly responseAssemblies = new Map<string, ResponseAssembly>();
   private readonly completedMessageIds = new Set<string>();
   private readonly entitySubscriptions = new Set<EntitySubscription>();
+  private readonly packageEventHolders = new Set<PackageEventHolder>();
   private readonly terminalStreamListeners = new Set<TerminalStreamListener>();
   private readonly subscriptionGenerations = new Map<string, number>();
   private helloPromise: Promise<DaemonHelloAck> | undefined;
@@ -586,6 +607,34 @@ class WebrtcDaemonTransport {
         const subscriptionId = subscription.subscriptionId;
         if (subscriptionId) {
           void this.request({ type: "unsubscribe_entities", subscription_id: subscriptionId }).catch(() => undefined);
+        }
+      }
+    };
+  }
+
+  subscribePackageEvents(
+    spec: { owner: string; name: string; subjects: string[] },
+    listener: (event: DaemonEvent) => void
+  ): { ready: Promise<void>; unsubscribe(): void } {
+    const holder: PackageEventHolder = {
+      owner: spec.owner,
+      name: spec.name,
+      subjects: spec.subjects,
+      listener,
+      closed: false
+    };
+    this.packageEventHolders.add(holder);
+    const ready = this.ensurePackageEventSubscription(holder);
+
+    return {
+      ready,
+      unsubscribe: () => {
+        if (holder.closed) return;
+        holder.closed = true;
+        this.packageEventHolders.delete(holder);
+        const subscriptionId = holder.subscriptionId;
+        if (subscriptionId) {
+          void this.request({ type: "unsubscribe_events", subscription_id: subscriptionId }).catch(() => undefined);
         }
       }
     };
@@ -859,6 +908,9 @@ class WebrtcDaemonTransport {
       for (const subscription of this.entitySubscriptions) {
         void this.startEntitySubscription(subscription, generation);
       }
+      for (const holder of this.packageEventHolders) {
+        void this.startPackageEventSubscription(holder, generation);
+      }
     });
   }
 
@@ -1122,7 +1174,11 @@ class WebrtcDaemonTransport {
   }
 
   private hasReconnectDemand(): boolean {
-    return this.entitySubscriptions.size > 0 || this.terminalStreamListeners.size > 0;
+    return (
+      this.entitySubscriptions.size > 0 ||
+      this.packageEventHolders.size > 0 ||
+      this.terminalStreamListeners.size > 0
+    );
   }
 
   private handleTransportClosed(error: unknown, shouldReconnect = this.hasReconnectDemand()): void {
@@ -1155,6 +1211,10 @@ class WebrtcDaemonTransport {
       subscription.subscriptionId = undefined;
       subscription.snapshotSeq = undefined;
       subscription.resubscribing = false;
+    }
+    for (const holder of this.packageEventHolders) {
+      holder.generation = undefined;
+      holder.subscriptionId = undefined;
     }
 
     if (this.closing) return;
@@ -1235,6 +1295,66 @@ class WebrtcDaemonTransport {
     return subscription.ready;
   }
 
+  private ensurePackageEventSubscription(holder: PackageEventHolder): Promise<void> {
+    return this.connect().then(() => this.startPackageEventSubscription(holder, this.peerGeneration));
+  }
+
+  private startPackageEventSubscription(holder: PackageEventHolder, generation: number): Promise<void> {
+    if (holder.closed || generation !== this.peerGeneration) return Promise.resolve();
+    if (holder.generation === generation && holder.ready) return holder.ready;
+
+    const subscriptionId = this.options.eventSubscriptionIdGenerator?.(
+      { owner: holder.owner, name: holder.name },
+      generation
+    ) ?? crypto.randomUUID();
+    holder.generation = generation;
+    holder.subscriptionId = subscriptionId;
+    if (!holder.ready) {
+      holder.ready = new Promise<void>((resolve, reject) => {
+        holder.resolveReady = resolve;
+        holder.rejectReady = reject;
+      });
+    }
+    recordLiveHarnessEvent("webrtc_package_event_subscription", {
+      state: "requested",
+      owner: holder.owner,
+      name: holder.name,
+      subjects: holder.subjects,
+      subscription_id: subscriptionId,
+      generation
+    });
+    void this.request({
+      type: "subscribe_events",
+      subscription_id: subscriptionId,
+      owner: holder.owner,
+      name: holder.name,
+      subjects: holder.subjects
+    }).then((response) => {
+      if (holder.closed || holder.generation !== generation || holder.subscriptionId !== subscriptionId) {
+        return;
+      }
+      if (response.error) throw new Error(response.error.message);
+      if (response.kind !== "event_subscribed") {
+        throw new Error(`event subscription returned ${response.kind}`);
+      }
+      holder.resolveReady?.();
+    }).catch((error: unknown) => {
+      if (holder.closed || holder.generation !== generation || holder.subscriptionId !== subscriptionId) {
+        return;
+      }
+      holder.rejectReady?.(error);
+      recordLiveHarnessEvent("webrtc_package_event_subscription_error", {
+        stage: "subscribe",
+        owner: holder.owner,
+        name: holder.name,
+        subscription_id: subscriptionId,
+        generation,
+        message: errorMessage(error)
+      });
+    });
+    return holder.ready;
+  }
+
   private async receiveTerminalFrame(payload: unknown, generation: number): Promise<void> {
     if (generation !== this.peerGeneration) {
       recordLiveHarnessEvent("webrtc_terminal_frame_discarded", {
@@ -1310,6 +1430,29 @@ class WebrtcDaemonTransport {
     }
     const event = payload as DaemonEvent;
     recordLiveHarnessEvent("daemon_event", event);
+    if (event.type === "package_event" || event.type === "event_gap") {
+      const holder = Array.from(this.packageEventHolders).find(
+        (candidate) =>
+          !candidate.closed &&
+          candidate.generation === generation &&
+          candidate.subscriptionId === event.subscription_id &&
+          candidate.owner === event.owner &&
+          candidate.name === event.name
+      );
+      if (!holder) {
+        recordLiveHarnessEvent("webrtc_daemon_event_discarded", {
+          reason: "stale_generation_or_subscription",
+          generation,
+          subscription_id: event.subscription_id,
+          owner: event.owner,
+          name: event.name,
+          type: event.type
+        });
+        return;
+      }
+      holder.listener(event);
+      return;
+    }
     if (event.type === "terminal_subscription_closed") {
       const listeners = [...this.terminalStreamListeners].filter(
         (listener) =>

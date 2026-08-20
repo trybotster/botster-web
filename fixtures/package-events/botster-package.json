@@ -1,0 +1,50 @@
+{
+  "name": "project-pipelines",
+  "version": "1.0.0",
+  "kind": "plugin",
+  "botster": ">=0.1.0",
+  "source": { "type": "path", "path": "." },
+  "description": "Isolated live fixture: Project Pipelines question.opened producer plus 0.4.0 run_step session binding.",
+  "capabilities": [{ "surface": "surfaces" }],
+  "entrypoints": [
+    {
+      "runtime": "lua",
+      "path": "plugin.lua",
+      "bootstrap": false
+    }
+  ],
+  "surfaces": [
+    {
+      "id": "project-pipelines.events",
+      "kind": "app",
+      "title": "Package Events",
+      "description": "Emit question.opened through the production action path.",
+      "icon": "flash",
+      "order": 10,
+      "category": "contract",
+      "supports": ["render", "action"]
+    }
+  ],
+  "events": {
+    "emitted": [
+      {
+        "name": "question.opened",
+        "audience": ["clients", "plugins"],
+        "payload_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "question_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "kind": { "type": "string", "enum": ["human", "agent"] },
+            "notice": { "type": "string", "minLength": 1, "maxLength": 280 },
+            "blocking": { "type": "boolean" },
+            "run_id": { "type": "string", "maxLength": 128 },
+            "step_id": { "type": "string", "maxLength": 128 },
+            "ticket_id": { "type": "string", "maxLength": 128 }
+          },
+          "required": ["question_id", "kind", "notice"]
+        }
+      }
+    ]
+  }
+}

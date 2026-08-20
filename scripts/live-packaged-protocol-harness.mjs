@@ -105,6 +105,28 @@ const entityOptionsPackagePath = entityOptionsMode
       "BOTSTER_ENTITY_OPTIONS_PACKAGE_PATH"
     )
   : undefined;
+const packageEventsMode = process.env.BOTSTER_LIVE_PACKAGE_EVENTS === "1";
+const packageEventsGapMode = process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX != null
+  && process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX !== "";
+if (packageEventsMode && packageEventsGapMode) {
+  const queueMax = Number.parseInt(process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX, 10);
+  if (!Number.isInteger(queueMax) || queueMax < 1) {
+    throw new Error(
+      `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX must be a positive integer, got ${JSON.stringify(process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX)}`
+    );
+  }
+}
+const packageEventsPackageName = "project-pipelines";
+const packageEventsPackagePath = packageEventsMode
+  ? resolveRequiredPackagePath(
+      [
+        process.env.BOTSTER_PACKAGE_EVENTS_PACKAGE_PATH,
+        join(packageRoot, "fixtures/package-events")
+      ],
+      packageEventsPackageName,
+      "BOTSTER_PACKAGE_EVENTS_PACKAGE_PATH"
+    )
+  : undefined;
 const echoProbe = "keys";
 const attachProbe = "botster-web-production-attach-probe";
 const productionSessionId = sharedSessionMode ? sharedSessionContract.sessionId : "web-prod";
@@ -236,6 +258,22 @@ try {
   await assertNoSessionTypeListHydration(page);
   await assertCurrentHubSchemaPresentation(page, authoritativeHubStatus);
   const initialHubIdentity = await assertAuthoritativeHubIdentity(page, authoritativeHubStatus, "initial connect");
+  if (packageEventsMode) {
+    await openHomeView(page);
+    await waitForSessionStatus(page, "running");
+    await openSessionTerminal(page, productionSessionId);
+    await waitForTerminalSession(page, productionSessionId);
+    await exercisePackageEvents(page, { forceGap: packageEventsGapMode });
+    assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+    assertRequiredWorkspacesProof();
+    await requestDaemonShutdown();
+    console.log(
+      packageEventsGapMode
+        ? "package-events forced-gap live proof passed (webrtc)"
+        : "package-events live proof passed (webrtc)"
+    );
+    process.exit(0);
+  }
   const liveHubUpdate = await assertHubUpdateCheck(page);
   await openDiagnosticsView(page);
   const hubUpdateSupportDiagnostics = await assertHubUpdateSupportDiagnostics(page);
@@ -1487,6 +1525,309 @@ async function waitForPluginSurfaceRequest(page, { packageName, surfaceId, actio
     { packageName, surfaceId, actionId, nodeId, values, payload },
     { timeout: 15_000 }
   );
+}
+
+async function emitPackageEventFixtureAction(page, actionId, payload) {
+  await page.waitForFunction(() =>
+    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchPluginSurfaceAction === "function"
+  );
+  const before = await page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length);
+  await page.evaluate(
+    ({ packageName, actionId: nextActionId, payload: nextPayload }) => {
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.dispatchPluginSurfaceAction(
+        packageName,
+        "project-pipelines.events",
+        nextActionId,
+        nextPayload
+      );
+    },
+    { packageName: packageEventsPackageName, actionId, payload: payload ?? {} }
+  );
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "plugin_surface_action", action_id: actionId },
+    `package-events ${actionId} plugin_surface_action`,
+    before
+  );
+}
+
+async function exercisePackageEvents(page, { forceGap }) {
+  const hello = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).find((entry) => entry.kind === "daemon_hello")
+  );
+  const requiredFeatures = hello?.payload?.compatibility?.required_features ?? [];
+  if (!requiredFeatures.includes("package_event_subscriptions")) {
+    throw new Error("Web Hello omitted required feature package_event_subscriptions");
+  }
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_hello_ack" },
+    "package-events hello ack"
+  );
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "subscribe_events" },
+    "package-events subscribe_events"
+  );
+  const subscribe = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "subscribe_events")
+      .at(-1)?.payload
+  );
+  if (subscribe?.owner !== "project-pipelines" || subscribe?.name !== "question.opened") {
+    throw new Error(`unexpected subscribe_events body: ${JSON.stringify(subscribe)}`);
+  }
+  if (!Array.isArray(subscribe.subjects) || subscribe.subjects.length !== 0) {
+    throw new Error(`subscribe_events must send subjects: [], got ${JSON.stringify(subscribe.subjects)}`);
+  }
+  const subscriptionId = subscribe.subscription_id;
+
+  await page.waitForFunction(() =>
+    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.demandEntityFamily === "function"
+  );
+  await page.evaluate(() =>
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.demandEntityFamily("project-pipelines.question")
+  );
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_request", type: "subscribe_entities", entity_type: "project-pipelines.run_step" },
+    "package-events run_step entity demand"
+  );
+  await waitForHarnessEvent(
+    page,
+    { kind: "hub_frame", family: "project-pipelines.run_step" },
+    "package-events run_step snapshot"
+  );
+  await page.waitForFunction(() => {
+    const steps = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.run_step") ?? [];
+    return steps.some((record) => record.agent_session_uuid === "web-prod");
+  }, undefined, { timeout: 15_000 }).catch((error) => {
+    throw new Error(`run_step identity join never bound web-prod: ${error.message}`);
+  });
+  const sessionPath = await page.evaluate(() => globalThis.location.pathname);
+  if (!sessionPath.includes("/sessions/web-prod")) {
+    throw new Error(`expected session route /sessions/web-prod, got ${sessionPath}`);
+  }
+
+  await emitPackageEventFixtureAction(page, "package-events.emit_match");
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_event", type: "package_event" },
+    "package-events matching package_event"
+  );
+  await page.waitForFunction(() => {
+    const toasts = [...globalThis.document.querySelectorAll("ion-toast, [data-testid='package-event-notice']")];
+    return toasts.some((toast) => {
+      const open = toast.getAttribute("is-open") === "true" || toast.hasAttribute("is-open");
+      const text = `${toast.textContent ?? ""} ${toast.getAttribute("message") ?? ""}`;
+      return open && text.includes("Matching workflow question");
+    });
+  }, undefined, { timeout: 15_000 }).catch((error) => {
+    throw new Error(`matching question.opened never showed a transient notice: ${error.message}`);
+  });
+
+  await emitPackageEventFixtureAction(page,"package-events.emit_mismatch");
+  await page.waitForTimeout(500);
+  const mismatchNotices = await page.evaluate(() => {
+    const toast = globalThis.document.querySelector("[data-testid='package-event-notice']");
+    return toast?.textContent ?? "";
+  });
+  if (mismatchNotices.includes("Mismatching workflow question")) {
+    throw new Error("mismatching question.opened showed a transient notice");
+  }
+
+  await openHomeView(page);
+  const dashboardToastBefore = await page.evaluate(() => {
+    const toast = globalThis.document.querySelector("[data-testid='package-event-notice']");
+    return toast?.getAttribute("is-open") === "true";
+  });
+  const dashboardEventsBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+      (entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event"
+    ).length
+  );
+  await emitPackageEventFixtureAction(page,"package-events.emit_match");
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_event", type: "package_event" },
+    "package-events dashboard package_event delivery"
+  );
+  const dashboardEventsAfter = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+      (entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event"
+    ).length
+  );
+  if (dashboardEventsAfter <= dashboardEventsBefore) {
+    throw new Error("dashboard view did not receive the live package_event");
+  }
+  const dashboardToastAfter = await page.evaluate(() => {
+    const toast = globalThis.document.querySelector("[data-testid='package-event-notice']");
+    return {
+      open: toast?.getAttribute("is-open") === "true",
+      text: toast?.textContent ?? ""
+    };
+  });
+  if (!dashboardToastBefore && dashboardToastAfter.open && dashboardToastAfter.text.includes("Matching workflow question")) {
+    throw new Error("dashboard view showed a transient notice without workflow identity");
+  }
+  await page.evaluate(async () => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    await harness.releaseEntityFamily?.("project-pipelines.question");
+    await harness.demandEntityFamily?.("project-pipelines.question");
+  });
+  await page.waitForFunction(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? []).length > 0,
+    undefined,
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`durable question entity was not visible after emit: ${error.message}`);
+  });
+
+  if (forceGap) {
+    const beforeGap = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+        (entry) => entry.kind === "daemon_event" && entry.payload?.type === "event_gap"
+      ).length
+    );
+    await emitPackageEventFixtureAction(page,"package-events.emit_burst", { count: 20 });
+    await page.waitForFunction(
+      (prior) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+        (entry) => entry.kind === "daemon_event" && (entry.payload?.type === "event_gap" || entry.type === "event_gap")
+      ).length > prior,
+      beforeGap,
+      { timeout: 15_000 }
+    ).catch(() => {
+      throw new Error("forced-gap lane observed no event_gap");
+    });
+    const afterQuestions = await page.evaluate(() =>
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? []
+    );
+    if (afterQuestions.length === 0) {
+      throw new Error("forced-gap lane hid the durable question entity");
+    }
+    return;
+  }
+
+  await openHomeView(page);
+  await waitForSessionStatus(page, "running");
+  await openSessionTerminal(page, productionSessionId);
+  await waitForTerminalSession(page, productionSessionId);
+
+  const openEventsBefore = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length
+  );
+  const closedChannelEvents = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+      (entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event"
+    ).length
+  );
+  const closed = await page.evaluate(
+    () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
+  );
+  if (!closed) {
+    throw new Error("package-events live proof could not close the live WebRTC data channel");
+  }
+  try {
+    await sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), {
+      type: "plugin_surface_action",
+      package_name: packageEventsPackageName,
+      request: {
+        request_id: randomUUID(),
+        surface_id: "project-pipelines.events",
+        action_id: "package-events.emit_match",
+        node_id: "package-events.emit_match",
+        kind: "submit"
+      }
+    });
+  } catch (error) {
+    console.log(`package-events closed-channel unix emit skipped: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  await page.waitForFunction(
+    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before,
+    { before: openEventsBefore },
+    { timeout: 20_000 }
+  ).catch((error) => {
+    throw new Error(`package-events reconnect never reopened the data channel: ${error.message}`);
+  });
+  const eventsAfterReconnect = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+      (entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event"
+    ).length
+  );
+  if (eventsAfterReconnect !== closedChannelEvents) {
+    throw new Error("reconnect replayed a closed-channel package_event");
+  }
+  const durableAfterReconnect = await page.evaluate(() =>
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? []
+  );
+  if (durableAfterReconnect.length === 0) {
+    await page.evaluate(() =>
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.demandEntityFamily("project-pipelines.question")
+    );
+    await page.waitForFunction(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? []).length > 0,
+      undefined,
+      { timeout: 15_000 }
+    ).catch((error) => {
+      throw new Error(`durable question entity missing after reconnect: ${error.message}`);
+    });
+  }
+  await emitPackageEventFixtureAction(page,"package-events.emit_match");
+  await waitForHarnessEvent(
+    page,
+    { kind: "daemon_event", type: "package_event" },
+    "package-events live event after reconnect"
+  );
+
+  const floodStarted = Date.now();
+  const controlStarted = Date.now();
+  const controlPromise = sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), { type: "status" });
+  await emitPackageEventFixtureAction(page,"package-events.emit_burst", { count: 200 });
+  const controlReply = await controlPromise;
+  const controlMs = Date.now() - controlStarted;
+  if (controlMs > 10_000) {
+    throw new Error(`mid-flood control request exceeded 10000ms: ${controlMs}`);
+  }
+  if (controlReply.error) {
+    throw new Error(`mid-flood control request failed: ${JSON.stringify(controlReply.error)}`);
+  }
+  await page.waitForFunction(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? []).length > 0,
+    undefined,
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`entity reconciliation exceeded 15000ms during flood: ${error.message}`);
+  });
+  const echoProbe = "package-events-flood";
+  await typeThroughMountedTerminal(page, `${echoProbe}\n`);
+  await waitForTerminalOutput(page, `botster-web-production-echo:${echoProbe}`).catch((error) => {
+    throw new Error(`terminal echo exceeded 15000ms during flood: ${error.message}`);
+  });
+  const floodMs = Date.now() - floodStarted;
+  const overflow = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) =>
+      String(entry.payload?.message ?? entry.message ?? "").includes("terminal delivery queue overflow")
+    )
+  );
+  if (overflow) {
+    throw new Error("event flood overflowed the terminal delivery backlog");
+  }
+  const eventKinds = await page.evaluate(() => {
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    return {
+      daemon_event: events.filter((entry) => entry.kind === "daemon_event").length,
+      terminal_from_event: events.filter((entry) =>
+        entry.kind === "daemon_terminal_event" &&
+        (entry.payload?.type === "package_event" || entry.payload?.type === "event_gap")
+      ).length
+    };
+  });
+  if (eventKinds.terminal_from_event > 0) {
+    throw new Error("package events entered the terminal adapter path");
+  }
+  console.log(`package-events flood budgets ${JSON.stringify({ control_ms: controlMs, flood_ms: floodMs, subscription_id: subscriptionId })}`);
 }
 
 async function exerciseEntityOptionsReactive(page) {
@@ -8372,11 +8713,17 @@ async function startWebrtcPackageRuntime() {
   if (entityOptionsMode && entityOptionsPackagePath) {
     await ensurePackageEnabled(entityOptionsPackageName, entityOptionsPackagePath);
   }
+  if (packageEventsMode && packageEventsPackagePath) {
+    await ensurePackageEnabled(packageEventsPackageName, packageEventsPackagePath);
+  }
   if (durableStateMode) {
     await seedDurableExitedSessions();
     await restartHubWithDurableState();
   }
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  if (packageEventsMode) {
+    await startProductionSession();
+  }
   await sendDaemonRequest(socketPath, {
     type: "start_package_entrypoint",
     package_name: "botster-web",
@@ -8688,9 +9035,19 @@ function spawnHubProcess(dataDir) {
     args.push("--session-worker-bin", process.env.BOTSTER_SESSION_WORKER_BIN);
   }
 
+  const env = { ...process.env };
+  if (packageEventsMode && packageEventsGapMode) {
+    // Hub honors BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX only when BOTSTER_ENV=test.
+    env.BOTSTER_ENV = "test";
+    process.stdout.write(
+      `[package-events] gap lane: hub BOTSTER_ENV=test BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX=${process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX}\n`
+    );
+  }
+
   const child = spawn(process.env.BOTSTER_HUB_BIN, args, {
     cwd: packageRoot,
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    env
   });
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");

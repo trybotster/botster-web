@@ -25,6 +25,9 @@ type RuntimeClient = ReturnType<typeof createBotsterWebClient>;
 
 type LiveProtocolHarnessEntityControl = {
   applyEntityFrame?: (frame: EntityFrame) => void;
+  listEntities?: (family: string) => Array<Record<string, unknown> & { id: string }>;
+  demandEntityFamily?: (family: string) => Promise<void>;
+  releaseEntityFamily?: (family: string) => Promise<void>;
 };
 
 export function useProductionHubConnection(options: {
@@ -54,9 +57,7 @@ export function useProductionHubConnection(options: {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const harness = (window as typeof window & {
-      __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveProtocolHarnessEntityControl & {
-        listEntities?: (family: string) => Array<Record<string, unknown> & { id: string }>;
-      };
+      __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveProtocolHarnessEntityControl;
     }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
     if (!harness) return;
 
@@ -66,14 +67,26 @@ export function useProductionHubConnection(options: {
     };
     const listEntities = (family: string) =>
       runtimeClient.entities.list(family).map((record) => ({ ...record }));
+    const demandEntityFamily = (family: string) =>
+      runtimeClient.hub.send({ kind: "entity_pull", payload: { family } });
+    const releaseEntityFamily = (family: string) =>
+      runtimeClient.hub.send({ kind: "entity_release", payload: { family } });
     harness.applyEntityFrame = applyEntityFrame;
     harness.listEntities = listEntities;
+    harness.demandEntityFamily = demandEntityFamily;
+    harness.releaseEntityFamily = releaseEntityFamily;
     return () => {
       if (harness.applyEntityFrame === applyEntityFrame) {
         delete harness.applyEntityFrame;
       }
       if (harness.listEntities === listEntities) {
         delete harness.listEntities;
+      }
+      if (harness.demandEntityFamily === demandEntityFamily) {
+        delete harness.demandEntityFamily;
+      }
+      if (harness.releaseEntityFamily === releaseEntityFamily) {
+        delete harness.releaseEntityFamily;
       }
     };
   }, [runtimeClient, setFrameVersion]);

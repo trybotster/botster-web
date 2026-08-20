@@ -1,6 +1,6 @@
 /** Plugin surface action dispatch and local presentation updates. */
 
-import { useCallback, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
 import type { ActionBinding } from "../botster/actions";
 import { actionFailureDiagnostic, type ConnectionDiagnostic } from "../botster/connectionDiagnostics";
@@ -109,6 +109,37 @@ export function usePluginSurfaceDispatch(options: {
     },
     [recordDiagnostic, runtimeClient, setPackageActionToast, setSelectedPluginSurface, updateLocalState]
   );
+
+  useEffect(() => {
+    const harness = (window as typeof window & {
+      __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
+        dispatchPluginSurfaceAction?: (
+          packageName: string,
+          surfaceId: string,
+          actionId: string,
+          payload?: unknown
+        ) => void;
+      };
+    }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    if (!harness) return;
+    const dispatch = (packageName: string, surfaceId: string, actionId: string, payload?: unknown) => {
+      dispatchPluginSurfaceAction(packageName, surfaceId, {
+        action: { id: actionId, ...(payload !== undefined ? { payload } : {}) },
+        node: {
+          id: actionId,
+          type: "button",
+          props: { label: actionId, action: { id: actionId } }
+        },
+        kind: "submit"
+      } as UiNodeActionDispatch);
+    };
+    harness.dispatchPluginSurfaceAction = dispatch;
+    return () => {
+      if (harness.dispatchPluginSurfaceAction === dispatch) {
+        delete harness.dispatchPluginSurfaceAction;
+      }
+    };
+  }, [dispatchPluginSurfaceAction]);
 
   const dismissPluginSurfacePresentation = useCallback((
     packageName: string,

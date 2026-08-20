@@ -29,6 +29,17 @@ There is no HTTP daemon client, SSE terminal stream, polling, `list_sessions` hy
 
 Terminal data stays outside `HubControlFrame`. After Hello, the WebRTC client attaches and consumes Core terminal frames. The Hub terminal data plane imports authoritative GHOSTSNP Snapshot bytes into Restty (H0–H5), buffers live output across install, reads mode flags for ModeGatedInput, and never imports Scrollback as renderer state. ReadScreen is an optional supplement only. Restty mounts as a pure renderer (`readOnly`) and does not answer OSC color queries in the browser. A lost PAGE starts a fresh attach on a new decoder. `terminal_subscription_closed` arrives only as `daemon_event`.
 
+Package events stay on the Hub host-control plane. Hello requires `package_event_subscriptions`. The route-owned connection holds one `subscribe_events` for owner `project-pipelines` and name `question.opened` with `subjects: []`. Delivery is unsolicited `daemon_event` (`package_event` / `event_gap`) and never enters the terminal delivery queue. A matching `question.opened` payload shows one transient `IonToast` only when `run_id`, `ticket_id`, or `step_id` matches the viewed session joined through `project-pipelines.run_step.agent_session_uuid` (Project Pipelines 0.4.0). A view with no identity shows no notice. `event_gap` records a connection diagnostic and leaves entity state unchanged. Durable question state remains package-entity driven. Reconnect issues a fresh subscription id and does not replay notices.
+
+Published Web event-plane budgets:
+
+| Budget | Value | Source |
+| --- | --- | --- |
+| Terminal delivery backlog | 16 frames | `localWebrtcResponseChunkLimits.maximumTerminalDeliveryBacklog` |
+| Host request round-trip | 10,000 ms | `localWebrtcResponseChunkLimits.requestTimeoutMs` |
+| Entity reconciliation deadline | 15,000 ms | live packaged harness standing wait ceiling |
+| Terminal echo round-trip deadline | 15,000 ms | live packaged harness standing wait ceiling |
+
 Hub identity is a `DaemonStatus` projection on family `botster-web.hub_status`, never a package row. `software`, `installation`, `host_id`, `schema_version`, and `compatibility` all come from the status response, and `check_hub_update` is the only Hub self-update read. The family is registered as an active pull and replayed when the data channel reopens, so protocol, conformance, and schema facts do not regress after reconnect. `DaemonHubUpdate` has exactly three states — `current`, `available`, `unavailable`. Offline and error are rejected-action-result outcomes, never a fourth state.
 
 ## Local package server
@@ -52,8 +63,8 @@ reads the generic entity store, including nested row context, while
 Bind-list identity has one materialization order. The direct item-template root
 retains its item-relative `$bind`; after that root becomes a nonblank literal,
 `bind_list_descendant_id` children call the runtime helper exported by
-`@trybotster/ui-contract@0.3.2`. Host DTOs and revision-41 shared conformance
-fixtures come from `@trybotster/hub-test-support@0.1.36`. Core terminal types
+`@trybotster/ui-contract@0.3.2`. Host DTOs and revision-44 shared conformance
+fixtures come from `@trybotster/hub-test-support@0.1.39`. Core terminal types
 and feature tokens come from `@trybotster/terminal-protocol@0.1.0`. Web does
 not pin a Hub Git revision for terminal compatibility.
 Nested bind lists establish a new nearest-row context. Web never encodes,
