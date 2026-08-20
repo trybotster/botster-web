@@ -1,5 +1,19 @@
 # Web: consume transient package events through the Hub control plane
 
+Revision 2. Revision 1 received `changes_required` from `review_1787199378_844970`.
+
+## Plan Review response (rev 2)
+
+| Finding | Response |
+| --- | --- |
+| `finding_1787199379_612718` subjects contract incomplete | Fixed. Loaded [[question opened clients subscribe with empty subjects]] and [[project-pipelines-playbook]]. The subscribe request now carries `subjects: []` explicitly. A client-side workflow-scope filter seam is planned with positive and negative `run_id` / `ticket_id` / `step_id` tests. See "Subscription contract". |
+| `finding_1787199379_758031` teardown class misclassified | Accepted. `teardown_class_applies` is now **yes**. All seven required fields are answered below, including the late-message matrix, bounded release, and sibling policy, with the tests the reviewer named. |
+| `finding_1787199379_921556` gap proof conditional | Fixed. A dedicated gap lane sets `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX` to force at least one observed `event_gap`, per [[hub test support lacks package event producer fixtures]]. The lane fails when no gap is observed. |
+| `finding_1787199379_967888` SPA request race omitted | Fixed. Unit and live checks now cover release-before-ack, disconnect-before-ack, late event after release, StrictMode-style acquire/release ordering, and exactly-one-active-subscription after reconnect. |
+| `finding_1787199379_833641` gate evidence fields (process) | Fixed procedurally. The rev-2 gate submission and the advance request both carry `plan_uri`, `artifact_id`, `checklist_id`, `target_id`, and `target_repository` as structured evidence. |
+| `finding_1787199379_870836` producer source | Fixed. The fixture derives from the checked-in Hub `examples/event-plane-producer` at hub commit `7a09292` (its `events.emit` producer path), carries the Project Pipelines contract verbatim from `botster-project-pipelines` commit `beaba94`, and records both source commits in the fixture README header. |
+| `finding_1787199379_842080` budgets unnamed | Fixed. Four numeric budgets are named with authoritative sources, measured and failed separately, and published in `docs/architecture.md`. See "Published budgets". |
+
 ## Target repository and target
 
 - Repository: `trybotster/botster-web`
@@ -12,22 +26,30 @@
 
 Routing used `list_spawn_targets` against the ticket `target_id`. The ambient process directory was not the routing source.
 
-## Runtime-teardown class determination
+## Runtime-teardown class (applies: yes)
 
-**Class applies: no.** Reasoning against each trigger in [[botster runtime teardown lenses]]:
+**`teardown_class_applies`: yes.** The change adds an ownership-creating host-control message class (`subscribe_events`), extends `hasReconnectDemand()`, and manages holder release across WebRTC peer generations. Per [[botster runtime teardown lenses]], every required field follows.
 
-- The ticket does not change WebRTC peer lifecycle, signaling, or peer maps. It adds one new request pair (`subscribe_events` / `unsubscribe_events`) on the existing host-control connection.
-- The ticket does not change Session, ClientWorker, or SessionIo teardown. It forbids terminal adapter work explicitly.
-- The ticket leaves no OS resources at risk on the Web side. The worst residual is a JavaScript listener, and the existing peer-generation guards already discard stale deliveries.
-- Hub-side holder cleanup already shipped in the parent ticket: [[Client event holders are connection-scoped]] records that connection cleanup drops that connection's holders only.
+**`teardown_isolation`.** The ownership set for one event subscription is: the Web-side holder record (spec, `subscription_id`, generation, listener) plus the Hub-side `(connection, subscription_id)` holder. One holder's failure — rejected subscribe, gap, or release — must not disturb entity subscriptions, terminal stream listeners, or other event holders. The registry is per-transport; a failed subscribe rejects only that holder's ready promise. Isolation is chosen; no shared resource forces sibling sacrifice.
 
-Three behaviors that superficially resemble the class are planned and proven as ordinary acceptance checks instead:
+**`teardown_bounds`.** Every `subscribe_events` / `unsubscribe_events` request is bounded by `requestTimeoutMs` = 10,000 ms (`localWebrtcResponseChunkLimits`, `src/botster/webrtcDaemonClient.ts`). Local release is synchronous: the holder leaves the registry immediately; the `unsubscribe_events` RPC is best-effort, bounded by the same timeout, with rejection swallowed. Disconnect runs through `resetPeerState`, which clears holder generation state synchronously and never blocks on a remote acknowledgement. The hard stop is peer close plus registry clear: delivery ends even when Hub never acknowledges.
 
-1. **Late-message policy.** A `package_event` or `event_gap` whose `subscription_id` does not match a live current-generation holder is discarded with a recorded harness event, mirroring the shipped `terminal_subscription_closed` discard path.
-2. **Ownership across reconnect.** Each peer generation creates a fresh `subscription_id`. A stale generation's id never routes into a new generation's holder.
-3. **Fail-safe under pressure.** A gap or a missed event degrades to "no transient notice." Durable question state stays entity-driven and cannot be hidden by event loss.
+**`late_message_matrix`.** Ownership-creating messages on the shared host-control connection, each with tag, reject, and sweep:
 
-Plan Review may force the class; these answers map directly onto the isolation, late-message, and ownership lenses if it does.
+| Message | Owner tag | Reject after terminal failure | Sweep on race |
+| --- | --- | --- | --- |
+| `attach` (existing) | `session_id` + `subscription_id` + `coreGeneration` | stale terminal frames and closed events discarded with recorded reason | `abandon()` removes the listener; `resetPeerState` bumps the delivery epoch |
+| `subscribe_entities` (existing) | `entityType` + per-generation `subscription_id` | ack for a superseded generation ignored via `subscription.generation` check | `resetPeerState` clears generation, id, and `snapshot_seq` |
+| `subscribe_events` (new) | per-generation fresh UUID `subscription_id` in the holder registry | ack arriving after release or after a generation change is ignored: the holder is marked closed on release and acks check holder liveness and generation; a late ack must not resurrect the holder or reconnect demand | `resetPeerState` clears holder generation state; `package_event` / `event_gap` with an unknown or stale `subscription_id` is discarded with a recorded harness reason |
+| `unsubscribe_events` (new) | targets the holder's current `subscription_id` | failure or timeout is swallowed; the local holder is already gone | Hub sweeps the remaining server-side holder on connection cleanup per [[Client event holders are connection-scoped]] |
+
+Both queue orders are covered: event-then-reset (generation check on delivery) and reset-then-event (unknown id discard).
+
+**`production_path_proof`.** Exact production path: route unmount or connection release → transport releases the holder (registry removal, closed flag) → best-effort `unsubscribe_events` when the channel is live → `disconnect` → `resetPeerState` → `hasReconnectDemand()` returns false → no reconnect attempt. Live oracles: after final route release the harness ledger shows no new WebRTC reconnect attempts and no further `daemon_event` deliveries for the released id; unit oracle: the fake bridge records that no `subscribe_events` follows release and that reconnect demand is absent. Red-on-revert control: removing the registry clear from the release path must fail the no-residual-demand assertion.
+
+**`ownership_identity`.** Holder identity is `(peerGeneration, subscription_id)` with a fresh UUID per generation. A stale id never routes into a new generation's holder. Reused public ids across connections are Hub-separated by private connection identity ([[Client event holders are connection-scoped]]); Web never reuses a UUID across generations.
+
+**`sibling_fail_closed_policy`.** On successful release or subscribe failure of one event holder: entity subscriptions, terminal streams, and other event holders keep working (tested). On ultimate failure (unsubscribe never acknowledged, channel dead): the local holder is already removed, the Hub-side holder dies with connection cleanup, and no sibling is sacrificed; the blast radius is bounded by `requestTimeoutMs`.
 
 ## Playbooks and notes loaded
 
@@ -39,11 +61,8 @@ Plan Review may force the class; these answers map directly onto the isolation, 
 - [[botster-architecture]]
 - [[cli-patterns]] (mixed-generation index; used only as a pointer map)
 - [[spa-patterns]]
-- [[botster runtime teardown lenses]] (loaded to make the class determination above)
-
-This ticket is not a consumer of Hub session-type eligibility work. The parents are the Hub client-event subscription ticket, the Project Pipelines `question.opened` producer ticket, and the Web protocol-planes ticket. Do not inject `list_session_types_for_target` / spawn Option A.
-
-[[project-pipelines-playbook]] was not loaded. The ticket consumes a Project Pipelines event contract but changes no Project Pipelines package or plugin path and no workflow policy.
+- [[botster runtime teardown lenses]] (class applies; all fields answered above)
+- [[project-pipelines-playbook]] — loaded in rev 2. The `question.opened` client contract is Project Pipelines-owned policy: `subjects: []` plus client-side `run_id` / `ticket_id` / `step_id` filtering, nonempty subject filters rejected. This ticket still changes no Project Pipelines package path.
 
 ### Targeted atomic notes
 
@@ -52,53 +71,74 @@ Event plane contract:
 - [[Client event subscriptions stay on the multiplexed host-control path]] — `SubscribeEvents` is an ordinary one-shot host request; delivery is unsolicited `DaemonEvent::PackageEvent` / `DaemonEvent::EventGap`; events never use the entity mailbox.
 - [[Client event holders are connection-scoped]] — Hub keys holders by private connection identity plus caller `subscription_id`; reconnect creates a new holder.
 - [[exact owner plus name is the only package event subscription key]] — no wildcards; exact strings only.
-- [[Package-event subject filters are exact strings compiled at admission]] — optional exact subject set; v1 ceilings (16 values / 256 B / 4096 B / 64 subscriptions per connection).
+- [[Package-event subject filters are exact strings compiled at admission]] — a missing `payload.subject` cannot match a nonempty subject set.
+- [[question opened clients subscribe with empty subjects]] — `question.opened` has no `subject` field, so consumers must send `subjects: []` and filter workflow ids client-side; a nonempty subject list receives nothing.
+- [[hub test support lacks package event producer fixtures]] — revision 44 ships no producer helper; consumers use Hub-local helpers or `examples/event-plane-producer`, and `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX` forces deterministic gaps.
 - [[WebRTC host events use unsolicited daemon-event delivery]] — WebRTC carries host events as `DaemonLocalWebrtcDeliveryKind::DaemonEvent`.
 - [[Fair host-control writing selects already-admitted frames]] — Hub-side fairness across control, entity, and event frames (shipped in the parent).
 - [[package event contracts live on HubPackageManifest not Core PackageManifest]] — producer contracts are declared in `botster-package.json` `events.emitted`.
-- [[events.emit is a non-blocking router ingress not an owner-pumped host bridge]] — producer side can shed; consumers must tolerate loss.
-- [[a transient package event cannot be the sole authority for a durable close]] — durable state lives on package persistence and entity planes; events stay notices. This plan applies the consumer-side mirror of that rule.
-- [[hub event pressure needs bounded flood regressions]] — flood behavior needs an explicit bounded regression, not an assumption.
+- [[events.emit is a non-blocking router ingress not an owner-pumped host bridge]] — producers can shed; consumers must tolerate loss.
+- [[a transient package event cannot be the sole authority for a durable close]] — durable state lives on package persistence and entity planes; this plan applies the consumer-side mirror.
+- [[hub event pressure needs bounded flood regressions]] — flood behavior needs an explicit bounded regression.
 
 Web charter and transport:
 
-- [[WebRTC adapter admission uses a Hello feature string not a generated DTO token]] — the new capability gates on the `package_event_subscriptions` Hello feature string.
-- [[botster spa has one route owned hub control plane connection]] — the event subscription belongs to the route-owned connection, not to leaf views.
+- [[WebRTC adapter admission uses a Hello feature string not a generated DTO token]] — the capability gates on the `package_event_subscriptions` Hello feature string.
+- [[botster spa has one route owned hub control plane connection]] — the event subscription belongs to the route-owned connection.
 - [[botster browser pull requests must retry after webrtc reconnect]] and [[reused browser transports replay the live hub mode]] — reconnect replay obligations.
-- [[a page reload is not a reconnect]] — reconnect proof must close and reopen the real DataChannel on one document.
+- [[a page reload is not a reconnect]] — reconnect proof closes and reopens the real DataChannel on one document.
 - [[botster web dto field names must match authoritative rust serde structs]] and [[botster web generated protocol drift checks need explicit hub artifact paths]] — DTO consumption discipline.
-- [[closed dependency tickets signal merged source not a consumable release]] — artifact availability was verified directly (below), not inferred from closed tickets.
-- [[botster web pinned hub test support claims span readme and architecture docs]] — the pin bump must update both `README.md` and `docs/architecture.md`.
+- [[closed dependency tickets signal merged source not a consumable release]] — artifact availability verified directly (below).
+- [[botster web pinned hub test support claims span readme and architecture docs]] — the pin bump updates both `README.md` and `docs/architecture.md`.
 - [[botster web uses vanilla ionic primitives by default]] — the transient notice uses `IonToast`.
-- [[packaged browser smoke attaches to the ambient hub inside pipeline worktrees]] — live-lane environment sensitivity.
+- [[packaged browser smoke attaches to the ambient hub inside pipeline worktrees]] — the lanes must pin their own hub, required anyway by the gap lane's env var.
 - [[Protocol 7 gates WebRTC daemon events on close-event Hello negotiation]] — precedent for negotiated daemon-event delivery.
 
 ## Context loaded (source evidence)
 
-- Ticket, run, gates, dependencies via `project_pipelines_current_context`. All three dependencies are closed: Hub client event subscriptions (`ticket_1786663583_640263`), Project Pipelines `question.opened` producer (`ticket_1786663583_568924`), Web protocol planes (`ticket_1786661008_897067`).
-- **Artifact availability verified directly** (per [[closed dependency tickets signal merged source not a consumable release]]): `npm pack @trybotster/hub-test-support@0.1.39` was unpacked and inspected at plan time. Its `daemon-protocol.ts` contains `subscribe_events`, `unsubscribe_events`, response kinds `event_subscribed` / `event_unsubscribed`, and `DaemonEvent` variants `package_event` / `event_gap`. Its `metadata.json` reports protocol_version 7 and `conformance_fixture_revision` 44. Version 0.1.38 (revision 43) also carries the tokens; 0.1.39 is latest and is the chosen pin.
-- Hub protocol contract: `botster-hub` `docs/client-protocol.md` "Package event subscriptions" section (merge `7a09292`). `package_event_subscriptions` is an optional host-control feature; clients that want live package events Hello with that required feature. `PROTOCOL_VERSION` stays 7. Advertising the feature advances the conformance fixture revision to 44. No public sequence, cursor, replay, or history field exists.
-- Producer contract: `botster-project-pipelines` `botster-package.json` declares `events.emitted` entry `question.opened` with audience `["clients","plugins"]` and payload schema `{question_id (required), kind (required, human|agent), notice (required, ≤280 chars), blocking, run_id?, step_id?, ticket_id?}`. `plugin.lua` emits it after the durable `save_state` commit. The payload has **no `subject` field**, so subject filters must not be used.
-- **Admitted owner string verified live**: `list_plugins` on the running hub shows the plugin name `project-pipelines`. The ticket phrase "botster-project-pipelines" names the repository; the event owner key is the package name `project-pipelines`.
-- botster-web worktree at `origin/main` (`855ccd0`), clean, `.gitignore` intact (14 lines). Key seams read: `src/botster/protocolPlanes.ts` (Hello requirements derive from installed hub-test-support metadata), `src/botster/webrtcDaemonClient.ts` (`receiveHostEvent` currently handles only `terminal_subscription_closed` and drops other host events; entity subscriptions resubscribe per peer generation), `src/botster/hubTransport.ts` (`DaemonBridgeClient` with optional `subscribeEvents`; `daemonEventFrame` currently projects only `runtime_observation`), `src/botster/protocol.ts` (`HubControlFrameKind` vocabulary), `src/app/useProductionHubConnection.ts` (route-owned connect + entity pulls), `src/app/dialogs/WorkbenchNotifications.tsx` (`IonToast` host), `scripts/check-daemon-protocol-drift.mjs` (byte-equality drift gate), `scripts/live-packaged-protocol-harness.mjs` (env-flag lane pattern, `fixtures/entity-options-reactive` path-install precedent, `__BOTSTER_LIVE_PROTOCOL_HARNESS__.listEntities` durable-state oracle).
-- Current pins: `@trybotster/hub-test-support@0.1.36` (revision 41 claims in `README.md:11` and `docs/architecture.md:55-56`), `@trybotster/ui-contract@0.3.2`, `@trybotster/terminal-protocol@0.1.0`.
+- Ticket, run, gates, dependencies, review `review_1787199378_844970` and its seven findings via `project_pipelines_current_context`. All three dependencies are closed: Hub client event subscriptions (`ticket_1786663583_640263`), Project Pipelines `question.opened` producer (`ticket_1786663583_568924`), Web protocol planes (`ticket_1786661008_897067`).
+- **Artifact availability verified directly**: `npm pack @trybotster/hub-test-support@0.1.39` unpacked and inspected. `daemon-protocol.ts` contains `subscribe_events` (with optional `subjects`), `unsubscribe_events`, response kinds `event_subscribed` / `event_unsubscribed`, and `DaemonEvent` variants `package_event` / `event_gap`. `metadata.json`: protocol 7, conformance revision 44.
+- Hub protocol contract: `botster-hub` `docs/client-protocol.md` "Package event subscriptions" (merge `7a09292`). Optional host feature `package_event_subscriptions`; Hello with it as a required feature; protocol stays 7; revision advances to 44; no public sequence, cursor, replay, or history field.
+- Producer contract: `botster-project-pipelines` commit `beaba94` `botster-package.json` lines 127–143 declare `question.opened`, audience `["clients","plugins"]`, payload `{question_id (required), kind (required, human|agent), notice (required, ≤280 chars), blocking, run_id?, step_id?, ticket_id?}`, `additionalProperties: false`, **no `subject` field**. `plugin.lua` emits after the durable `save_state` commit.
+- Producer example: `botster-hub` `examples/event-plane-producer` at `7a09292` — manifest `events.emitted` declaration plus a registered tool whose handler calls `events.emit(name, payload)` from the plugin worker VM.
+- **Admitted owner string verified live**: `list_plugins` shows the plugin name `project-pipelines`. The ticket phrase "botster-project-pipelines" names the repository; the event owner key is the package name.
+- botster-web worktree at `origin/main` (`855ccd0`), clean, `.gitignore` intact. Seams read: `src/botster/protocolPlanes.ts`, `src/botster/webrtcDaemonClient.ts` (`receiveHostEvent`, entity resubscribe machinery, `localWebrtcResponseChunkLimits` with `maximumTerminalDeliveryBacklog: 16` and `requestTimeoutMs: 10_000`), `src/botster/hubTransport.ts`, `src/botster/protocol.ts`, `src/app/useProductionHubConnection.ts`, `src/app/dialogs/WorkbenchNotifications.tsx`, `scripts/check-daemon-protocol-drift.mjs`, `scripts/live-packaged-protocol-harness.mjs` (lane flags, 15,000 ms standing waits, `fixtures/entity-options-reactive` surface-action trigger precedent, `__BOTSTER_LIVE_PROTOCOL_HARNESS__.listEntities` durable oracle).
+- Current pins: `@trybotster/hub-test-support@0.1.36` (revision 41 claims at `README.md:11` and `docs/architecture.md:55-56`), `@trybotster/ui-contract@0.3.2`, `@trybotster/terminal-protocol@0.1.0`.
+
+## Subscription contract (rev 2)
+
+The subscribe request is exactly:
+
+```json
+{ "type": "subscribe_events", "subscription_id": "<uuid>", "owner": "project-pipelines", "name": "question.opened", "subjects": [] }
+```
+
+`subjects: []` is explicit and required: the payload schema has no `subject` field, so a nonempty subject set would receive nothing ([[question opened clients subscribe with empty subjects]]). The unit oracle pins this exact body — no sequence, cursor, replay, or history field, and `subjects` present as an empty array.
+
+**Workflow-scope filter.** Every delivered `question.opened` payload passes through one pure filter seam (for example `questionOpenedNoticeFromEvent(payload, scope)`):
+
+1. Validity: `question_id`, `kind`, and `notice` must be present with the declared types; ids present with wrong types reject the payload.
+2. Scope: `scope` is `{ run_id?, ticket_id?, step_id? }`. A set scope field must equal the payload field; a payload missing a scoped field does not match.
+3. The production workbench passes the unscoped value (all workflows): the operator-facing notice is hub-wide. This is an explicit product decision recorded here.
+
+Unit tests drive the production seam both ways: positive (scoped `run_id` / `ticket_id` / `step_id` matches produce a notice) and negative (non-matching or missing ids produce none). The live lane emits two events with different `run_id` values and proves through the harness filter hook that a scoped consumer sees exactly one while the unscoped workbench shows both.
 
 ## Scope
 
-1. **Pin and vendor.** Bump `@trybotster/hub-test-support` to `0.1.39`. Re-vendor `src/botster/generated/daemon-protocol.ts` byte-identical to the published artifact. Update the pin and revision claims in `README.md` and `docs/architecture.md` (revision 41 → 44, 0.1.36 → 0.1.39).
-2. **Hello negotiation.** Add `"package_event_subscriptions"` to `requiredHostFeatures` in `src/botster/protocolPlanes.ts`. `minimum_conformance_fixture_revision` follows the installed metadata to 44 automatically. Feature tokens stay on the host requirement, never the terminal requirement.
-3. **WebRTC bridge event subscriptions.** In `src/botster/webrtcDaemonClient.ts`, add a package-event subscription registry that mirrors the entity-subscription lifecycle: client-generated `subscription_id` per peer generation; `subscribe_events` issued after connect and Hello; `event_subscribed` expected; resubscribe with a **fresh** `subscription_id` after DataChannel reconnect; best-effort `unsubscribe_events` on release; registry counted by `hasReconnectDemand()`. Route `package_event` and `event_gap` in `receiveHostEvent` to the matching current-generation holder by `subscription_id`; discard mismatches with a recorded harness event. Event delivery must not enter `enqueueTerminalDelivery` and must not await consumers on the DataChannel message path.
-4. **Transport frame plane.** Add `DaemonBridgeClient.subscribePackageEvents?` (owner, name, optional subjects). Add outbound `HubControlFrame` kinds `events_subscribe` / `events_release` handled in `createHubTransport` as held bridge subscriptions (same shape as generic entity demand). Project deliveries as inbound frames: kind `package_event` with `{owner, name, payload}` and kind `event_gap` with `{owner, name}`.
-5. **Concrete consumer.** From the route-owned connection (`useProductionHubConnection` or a sibling hook it calls), send one `events_subscribe` for owner `project-pipelines`, name `question.opened`, no subjects. On a matching `package_event` frame, validate the payload shape (`question_id`, `kind`, `notice`, `blocking`) and show one transient notice through a dedicated `IonToast` instance (bounded text from `notice`, fixed duration, no persistence, no navigation side effects). On `event_gap`: drop transient reactions and record a connection diagnostic; never alter entity state and never surface an error UI.
-6. **Proof.** Unit coverage in `src/App.test.mjs`; a new live packaged-protocol lane (`BOTSTER_LIVE_PACKAGE_EVENTS=1` plus an npm `smoke:` alias) with a fixture producer package under `fixtures/package-events/`; this plan document.
+1. **Pin and vendor.** Bump `@trybotster/hub-test-support` to `0.1.39`. Re-vendor `src/botster/generated/daemon-protocol.ts` byte-identical. Update pin and revision claims in `README.md` and `docs/architecture.md` (41 → 44, 0.1.36 → 0.1.39), and publish the event-plane budgets (below) in `docs/architecture.md`.
+2. **Hello negotiation.** Add `"package_event_subscriptions"` to `requiredHostFeatures` in `src/botster/protocolPlanes.ts`; the revision minimum follows the installed metadata to 44.
+3. **WebRTC bridge event subscriptions.** Generation-scoped holder registry in `src/botster/webrtcDaemonClient.ts` per the teardown answers above: fresh UUID per generation, `subscribe_events` after connect and Hello, `event_subscribed` expected within `requestTimeoutMs`, resubscribe with a fresh id after reconnect, best-effort bounded `unsubscribe_events` on release, registry counted by `hasReconnectDemand()`, release marks the holder closed so a late ack cannot resurrect it. `receiveHostEvent` routes `package_event` / `event_gap` to the matching current-generation holder; mismatches are discarded with a recorded reason. Event delivery never enters `enqueueTerminalDelivery` and never awaits consumers on the DataChannel message path.
+4. **Transport frame plane.** `DaemonBridgeClient.subscribePackageEvents?` (owner, name, subjects). Outbound `HubControlFrame` kinds `events_subscribe` / `events_release` held in `createHubTransport` like generic entity demand. Inbound frames: `package_event` `{owner, name, payload}` and `event_gap` `{owner, name}`.
+5. **Concrete consumer.** From the route-owned production connection: one `events_subscribe` for `project-pipelines` / `question.opened` / `subjects: []`. Deliveries pass the workflow-scope filter seam; a passing payload shows one transient notice through a dedicated `IonToast` (bounded `notice` text, fixed duration, no persistence, no navigation). `event_gap`: drop transient reactions, record a connection diagnostic, never touch entity state, never show an error UI.
+6. **Proof.** Unit coverage in `src/App.test.mjs`; live packaged lanes (`BOTSTER_LIVE_PACKAGE_EVENTS=1`, plus the forced-gap sub-lane) with the fixture producer under `fixtures/package-events/`; this plan document.
 
 ## Non-scope
 
-- No change to the durable question or attention UI. Project Pipelines surfaces keep rendering durable question state from package entity state through the existing plugin-surface path.
-- No generic notification framework, no per-event settings, no subscription configurability beyond the one concrete case. The transport/frame seam is generic only because the DTOs are; product policy stays one subscription.
-- No Hub, Core, or Project Pipelines changes. No new protocol semantics; Web consumes generated DTOs only.
-- No terminal-plane work: no Hub-specific terminal logic, no inspection or scheduling of terminal adapter frames, no event traffic on the terminal data plane.
-- No event persistence, no event ids stored, no replay or history requests (the public DTOs contain no such fields; unit tests pin the request shape).
+- No change to the durable question or attention UI; Project Pipelines surfaces keep rendering durable question state from package entity state.
+- No generic notification framework, no per-event settings, no configurability beyond the one concrete subscription plus the filter seam the contract requires.
+- No Hub, Core, or Project Pipelines changes. No new protocol semantics.
+- No terminal-plane work: no Hub-specific terminal logic, no terminal adapter frame inspection or scheduling.
+- No event persistence, no stored event ids, no replay or history requests.
 
 ## Ownership boundaries and cross-repo dependencies
 
@@ -106,76 +146,95 @@ Web charter and transport:
 | --- | --- | --- |
 | Event admission, exact owner+name filters, shedding, gap production, host-control fairness | botster-hub | Shipped (`7a09292`, ticket closed) |
 | Generated DTOs and conformance metadata | `@trybotster/hub-test-support@0.1.39` on npm | Published; content verified at plan time |
-| `question.opened` contract and emit-after-commit ordering | botster-project-pipelines plugin | Shipped (`a198f16`..`beaba94`, ticket closed) |
-| Independent Hub control / Core terminal planes in Web | botster-web (parent ticket) | Shipped (`ticket_1786661008_897067` closed) |
-| Subscription client lifecycle, reconnect resubscribe, gap handling, transient notice UI | botster-web | **This ticket** |
+| `question.opened` contract, emit-after-commit, client contract policy (`subjects: []` + workflow-id filtering) | botster-project-pipelines | Shipped (`beaba94`, ticket closed); policy recorded in [[project-pipelines-playbook]] |
+| Producer example and gap-forcing env (`examples/event-plane-producer`, `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX`) | botster-hub | Checked in at `7a09292` |
+| Independent Hub control / Core terminal planes in Web | botster-web (parent ticket) | Shipped (closed) |
+| Subscription client lifecycle, reconnect resubscribe, gap handling, filter seam, transient notice UI | botster-web | **This ticket** |
 
-No new cross-repository prerequisite is required. All dependency edges are closed and the artifact-coupled edge was verified against the published package content, not the ticket status. Live-proof requirement: the harness Hub must be a build at or after merge `7a09292` so it advertises `package_event_subscriptions`; the harness must fail with an explicit message when the feature is absent rather than passing vacuously.
+No new cross-repository prerequisite. Live-proof requirement: the harness Hub must be at or after `7a09292` (advertises `package_event_subscriptions`, honors `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX`); the lanes fail with an explicit message otherwise and must spawn a pinned hub, not attach to an ambient one.
 
 ## Assumptions and unknowns
 
-1. **Owner string.** The subscription owner is the admitted package name `project-pipelines`, verified live via `list_plugins` and the manifest `name` field. The ticket's "botster-project-pipelines" is the repository name. If Plan Review reads the ticket as requiring a different owner string, that is a producer-side rename and needs a human decision.
-2. **Fixture producer for live proof.** The live lane installs a path fixture package named `project-pipelines` (under `fixtures/package-events/`) that declares the byte-identical `question.opened` `events.emitted` contract copied from the real manifest, persists a durable question record to a plugin entity family, and then emits the event — the same commit-then-emit order as the real plugin. Driving the full real Project Pipelines state machine (MCP `ask_human` with pipeline state) inside the packaged harness is out of proportion for a browser-consumption proof; the harness hub is isolated, so the name cannot collide with a real installation. The fixture asserts the exact owner/name/payload contract end to end. If Plan Review requires the real plugin as producer, that is a scope decision to escalate.
-3. **Required Hello feature.** Adding `package_event_subscriptions` to `requiredHostFeatures` makes new Web refuse Hubs older than `7a09292`. Precedent: `terminal_subscription_closed` is already required, and the repository family moves in direct-merge lockstep. The alternative (optional feature detection with degraded mode) adds a dual code path this ticket does not need.
-4. **"Published budgets."** The ticket's budget language is interpreted as: Hub-side fairness budgets already proven in the parent Hub ticket, plus Web-side bounds — package events never enter the ordered terminal delivery queue (whose backlog cap is `maximumTerminalDeliveryBacklog`), and the flood regression must complete entity convergence and terminal echo within the existing harness step timeouts. No new budget constants are invented.
-5. **Notice placement.** The toast mounts in the same shell that hosts the existing `WorkbenchNotifications`, as a separate `IonToast` instance so package-event notices never contend with action-result toasts. Exact placement is an Implement detail inside that shell.
+1. **Owner string.** The subscription owner is the admitted package name `project-pipelines` (verified via `list_plugins` and the manifest). The ticket's "botster-project-pipelines" is the repository name.
+2. **Fixture producer derivation.** The live fixture package under `fixtures/package-events/` is named `project-pipelines`, derives its producer path from the checked-in Hub `examples/event-plane-producer` at `7a09292` (manifest `events.emitted` declaration plus a handler calling `events.emit(name, payload)` in the plugin worker VM), carries the `question.opened` contract verbatim from `beaba94`, persists a durable question entity record before emitting (commit-then-emit), and adds a surface-action trigger following the `fixtures/entity-options-reactive` precedent so the browser harness drives emission through the production action path. Both source commits are recorded in the fixture README header. The harness hub is isolated, so the name cannot collide with a real installation.
+3. **Required Hello feature.** `package_event_subscriptions` becomes a required host feature (precedent: `terminal_subscription_closed`; direct-merge lockstep family). New Web refuses pre-`7a09292` Hubs; the failure must read as a Hub-version incompatibility.
+4. **Workbench notice scope.** The production notice is unscoped (all workflows) because botster-web is an operator client; the filter seam still enforces the contract and is proven both ways. If Plan Review wants a narrower default scope, that is a product decision to state, not a structural change.
+5. **Notice placement.** The toast mounts beside the existing `WorkbenchNotifications` as a separate `IonToast`; exact placement is an Implement detail.
+
+## Published budgets (rev 2)
+
+The flood and gap lanes measure and fail each budget separately, and `docs/architecture.md` publishes all four as the Web event-plane budgets:
+
+| Budget | Value | Authoritative source |
+| --- | --- | --- |
+| Terminal delivery backlog | 16 frames | `localWebrtcResponseChunkLimits.maximumTerminalDeliveryBacklog`, `src/botster/webrtcDaemonClient.ts` — event traffic must never consume this queue; overflow during flood fails the lane |
+| Host request round-trip | 10,000 ms | `localWebrtcResponseChunkLimits.requestTimeoutMs` — a control request issued mid-flood must resolve inside this bound |
+| Entity reconciliation deadline | 15,000 ms | The harness's standing 15,000 ms wait ceilings in `scripts/live-packaged-protocol-harness.mjs` — the durable question entity mutated during flood must converge inside this bound, measured and recorded |
+| Terminal echo round-trip deadline | 15,000 ms | Same harness ceiling — a terminal input echo completed during flood must round-trip inside this bound, measured and recorded |
 
 ## Affected surfaces and files
 
-- `package.json`, `package-lock.json` — hub-test-support pin 0.1.36 → 0.1.39; new `smoke:package-events` script.
-- `src/botster/generated/daemon-protocol.ts` — re-vendored artifact (byte-identical; drift check enforces).
+- `package.json`, `package-lock.json` — pin 0.1.39; `smoke:package-events` script (and the forced-gap invocation).
+- `src/botster/generated/daemon-protocol.ts` — re-vendored artifact.
 - `src/botster/protocolPlanes.ts` — `package_event_subscriptions` host feature.
-- `src/botster/webrtcDaemonClient.ts` — package-event subscription registry, `receiveHostEvent` routing, reconnect demand, harness event records.
-- `src/botster/hubTransport.ts` — `DaemonBridgeClient.subscribePackageEvents?`, `events_subscribe` / `events_release` handling, `package_event` / `event_gap` frame projection.
+- `src/botster/webrtcDaemonClient.ts` — holder registry, `receiveHostEvent` routing, reconnect demand, bounded release, harness records.
+- `src/botster/hubTransport.ts` — `subscribePackageEvents?`, `events_subscribe` / `events_release`, `package_event` / `event_gap` projection.
 - `src/botster/protocol.ts` — new `HubControlFrameKind` members.
-- `src/app/useProductionHubConnection.ts` (plus a small hook/helper such as `src/app/packageEventNotices.ts`) — one concrete subscription, payload validation, notice state, gap diagnostic.
-- `src/app/workbench.tsx` / `src/app/WorkbenchDialogs.tsx` (or `WorkbenchShell.tsx`) — mount the transient notice toast.
-- `src/App.test.mjs` — unit coverage.
-- `scripts/live-packaged-protocol-harness.mjs` — `BOTSTER_LIVE_PACKAGE_EVENTS=1` lane.
-- `fixtures/package-events/botster-package.json`, `fixtures/package-events/plugin.lua` — fixture producer.
-- `README.md`, `docs/architecture.md` — pin/revision claims.
+- `src/app/useProductionHubConnection.ts` plus a small helper (for example `src/app/packageEventNotices.ts` with the filter seam) — subscription, filtering, notice state, gap diagnostic.
+- `src/app/workbench.tsx` / `src/app/WorkbenchDialogs.tsx` (or `WorkbenchShell.tsx`) — notice toast mount.
+- `src/App.test.mjs` — unit coverage including the race and teardown matrix.
+- `scripts/live-packaged-protocol-harness.mjs` — `BOTSTER_LIVE_PACKAGE_EVENTS=1` lane plus the forced-gap sub-lane.
+- `fixtures/package-events/botster-package.json`, `fixtures/package-events/plugin.lua`, fixture README header with source commits.
+- `README.md`, `docs/architecture.md` — pin/revision claims and published budgets.
 - `docs/plans/consume-transient-package-events-through-hub-control-plane.md` — this plan.
 
 ## Risks
 
-1. **Drift-gate breakage.** The vendored protocol must be byte-identical to the 0.1.39 artifact; hand edits are forbidden. Mitigation: copy from `node_modules`, `npm test` runs the drift check.
-2. **Conformance revision jump 41 → 44.** The pin bump raises Web's `minimum_conformance_fixture_revision`; a stale local Hub then fails Hello. This is intended lockstep behavior, but the harness must report it as a Hub-version failure, not a mystery timeout.
-3. **Flood-induced render churn.** Each matching event updates React notice state. Mitigation: only the one subscribed owner/name reaches the app; the flood regression bounds the effect; notice state coalesces to the latest event.
-4. **Toast contention.** A second `IonToast` avoids fighting `packageActionToast`, but stacking behavior needs a look during Implement.
-5. **Reconnect races.** Event resubscription runs beside entity resubscription on the same reconnect path. Holders are independent and unordered by contract; unit tests cover resubscribe-after-reset, and the live lane covers a real DataChannel close/reopen on one document ([[a page reload is not a reconnect]]).
-6. **Ambient-hub sensitivity.** Packaged smokes can attach to an ambient hub inside pipeline worktrees ([[packaged browser smoke attaches to the ambient hub inside pipeline worktrees]]); the lane must pin its hub and fail loudly on a feature-less hub.
-7. **Gap mis-handling.** Treating `event_gap` as an error would violate the ticket. The gap path is diagnostic-only and covered by unit and live checks.
+1. **Drift-gate byte-equality** on the re-vendored protocol; copy from `node_modules`, never hand-edit.
+2. **Revision jump 41 → 44** makes stale local Hubs fail Hello; must surface as a Hub-version failure, not a timeout.
+3. **Flood-induced render churn**; bounded by the single subscribed owner/name, the filter seam, coalescing notice state, and the flood budgets.
+4. **Toast contention** with `packageActionToast`; separate instance, checked during Implement.
+5. **Reconnect and release races**; covered by the teardown matrix tests and the live DataChannel close/reopen on one document.
+6. **Ambient-hub sensitivity**; lanes spawn a pinned hub (mandatory for the gap env var) and fail loudly on a feature-less hub.
+7. **Gap mis-handling**; diagnostic-only path, unit plus forced-gap live coverage.
+8. **Fixture drift from the shipped producer path**; mitigated by deriving from the checked-in example and recording source commits.
 
 ## Acceptance checks and tests
 
-Repository gates (all must pass):
+Repository gates:
 
 1. `npm run typecheck`, `npm run lint`, `npm test` (drift check + `App.test.mjs`), `npm run build`.
 
 Unit coverage (`src/App.test.mjs`, fake transport/bridge):
 
-2. Connect issues exactly one `subscribe_events` per connection generation for `project-pipelines` / `question.opened`; the request body is exactly `{type, subscription_id, owner, name}` with no subjects, sequence, cursor, replay, or history field.
-3. A matching `package_event` frame produces one transient notice with the payload `notice` text; a `package_event` for a different owner or name produces nothing.
-4. `event_gap` produces no notice and no entity mutation; previously applied durable entity records remain readable.
-5. Simulated transport reset then reconnect issues a new `subscribe_events` with a **different** `subscription_id`; a `package_event` carrying the old `subscription_id` is discarded.
-6. A malformed `package_event` payload (missing `question_id` or `notice`) is rejected without a notice and without a crash.
+2. Connect issues exactly one `subscribe_events` per connection generation with the exact body `{type, subscription_id, owner: "project-pipelines", name: "question.opened", subjects: []}` — `subjects` present and empty; no sequence, cursor, replay, or history field.
+3. Filter seam positive/negative: scoped `run_id`, `ticket_id`, and `step_id` matches produce a notice; non-matching or missing ids produce none; unscoped scope passes valid payloads; invalid payloads (missing `question_id` / `notice`, wrongly typed ids) are rejected without a crash.
+4. A matching `package_event` produces one transient notice; a different owner or name produces nothing.
+5. `event_gap` produces no notice and no entity mutation; durable entity records remain readable.
+6. Reset then reconnect issues a new `subscribe_events` with a different `subscription_id`; a `package_event` or ack carrying the old id is discarded.
+7. **Request race:** release-before-ack — releasing the holder while `subscribe_events` awaits its ack leaves no holder, no notice on a late event, and no reconnect demand; disconnect-before-ack behaves the same; a late ack after release cannot resurrect the holder; StrictMode-style acquire/release/acquire ordering ends with exactly one active subscription; after reconnect exactly one subscription is active.
+8. **Teardown matrix:** release during in-flight subscribe (above); stale ack ignored; stale event discarded; disconnect completes without waiting on any remote ack (bounded by `requestTimeoutMs` at most); no residual reconnect demand after final release (red-on-revert: removing the registry clear fails this); sibling health — entity subscription and terminal stream listeners survive event-holder release and failure.
 
-Live packaged proof (new lane, real WebRTC, final independent Hub control and Core terminal planes):
+Live packaged proof (real WebRTC, final independent Hub control and Core terminal planes, pinned hub ≥ `7a09292`):
 
-7. Hello with `package_event_subscriptions` is accepted by a Hub at or after `7a09292`; the lane fails with an explicit message when the hub does not advertise the feature.
-8. The fixture producer's surface action commits a durable question record to its entity family and then emits `question.opened`; the browser shows **exactly one** transient notice (structured harness event plus a DOM oracle on the toast, not toast-text-only assertions — the harness event ledger is the primary oracle).
-9. Missed event: emit while the DataChannel is closed (harness `closeDataChannel` in-place reconnect on one surviving document); after reconnect the durable question record is visible through `listEntities` / entity pull, no notice replays, and the fresh subscription receives a subsequent live event.
-10. Flood: the fixture emits a bounded burst (≥200 events). Entity reconciliation converges and a terminal echo round-trip completes within the existing harness step timeouts; the browser stays responsive; notice count never exceeds emitted count; any shed tail surfaces as `event_gap`, and the durable record stays visible.
-11. Terminal isolation: harness event records show no terminal adapter frames and no terminal-queue involvement caused by event traffic (event deliveries appear only as `daemon_event` records).
+9. Hello with `package_event_subscriptions` accepted; explicit failure naming the Hub version when the feature is absent.
+10. The fixture commits a durable question entity, then emits; the browser shows exactly one transient notice, proven by the structured harness event ledger plus a DOM oracle.
+11. Scoped-filter live check: two events with different `run_id` values; a scoped consumer registered through the harness filter hook sees one; the unscoped workbench shows both.
+12. Missed event: emit while the DataChannel is closed (harness `closeDataChannel`, one surviving document); after reconnect the durable entity is visible via `listEntities` / entity pull, no notice replays, and the fresh subscription receives a later live event.
+13. **Forced gap lane:** hub spawned with `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX` set low; burst emit; the lane requires at least one observed `event_gap` in the ledger (fails when none is observed), proves transient reactions stop for shed events, and proves the durable question entity remains visible.
+14. **Flood with named budgets:** ≥200-event burst; each published budget above is measured and failed separately — no terminal backlog overflow, a mid-flood control request inside 10,000 ms, entity convergence inside 15,000 ms, terminal echo inside 15,000 ms; notice count never exceeds emitted count.
+15. Terminal isolation: harness records show event traffic only as `daemon_event` deliveries; no terminal adapter frames and no terminal-queue involvement from events.
+16. Teardown/live: after final route release, no further reconnect attempts and no `daemon_event` deliveries for the released subscription appear in the ledger.
 
 Downstream/documentation proof:
 
-12. `README.md` and `docs/architecture.md` claims match the installed package via a source-derived check (grep the installed `metadata.json` values into the diff review), per [[botster web pinned hub test support claims span readme and architecture docs]].
-13. The production entry point is proven changed: the subscription is issued from the route-owned production connection path (`useProductionHubConnection`), not only from harness code.
+17. `README.md` and `docs/architecture.md` claims match the installed `metadata.json` (source-derived check), and `docs/architecture.md` publishes the event-plane budgets.
+18. Production entry point proof: the subscription is issued from the route-owned production connection path (`useProductionHubConnection`), not only from harness code.
 
 ## Vault gaps worth capturing
 
-1. **Package event owner strings are admitted package names, not repository names** — `botster-project-pipelines` (repo) vs `project-pipelines` (owner key). Gotcha class; would have silently produced a dead subscription.
-2. **Web package-event notices are transient; entity state is the only durable authority** — the consumer-side mirror of [[a transient package event cannot be the sole authority for a durable close]].
-3. **hub-test-support 0.1.39 / conformance revision 44 is the package-event DTO cutover for Web** — same shape as the existing 0.1.35/0.1.36 cutover notes.
-4. If Implement finds the harness hub feature-detection awkward, capture the pattern for asserting advertised host features in packaged smokes.
+1. **Package event owner strings are admitted package names, not repository names** (`project-pipelines` vs `botster-project-pipelines`).
+2. **Web package-event notices are transient; entity state is the only durable authority** — consumer-side mirror of [[a transient package event cannot be the sole authority for a durable close]].
+3. **hub-test-support 0.1.39 / revision 44 is the package-event DTO cutover for Web.**
+4. **Web event-plane budgets and where they are published** — once the numbers land in `docs/architecture.md`, capture the pattern of naming numeric budgets for flood lanes.
+5. If the forced-gap env plumbing through the harness-spawned hub is awkward, capture the working recipe.
