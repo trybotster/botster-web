@@ -1,6 +1,12 @@
 # Web: consume transient package events through the Hub control plane
 
-Revision 2. Revision 1 received `changes_required` from `review_1787199378_844970`.
+Revision 3. Revision 1 received `changes_required` from `review_1787199378_844970`. Revision 2 resolved those seven findings per `review_1787199881_585990`, which added one product finding backed by blocking human answer `question_1787199815_341943`.
+
+## Plan Review response (rev 3)
+
+| Finding | Response |
+| --- | --- |
+| `finding_1787199881_617942` production notice scope contradicts the human decision | Fixed. The unscoped production mode is removed. The production source of active workflow identity is the currently viewed session joined to Project Pipelines entity records; a view with no active workflow identity shows no transient notice. Production-path positive and negative tests are required in unit and live lanes. See "Active workflow identity (human decision)". |
 
 ## Plan Review response (rev 2)
 
@@ -115,13 +121,27 @@ The subscribe request is exactly:
 
 `subjects: []` is explicit and required: the payload schema has no `subject` field, so a nonempty subject set would receive nothing ([[question opened clients subscribe with empty subjects]]). The unit oracle pins this exact body — no sequence, cursor, replay, or history field, and `subjects` present as an empty array.
 
-**Workflow-scope filter.** Every delivered `question.opened` payload passes through one pure filter seam (for example `questionOpenedNoticeFromEvent(payload, scope)`):
+**Workflow-scope filter.** Every delivered `question.opened` payload passes through one pure filter seam (for example `questionOpenedNoticeFromEvent(payload, identity)`):
 
 1. Validity: `question_id`, `kind`, and `notice` must be present with the declared types; ids present with wrong types reject the payload.
-2. Scope: `scope` is `{ run_id?, ticket_id?, step_id? }`. A set scope field must equal the payload field; a payload missing a scoped field does not match.
-3. The production workbench passes the unscoped value (all workflows): the operator-facing notice is hub-wide. This is an explicit product decision recorded here.
+2. Identity match: `identity` is `{ run_id?, ticket_id?, step_id? }` resolved from the active view (next section). The notice shows only when at least one payload workflow id equals the corresponding identity field.
+3. **No identity, no notice**: when the active view resolves no workflow identity, the filter rejects every payload. There is no unscoped production mode.
 
-Unit tests drive the production seam both ways: positive (scoped `run_id` / `ticket_id` / `step_id` matches produce a notice) and negative (non-matching or missing ids produce none). The live lane emits two events with different `run_id` values and proves through the harness filter hook that a scoped consumer sees exactly one while the unscoped workbench shows both.
+## Active workflow identity (human decision)
+
+Blocking human answer `question_1787199815_341943`: show the notice only when its `run_id`, `ticket_id`, or `step_id` matches the identity owned by the current route or view; a view with no active workflow identity shows no transient notice; an unscoped Hub workbench is not permission for device-wide notices.
+
+**Production identity source.** The identity owner is the currently viewed session:
+
+- The session route `/sessions/:sessionId` and the workbench's selected session view resolve to one viewed session uuid through a single selector.
+- The consumer joins that uuid to Project Pipelines entity records already consumable through the shared entity store and generic selectors: a `project-pipelines.run_step` record whose `agent_session_uuid` equals the viewed session uuid yields `run_id` and `step_id`; the matching `project-pipelines.run` record yields `ticket_id`.
+- While a session view is active, the consumer holds entity demand for `project-pipelines.run_step` and `project-pipelines.run` through the existing generic `entity_pull` / `entity_release` held-subscription mechanism (the entity-options demand path). No new hydration machinery is added.
+
+**Identity lifetime.** The identity derives from the current route/view plus the entity store, recomputes on route or entity change, and clears on navigation or unmount. A late event after navigation resolves no identity and shows nothing. Dashboard, apps, settings, and Project Pipelines surface routes without a viewed session resolve no identity and show no notice; the durable question and attention UI on those surfaces stays package-entity driven and is unaffected.
+
+**Join-key verification.** `agent_session_uuid` on live `project-pipelines.run_step` records uses the hub session uuid namespace (`sess-...`), which is the same identity Web session views use. Implement must verify this join against one live record before relying on it, and must ask a human if the production join key differs.
+
+Unit tests drive the production seam both ways: positive (a payload matching the resolved `run_id` / `ticket_id` / `step_id` produces a notice) and negative (non-matching ids, payloads without workflow ids, and views without identity produce none). The live lane proves the same through the production path (below).
 
 ## Scope
 
@@ -129,7 +149,7 @@ Unit tests drive the production seam both ways: positive (scoped `run_id` / `tic
 2. **Hello negotiation.** Add `"package_event_subscriptions"` to `requiredHostFeatures` in `src/botster/protocolPlanes.ts`; the revision minimum follows the installed metadata to 44.
 3. **WebRTC bridge event subscriptions.** Generation-scoped holder registry in `src/botster/webrtcDaemonClient.ts` per the teardown answers above: fresh UUID per generation, `subscribe_events` after connect and Hello, `event_subscribed` expected within `requestTimeoutMs`, resubscribe with a fresh id after reconnect, best-effort bounded `unsubscribe_events` on release, registry counted by `hasReconnectDemand()`, release marks the holder closed so a late ack cannot resurrect it. `receiveHostEvent` routes `package_event` / `event_gap` to the matching current-generation holder; mismatches are discarded with a recorded reason. Event delivery never enters `enqueueTerminalDelivery` and never awaits consumers on the DataChannel message path.
 4. **Transport frame plane.** `DaemonBridgeClient.subscribePackageEvents?` (owner, name, subjects). Outbound `HubControlFrame` kinds `events_subscribe` / `events_release` held in `createHubTransport` like generic entity demand. Inbound frames: `package_event` `{owner, name, payload}` and `event_gap` `{owner, name}`.
-5. **Concrete consumer.** From the route-owned production connection: one `events_subscribe` for `project-pipelines` / `question.opened` / `subjects: []`. Deliveries pass the workflow-scope filter seam; a passing payload shows one transient notice through a dedicated `IonToast` (bounded `notice` text, fixed duration, no persistence, no navigation). `event_gap`: drop transient reactions, record a connection diagnostic, never touch entity state, never show an error UI.
+5. **Concrete consumer.** From the route-owned production connection: one `events_subscribe` for `project-pipelines` / `question.opened` / `subjects: []`. Deliveries pass the workflow-scope filter seam against the active workflow identity resolved from the viewed session (human decision above); a passing payload shows one transient notice through a dedicated `IonToast` (bounded `notice` text, fixed duration, no persistence, no navigation). Views without identity show no notice. `event_gap`: drop transient reactions, record a connection diagnostic, never touch entity state, never show an error UI.
 6. **Proof.** Unit coverage in `src/App.test.mjs`; live packaged lanes (`BOTSTER_LIVE_PACKAGE_EVENTS=1`, plus the forced-gap sub-lane) with the fixture producer under `fixtures/package-events/`; this plan document.
 
 ## Non-scope
@@ -156,9 +176,9 @@ No new cross-repository prerequisite. Live-proof requirement: the harness Hub mu
 ## Assumptions and unknowns
 
 1. **Owner string.** The subscription owner is the admitted package name `project-pipelines` (verified via `list_plugins` and the manifest). The ticket's "botster-project-pipelines" is the repository name.
-2. **Fixture producer derivation.** The live fixture package under `fixtures/package-events/` is named `project-pipelines`, derives its producer path from the checked-in Hub `examples/event-plane-producer` at `7a09292` (manifest `events.emitted` declaration plus a handler calling `events.emit(name, payload)` in the plugin worker VM), carries the `question.opened` contract verbatim from `beaba94`, persists a durable question entity record before emitting (commit-then-emit), and adds a surface-action trigger following the `fixtures/entity-options-reactive` precedent so the browser harness drives emission through the production action path. Both source commits are recorded in the fixture README header. The harness hub is isolated, so the name cannot collide with a real installation.
+2. **Fixture producer derivation.** The live fixture package under `fixtures/package-events/` is named `project-pipelines`, derives its producer path from the checked-in Hub `examples/event-plane-producer` at `7a09292` (manifest `events.emitted` declaration plus a handler calling `events.emit(name, payload)` in the plugin worker VM), carries the `question.opened` contract verbatim from `beaba94`, persists a durable question entity record before emitting (commit-then-emit), and adds a surface-action trigger following the `fixtures/entity-options-reactive` precedent so the browser harness drives emission through the production action path. For the identity join, the fixture also publishes `project-pipelines.run_step` and `project-pipelines.run` records binding the harness's viewed session uuid (`agent_session_uuid`) to a known `run_id` / `step_id` / `ticket_id`, mirroring the real plugin's record shape at `beaba94`. Both source commits are recorded in the fixture README header. The harness hub is isolated, so the name cannot collide with a real installation.
 3. **Required Hello feature.** `package_event_subscriptions` becomes a required host feature (precedent: `terminal_subscription_closed`; direct-merge lockstep family). New Web refuses pre-`7a09292` Hubs; the failure must read as a Hub-version incompatibility.
-4. **Workbench notice scope.** The production notice is unscoped (all workflows) because botster-web is an operator client; the filter seam still enforces the contract and is proven both ways. If Plan Review wants a narrower default scope, that is a product decision to state, not a structural change.
+4. **Notice scope is settled, not assumed.** Human answer `question_1787199815_341943` fixes the scope: active-view identity matching, no notice without identity. The remaining assumption is the join key: `project-pipelines.run_step.agent_session_uuid` equals the hub session uuid Web session views use; Implement verifies this against one live record and asks a human if it differs.
 5. **Notice placement.** The toast mounts beside the existing `WorkbenchNotifications` as a separate `IonToast`; exact placement is an Implement detail.
 
 ## Published budgets (rev 2)
@@ -180,7 +200,7 @@ The flood and gap lanes measure and fail each budget separately, and `docs/archi
 - `src/botster/webrtcDaemonClient.ts` — holder registry, `receiveHostEvent` routing, reconnect demand, bounded release, harness records.
 - `src/botster/hubTransport.ts` — `subscribePackageEvents?`, `events_subscribe` / `events_release`, `package_event` / `event_gap` projection.
 - `src/botster/protocol.ts` — new `HubControlFrameKind` members.
-- `src/app/useProductionHubConnection.ts` plus a small helper (for example `src/app/packageEventNotices.ts` with the filter seam) — subscription, filtering, notice state, gap diagnostic.
+- `src/app/useProductionHubConnection.ts` plus a small helper (for example `src/app/packageEventNotices.ts` with the filter seam and the active-workflow-identity selector joining the viewed session to `project-pipelines.run_step` / `project-pipelines.run` records) — subscription, identity resolution, filtering, notice state, gap diagnostic, held entity demand on session views.
 - `src/app/workbench.tsx` / `src/app/WorkbenchDialogs.tsx` (or `WorkbenchShell.tsx`) — notice toast mount.
 - `src/App.test.mjs` — unit coverage including the race and teardown matrix.
 - `scripts/live-packaged-protocol-harness.mjs` — `BOTSTER_LIVE_PACKAGE_EVENTS=1` lane plus the forced-gap sub-lane.
@@ -198,6 +218,7 @@ The flood and gap lanes measure and fail each budget separately, and `docs/archi
 6. **Ambient-hub sensitivity**; lanes spawn a pinned hub (mandatory for the gap env var) and fail loudly on a feature-less hub.
 7. **Gap mis-handling**; diagnostic-only path, unit plus forced-gap live coverage.
 8. **Fixture drift from the shipped producer path**; mitigated by deriving from the checked-in example and recording source commits.
+9. **Identity join risk.** The `agent_session_uuid` join key or the `project-pipelines.run_step` family shape could differ live; Implement verifies against one live record before relying on it and asks a human if it differs. Holding entity demand on session views adds one held generic subscription pair; it reuses the existing demand machinery and releases on unmount.
 
 ## Acceptance checks and tests
 
@@ -208,7 +229,7 @@ Repository gates:
 Unit coverage (`src/App.test.mjs`, fake transport/bridge):
 
 2. Connect issues exactly one `subscribe_events` per connection generation with the exact body `{type, subscription_id, owner: "project-pipelines", name: "question.opened", subjects: []}` — `subjects` present and empty; no sequence, cursor, replay, or history field.
-3. Filter seam positive/negative: scoped `run_id`, `ticket_id`, and `step_id` matches produce a notice; non-matching or missing ids produce none; unscoped scope passes valid payloads; invalid payloads (missing `question_id` / `notice`, wrongly typed ids) are rejected without a crash.
+3. Filter seam and identity positive/negative through the production path: with a viewed session whose `project-pipelines.run_step` / `project-pipelines.run` records resolve an identity, a payload matching `run_id`, `ticket_id`, or `step_id` produces a notice; non-matching ids, payloads without workflow ids, and views without identity (no session viewed, or no matching run_step record) produce none; identity clears on navigation, so a late event after route change produces nothing; invalid payloads (missing `question_id` / `notice`, wrongly typed ids) are rejected without a crash; session views hold and release the `project-pipelines.run_step` / `project-pipelines.run` entity demand.
 4. A matching `package_event` produces one transient notice; a different owner or name produces nothing.
 5. `event_gap` produces no notice and no entity mutation; durable entity records remain readable.
 6. Reset then reconnect issues a new `subscribe_events` with a different `subscription_id`; a `package_event` or ack carrying the old id is discarded.
@@ -219,7 +240,7 @@ Live packaged proof (real WebRTC, final independent Hub control and Core termina
 
 9. Hello with `package_event_subscriptions` accepted; explicit failure naming the Hub version when the feature is absent.
 10. The fixture commits a durable question entity, then emits; the browser shows exactly one transient notice, proven by the structured harness event ledger plus a DOM oracle.
-11. Scoped-filter live check: two events with different `run_id` values; a scoped consumer registered through the harness filter hook sees one; the unscoped workbench shows both.
+11. Identity live check through the production path: with the harness's shared session viewed and the fixture's `run_step` / `run` records binding that session, an event carrying the bound `run_id` shows the notice; an event with a different `run_id` shows none; after navigating to a view without identity (dashboard), a further event shows none while the durable question entity stays visible.
 12. Missed event: emit while the DataChannel is closed (harness `closeDataChannel`, one surviving document); after reconnect the durable entity is visible via `listEntities` / entity pull, no notice replays, and the fresh subscription receives a later live event.
 13. **Forced gap lane:** hub spawned with `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX` set low; burst emit; the lane requires at least one observed `event_gap` in the ledger (fails when none is observed), proves transient reactions stop for shed events, and proves the durable question entity remains visible.
 14. **Flood with named budgets:** ≥200-event burst; each published budget above is measured and failed separately — no terminal backlog overflow, a mid-flood control request inside 10,000 ms, entity convergence inside 15,000 ms, terminal echo inside 15,000 ms; notice count never exceeds emitted count.
