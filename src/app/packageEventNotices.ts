@@ -58,9 +58,35 @@ export function viewedSessionIdFromRoute(route: { view: string; sessionId?: stri
     : undefined;
 }
 
+const WORKFLOW_ID_KEYS = ["run_id", "ticket_id", "step_id"] as const;
+
+/**
+ * Accept a payload only when at least one present workflow ID matches identity
+ * and no present workflow ID conflicts with identity.
+ * Project Pipelines step IDs repeat across runs, so a matching step_id cannot
+ * override a conflicting run_id or ticket_id.
+ */
+export function payloadMatchesWorkflowIdentity(
+  payload: Record<string, unknown>,
+  identity: WorkflowIdentity
+): boolean {
+  let matched = false;
+  for (const key of WORKFLOW_ID_KEYS) {
+    const payloadId = optionalId(payload[key]);
+    const identityId = optionalId(identity[key]);
+    if (!payloadId || !identityId) continue;
+    if (payloadId === identityId) {
+      matched = true;
+    } else {
+      return false;
+    }
+  }
+  return matched;
+}
+
 /**
  * Return the transient notice text when the payload is valid and matches active workflow identity.
- * No identity, invalid payloads, and non-matching ids produce no notice.
+ * No identity, invalid payloads, conflicting ids, and non-matching ids produce no notice.
  */
 export function questionOpenedNoticeFromEvent(
   payload: unknown,
@@ -70,15 +96,11 @@ export function questionOpenedNoticeFromEvent(
   if (typeof payload.question_id !== "string" || payload.question_id.length === 0) return undefined;
   if (payload.kind !== "human" && payload.kind !== "agent") return undefined;
   if (typeof payload.notice !== "string" || payload.notice.length === 0) return undefined;
-  for (const key of ["run_id", "ticket_id", "step_id"] as const) {
+  for (const key of WORKFLOW_ID_KEYS) {
     if (payload[key] !== undefined && typeof payload[key] !== "string") return undefined;
   }
   if (!identity) return undefined;
-  const matches =
-    (typeof payload.run_id === "string" && payload.run_id === identity.run_id) ||
-    (typeof payload.ticket_id === "string" && payload.ticket_id === identity.ticket_id) ||
-    (typeof payload.step_id === "string" && payload.step_id === identity.step_id);
-  return matches ? payload.notice : undefined;
+  return payloadMatchesWorkflowIdentity(payload, identity) ? payload.notice : undefined;
 }
 
 export function packageEventSubscriptionKey(spec: PackageEventSubscribeSpec): string {

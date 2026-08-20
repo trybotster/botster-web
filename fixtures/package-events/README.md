@@ -18,7 +18,8 @@ transient `question.opened` consumption.
 
 The matching `project-pipelines.run_step` record binds `agent_session_uuid` to
 the harness production session `web-prod`. The mismatch emit uses a different
-`run_id` so the production filter seam can reject it.
+`run_id` and `ticket_id` with the same `step_id`. The production filter must
+reject that conflict because step IDs repeat across runs.
 
 Durable question rows live on `project-pipelines.question` and are committed
 before `events.emit`.

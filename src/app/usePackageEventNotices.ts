@@ -26,6 +26,11 @@ export function usePackageEventNotices(options: {
 } {
   const { runtimeClient, viewedSessionId } = options;
   const [toast, setToast] = useState<{ message: string } | undefined>();
+  const [toastSessionId, setToastSessionId] = useState(viewedSessionId);
+  if (viewedSessionId !== toastSessionId) {
+    setToastSessionId(viewedSessionId);
+    setToast(undefined);
+  }
 
   useEffect(() => {
     const spec = questionOpenedSubscribePayload;
@@ -51,6 +56,12 @@ export function usePackageEventNotices(options: {
       const notice = questionOpenedNoticeFromEvent(payload.payload, identity);
       if (notice) {
         setToast({ message: notice });
+        if (typeof window !== "undefined") {
+          const harness = (window as typeof window & {
+            __BOTSTER_LIVE_PROTOCOL_HARNESS__?: { events?: Array<{ kind: string; payload: unknown }> };
+          }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+          harness?.events?.push({ kind: "package_event_notice", payload: { message: notice } });
+        }
       }
     });
 

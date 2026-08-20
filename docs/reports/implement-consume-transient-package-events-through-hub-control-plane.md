@@ -2,9 +2,19 @@
 
 Ticket: `ticket_1786663584_427840`
 Run: `run_1787197984_591095`
-Step: `botster_stack_implement` / `run_step_1787237635_112668`
+Step: `botster_stack_implement` / `run_step_1787241118_671269`
 Plan: `docs/plans/consume-transient-package-events-through-hub-control-plane.md` revision 5 (`025fce5`)
 Plan Review: `review_1787237618_639262` approved
+
+## Review return
+
+Review `review_1787241103_136225` sent Implement back after `3ee129d`. Three high findings:
+
+| Finding | Response |
+| --- | --- |
+| `finding_1787241103_465225` Conflicting workflow IDs can show a notice for the wrong run | The filter requires at least one matching ID and rejects any present ID that conflicts with active identity. Unit cases cover matching `step_id` with a conflicting `run_id` or `ticket_id`. The live mismatch oracle reads `textContent` and the Ionic `message` attribute. |
+| `finding_1787241103_606151` The transient notice survives navigation to a view with no workflow identity | `usePackageEventNotices` clears toast state when `viewedSessionId` changes or becomes undefined. The live lane opens a matching notice, navigates to the dashboard, and requires the toast to close before the next event. |
+| `finding_1787241103_911808` The flood lane does not prove post-flood entity reconciliation | The flood lane snapshots question IDs, emits 200 events, then release/redemands `project-pipelines.question` through the production demand path and waits for a new ID inside 15,000 ms. It counts received `package_event` frames and `package_event_notice` records and fails when either exceeds emitted count. |
 
 ## Target repository and target_id
 
@@ -132,11 +142,11 @@ node scripts/live-packaged-protocol-harness.mjs
 
 Results:
 
-- `npm test` passed (`check-daemon-protocol-drift.mjs` plus `src/App.test.mjs`).
+- `npm test` passed (`check-daemon-protocol-drift.mjs` plus `src/App.test.mjs`), including the conflicting-ID unit matrix.
 - Typecheck passed.
 - Lint passed with five pre-existing `react-refresh/only-export-components` warnings and zero new errors.
 - Production build passed. Vite reports the existing large-chunk warning.
-- Main live lane (prior visit, Hub `7a09292`) printed `package-events live proof passed (webrtc)` and measured flood budgets (`control_ms` 18, `flood_ms` 3823).
+- Main live lane (Hub `7a09292`) printed `package-events live proof passed (webrtc)` and flood budgets `control_ms` 15, `entity_ms` 11, `flood_ms` 3694, `emitted` 200, `received_events` 6, `received_notices` 6.
 - Forced-gap live lane printed `[package-events] gap lane: hub BOTSTER_ENV=test BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX=1` and `package-events forced-gap live proof passed (webrtc)`.
 
 Production entry point: `usePackageEventNotices` in `App.tsx` issues the subscription on the route-owned production connection from `useProductionHubConnection`. The live harness does not open a second control-plane connection.

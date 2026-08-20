@@ -5211,6 +5211,41 @@ try {
   };
   assert.equal(questionOpenedNoticeFromEvent(validPayload, matchingIdentity), "Need a decision");
   assert.equal(questionOpenedNoticeFromEvent({ ...validPayload, run_id: "other" }, matchingIdentity), undefined);
+  assert.equal(
+    questionOpenedNoticeFromEvent(
+      { ...validPayload, run_id: "other", ticket_id: "ticket-1", step_id: "implement" },
+      matchingIdentity
+    ),
+    undefined
+  );
+  assert.equal(
+    questionOpenedNoticeFromEvent(
+      { ...validPayload, run_id: "run-1", ticket_id: "other-ticket", step_id: "implement" },
+      matchingIdentity
+    ),
+    undefined
+  );
+  assert.equal(
+    questionOpenedNoticeFromEvent(
+      { ...validPayload, run_id: "other", ticket_id: "ticket-1" },
+      matchingIdentity
+    ),
+    undefined
+  );
+  assert.equal(
+    questionOpenedNoticeFromEvent(
+      { question_id: "q1", kind: "human", notice: "Need a decision", step_id: "implement" },
+      matchingIdentity
+    ),
+    "Need a decision"
+  );
+  assert.equal(
+    questionOpenedNoticeFromEvent(
+      { ...validPayload, run_id: "run-1", ticket_id: "ticket-1", step_id: "implement" },
+      matchingIdentity
+    ),
+    "Need a decision"
+  );
   assert.equal(questionOpenedNoticeFromEvent(validPayload, undefined), undefined);
   assert.equal(questionOpenedNoticeFromEvent({ question_id: "q1", kind: "human" }, matchingIdentity), undefined);
   assert.equal(questionOpenedNoticeFromEvent({ ...validPayload, run_id: 12 }, matchingIdentity), undefined);

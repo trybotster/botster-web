@@ -1527,6 +1527,23 @@ async function waitForPluginSurfaceRequest(page, { packageName, surfaceId, actio
   );
 }
 
+function packageEventNoticeSnapshotFromDocument() {
+  const toast = globalThis.document.querySelector("[data-testid='package-event-notice']");
+  if (!toast) return { open: false, text: "" };
+  const attr = toast.getAttribute("is-open");
+  const open = attr !== "false" && (
+    attr === "true" ||
+    toast.isOpen === true ||
+    toast.hasAttribute("is-open")
+  );
+  const text = `${toast.textContent ?? ""} ${toast.getAttribute("message") ?? ""}`;
+  return { open, text };
+}
+
+async function readPackageEventNotice(page) {
+  return page.evaluate(packageEventNoticeSnapshotFromDocument);
+}
+
 async function emitPackageEventFixtureAction(page, actionId, payload) {
   await page.waitForFunction(() =>
     typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchPluginSurfaceAction === "function"
@@ -1616,31 +1633,36 @@ async function exercisePackageEvents(page, { forceGap }) {
     "package-events matching package_event"
   );
   await page.waitForFunction(() => {
-    const toasts = [...globalThis.document.querySelectorAll("ion-toast, [data-testid='package-event-notice']")];
-    return toasts.some((toast) => {
-      const open = toast.getAttribute("is-open") === "true" || toast.hasAttribute("is-open");
-      const text = `${toast.textContent ?? ""} ${toast.getAttribute("message") ?? ""}`;
-      return open && text.includes("Matching workflow question");
-    });
+    const toast = globalThis.document.querySelector("[data-testid='package-event-notice']");
+    if (!toast) return false;
+    const attr = toast.getAttribute("is-open");
+    const open = attr !== "false" && (attr === "true" || toast.isOpen === true || toast.hasAttribute("is-open"));
+    const text = `${toast.textContent ?? ""} ${toast.getAttribute("message") ?? ""}`;
+    return open && text.includes("Matching workflow question");
   }, undefined, { timeout: 15_000 }).catch((error) => {
     throw new Error(`matching question.opened never showed a transient notice: ${error.message}`);
   });
 
   await emitPackageEventFixtureAction(page,"package-events.emit_mismatch");
   await page.waitForTimeout(500);
-  const mismatchNotices = await page.evaluate(() => {
-    const toast = globalThis.document.querySelector("[data-testid='package-event-notice']");
-    return toast?.textContent ?? "";
-  });
-  if (mismatchNotices.includes("Mismatching workflow question")) {
+  const mismatchNotice = await readPackageEventNotice(page);
+  if (mismatchNotice.text.includes("Mismatching workflow question")) {
     throw new Error("mismatching question.opened showed a transient notice");
   }
 
   await openHomeView(page);
-  const dashboardToastBefore = await page.evaluate(() => {
+  await page.waitForFunction(() => {
     const toast = globalThis.document.querySelector("[data-testid='package-event-notice']");
-    return toast?.getAttribute("is-open") === "true";
+    if (!toast) return true;
+    const attr = toast.getAttribute("is-open");
+    return attr === "false" || (!toast.hasAttribute("is-open") && toast.isOpen !== true);
+  }, undefined, { timeout: 5_000 }).catch(() => {
+    throw new Error("package-event notice stayed open after leaving the session view");
   });
+  const dashboardToastBefore = await readPackageEventNotice(page);
+  if (dashboardToastBefore.open) {
+    throw new Error("package-event notice stayed open after leaving the session view");
+  }
   const dashboardEventsBefore = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
       (entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event"
@@ -1660,14 +1682,8 @@ async function exercisePackageEvents(page, { forceGap }) {
   if (dashboardEventsAfter <= dashboardEventsBefore) {
     throw new Error("dashboard view did not receive the live package_event");
   }
-  const dashboardToastAfter = await page.evaluate(() => {
-    const toast = globalThis.document.querySelector("[data-testid='package-event-notice']");
-    return {
-      open: toast?.getAttribute("is-open") === "true",
-      text: toast?.textContent ?? ""
-    };
-  });
-  if (!dashboardToastBefore && dashboardToastAfter.open && dashboardToastAfter.text.includes("Matching workflow question")) {
+  const dashboardToastAfter = await readPackageEventNotice(page);
+  if (dashboardToastAfter.open && dashboardToastAfter.text.includes("Matching workflow question")) {
     throw new Error("dashboard view showed a transient notice without workflow identity");
   }
   await page.evaluate(async () => {
@@ -1782,9 +1798,24 @@ async function exercisePackageEvents(page, { forceGap }) {
   );
 
   const floodStarted = Date.now();
+  const floodCount = 200;
+  const preFloodQuestionIds = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? [])
+      .map((record) => record.id)
+  );
+  const packageEventsBeforeFlood = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+      (entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event"
+    ).length
+  );
+  const noticesBeforeFlood = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+      (entry) => entry.kind === "package_event_notice"
+    ).length
+  );
   const controlStarted = Date.now();
   const controlPromise = sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), { type: "status" });
-  await emitPackageEventFixtureAction(page,"package-events.emit_burst", { count: 200 });
+  await emitPackageEventFixtureAction(page,"package-events.emit_burst", { count: floodCount });
   const controlReply = await controlPromise;
   const controlMs = Date.now() - controlStarted;
   if (controlMs > 10_000) {
@@ -1793,13 +1824,41 @@ async function exercisePackageEvents(page, { forceGap }) {
   if (controlReply.error) {
     throw new Error(`mid-flood control request failed: ${JSON.stringify(controlReply.error)}`);
   }
-  await page.waitForFunction(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? []).length > 0,
-    undefined,
-    { timeout: 15_000 }
-  ).catch((error) => {
+  const entityStarted = Date.now();
+  await page.evaluate(async () => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    await harness.releaseEntityFamily?.("project-pipelines.question");
+    await harness.demandEntityFamily?.("project-pipelines.question");
+  });
+  await page.waitForFunction((priorIds) => {
+    const ids = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? [])
+      .map((record) => record.id);
+    return ids.some((id) => !priorIds.includes(id));
+  }, preFloodQuestionIds, { timeout: 15_000 }).catch((error) => {
     throw new Error(`entity reconciliation exceeded 15000ms during flood: ${error.message}`);
   });
+  const entityMs = Date.now() - entityStarted;
+  if (entityMs > 15_000) {
+    throw new Error(`entity reconciliation exceeded 15000ms during flood: ${entityMs}`);
+  }
+  const packageEventsAfterFlood = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+      (entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event"
+    ).length
+  );
+  const noticesAfterFlood = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+      (entry) => entry.kind === "package_event_notice"
+    ).length
+  );
+  const receivedEvents = packageEventsAfterFlood - packageEventsBeforeFlood;
+  const receivedNotices = noticesAfterFlood - noticesBeforeFlood;
+  if (receivedEvents > floodCount) {
+    throw new Error(`received package_event count ${receivedEvents} exceeded emitted ${floodCount}`);
+  }
+  if (receivedNotices > floodCount) {
+    throw new Error(`received notice count ${receivedNotices} exceeded emitted ${floodCount}`);
+  }
   const echoProbe = "package-events-flood";
   await typeThroughMountedTerminal(page, `${echoProbe}\n`);
   await waitForTerminalOutput(page, `botster-web-production-echo:${echoProbe}`).catch((error) => {
@@ -1827,7 +1886,15 @@ async function exercisePackageEvents(page, { forceGap }) {
   if (eventKinds.terminal_from_event > 0) {
     throw new Error("package events entered the terminal adapter path");
   }
-  console.log(`package-events flood budgets ${JSON.stringify({ control_ms: controlMs, flood_ms: floodMs, subscription_id: subscriptionId })}`);
+  console.log(`package-events flood budgets ${JSON.stringify({
+    control_ms: controlMs,
+    entity_ms: entityMs,
+    flood_ms: floodMs,
+    emitted: floodCount,
+    received_events: receivedEvents,
+    received_notices: receivedNotices,
+    subscription_id: subscriptionId
+  })}`);
 }
 
 async function exerciseEntityOptionsReactive(page) {
