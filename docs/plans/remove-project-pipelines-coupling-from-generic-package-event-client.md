@@ -1,6 +1,18 @@
 # Web: remove Project Pipelines coupling from the generic package-event client
 
-Revision 1.
+Revision 2. Revision 1 received `changes_required` from `review_1787349940_998291` with two blockers, one high, two medium, and one process finding. Revision 2 answers all six against the merged upstream artifacts.
+
+## Plan Review response (rev 1 -> rev 2)
+
+| Finding | Severity | Response |
+| --- | --- | --- |
+| `finding_1787349940_182802` the plan does not wire package notice descriptors into the production hook | blocker | Fixed. Rev 1 excluded `src/botster/hubTransport.ts` and therefore left the hook with no descriptor source. Rev 2 adds the smallest generic adapter change: `packageRecord()` preserves `notice_reactions` on the `botster-web.package` row, and `src/App.tsx` passes those reactive rows into the hook. See "Production wiring (rev 2)". |
+| `finding_1787349940_689889` merged Hub source is not a consumable Web dependency | blocker | Fixed. Independently confirmed on 2026-08-21 that npm ends at `@trybotster/ui-contract@0.3.2` and `@trybotster/hub-test-support@0.1.39`, while the merge carries 0.3.3 and 0.1.40. Registered `ticket_1787351279_697528` on the Hub target for npm publication, and dependency edge `dependency_1787351283_317598`. The existing `ticket_1787349524_364728` covers only the Rust Git tag and does not make an npm coordinate installable. |
+| `finding_1787349940_748237` the plan duplicates the canonical notice text resolver | high | Fixed. The Web-owned `noticeTextFromEvent` parser is removed from the plan. Web calls `resolveNoticeText` from `@trybotster/ui-contract` and handles its typed error codes. See "Notice text resolution (rev 2)". |
+| `finding_1787349940_216135` the affected-file list cites an absent path | medium | Fixed. `src/app/dialogs/WorkbenchDialogs.tsx` does not exist. Every reference now reads `src/app/WorkbenchDialogs.tsx`, verified against the routed tree. `src/app/dialogs/WorkbenchNotifications.tsx` was checked and is correct. |
+| `finding_1787349940_889046` acceptance gate G3 cannot pass and scans unrelated contracts | medium | Fixed. G3 is now a scoped scan of the three production reaction modules with an explicit exclusion rationale for generated DTOs, tests, fixtures, and unrelated package-management code. |
+| `finding_1787349940_213858` final Plan completion evidence omitted artifact_id | info | Fixed procedurally. The rev-2 gate submission and advance request both carry `plan_uri`, `artifact_id`, `checklist_id`, `target_id`, and `target_repository`. |
+
 
 ## Target repository and target
 
@@ -42,7 +54,7 @@ Not loaded: [[botster runtime teardown lenses]]. See "Runtime-teardown class" be
 ## Context loaded
 
 - Merged base commits `3ee129d` (Web consumption of transient Hub package events) and `71b461c` (conflicting workflow IDs, notice clearing).
-- `src/app/packageEventNotices.ts`, `src/app/usePackageEventNotices.ts`, `src/App.tsx`, `src/app/dialogs/WorkbenchDialogs.tsx`, `src/app/dialogs/WorkbenchNotifications.tsx`.
+- `src/app/packageEventNotices.ts`, `src/app/usePackageEventNotices.ts`, `src/App.tsx`, `src/app/WorkbenchDialogs.tsx`, `src/app/dialogs/WorkbenchNotifications.tsx`.
 - `src/botster/hubTransport.ts`, `src/botster/webrtcDaemonClient.ts`, `src/botster/protocolPlanes.ts`, `src/botster/protocol.ts`, `src/botster/connectionDiagnostics.ts`.
 - `src/botster/generated/daemon-protocol.ts` (`DaemonPackage`, `DaemonEvent`, `subscribe_events`, `package_event`, `event_gap`).
 - Installed `@trybotster/ui-contract@0.3.2` and `@trybotster/hub-test-support@0.1.39` public surfaces.
@@ -94,7 +106,7 @@ These hold under every branch below.
 
 ## Non-scope
 
-- No change to `src/botster/hubTransport.ts` or `src/botster/webrtcDaemonClient.ts` subscription mechanics beyond passing a declared spec.
+- No change to `src/botster/webrtcDaemonClient.ts` subscription mechanics beyond passing a declared spec. Rev 2 adds exactly one generic passthrough field in `src/botster/hubTransport.ts`; see "Production wiring (rev 2)".
 - No new Web-local package registry and no second event protocol.
 - No change to the entity plane, terminal planes, or any unrelated route.
 - No new Hub protocol authored inside `botster-web`.
@@ -156,7 +168,7 @@ This Web ticket therefore parks after Plan. It cannot start Implement until both
 - Authoring the descriptor shape. That is `ticket_1787278643_145174`.
 - Declaring or emitting `question.opened`. That is `ticket_1787278658_151737`.
 - Any TUI change.
-- Any change to transport subscription mechanics beyond passing the declared spec.
+- Any change to transport subscription mechanics beyond passing the declared spec and the one `notice_reactions` passthrough named in rev 2.
 
 ## Convention conflict recorded
 
@@ -195,7 +207,7 @@ Production:
 - `src/app/packageEventNotices.ts` — rewritten generic; all product constants removed.
 - `src/app/usePackageEventNotices.ts` — rewritten descriptor-driven; product entity demand removed.
 - `src/App.tsx` — composition only; product imports removed.
-- `src/app/dialogs/WorkbenchNotifications.tsx` and `src/app/dialogs/WorkbenchDialogs.tsx` — declared TTL and severity replace the fixed 5000 ms default.
+- `src/app/dialogs/WorkbenchNotifications.tsx` and `src/app/WorkbenchDialogs.tsx` — declared TTL and severity replace the fixed 5000 ms default.
 - `src/botster/generated/daemon-protocol.ts` — regenerated for the descriptor projection.
 
 Tests, fixtures, and documents:
@@ -228,7 +240,14 @@ Gate for the parked state, verifiable now:
 
 Gates for Implement, after both dependencies close:
 
-- G3. `grep -rn "project-pipelines\|question\.opened\|question_id\|run_step\|ticket_id" src/` returns no match in production source. Matches are allowed only in optional conformance fixtures and their tests.
+- G3. Forbidden-constant scan, scoped to the three production reaction modules only — `src/app/packageEventNotices.ts`, `src/app/usePackageEventNotices.ts`, and `src/App.tsx`:
+
+  ```
+  grep -nE '"project-pipelines|question\.opened|question_id|project-pipelines\.(run_step|run|question)' \
+    src/app/packageEventNotices.ts src/app/usePackageEventNotices.ts src/App.tsx
+  ```
+
+  The command must return no match. The scan deliberately excludes `src/botster/generated/daemon-protocol.ts`, every test, every fixture, and unrelated generic package-management code. The generated DTO legitimately contains `ticket_id`, and unrelated tests and fixtures legitimately carry Project Pipelines package rows, so a repository-wide scan for bare `ticket_id` or `run_step` cannot pass and does not measure this ticket's intent.
 - G4. `npm run typecheck` passes.
 - G5. `npm run lint` passes.
 - G6. `npm test` passes, including `scripts/check-daemon-protocol-drift.mjs`.
@@ -253,3 +272,132 @@ Direct merge into `main`. No pull request.
 - V3. Supersede [[question opened clients subscribe with empty subjects]] once `ticket_1787278658_151737` merges.
 - V4. Update the [[botster-web-playbook]] required gate that tells Web to keep subject filters empty and to filter workflow identity in the client.
 - V5. A new note: a generic client mechanism that ships with no composed production reaction is unwired implementation, and the human rejected that trade in this run.
+
+---
+
+# Revision 2
+
+Revision 2 supersedes the rev-1 sections "Scope of this Web ticket, after both dependencies merge", "Assumptions and unknowns", and the G3 entry. Every other rev-1 section stands.
+
+## Verified merged upstream contract
+
+Rev 1 stated assumptions A1 to A4 because the contract did not exist yet. Both dependency tickets have merged, so these are now verified facts read from the merged sources, not assumptions.
+
+Hub merge `12e0cc6` ("Merge ticket: Hub package-owned client notice reaction descriptor"), in `trybotster/botster-hub`:
+
+- `DaemonPackage` gains `notice_reactions?: PackageNoticeReactionDescriptor[]`, verified at `packages/hub-test-support/daemon-protocol.ts:609`.
+- `PackageNoticeReactionDescriptor` is `{ owner: string; name: string; subject_scope: PackageNoticeSubjectScope; text_pointer: string; ttl_ms: number; severity: PackageNoticeSeverity }`.
+- `PackageNoticeSubjectScope` is the single value `"session"`.
+- `PackageNoticeSeverity` is `"info" | "warning" | "error"`.
+- `@trybotster/ui-contract` exports `resolveNoticeText(payload, pointer)` and `NOTICE_TEXT_MAX_BYTES = 512`.
+- `resolveNoticeText` accepts one top-level RFC 6901 pointer, measures the decoded string as UTF-8 bytes, and does not trim or truncate. It throws typed errors with `code` values `missing`, `not_string`, `empty`, and `oversized`. The `oversized` error also carries `bytes`.
+- `docs/client-protocol.md` states that `notice_reactions` is additive and optional, that empty vectors are omitted on the wire, that each projected descriptor always carries a required `owner` equal to the admitted package name, and that protocol version stays 7.
+- Published metadata: `@trybotster/hub-test-support` 0.1.40, `@trybotster/ui-contract` 0.3.3, protocol_version 7, conformance_fixture_revision 45.
+- The generated protocol delta is two insertions and one deletion: the new field and its import. `subscribe_events`, `package_event`, and `event_gap` are untouched.
+
+Project Pipelines merge, in `trybotster/botster-project-pipelines`:
+
+- `botster-package.json` declares `notices: [{ name: "question.opened", subject_scope: "session", text_pointer: "/notice", ttl_ms: 10000, severity: "warning" }]`. It omits `owner`, so Hub projects the admitted name `project-pipelines`.
+- The `question.opened` payload schema gains an optional `subject` string of at most 128 bytes.
+- `plugin.lua:1980` reads `run_step.agent_session_uuid` and `plugin.lua:1981` sets `payload.subject` only when that value is a nonempty string.
+
+Rev-1 assumption outcomes:
+
+| Rev-1 item | Outcome |
+| --- | --- |
+| A1 descriptor reaches Web only through `DaemonPackage` | Confirmed. `notice_reactions` on the package row is the only client-visible source. |
+| A2 the session subject is the agent session uuid Web knows from its route | Confirmed. Project Pipelines emits `payload.subject` as `run_step.agent_session_uuid`. Web needs no entity read. |
+| A3 `subscribe_events` keeps its current `subjects` array shape | Confirmed. The frame is unchanged. |
+| A4 `event_gap` and queue-limit behaviour unchanged | Confirmed. Protocol version stays 7 and neither frame changed. |
+| U1 descriptor field names and pointer grammar | Resolved. Fields listed above; one top-level RFC 6901 pointer. |
+| U2 more than one reaction per package | Resolved. `notice_reactions` is a vector, so Web iterates. |
+| U3 severity mapping | Resolved. Three values map onto Ionic toast colours: `info` to `medium`, `warning` to `warning`, `error` to `danger`, per [[botster web uses vanilla ionic primitives by default]]. |
+| U4 subject matching is exact or prefix | Resolved as **exact**, per [[Package-event subject filters are exact strings compiled at admission]]. Hub compares `payload.subject` against an exact-match set compiled at admission. |
+
+## Additional notes loaded in rev 2
+
+- [[generic botster clients must not hardcode package event reactions]] — names this exact violation at Web commit `71b461c` and states that renaming or relocating the constants does not fix it.
+- [[client notice reactions belong to package declarations not client constants]] — the canonical contract. It also states that the binary composition root must stay generic, which independently rules out the rev-1 option B.
+- [[question opened notices target the agent session subject]] — the Project Pipelines application, including the declared `ttl_ms: 10000` and `severity: "warning"`.
+- [[Package-event subject filters are exact strings compiled at admission]] — exact matching plus the admission ceilings: 16 subject values per subscription, 256 UTF-8 bytes per value, 4,096 aggregate bytes per subscription, and 64 active subscriptions per host-control connection.
+
+## Production wiring (rev 2)
+
+This section answers `finding_1787349940_182802`. Rev 1 left the descriptor with no path from the wire to the hook.
+
+Current path, measured: `hubTransport.ts` translates every `DaemonPackage` through `packageRecord()` at `src/botster/hubTransport.ts:845`. That function builds an explicit allow-list object and drops any field it does not name, so `notice_reactions` disappears. `src/App.tsx:213` reads the resulting rows with `runtimeClient.entities.list("botster-web.package")`.
+
+Rev-2 wiring, smallest change that closes the gap:
+
+1. `packageRecord()` adds one field to its returned record: `notice_reactions: packageRecord.notice_reactions ?? []`. This is a generic adapter passthrough. It names no package and no event.
+2. `src/App.tsx` passes the existing `packages` rows into `usePackageEventNotices({ runtimeClient, viewedSessionId, packages })`. `App.tsx` already holds those rows at line 213, so no new subscription is added.
+3. `usePackageEventNotices` derives its subscription set from `packages.flatMap((row) => row.notice_reactions)`. The hook holds no constant.
+
+The production entry point therefore uses the new behaviour: a real `list_packages` response carrying `notice_reactions` produces a real subscription and a real toast. `src/botster/hubTransport.ts` moves from the rev-1 non-scope list into scope for exactly this one passthrough field.
+
+Reactivity requirements, all provable at the encoded boundary:
+
+- A package row that arrives after the first render adds its subscription without a remount.
+- A package row whose `notice_reactions` becomes empty releases its subscription.
+- A package removal releases its subscription.
+- Reconnect re-subscribes once per descriptor per connection generation.
+- Exactly one active subscription per descriptor at any time.
+
+## Notice text resolution (rev 2)
+
+This section answers `finding_1787349940_748237`. Web authors no pointer parser and no byte-limit check.
+
+- Web calls `resolveNoticeText(payload, descriptor.text_pointer)` from `@trybotster/ui-contract`.
+- Web catches the typed error and suppresses the notice for every `code`: `missing`, `not_string`, `empty`, and `oversized`.
+- Each suppression emits one bounded connection diagnostic. Suppression never creates, removes, or changes entity state.
+- Web does not trim, truncate, or re-measure the string. The canonical helper owns that behaviour, including RFC 6901 escape handling and the 512-byte UTF-8 limit.
+- Web asserts the shared conformance vectors from `@trybotster/ui-contract/conformance-fixtures` rather than hand-authored equivalents.
+
+## Subscription construction (rev 2)
+
+- Owner and name come from the descriptor, never from Web.
+- `subject_scope: "session"` means the subject set is `[viewedSessionId]` when a session is viewed.
+- With no viewed session, Web sends no subscription for that descriptor. It does not fall back to an empty subject set, because an empty set accepts every live event and would restore the unscoped notice the human rejected in `question_1787278509_823001`.
+- Web sends at most one subject value, well inside the admission ceilings of 16 values, 256 bytes per value, and 4,096 aggregate bytes.
+- A question with no session binding does not reach a session-scoped subscriber. That is the intended contract, not a defect.
+
+## TTL and severity (rev 2)
+
+- The toast duration is `descriptor.ttl_ms`, clamped to a bounded range. Project Pipelines declares 10000, which replaces the current hardcoded 5000 in `src/app/dialogs/WorkbenchNotifications.tsx`.
+- `severity` maps to the Ionic toast colour as listed in U3.
+- The notice still clears when the viewed session changes.
+
+## Dependencies after rev 2
+
+| Ticket | Target | Repository | Status |
+| --- | --- | --- | --- |
+| `ticket_1787278643_145174` | `tgt_7e208a0c76a44980a83b63af976b1f22` | `botster-hub` | closed |
+| `ticket_1787278658_151737` | `tgt_a72ca1a83d504385b8648f71409119ab` | `botster-project-pipelines` | closed |
+| `ticket_1787351279_697528` | `tgt_7e208a0c76a44980a83b63af976b1f22` | `botster-hub` | open — npm publication of 0.3.3 and 0.1.40 |
+
+Edge `dependency_1787351283_317598` registers the third ticket. Web stays parked until it closes, because the merged Hub source is not installable from the registry today.
+
+Related but not a Web dependency: `ticket_1787349524_364728` publishes the `botster-ui-contract-v0.3.3` Git tag for Rust consumers. Web consumes npm, not Cargo, so that ticket does not gate this one.
+
+## Acceptance checks added in rev 2
+
+These are additional to G1 through G17, and G3 is replaced as shown above.
+
+- G18. A clean registry install pins `@trybotster/ui-contract@0.3.3` and `@trybotster/hub-test-support@0.1.40`. `package.json` and `package-lock.json` record both. The install is verified from the registry, not from a workspace link.
+- G19. Token checks on the installed artifacts: `notice_reactions` present in the installed `daemon-protocol.ts`, `resolveNoticeText` and `NOTICE_TEXT_MAX_BYTES` exported by the installed `ui-contract`, installed metadata reporting package_version 0.1.40 and conformance_fixture_revision 45.
+- G20. Encoded `list_packages` proof for descriptor reactivity: late package arrival subscribes, descriptor removal releases, package removal releases, reconnect re-subscribes once, and exactly one active subscription per descriptor throughout.
+- G21. `resolveNoticeText` conformance: the shared vectors pass, and each typed error code suppresses the notice and emits exactly one bounded diagnostic. Include the 512-byte UTF-8 boundary, the no-trim case, and the no-truncate case.
+- G22. TTL and severity render from the descriptor. A declared 10000 ms produces a 10000 ms toast, and each severity maps to its Ionic colour.
+- G23. No-viewed-session proof: Web sends no subscription for a session-scoped descriptor when no session is viewed, and never substitutes an empty subject set.
+- G24. Production wiring proof: with `notice_reactions` stripped from the encoded `list_packages` response, no subscription is sent and no toast appears. With it present, both happen. This proves the production path reads the descriptor rather than any residual constant.
+
+## Vault gaps, revised in rev 2
+
+Rev-1 gaps V1, V2, and V3 are now captured upstream in [[client notice reactions belong to package declarations not client constants]], [[question opened notices target the agent session subject]], and [[generic botster clients must not hardcode package event reactions]]. They no longer need new notes.
+
+Remaining gaps:
+
+- V4. Update the [[botster-web-playbook]] required gate that still tells Web to keep question subject filters empty and to filter workflow identity in the client. That gate now contradicts the merged contract.
+- V5. A generic client mechanism shipped with no composed production reaction is unwired implementation. The human rejected that trade in `question_1787278509_823001`, and Plan Review independently blocked the rev-1 plan for the same class of gap at the adapter layer.
+- V6 (new). A merged monorepo version bump is not a consumable client dependency. Node clients need the npm coordinate published, and a Rust Git tag does not supply it. This cost one blocker finding in this run.
+- V7 (new). An adapter that builds an explicit allow-list record silently drops new protocol fields. Any additive DTO field needs a matching adapter passthrough before a consumer can see it.
