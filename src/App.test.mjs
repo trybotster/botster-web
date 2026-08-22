@@ -1003,6 +1003,8 @@ const appFeatureSources = await Promise.all([
   readFile(new URL("./app/terminalChrome.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/useAppNavigation.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/useHubActions.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/packageEventNotices.ts", import.meta.url), "utf8"),
+  readFile(new URL("./app/usePackageEventNotices.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/usePackageInstall.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/pluginRouteState.ts", import.meta.url), "utf8"),
   readFile(new URL("./app/usePluginRouteState.ts", import.meta.url), "utf8"),
@@ -1811,8 +1813,10 @@ assert.match(generatedDaemonProtocol, /type: "package_event"/);
 assert.match(generatedDaemonProtocol, /type: "event_gap"/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "package_entrypoint_status"; package_name: string; entrypoint_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue \}/);
-assert.match(generatedDaemonProtocol, /import type \{ PackageSurfaceDescriptor, UiActionRequest, UiActionResult, UiNode \} from "@trybotster\/ui-contract"/);
+assert.match(generatedDaemonProtocol, /import type \{ PackageNoticeReactionDescriptor, PackageSurfaceDescriptor, UiActionRequest, UiActionResult, UiNode \} from "@trybotster\/ui-contract"/);
+assert.match(generatedDaemonProtocol, /notice_reactions\?: PackageNoticeReactionDescriptor\[\]/);
 assert.doesNotMatch(generatedDaemonProtocol, /DaemonPackageSurfaceDescriptor/);
+assert.match(hubTransport, /notice_reactions: packageRecord\.notice_reactions \?\? \[\]/);
 assert.match(
   hubTransport,
   /import type \{\s*PackageSurfaceDescriptor,\s*PackageSurfaceKind,\s*PackageSurfaceOperation\s*\} from "@trybotster\/ui-contract"/
@@ -2392,8 +2396,13 @@ assert.match(webrtcDaemonClient, /packageEventHolders/);
 assert.match(webrtcDaemonClient, /type: "subscribe_events"/);
 assert.match(protocolPlanes, /package_event_subscriptions/);
 assert.match(architecture, /Published Web event-plane budgets/);
+assert.match(architecture, /notice_reactions/);
+assert.match(architecture, /resolveNoticeText/);
 assert.match(architecture, /Terminal delivery backlog/);
 assert.match(appShellSource, /usePackageEventNotices/);
+assert.match(appShellSource, /packages,/);
+assert.match(liveProtocolHarnessScript, /fixtures\/package-notice-reaction/);
+assert.doesNotMatch(appShellSource, /project-pipelines|question\.opened|question_id|project-pipelines\.(run_step|run|question)/);
 assert.match(connectionDiagnostics, /Package event gap/);
 assert.match(webrtcDaemonClient, /createLocalWebrtcBootstrapRefresher/);
 assert.match(webrtcDaemonClient, /createDataChannel\("botster-daemon"/);
@@ -2448,18 +2457,19 @@ assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 const expectedHubDaemonProtocolSha256 = hubTestSupportMetadata.daemon_protocol.sha256;
 const installedDaemonProtocol = readDaemonProtocolTypescript();
-// Web may cold-advance @trybotster/ui-contract ahead of hub-test-support metadata when
-// consuming a published contract feature (entity-options 0.3.2) the support package has not
-// re-declared yet. The consumable pin is authoritative; support metadata must not force a
-// downgrade. See plan: hub-test-support pin may stay until a published support republish.
+assert.equal(
+  hubTestSupportMetadata.daemon_protocol.sha256,
+  "14121c4b1aa15f0728040b7ab3cc0189bf7720dc3159d994926d54e0251c5996"
+);
+assert.equal(hubTestSupportMetadata.ui_contract.package_version, "0.3.3");
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
-assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.2");
+assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.39");
-assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.39");
+assert.equal(hubTestSupportMetadata.package_version, "0.1.41");
+assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.41");
 assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], "0.1.0");
 assert.equal(hubTestSupportMetadata.protocol_version, 7);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 44);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 46);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
@@ -2474,7 +2484,9 @@ for (const canonicalType of [
   "PackageSurfaceKind",
   "PackageSurfaceOperation",
   "PackageNavigationEntry",
-  "PackageNavigationTarget"
+  "PackageNavigationTarget",
+  "PackageNoticeReactionDescriptor",
+  "PackageNoticeReactionDeclaration"
 ]) {
   assert.match(uiContractDeclarations, new RegExp(`(?:interface|type) ${canonicalType}`));
   assert.equal(Boolean(uiContractSchema.$defs[canonicalType]), true);
@@ -3134,6 +3146,53 @@ await writeFile(
   join(compiledRoot, "node_modules/@trybotster/hub-test-support/metadata.json"),
   JSON.stringify(hubTestSupportMetadata)
 );
+await mkdir(join(compiledRoot, "node_modules/@trybotster/ui-contract"), { recursive: true });
+await writeFile(
+  join(compiledRoot, "node_modules/@trybotster/ui-contract/package.json"),
+  JSON.stringify({ name: "@trybotster/ui-contract", main: "index.cjs", type: "commonjs" })
+);
+await writeFile(
+  join(compiledRoot, "node_modules/@trybotster/ui-contract/index.cjs"),
+  `const NOTICE_TEXT_MAX_BYTES = 512;
+const utf8Encoder = new TextEncoder();
+function utf8Bytes(value) { return utf8Encoder.encode(value); }
+function decodeNoticeTextPointer(pointer) {
+  if (typeof pointer !== "string" || !pointer.startsWith("/")) {
+    throw Object.assign(new Error("missing_leading_slash"), { code: "missing_leading_slash" });
+  }
+  const raw = pointer.slice(1);
+  if (raw.includes("/")) {
+    throw Object.assign(new Error("multi_segment"), { code: "multi_segment" });
+  }
+  let decoded = "";
+  for (let index = 0; index < raw.length; index += 1) {
+    const ch = raw[index];
+    if (ch !== "~") { decoded += ch; continue; }
+    const escape = raw[index + 1];
+    if (escape === undefined) throw Object.assign(new Error("trailing_tilde"), { code: "trailing_tilde" });
+    if (escape === "0") decoded += "~";
+    else if (escape === "1") decoded += "/";
+    else throw Object.assign(new Error("unknown_escape"), { code: "unknown_escape" });
+    index += 1;
+  }
+  if (decoded === "") throw Object.assign(new Error("empty_property_name"), { code: "empty_property_name" });
+  return decoded;
+}
+function resolveNoticeText(payload, pointer) {
+  const property = decodeNoticeTextPointer(pointer);
+  if (payload == null || typeof payload !== "object" || Array.isArray(payload) || !Object.hasOwn(payload, property)) {
+    throw Object.assign(new Error("missing"), { code: "missing" });
+  }
+  const value = payload[property];
+  if (typeof value !== "string") throw Object.assign(new Error("not_string"), { code: "not_string" });
+  const bytes = utf8Bytes(value).byteLength;
+  if (bytes === 0) throw Object.assign(new Error("empty"), { code: "empty" });
+  if (bytes > NOTICE_TEXT_MAX_BYTES) throw Object.assign(new Error("oversized"), { code: "oversized", bytes });
+  return value;
+}
+module.exports = { resolveNoticeText, NOTICE_TEXT_MAX_BYTES, packageVersion: "0.3.3" };
+`
+);
 
 await mkdir(join(compiledRoot, "app"), { recursive: true });
 await Promise.all([
@@ -3160,9 +3219,13 @@ await Promise.all([
 const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
 const { createBotsterWebClient } = requireRuntime("./botster/client.js");
 const {
-  questionOpenedNoticeFromEvent,
-  workflowIdentityFromSessionRecords,
-  questionOpenedSubscribePayload,
+  admittedNoticeReaction,
+  clampNoticeTtlMs,
+  noticeColorFromSeverity,
+  noticeSubscribeSpec,
+  noticeTextFromEvent,
+  packageEventSubscriptionKey,
+  packageNoticeReactionsFromPackages,
   viewedSessionIdFromRoute
 } = requireRuntime("./app/packageEventNotices.js");
 const { createInMemoryEntityFrameStore } = requireRuntime("./botster/entities.js");
@@ -4509,6 +4572,16 @@ const bridge = {
               }
             ],
             runnable_entrypoints: [],
+            notice_reactions: [
+              {
+                owner: "local-diagnostics",
+                name: "sample.notice",
+                subject_scope: "session",
+                text_pointer: "/notice",
+                ttl_ms: 10000,
+                severity: "warning"
+              }
+            ],
             configuration: emptyPackageConfiguration,
             availability: availablePackageAvailability,
             dependency_availability: [],
@@ -5186,69 +5259,52 @@ try {
   );
   entityClient.disconnect();
 
-  assert.deepEqual(questionOpenedSubscribePayload, {
-    owner: "project-pipelines",
-    name: "question.opened",
-    subjects: []
-  });
+  const noticeDescriptor = {
+    owner: "package-notice-reaction",
+    name: "sample.notice",
+    subject_scope: "session",
+    text_pointer: "/notice",
+    ttl_ms: 10000,
+    severity: "warning"
+  };
+  assert.deepEqual(
+    admittedNoticeReaction(noticeDescriptor),
+    noticeDescriptor
+  );
+  assert.equal(admittedNoticeReaction({ ...noticeDescriptor, owner: "" }), undefined);
+  assert.deepEqual(
+    packageNoticeReactionsFromPackages([
+      { id: "package-notice-reaction", notice_reactions: [noticeDescriptor] },
+      { id: "other", notice_reactions: [] },
+      { id: "stripped" }
+    ]),
+    [noticeDescriptor]
+  );
+  assert.deepEqual(
+    noticeSubscribeSpec(noticeDescriptor, "web-prod"),
+    { owner: "package-notice-reaction", name: "sample.notice", subjects: ["web-prod"] }
+  );
+  assert.equal(noticeSubscribeSpec(noticeDescriptor, undefined), undefined);
+  assert.equal(noticeSubscribeSpec(noticeDescriptor, ""), undefined);
   assert.equal(viewedSessionIdFromRoute({ view: "session", sessionId: "web-prod" }), "web-prod");
   assert.equal(viewedSessionIdFromRoute({ view: "dashboard" }), undefined);
-  const matchingIdentity = workflowIdentityFromSessionRecords(
-    "sess-1",
-    [{ id: "step-1", run_id: "run-1", step_id: "implement", status: "active", agent_session_uuid: "sess-1" }],
-    [{ id: "run-1", ticket_id: "ticket-1", status: "active" }]
-  );
-  assert.deepEqual(matchingIdentity, { run_id: "run-1", step_id: "implement", ticket_id: "ticket-1" });
+  assert.equal(clampNoticeTtlMs(10000), 10000);
+  assert.equal(clampNoticeTtlMs(50), 1000);
+  assert.equal(clampNoticeTtlMs(120000), 60000);
+  assert.equal(clampNoticeTtlMs(undefined), 5000);
+  assert.equal(noticeColorFromSeverity("info"), "medium");
+  assert.equal(noticeColorFromSeverity("warning"), "warning");
+  assert.equal(noticeColorFromSeverity("error"), "danger");
+  const validPayload = { notice: "Need a decision", subject: "web-prod" };
+  assert.deepEqual(noticeTextFromEvent(noticeDescriptor, validPayload), { text: "Need a decision" });
+  assert.equal(noticeTextFromEvent(noticeDescriptor, { notice: " " }).text, " ");
+  assert.equal(noticeTextFromEvent(noticeDescriptor, {}).suppressed.code, "missing");
+  assert.equal(noticeTextFromEvent(noticeDescriptor, { notice: 12 }).suppressed.code, "not_string");
+  assert.equal(noticeTextFromEvent(noticeDescriptor, { notice: "" }).suppressed.code, "empty");
   assert.equal(
-    workflowIdentityFromSessionRecords("sess-1", [{ id: "step-1", run_id: "run-1", step_id: "implement", status: "active" }], []),
-    undefined
+    packageEventSubscriptionKey({ owner: "package-notice-reaction", name: "sample.notice", subjects: ["web-prod"] }),
+    "package-notice-reaction\0sample.notice\0[\"web-prod\"]"
   );
-  const validPayload = {
-    question_id: "q1",
-    kind: "human",
-    notice: "Need a decision",
-    run_id: "run-1"
-  };
-  assert.equal(questionOpenedNoticeFromEvent(validPayload, matchingIdentity), "Need a decision");
-  assert.equal(questionOpenedNoticeFromEvent({ ...validPayload, run_id: "other" }, matchingIdentity), undefined);
-  assert.equal(
-    questionOpenedNoticeFromEvent(
-      { ...validPayload, run_id: "other", ticket_id: "ticket-1", step_id: "implement" },
-      matchingIdentity
-    ),
-    undefined
-  );
-  assert.equal(
-    questionOpenedNoticeFromEvent(
-      { ...validPayload, run_id: "run-1", ticket_id: "other-ticket", step_id: "implement" },
-      matchingIdentity
-    ),
-    undefined
-  );
-  assert.equal(
-    questionOpenedNoticeFromEvent(
-      { ...validPayload, run_id: "other", ticket_id: "ticket-1" },
-      matchingIdentity
-    ),
-    undefined
-  );
-  assert.equal(
-    questionOpenedNoticeFromEvent(
-      { question_id: "q1", kind: "human", notice: "Need a decision", step_id: "implement" },
-      matchingIdentity
-    ),
-    "Need a decision"
-  );
-  assert.equal(
-    questionOpenedNoticeFromEvent(
-      { ...validPayload, run_id: "run-1", ticket_id: "ticket-1", step_id: "implement" },
-      matchingIdentity
-    ),
-    "Need a decision"
-  );
-  assert.equal(questionOpenedNoticeFromEvent(validPayload, undefined), undefined);
-  assert.equal(questionOpenedNoticeFromEvent({ question_id: "q1", kind: "human" }, matchingIdentity), undefined);
-  assert.equal(questionOpenedNoticeFromEvent({ ...validPayload, run_id: 12 }, matchingIdentity), undefined);
 
   const packageEventChannels = [createFakeDataChannel(), createFakeDataChannel()];
   let nextPackageEventSubscriptionId = 0;
@@ -5258,7 +5314,7 @@ try {
   });
   const receivedPackageEvents = [];
   const packageEventSubscription = packageEventClient.subscribePackageEvents(
-    { owner: "project-pipelines", name: "question.opened", subjects: [] },
+    { owner: "package-notice-reaction", name: "sample.notice", subjects: ["web-prod"] },
     (event) => receivedPackageEvents.push(event)
   );
   await waitForTestCondition(() => packageEventChannels[0].sent.length === 1);
@@ -5267,9 +5323,9 @@ try {
     {
       type: "subscribe_events",
       subscription_id: "event-generation-1-1",
-      owner: "project-pipelines",
-      name: "question.opened",
-      subjects: []
+      owner: "package-notice-reaction",
+      name: "sample.notice",
+      subjects: ["web-prod"]
     }
   );
   await emitChunkedTestResponse(
@@ -5285,8 +5341,8 @@ try {
     {
       type: "package_event",
       subscription_id: "event-generation-1-1",
-      owner: "project-pipelines",
-      name: "question.opened",
+      owner: "package-notice-reaction",
+      name: "sample.notice",
       payload: validPayload
     },
     { deliveryKind: "daemon_event", messageId: "package-event-match" }
@@ -5299,7 +5355,7 @@ try {
       type: "package_event",
       subscription_id: "event-generation-1-1",
       owner: "other-owner",
-      name: "question.opened",
+      name: "sample.notice",
       payload: validPayload
     },
     { deliveryKind: "daemon_event", messageId: "package-event-other-owner" }
@@ -5311,8 +5367,8 @@ try {
     {
       type: "event_gap",
       subscription_id: "event-generation-1-1",
-      owner: "project-pipelines",
-      name: "question.opened"
+      owner: "package-notice-reaction",
+      name: "sample.notice"
     },
     { deliveryKind: "daemon_event", messageId: "package-event-gap" }
   );
@@ -5324,9 +5380,9 @@ try {
     {
       type: "subscribe_events",
       subscription_id: "event-generation-2-2",
-      owner: "project-pipelines",
-      name: "question.opened",
-      subjects: []
+      owner: "package-notice-reaction",
+      name: "sample.notice",
+      subjects: ["web-prod"]
     }
   );
   await emitChunkedTestResponse(
@@ -5341,8 +5397,8 @@ try {
     {
       type: "package_event",
       subscription_id: "event-generation-1-1",
-      owner: "project-pipelines",
-      name: "question.opened",
+      owner: "package-notice-reaction",
+      name: "sample.notice",
       payload: validPayload
     },
     { deliveryKind: "daemon_event", messageId: "stale-package-event" }
@@ -5364,7 +5420,7 @@ try {
   );
   const lateEvents = [];
   const releasedSubscription = releaseBeforeAckClient.subscribePackageEvents(
-    { owner: "project-pipelines", name: "question.opened", subjects: [] },
+    { owner: "package-notice-reaction", name: "sample.notice", subjects: ["web-prod"] },
     (event) => lateEvents.push(event)
   );
   await waitForTestCondition(() => releaseBeforeAckChannels[0].sent.length === 1);
@@ -5381,8 +5437,8 @@ try {
     {
       type: "package_event",
       subscription_id: "release-before-ack-id",
-      owner: "project-pipelines",
-      name: "question.opened",
+      owner: "package-notice-reaction",
+      name: "sample.notice",
       payload: validPayload
     },
     { deliveryKind: "daemon_event", messageId: "late-package-event-after-release" }
@@ -5401,7 +5457,7 @@ try {
   const siblingEntityFrames = [];
   const siblingEntity = eventSiblingClient.subscribeEntityFrames("session", (frame) => siblingEntityFrames.push(frame));
   const siblingEvents = eventSiblingClient.subscribePackageEvents(
-    { owner: "project-pipelines", name: "question.opened", subjects: [] },
+    { owner: "package-notice-reaction", name: "sample.notice", subjects: ["web-prod"] },
     () => {}
   );
   await waitForTestCondition(() => eventSiblingChannels[0].sent.length === 2);
@@ -5439,12 +5495,12 @@ try {
     eventSubscriptionIdGenerator: () => `strict-${strictChannels[0].sent.length + 1}`
   });
   const firstStrict = strictClient.subscribePackageEvents(
-    { owner: "project-pipelines", name: "question.opened", subjects: [] },
+    { owner: "package-notice-reaction", name: "sample.notice", subjects: ["web-prod"] },
     () => {}
   );
   firstStrict.unsubscribe();
   const secondStrict = strictClient.subscribePackageEvents(
-    { owner: "project-pipelines", name: "question.opened", subjects: [] },
+    { owner: "package-notice-reaction", name: "sample.notice", subjects: ["web-prod"] },
     () => {}
   );
   await waitForTestCondition(() => strictChannels[0].sent.length >= 1);
@@ -8072,6 +8128,17 @@ assert.equal(realRuntime.entities.get("botster-web.package", "github-provider").
 assert.match(realRuntime.entities.get("botster-web.package", "github-provider").entrypoint_process_summary, /poller stopped/);
 assert.match(realRuntime.entities.get("botster-web.package", "github-provider").entrypoint_process_summary, /exited_at 1781112200/);
 assert.equal(realRuntime.entities.get("botster-web.package", "local-diagnostics").capability_summary, "No requested capabilities");
+assert.deepEqual(realRuntime.entities.get("botster-web.package", "botster-web").notice_reactions, []);
+assert.deepEqual(realRuntime.entities.get("botster-web.package", "local-diagnostics").notice_reactions, [
+  {
+    owner: "local-diagnostics",
+    name: "sample.notice",
+    subject_scope: "session",
+    text_pointer: "/notice",
+    ttl_ms: 10000,
+    severity: "warning"
+  }
+]);
 assert.equal(realRuntime.entities.get("botster-web.package", "local-diagnostics").entrypoint_summary, "No runnable entrypoints");
 assert.deepEqual(realRuntime.entities.get("botster-web.hub_status", "local-hub").compatibility.features, [
   "sessions",
@@ -8411,7 +8478,7 @@ const outdatedConformanceDiagnostic = compatibilityDiagnosticsFromFrame({
   }
 })[0];
 assert.equal(outdatedConformanceDiagnostic.title, "Hub conformance fixture mismatch");
-assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 44/);
+assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 46/);
 
 const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -8443,13 +8510,13 @@ assert.deepEqual(requiredDaemonFeatures, [
   "terminal_subscription_closed",
   "package_event_subscriptions"
 ]);
-assert.equal(minimumConformanceFixtureRevision, 44);
+assert.equal(minimumConformanceFixtureRevision, 46);
 assert.equal(minimumDaemonProtocolVersion, 1);
 assert.equal(compatibleDescriptorDiagnostics.length, 1);
 assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
 assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
 
-// Protocol 6 remains compatible when the Hub also meets conformance revision 44.
+// Protocol 6 remains compatible when the Hub also meets the current conformance revision.
 const protocolSixHubStatusRecord = {
   id: "local-hub",
   schema_version: 3,
@@ -8459,7 +8526,7 @@ const protocolSixHubStatusRecord = {
     protocol: "botster-hub-daemon-v1",
     protocol_version: 6,
     features: [...requiredDaemonFeatures],
-    conformance_fixture_revision: 44
+    conformance_fixture_revision: 46
   }
 };
 const protocolSixDiagnostics = compatibilityDiagnosticsFromFrame({
@@ -8477,9 +8544,9 @@ assert.match(protocolSixDiagnostics[0].detail, /Protocol botster-hub-daemon-v1 v
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /mismatch/i.test(diagnostic.title)), false);
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /unsupported_feature/.test(JSON.stringify(diagnostic))), false);
 assert.equal(minimumDaemonProtocolVersion, 1);
-assert.equal(minimumConformanceFixtureRevision, 44);
+assert.equal(minimumConformanceFixtureRevision, 46);
 
-// Pre-envelope conformance revisions fail closed under the revision 44 floor.
+// Pre-envelope conformance revisions fail closed under the current revision floor.
 const preGhostsnpDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
   payload: {
@@ -17072,7 +17139,7 @@ function installAutoHelloAck(dataChannel, secret) {
             "resize",
             "snapshot_delivery=ready_then_history"
           ],
-          conformance_fixture_revision: 44
+          conformance_fixture_revision: 46
         },
         terminal_compatibility: {
           protocol: "botster-terminal-v1",
@@ -17447,7 +17514,7 @@ function removeCssAtRules(source) {
 }
 
 // ---------------------------------------------------------------------------
-// Entity-backed select options (ui-contract 0.3.2 + route-owned demand)
+// Entity-backed select options (ui-contract 0.3.3 + route-owned demand)
 // ---------------------------------------------------------------------------
 {
   const {
@@ -17457,7 +17524,7 @@ function removeCssAtRules(source) {
     entityFamilySubscriptionId,
     conformanceFixtures
   } = await import("@trybotster/ui-contract");
-  assert.equal(packageVersion, "0.3.2");
+  assert.equal(packageVersion, "0.3.3");
   assert.equal(typeof projectEntityOptions, "function");
   assert.equal(typeof collectEntityOptionFamilies, "function");
   const timelineFixture = conformanceFixtures.entity_options_reactive_timeline;
@@ -17944,5 +18011,314 @@ function removeCssAtRules(source) {
     } finally {
       await demandVite.close();
     }
+  }
+}
+
+{
+  const {
+    resolveNoticeText,
+    NOTICE_TEXT_MAX_BYTES,
+    packageVersion,
+    conformanceFixtures
+  } = await import("@trybotster/ui-contract");
+  assert.equal(packageVersion, "0.3.3");
+  assert.equal(NOTICE_TEXT_MAX_BYTES, 512);
+  assert.equal(typeof resolveNoticeText, "function");
+  const resolutionVectors = conformanceFixtures.notice_text_resolution_vectors;
+  assert.ok(Array.isArray(resolutionVectors) && resolutionVectors.length > 0);
+  for (const vector of resolutionVectors) {
+    if (vector.text != null) {
+      assert.equal(resolveNoticeText(vector.payload, vector.pointer), vector.text, vector.id);
+      const resolved = noticeTextFromEvent(
+        {
+          owner: "package-notice-reaction",
+          name: "sample.notice",
+          subject_scope: "session",
+          text_pointer: vector.pointer,
+          ttl_ms: 5000,
+          severity: "info"
+        },
+        vector.payload
+      );
+      assert.equal(resolved.text, vector.text, vector.id);
+    } else {
+      let thrown;
+      try {
+        resolveNoticeText(vector.payload, vector.pointer);
+      } catch (error) {
+        thrown = error;
+      }
+      assert.equal(thrown?.code, vector.error, vector.id);
+      const resolved = noticeTextFromEvent(
+        {
+          owner: "package-notice-reaction",
+          name: "sample.notice",
+          subject_scope: "session",
+          text_pointer: vector.pointer,
+          ttl_ms: 5000,
+          severity: "info"
+        },
+        vector.payload
+      );
+      assert.equal(resolved.suppressed?.code, vector.error, vector.id);
+    }
+  }
+
+  const fixtureLua = await readFile(new URL("../fixtures/package-notice-reaction/plugin.lua", import.meta.url), "utf8");
+  const fixtureManifest = JSON.parse(
+    await readFile(new URL("../fixtures/package-notice-reaction/botster-package.json", import.meta.url), "utf8")
+  );
+  assert.equal(fixtureManifest.name, "package-notice-reaction");
+  assert.equal(fixtureManifest.events.notices[0].name, "sample.notice");
+  assert.match(fixtureLua, /events\.emit\("sample\.notice"/);
+  assert.doesNotMatch(fixtureLua, /kind:\s*"package_event"|injectDecoded|decodedPayload/);
+  assert.match(liveProtocolHarnessScript, /deliveryKind: "daemon_event"|type: "package_event"/);
+  assert.match(
+    await readFile(new URL(import.meta.url), "utf8"),
+    /deliveryKind: "daemon_event"/
+  );
+
+  {
+    const previousLocation = globalThis.window?.location;
+    if (!globalThis.window) globalThis.window = globalThis;
+    globalThis.window.location = { origin: "http://127.0.0.1:41821" };
+    const encodedChannels = [createFakeDataChannel()];
+    const encodedClient = createWebrtcTestClient(encodedChannels, localWebrtcBootstrapFixture);
+    const encodedTransport = createHubTransport({ bridge: encodedClient });
+    const encodedRuntime = createBotsterWebClient({ transport: encodedTransport });
+    const connectPromise = encodedRuntime.hub.connect({ client: "botster-web", capabilities: [] });
+    await waitForEncryptedRequest(
+      encodedChannels[0],
+      localWebrtcBootstrapFixture.grant_secret,
+      (request) => request.type === "status"
+    );
+    await emitChunkedTestResponse(
+      encodedChannels[0],
+      localWebrtcBootstrapFixture.grant_secret,
+      { kind: "status", sessions: [], packages: [], events: [], diagnostics: [] },
+      { messageId: "encoded-status" }
+    );
+    await connectPromise;
+    const basePackage = {
+      package_name: "package-notice-reaction",
+      version: "1.0.0",
+      classification: "plugin",
+      source_kind: "path",
+      state: "enabled",
+      requested_capabilities: [],
+      runnable_entrypoints: [],
+      configuration: emptyPackageConfiguration,
+      availability: availablePackageAvailability,
+      provider_profile_admitted: false
+    };
+    const pullWithout = encodedRuntime.hub.send({ kind: "entity_pull", payload: { family: "botster-web.package" } });
+    await waitForEncryptedRequest(
+      encodedChannels[0],
+      localWebrtcBootstrapFixture.grant_secret,
+      (request) => request.type === "list_packages"
+    );
+    await emitChunkedTestResponse(
+      encodedChannels[0],
+      localWebrtcBootstrapFixture.grant_secret,
+      { kind: "packages", packages: [basePackage], events: [], diagnostics: [] },
+      { messageId: "packages-without-notice-reactions" }
+    );
+    await pullWithout;
+    await flushMicrotasks();
+    assert.deepEqual(
+      encodedRuntime.entities.get("botster-web.package", "package-notice-reaction").notice_reactions,
+      []
+    );
+    const pullWith = encodedRuntime.hub.send({ kind: "entity_pull", payload: { family: "botster-web.package" } });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      let listPackages = 0;
+      for (const envelope of encodedChannels[0].sent) {
+        const request = await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, envelope);
+        if (request.type === "list_packages") listPackages += 1;
+      }
+      if (listPackages >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (attempt === 19) assert.fail("timed out waiting for second encoded list_packages");
+    }
+    await emitChunkedTestResponse(
+      encodedChannels[0],
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        kind: "packages",
+        packages: [{
+          ...basePackage,
+          notice_reactions: [{
+            owner: "package-notice-reaction",
+            name: "sample.notice",
+            subject_scope: "session",
+            text_pointer: "/notice",
+            ttl_ms: 10000,
+            severity: "warning"
+          }]
+        }],
+        events: [],
+        diagnostics: []
+      },
+      { messageId: "packages-with-notice-reactions" }
+    );
+    await pullWith;
+    await flushMicrotasks();
+    assert.deepEqual(
+      encodedRuntime.entities.get("botster-web.package", "package-notice-reaction").notice_reactions,
+      [{
+        owner: "package-notice-reaction",
+        name: "sample.notice",
+        subject_scope: "session",
+        text_pointer: "/notice",
+        ttl_ms: 10000,
+        severity: "warning"
+      }]
+    );
+    encodedClient.disconnect();
+    if (previousLocation === undefined) {
+      delete globalThis.window.location;
+    } else {
+      globalThis.window.location = previousLocation;
+    }
+  }
+
+  const noticeVite = await createServer({
+    configFile: false,
+    optimizeDeps: { noDiscovery: true },
+    server: { middlewareMode: true },
+    appType: "custom",
+    logLevel: "error"
+  });
+  try {
+    const { PackageEventNoticeHarness } = await noticeVite.ssrLoadModule(
+      "/src/app/__fixtures__/packageEventNoticeHarness.tsx"
+    );
+    if (!globalThis.document) {
+      throw new Error("minimal DOM required for package notice tests");
+    }
+    const descriptor = {
+      owner: "package-notice-reaction",
+      name: "sample.notice",
+      subject_scope: "session",
+      text_pointer: "/notice",
+      ttl_ms: 10000,
+      severity: "warning"
+    };
+    const sent = [];
+    const listeners = new Set();
+    const diagnostics = [];
+    const runtimeClient = {
+      hub: {
+        async send(frame) {
+          sent.push(frame);
+        },
+        onFrame(handler) {
+          listeners.add(handler);
+          return () => listeners.delete(handler);
+        }
+      }
+    };
+    const rootEl = globalThis.document.createElement("div");
+    globalThis.document.body.appendChild(rootEl);
+    const root = createRoot(rootEl);
+    let latest = { durationMs: 0 };
+
+    async function renderHarness({ viewedSessionId, packages }) {
+      await act(async () => {
+        root.render(createElement(PackageEventNoticeHarness, {
+          runtimeClient,
+          viewedSessionId,
+          packages,
+          recordDiagnostic: (diagnostic) => {
+            if (diagnostic) diagnostics.push(diagnostic);
+          },
+          onNotices: (next) => { latest = next; }
+        }));
+      });
+    }
+
+    await renderHarness({ viewedSessionId: undefined, packages: [{ id: "package-notice-reaction", notice_reactions: [descriptor] }] });
+    assert.equal(sent.some((frame) => frame.kind === "events_subscribe"), false);
+
+    sent.length = 0;
+    await renderHarness({ viewedSessionId: "web-prod", packages: [{ id: "package-notice-reaction", notice_reactions: [descriptor] }] });
+    await waitForTestCondition(() => sent.some((frame) => frame.kind === "events_subscribe"));
+    const subscribe = sent.filter((frame) => frame.kind === "events_subscribe").at(-1);
+    assert.deepEqual(subscribe.payload, {
+      owner: "package-notice-reaction",
+      name: "sample.notice",
+      subjects: ["web-prod"]
+    });
+    assert.equal(JSON.stringify(subscribe.payload.subjects), JSON.stringify(["web-prod"]));
+
+    await act(async () => {
+      for (const listener of listeners) {
+        listener({
+          kind: "package_event",
+          payload: {
+            owner: "package-notice-reaction",
+            name: "sample.notice",
+            payload: { notice: "Matching session notice", subject: "web-prod" }
+          }
+        });
+      }
+    });
+    await waitForTestCondition(() => latest.toast?.message === "Matching session notice");
+    assert.equal(latest.toast.color, "warning");
+    assert.equal(latest.durationMs, 10000);
+
+    await act(async () => {
+      for (const listener of listeners) {
+        listener({
+          kind: "package_event",
+          payload: {
+            owner: "package-notice-reaction",
+            name: "sample.notice",
+            payload: { notice: "" }
+          }
+        });
+      }
+    });
+    await waitForTestCondition(() => diagnostics.some((row) => row.id.includes("empty")));
+    assert.equal(latest.toast.message, "Matching session notice");
+    assert.equal(diagnostics.filter((row) => row.title === "Package notice suppressed").length, 1);
+
+    sent.length = 0;
+    await renderHarness({ viewedSessionId: "web-prod", packages: [{ id: "package-notice-reaction", notice_reactions: [] }] });
+    await waitForTestCondition(() => sent.some((frame) => frame.kind === "events_release"));
+    assert.equal(sent.some((frame) => frame.kind === "events_subscribe"), false);
+
+    sent.length = 0;
+    await renderHarness({
+      viewedSessionId: "web-prod",
+      packages: [{ id: "late-package", notice_reactions: [{ ...descriptor, severity: "error", ttl_ms: 4000 }] }]
+    });
+    await waitForTestCondition(() => sent.some((frame) => frame.kind === "events_subscribe"));
+    await act(async () => {
+      for (const listener of listeners) {
+        listener({
+          kind: "package_event",
+          payload: {
+            owner: "package-notice-reaction",
+            name: "sample.notice",
+            payload: { notice: "Late package notice" }
+          }
+        });
+      }
+    });
+    await waitForTestCondition(() => latest.toast?.message === "Late package notice");
+    assert.equal(latest.toast.color, "danger");
+    assert.equal(latest.durationMs, 4000);
+
+    sent.length = 0;
+    await renderHarness({ viewedSessionId: undefined, packages: [{ id: "late-package", notice_reactions: [descriptor] }] });
+    await waitForTestCondition(() => sent.some((frame) => frame.kind === "events_release"));
+    assert.equal(sent.some((frame) => frame.kind === "events_subscribe"), false);
+    assert.equal(latest.toast, undefined);
+
+    await act(async () => { root.unmount(); });
+    if (rootEl.parentNode) rootEl.parentNode.removeChild(rootEl);
+  } finally {
+    await noticeVite.close();
   }
 }

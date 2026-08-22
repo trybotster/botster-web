@@ -116,17 +116,23 @@ if (packageEventsMode && packageEventsGapMode) {
     );
   }
 }
-const packageEventsPackageName = "project-pipelines";
+const packageEventsPackageName = "package-notice-reaction";
 const packageEventsPackagePath = packageEventsMode
   ? resolveRequiredPackagePath(
       [
         process.env.BOTSTER_PACKAGE_EVENTS_PACKAGE_PATH,
-        join(packageRoot, "fixtures/package-events")
+        join(packageRoot, "fixtures/package-notice-reaction")
       ],
       packageEventsPackageName,
       "BOTSTER_PACKAGE_EVENTS_PACKAGE_PATH"
     )
   : undefined;
+const packageEventsSurfaceId = "package-notice-reaction.events";
+const packageEventsMatchAction = "package-notice-reaction.emit_match";
+const packageEventsMismatchAction = "package-notice-reaction.emit_mismatch";
+const packageEventsBurstAction = "package-notice-reaction.emit_burst";
+const packageEventsItemFamily = "package-notice-reaction.item";
+const packageEventsEventName = "sample.notice";
 const echoProbe = "keys";
 const attachProbe = "botster-web-production-attach-probe";
 const productionSessionId = sharedSessionMode ? sharedSessionContract.sessionId : "web-prod";
@@ -1550,21 +1556,34 @@ async function emitPackageEventFixtureAction(page, actionId, payload) {
   );
   const before = await page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length);
   await page.evaluate(
-    ({ packageName, actionId: nextActionId, payload: nextPayload }) => {
+    ({ packageName, surfaceId, actionId: nextActionId, payload: nextPayload }) => {
       globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.dispatchPluginSurfaceAction(
         packageName,
-        "project-pipelines.events",
+        surfaceId,
         nextActionId,
         nextPayload
       );
     },
-    { packageName: packageEventsPackageName, actionId, payload: payload ?? {} }
+    {
+      packageName: packageEventsPackageName,
+      surfaceId: packageEventsSurfaceId,
+      actionId,
+      payload: payload ?? {}
+    }
   );
   await waitForHarnessEvent(
     page,
     { kind: "daemon_request", type: "plugin_surface_action", action_id: actionId },
     `package-events ${actionId} plugin_surface_action`,
     before
+  );
+}
+
+async function latestSubscribeEvents(page) {
+  return page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "subscribe_events")
+      .map((entry) => entry.payload)
   );
 }
 
@@ -1591,42 +1610,33 @@ async function exercisePackageEvents(page, { forceGap }) {
       .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "subscribe_events")
       .at(-1)?.payload
   );
-  if (subscribe?.owner !== "project-pipelines" || subscribe?.name !== "question.opened") {
+  if (subscribe?.owner !== packageEventsPackageName || subscribe?.name !== packageEventsEventName) {
     throw new Error(`unexpected subscribe_events body: ${JSON.stringify(subscribe)}`);
   }
-  if (!Array.isArray(subscribe.subjects) || subscribe.subjects.length !== 0) {
-    throw new Error(`subscribe_events must send subjects: [], got ${JSON.stringify(subscribe.subjects)}`);
+  if (!Array.isArray(subscribe.subjects) || subscribe.subjects.length !== 1 || subscribe.subjects[0] !== productionSessionId) {
+    throw new Error(`subscribe_events must send subjects: [${JSON.stringify(productionSessionId)}], got ${JSON.stringify(subscribe.subjects)}`);
+  }
+  const emptySubjectSubscribe = (await latestSubscribeEvents(page)).some(
+    (payload) => Array.isArray(payload.subjects) && payload.subjects.length === 0
+  );
+  if (emptySubjectSubscribe) {
+    throw new Error("session-scoped notice subscribed with an empty subject set");
   }
   const subscriptionId = subscribe.subscription_id;
 
   await page.waitForFunction(() =>
     typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.demandEntityFamily === "function"
   );
-  await page.evaluate(() =>
-    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.demandEntityFamily("project-pipelines.question")
+  await page.evaluate((family) =>
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.demandEntityFamily(family),
+    packageEventsItemFamily
   );
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "subscribe_entities", entity_type: "project-pipelines.run_step" },
-    "package-events run_step entity demand"
-  );
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", family: "project-pipelines.run_step" },
-    "package-events run_step snapshot"
-  );
-  await page.waitForFunction(() => {
-    const steps = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.run_step") ?? [];
-    return steps.some((record) => record.agent_session_uuid === "web-prod");
-  }, undefined, { timeout: 15_000 }).catch((error) => {
-    throw new Error(`run_step identity join never bound web-prod: ${error.message}`);
-  });
   const sessionPath = await page.evaluate(() => globalThis.location.pathname);
-  if (!sessionPath.includes("/sessions/web-prod")) {
-    throw new Error(`expected session route /sessions/web-prod, got ${sessionPath}`);
+  if (!sessionPath.includes(`/sessions/${productionSessionId}`)) {
+    throw new Error(`expected session route /sessions/${productionSessionId}, got ${sessionPath}`);
   }
 
-  await emitPackageEventFixtureAction(page, "package-events.emit_match");
+  await emitPackageEventFixtureAction(page, packageEventsMatchAction);
   await waitForHarnessEvent(
     page,
     { kind: "daemon_event", type: "package_event" },
@@ -1638,16 +1648,21 @@ async function exercisePackageEvents(page, { forceGap }) {
     const attr = toast.getAttribute("is-open");
     const open = attr !== "false" && (attr === "true" || toast.isOpen === true || toast.hasAttribute("is-open"));
     const text = `${toast.textContent ?? ""} ${toast.getAttribute("message") ?? ""}`;
-    return open && text.includes("Matching workflow question");
+    const color = toast.getAttribute("color") ?? "";
+    return open && text.includes("Matching session notice") && color === "warning";
   }, undefined, { timeout: 15_000 }).catch((error) => {
-    throw new Error(`matching question.opened never showed a transient notice: ${error.message}`);
+    throw new Error(`matching sample.notice never showed a transient notice: ${error.message}`);
   });
+  const matchedNotice = await readPackageEventNotice(page);
+  if (!matchedNotice.open) {
+    throw new Error("matching sample.notice toast was not open");
+  }
 
-  await emitPackageEventFixtureAction(page,"package-events.emit_mismatch");
+  await emitPackageEventFixtureAction(page, packageEventsMismatchAction);
   await page.waitForTimeout(500);
   const mismatchNotice = await readPackageEventNotice(page);
-  if (mismatchNotice.text.includes("Mismatching workflow question")) {
-    throw new Error("mismatching question.opened showed a transient notice");
+  if (mismatchNotice.text.includes("Mismatching session notice")) {
+    throw new Error("mismatching sample.notice showed a transient notice");
   }
 
   await openHomeView(page);
@@ -1663,49 +1678,66 @@ async function exercisePackageEvents(page, { forceGap }) {
   if (dashboardToastBefore.open) {
     throw new Error("package-event notice stayed open after leaving the session view");
   }
-  const dashboardEventsBefore = await page.evaluate(() =>
+  const dashboardSubscribeAfterLeave = (await latestSubscribeEvents(page)).at(-1);
+  if (
+    dashboardSubscribeAfterLeave &&
+    Array.isArray(dashboardSubscribeAfterLeave.subjects) &&
+    dashboardSubscribeAfterLeave.subjects.length === 0
+  ) {
+    throw new Error("leaving the session view subscribed with an empty subject set");
+  }
+  const dashboardNoticesBefore = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
-      (entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event"
+      (entry) => entry.kind === "package_event_notice"
     ).length
   );
-  await emitPackageEventFixtureAction(page,"package-events.emit_match");
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_event", type: "package_event" },
-    "package-events dashboard package_event delivery"
-  );
-  const dashboardEventsAfter = await page.evaluate(() =>
+  await emitPackageEventFixtureAction(page, packageEventsMatchAction);
+  await page.waitForTimeout(500);
+  const dashboardNoticesAfter = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
-      (entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event"
+      (entry) => entry.kind === "package_event_notice"
     ).length
   );
-  if (dashboardEventsAfter <= dashboardEventsBefore) {
-    throw new Error("dashboard view did not receive the live package_event");
+  if (dashboardNoticesAfter !== dashboardNoticesBefore) {
+    throw new Error("dashboard view showed a transient notice without a session subject");
   }
   const dashboardToastAfter = await readPackageEventNotice(page);
-  if (dashboardToastAfter.open && dashboardToastAfter.text.includes("Matching workflow question")) {
-    throw new Error("dashboard view showed a transient notice without workflow identity");
+  if (dashboardToastAfter.open && dashboardToastAfter.text.includes("Matching session notice")) {
+    throw new Error("dashboard view showed a transient notice without a session subject");
   }
-  await page.evaluate(async () => {
+  await page.evaluate(async (family) => {
     const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    await harness.releaseEntityFamily?.("project-pipelines.question");
-    await harness.demandEntityFamily?.("project-pipelines.question");
-  });
-  await page.waitForFunction(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? []).length > 0,
-    undefined,
+    await harness.releaseEntityFamily?.(family);
+    await harness.demandEntityFamily?.(family);
+  }, packageEventsItemFamily);
+  await page.waitForFunction((family) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? []).length > 0,
+    packageEventsItemFamily,
     { timeout: 15_000 }
   ).catch((error) => {
-    throw new Error(`durable question entity was not visible after emit: ${error.message}`);
+    throw new Error(`durable notice item was not visible after emit: ${error.message}`);
   });
 
   if (forceGap) {
+    const beforeResubscribe = await page.evaluate(
+      () => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length
+    );
+    await openHomeView(page);
+    await waitForSessionStatus(page, "running");
+    await openSessionTerminal(page, productionSessionId);
+    await waitForTerminalSession(page, productionSessionId);
+    await waitForHarnessEvent(
+      page,
+      { kind: "daemon_request", type: "subscribe_events" },
+      "package-events gap-lane resubscribe",
+      beforeResubscribe
+    );
     const beforeGap = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
         (entry) => entry.kind === "daemon_event" && entry.payload?.type === "event_gap"
       ).length
     );
-    await emitPackageEventFixtureAction(page,"package-events.emit_burst", { count: 20 });
+    await emitPackageEventFixtureAction(page, packageEventsBurstAction, { count: 20 });
     await page.waitForFunction(
       (prior) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
         (entry) => entry.kind === "daemon_event" && (entry.payload?.type === "event_gap" || entry.type === "event_gap")
@@ -1715,11 +1747,12 @@ async function exercisePackageEvents(page, { forceGap }) {
     ).catch(() => {
       throw new Error("forced-gap lane observed no event_gap");
     });
-    const afterQuestions = await page.evaluate(() =>
-      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? []
+    const afterItems = await page.evaluate((family) =>
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? [],
+      packageEventsItemFamily
     );
-    if (afterQuestions.length === 0) {
-      throw new Error("forced-gap lane hid the durable question entity");
+    if (afterItems.length === 0) {
+      throw new Error("forced-gap lane hid the durable notice item");
     }
     return;
   }
@@ -1750,9 +1783,9 @@ async function exercisePackageEvents(page, { forceGap }) {
       package_name: packageEventsPackageName,
       request: {
         request_id: randomUUID(),
-        surface_id: "project-pipelines.events",
-        action_id: "package-events.emit_match",
-        node_id: "package-events.emit_match",
+        surface_id: packageEventsSurfaceId,
+        action_id: packageEventsMatchAction,
+        node_id: "package-notice-reaction-emit-match",
         kind: "submit"
       }
     });
@@ -1775,22 +1808,24 @@ async function exercisePackageEvents(page, { forceGap }) {
   if (eventsAfterReconnect !== closedChannelEvents) {
     throw new Error("reconnect replayed a closed-channel package_event");
   }
-  const durableAfterReconnect = await page.evaluate(() =>
-    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? []
+  const durableAfterReconnect = await page.evaluate((family) =>
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? [],
+    packageEventsItemFamily
   );
   if (durableAfterReconnect.length === 0) {
-    await page.evaluate(() =>
-      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.demandEntityFamily("project-pipelines.question")
+    await page.evaluate((family) =>
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.demandEntityFamily(family),
+      packageEventsItemFamily
     );
-    await page.waitForFunction(() =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? []).length > 0,
-      undefined,
+    await page.waitForFunction((family) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? []).length > 0,
+      packageEventsItemFamily,
       { timeout: 15_000 }
     ).catch((error) => {
-      throw new Error(`durable question entity missing after reconnect: ${error.message}`);
+      throw new Error(`durable notice item missing after reconnect: ${error.message}`);
     });
   }
-  await emitPackageEventFixtureAction(page,"package-events.emit_match");
+  await emitPackageEventFixtureAction(page, packageEventsMatchAction);
   await waitForHarnessEvent(
     page,
     { kind: "daemon_event", type: "package_event" },
@@ -1799,9 +1834,10 @@ async function exercisePackageEvents(page, { forceGap }) {
 
   const floodStarted = Date.now();
   const floodCount = 200;
-  const preFloodQuestionIds = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? [])
-      .map((record) => record.id)
+  const preFloodQuestionIds = await page.evaluate((family) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? [])
+      .map((record) => record.id),
+    packageEventsItemFamily
   );
   const packageEventsBeforeFlood = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
@@ -1815,7 +1851,7 @@ async function exercisePackageEvents(page, { forceGap }) {
   );
   const controlStarted = Date.now();
   const controlPromise = sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), { type: "status" });
-  await emitPackageEventFixtureAction(page,"package-events.emit_burst", { count: floodCount });
+  await emitPackageEventFixtureAction(page, packageEventsBurstAction, { count: floodCount });
   const controlReply = await controlPromise;
   const controlMs = Date.now() - controlStarted;
   if (controlMs > 10_000) {
@@ -1825,16 +1861,16 @@ async function exercisePackageEvents(page, { forceGap }) {
     throw new Error(`mid-flood control request failed: ${JSON.stringify(controlReply.error)}`);
   }
   const entityStarted = Date.now();
-  await page.evaluate(async () => {
+  await page.evaluate(async (family) => {
     const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    await harness.releaseEntityFamily?.("project-pipelines.question");
-    await harness.demandEntityFamily?.("project-pipelines.question");
-  });
-  await page.waitForFunction((priorIds) => {
-    const ids = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("project-pipelines.question") ?? [])
+    await harness.releaseEntityFamily?.(family);
+    await harness.demandEntityFamily?.(family);
+  }, packageEventsItemFamily);
+  await page.waitForFunction(({ priorIds, family }) => {
+    const ids = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? [])
       .map((record) => record.id);
     return ids.some((id) => !priorIds.includes(id));
-  }, preFloodQuestionIds, { timeout: 15_000 }).catch((error) => {
+  }, { priorIds: preFloodQuestionIds, family: packageEventsItemFamily }, { timeout: 15_000 }).catch((error) => {
     throw new Error(`entity reconciliation exceeded 15000ms during flood: ${error.message}`);
   });
   const entityMs = Date.now() - entityStarted;

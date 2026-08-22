@@ -5,7 +5,7 @@ import { IonToast } from "@ionic/react";
 export interface WorkbenchNotificationsProps {
   toast?: { message: string; color: string };
   onDismiss: () => void;
-  packageEventToast?: { message: string };
+  packageEventToast?: { message: string; color?: string };
   packageEventDurationMs?: number;
   onPackageEventDismiss?: () => void;
 }
@@ -30,6 +30,7 @@ export function WorkbenchNotifications({
       <IonToast
         isOpen={Boolean(packageEventToast)}
         message={packageEventToast?.message}
+        color={packageEventToast?.color}
         duration={packageEventDurationMs}
         position="top"
         data-testid="package-event-notice"

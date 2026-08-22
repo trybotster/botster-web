@@ -43,7 +43,7 @@ export interface WorkbenchDialogsProps {
   confirmDeleteSessionType: () => void;
   packageActionToast?: { message: string; color: string };
   setPackageActionToast: (toast: { message: string; color: string } | undefined) => void;
-  packageEventToast?: { message: string };
+  packageEventToast?: { message: string; color?: string };
   packageEventDurationMs?: number;
   onPackageEventDismiss?: () => void;
 }

@@ -915,6 +915,7 @@ function packageRecord(packageRecord: DaemonPackage) {
     package_actions: packageActions,
     package_action_summary: actionListSummary(packageActions, "No package actions returned"),
     entrypoint_actions: runnableEntrypoints.flatMap((entrypoint) => entrypointActionRecords(packageRecord.package_name, entrypoint)),
+    notice_reactions: packageRecord.notice_reactions ?? [],
     diagnostics_summary: `${packageRecord.classification} package is ${packageRecord.state}`
   };
 }

@@ -29,7 +29,7 @@ There is no HTTP daemon client, SSE terminal stream, polling, `list_sessions` hy
 
 Terminal data stays outside `HubControlFrame`. After Hello, the WebRTC client attaches and consumes Core terminal frames. The Hub terminal data plane imports authoritative GHOSTSNP Snapshot bytes into Restty (H0–H5), buffers live output across install, reads mode flags for ModeGatedInput, and never imports Scrollback as renderer state. ReadScreen is an optional supplement only. Restty mounts as a pure renderer (`readOnly`) and does not answer OSC color queries in the browser. A lost PAGE starts a fresh attach on a new decoder. `terminal_subscription_closed` arrives only as `daemon_event`.
 
-Package events stay on the Hub host-control plane. Hello requires `package_event_subscriptions`. The route-owned connection holds one `subscribe_events` for owner `project-pipelines` and name `question.opened` with `subjects: []`. Delivery is unsolicited `daemon_event` (`package_event` / `event_gap`) and never enters the terminal delivery queue. A matching `question.opened` payload shows one transient `IonToast` only when `run_id`, `ticket_id`, or `step_id` matches the viewed session joined through `project-pipelines.run_step.agent_session_uuid` (Project Pipelines 0.4.0). A view with no identity shows no notice. `event_gap` records a connection diagnostic and leaves entity state unchanged. Durable question state remains package-entity driven. Reconnect issues a fresh subscription id and does not replay notices.
+Package events stay on the Hub host-control plane. Hello requires `package_event_subscriptions`. The route-owned connection holds one `subscribe_events` per admitted `DaemonPackage.notice_reactions` descriptor. Owner and name come from the descriptor. A session-scoped descriptor subscribes with the viewed session subject and sends no subscription when no session is viewed. Delivery is unsolicited `daemon_event` (`package_event` / `event_gap`) and never enters the terminal delivery queue. Web calls `resolveNoticeText` from `@trybotster/ui-contract@0.3.3` and maps declared severity onto Ionic toast colour (`info` to `medium`, `warning` to `warning`, `error` to `danger`). Declared `ttl_ms` is clamped to 1,000 through 60,000 milliseconds. `event_gap` records a connection diagnostic and leaves entity state unchanged. Durable package state remains package-entity driven. Reconnect issues a fresh subscription id and does not replay notices.
 
 Published Web event-plane budgets:
 
@@ -63,8 +63,8 @@ reads the generic entity store, including nested row context, while
 Bind-list identity has one materialization order. The direct item-template root
 retains its item-relative `$bind`; after that root becomes a nonblank literal,
 `bind_list_descendant_id` children call the runtime helper exported by
-`@trybotster/ui-contract@0.3.2`. Host DTOs and revision-44 shared conformance
-fixtures come from `@trybotster/hub-test-support@0.1.39`. Core terminal types
+`@trybotster/ui-contract@0.3.3`. Host DTOs and revision-46 shared conformance
+fixtures come from `@trybotster/hub-test-support@0.1.41`. Core terminal types
 and feature tokens come from `@trybotster/terminal-protocol@0.1.0`. Web does
 not pin a Hub Git revision for terminal compatibility.
 Nested bind lists establish a new nearest-row context. Web never encodes,

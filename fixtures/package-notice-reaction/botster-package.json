@@ -1,0 +1,55 @@
+{
+  "name": "package-notice-reaction",
+  "version": "1.0.0",
+  "kind": "plugin",
+  "botster": ">=0.1.0",
+  "source": { "type": "path", "path": "." },
+  "description": "Neutral live fixture: session-scoped package notice reaction through the public event plane.",
+  "capabilities": [{ "surface": "surfaces" }],
+  "entrypoints": [
+    {
+      "runtime": "lua",
+      "path": "plugin.lua",
+      "bootstrap": false
+    }
+  ],
+  "surfaces": [
+    {
+      "id": "package-notice-reaction.events",
+      "kind": "app",
+      "title": "Notice Reaction",
+      "description": "Emit a session-scoped sample.notice through the production action path.",
+      "icon": "flash",
+      "order": 10,
+      "category": "contract",
+      "supports": ["render", "action"]
+    }
+  ],
+  "events": {
+    "emitted": [
+      {
+        "name": "sample.notice",
+        "audience": ["clients", "plugins"],
+        "payload_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "notice": { "type": "string", "minLength": 1, "maxLength": 280 },
+            "subject": { "type": "string", "maxLength": 128 },
+            "token": { "type": "string", "maxLength": 128 }
+          },
+          "required": ["notice"]
+        }
+      }
+    ],
+    "notices": [
+      {
+        "name": "sample.notice",
+        "subject_scope": "session",
+        "text_pointer": "/notice",
+        "ttl_ms": 10000,
+        "severity": "warning"
+      }
+    ]
+  }
+}

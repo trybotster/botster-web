@@ -294,7 +294,9 @@ export default function App() {
   const routeSessionId = viewedSessionIdFromRoute(activeRoute);
   const packageEventNotices = usePackageEventNotices({
     runtimeClient,
-    viewedSessionId: routeSessionId
+    viewedSessionId: routeSessionId,
+    packages,
+    recordDiagnostic
   });
   useSessionEntityDetach(
     routeSessionId,

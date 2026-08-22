@@ -1,22 +1,16 @@
-/** Production filter and identity join for Hub `question.opened` notices. */
+/** Descriptor-driven package notice helpers. No product owner, event, or entity constants. */
 
-export const QUESTION_OPENED_EVENT_OWNER = "project-pipelines";
-export const QUESTION_OPENED_EVENT_NAME = "question.opened";
-export const RUN_STEP_FAMILY = "project-pipelines.run_step";
-export const RUN_FAMILY = "project-pipelines.run";
-export const PACKAGE_EVENT_NOTICE_DURATION_MS = 5000;
+import {
+  resolveNoticeText,
+  type JsonValue,
+  type PackageNoticeReactionDescriptor,
+  type PackageNoticeSeverity,
+  type PackageNoticeSubjectScope
+} from "@trybotster/ui-contract";
 
-export const questionOpenedSubscribePayload = {
-  owner: QUESTION_OPENED_EVENT_OWNER,
-  name: QUESTION_OPENED_EVENT_NAME,
-  subjects: [] as string[]
-};
-
-export type WorkflowIdentity = {
-  run_id?: string;
-  ticket_id?: string;
-  step_id?: string;
-};
+export const NOTICE_TTL_MIN_MS = 1_000;
+export const NOTICE_TTL_MAX_MS = 60_000;
+export const NOTICE_TTL_DEFAULT_MS = 5_000;
 
 export type PackageEventSubscribeSpec = {
   owner: string;
@@ -24,32 +18,14 @@ export type PackageEventSubscribeSpec = {
   subjects: string[];
 };
 
+export type NoticeTextResult =
+  | { text: string }
+  | { suppressed: { code: string; message: string; bytes?: number } };
+
+const SEVERITIES = new Set<PackageNoticeSeverity>(["info", "warning", "error"]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function optionalId(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-/**
- * Join the viewed session uuid to Project Pipelines 0.4.0 `run_step.agent_session_uuid`.
- * A missing or blank binding resolves no identity.
- */
-export function workflowIdentityFromSessionRecords(
-  sessionId: string | undefined,
-  runSteps: ReadonlyArray<Record<string, unknown>>,
-  runs: ReadonlyArray<Record<string, unknown>>
-): WorkflowIdentity | undefined {
-  if (!sessionId) return undefined;
-  const step = runSteps.find((record) => record.agent_session_uuid === sessionId);
-  if (!step) return undefined;
-  const run_id = optionalId(step.run_id);
-  const step_id = optionalId(step.step_id);
-  const run = run_id ? runs.find((record) => record.id === run_id) : undefined;
-  const ticket_id = optionalId(run?.ticket_id);
-  if (!run_id && !step_id && !ticket_id) return undefined;
-  return { run_id, step_id, ticket_id };
 }
 
 export function viewedSessionIdFromRoute(route: { view: string; sessionId?: string }): string | undefined {
@@ -58,51 +34,83 @@ export function viewedSessionIdFromRoute(route: { view: string; sessionId?: stri
     : undefined;
 }
 
-const WORKFLOW_ID_KEYS = ["run_id", "ticket_id", "step_id"] as const;
-
-/**
- * Accept a payload only when at least one present workflow ID matches identity
- * and no present workflow ID conflicts with identity.
- * Project Pipelines step IDs repeat across runs, so a matching step_id cannot
- * override a conflicting run_id or ticket_id.
- */
-export function payloadMatchesWorkflowIdentity(
-  payload: Record<string, unknown>,
-  identity: WorkflowIdentity
-): boolean {
-  let matched = false;
-  for (const key of WORKFLOW_ID_KEYS) {
-    const payloadId = optionalId(payload[key]);
-    const identityId = optionalId(identity[key]);
-    if (!payloadId || !identityId) continue;
-    if (payloadId === identityId) {
-      matched = true;
-    } else {
-      return false;
-    }
+export function admittedNoticeReaction(value: unknown): PackageNoticeReactionDescriptor | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.owner !== "string" || value.owner.length === 0) return undefined;
+  if (typeof value.name !== "string" || value.name.length === 0) return undefined;
+  if (value.subject_scope !== "session") return undefined;
+  if (typeof value.text_pointer !== "string" || value.text_pointer.length === 0) return undefined;
+  if (typeof value.ttl_ms !== "number" || !Number.isFinite(value.ttl_ms)) return undefined;
+  if (typeof value.severity !== "string" || !SEVERITIES.has(value.severity as PackageNoticeSeverity)) {
+    return undefined;
   }
-  return matched;
+  return {
+    owner: value.owner,
+    name: value.name,
+    subject_scope: value.subject_scope as PackageNoticeSubjectScope,
+    text_pointer: value.text_pointer,
+    ttl_ms: value.ttl_ms,
+    severity: value.severity as PackageNoticeSeverity
+  };
 }
 
-/**
- * Return the transient notice text when the payload is valid and matches active workflow identity.
- * No identity, invalid payloads, conflicting ids, and non-matching ids produce no notice.
- */
-export function questionOpenedNoticeFromEvent(
-  payload: unknown,
-  identity: WorkflowIdentity | undefined
-): string | undefined {
-  if (!isRecord(payload)) return undefined;
-  if (typeof payload.question_id !== "string" || payload.question_id.length === 0) return undefined;
-  if (payload.kind !== "human" && payload.kind !== "agent") return undefined;
-  if (typeof payload.notice !== "string" || payload.notice.length === 0) return undefined;
-  for (const key of WORKFLOW_ID_KEYS) {
-    if (payload[key] !== undefined && typeof payload[key] !== "string") return undefined;
+export function packageNoticeReactionsFromPackages(
+  packages: ReadonlyArray<Record<string, unknown>>
+): PackageNoticeReactionDescriptor[] {
+  const descriptors: PackageNoticeReactionDescriptor[] = [];
+  for (const row of packages) {
+    const reactions = row.notice_reactions;
+    if (!Array.isArray(reactions)) continue;
+    for (const item of reactions) {
+      const descriptor = admittedNoticeReaction(item);
+      if (descriptor) descriptors.push(descriptor);
+    }
   }
-  if (!identity) return undefined;
-  return payloadMatchesWorkflowIdentity(payload, identity) ? payload.notice : undefined;
+  return descriptors;
+}
+
+export function noticeSubscribeSpec(
+  descriptor: PackageNoticeReactionDescriptor,
+  sessionSubject: string | undefined
+): PackageEventSubscribeSpec | undefined {
+  if (descriptor.subject_scope !== "session") return undefined;
+  if (typeof sessionSubject !== "string" || sessionSubject.length === 0) return undefined;
+  return {
+    owner: descriptor.owner,
+    name: descriptor.name,
+    subjects: [sessionSubject]
+  };
+}
+
+export function noticeTextFromEvent(
+  descriptor: PackageNoticeReactionDescriptor,
+  payload: unknown
+): NoticeTextResult {
+  try {
+    return { text: resolveNoticeText(payload as JsonValue, descriptor.text_pointer) };
+  } catch (error) {
+    const code = isRecord(error) && typeof error.code === "string" ? error.code : "unknown";
+    const message = error instanceof Error ? error.message : "notice text resolution failed";
+    const bytes = isRecord(error) && typeof error.bytes === "number" ? error.bytes : undefined;
+    return { suppressed: { code, message, bytes } };
+  }
+}
+
+export function clampNoticeTtlMs(ttlMs: unknown): number {
+  if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs)) return NOTICE_TTL_DEFAULT_MS;
+  return Math.min(NOTICE_TTL_MAX_MS, Math.max(NOTICE_TTL_MIN_MS, Math.trunc(ttlMs)));
+}
+
+export function noticeColorFromSeverity(severity: string | undefined): "medium" | "warning" | "danger" {
+  if (severity === "warning") return "warning";
+  if (severity === "error") return "danger";
+  return "medium";
 }
 
 export function packageEventSubscriptionKey(spec: PackageEventSubscribeSpec): string {
   return `${spec.owner}\0${spec.name}\0${JSON.stringify(spec.subjects)}`;
+}
+
+export function noticeReactionIdentity(descriptor: PackageNoticeReactionDescriptor): string {
+  return `${descriptor.owner}\0${descriptor.name}`;
 }
