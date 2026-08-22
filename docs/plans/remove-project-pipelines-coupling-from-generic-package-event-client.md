@@ -1,6 +1,6 @@
 # Web: remove Project Pipelines coupling from the generic package-event client
 
-Revision 2. Revision 1 received `changes_required` from `review_1787349940_998291` with two blockers, one high, two medium, and one process finding. Revision 2 answers all six against the merged upstream artifacts.
+Revision 3. Revision 2 received `changes_required` from `review_1787363668_187959` for pinning a release that was never published; see "Revision 3". Revision 1 received `changes_required` from `review_1787349940_998291` with two blockers, one high, two medium, and one process finding. Revision 2 answers all six against the merged upstream artifacts.
 
 ## Plan Review response (rev 1 -> rev 2)
 
@@ -292,7 +292,7 @@ Hub merge `12e0cc6` ("Merge ticket: Hub package-owned client notice reaction des
 - `@trybotster/ui-contract` exports `resolveNoticeText(payload, pointer)` and `NOTICE_TEXT_MAX_BYTES = 512`.
 - `resolveNoticeText` accepts one top-level RFC 6901 pointer, measures the decoded string as UTF-8 bytes, and does not trim or truncate. It throws typed errors with `code` values `missing`, `not_string`, `empty`, and `oversized`. The `oversized` error also carries `bytes`.
 - `docs/client-protocol.md` states that `notice_reactions` is additive and optional, that empty vectors are omitted on the wire, that each projected descriptor always carries a required `owner` equal to the admitted package name, and that protocol version stays 7.
-- Published metadata: `@trybotster/hub-test-support` 0.1.40, `@trybotster/ui-contract` 0.3.3, protocol_version 7, conformance_fixture_revision 45.
+- Source-tree metadata at the merge: `@trybotster/hub-test-support` 0.1.40, `@trybotster/ui-contract` 0.3.3, protocol_version 7, conformance_fixture_revision 45. **Superseded.** The release skipped 0.1.40 and published 0.1.41 with conformance_fixture_revision 46. See "Revision 3" for the pins Implement must use.
 - The generated protocol delta is two insertions and one deletion: the new field and its import. `subscribe_events`, `package_event`, and `event_gap` are untouched.
 
 Project Pipelines merge, in `trybotster/botster-project-pipelines`:
@@ -373,7 +373,7 @@ This section answers `finding_1787349940_748237`. Web authors no pointer parser 
 | --- | --- | --- | --- |
 | `ticket_1787278643_145174` | `tgt_7e208a0c76a44980a83b63af976b1f22` | `botster-hub` | closed |
 | `ticket_1787278658_151737` | `tgt_a72ca1a83d504385b8648f71409119ab` | `botster-project-pipelines` | closed |
-| `ticket_1787351279_697528` | `tgt_7e208a0c76a44980a83b63af976b1f22` | `botster-hub` | open — npm publication of 0.3.3 and 0.1.40 |
+| `ticket_1787351279_697528` | `tgt_7e208a0c76a44980a83b63af976b1f22` | `botster-hub` | closed — published 0.3.3 and 0.1.41; 0.1.40 was skipped |
 
 Edge `dependency_1787351283_317598` registers the third ticket. Web stays parked until it closes, because the merged Hub source is not installable from the registry today.
 
@@ -383,8 +383,8 @@ Related but not a Web dependency: `ticket_1787349524_364728` publishes the `bots
 
 These are additional to G1 through G17, and G3 is replaced as shown above.
 
-- G18. A clean registry install pins `@trybotster/ui-contract@0.3.3` and `@trybotster/hub-test-support@0.1.40`. `package.json` and `package-lock.json` record both. The install is verified from the registry, not from a workspace link.
-- G19. Token checks on the installed artifacts: `notice_reactions` present in the installed `daemon-protocol.ts`, `resolveNoticeText` and `NOTICE_TEXT_MAX_BYTES` exported by the installed `ui-contract`, installed metadata reporting package_version 0.1.40 and conformance_fixture_revision 45.
+- G18. A clean registry install pins `@trybotster/ui-contract@0.3.3` and `@trybotster/hub-test-support@0.1.41`. `package.json` and `package-lock.json` record both. The install is verified from the registry, not from a workspace link.
+- G19. Token checks on the installed artifacts: `notice_reactions` present in the installed `daemon-protocol.ts`, `resolveNoticeText` and `NOTICE_TEXT_MAX_BYTES` equal to 512 exported by the installed `ui-contract`, installed metadata reporting package_version 0.1.41, ui_contract 0.3.3, protocol_version 7, and conformance_fixture_revision 46, and the installed `daemon-protocol.ts` sha256 equal to `14121c4b1aa15f0728040b7ab3cc0189bf7720dc3159d994926d54e0251c5996`.
 - G20. Encoded `list_packages` proof for descriptor reactivity: late package arrival subscribes, descriptor removal releases, package removal releases, reconnect re-subscribes once, and exactly one active subscription per descriptor throughout.
 - G21. `resolveNoticeText` conformance: the shared vectors pass, and each typed error code suppresses the notice and emits exactly one bounded diagnostic. Include the 512-byte UTF-8 boundary, the no-trim case, and the no-truncate case.
 - G22. TTL and severity render from the descriptor. A declared 10000 ms produces a 10000 ms toast, and each severity maps to its Ionic colour.
@@ -401,3 +401,74 @@ Remaining gaps:
 - V5. A generic client mechanism shipped with no composed production reaction is unwired implementation. The human rejected that trade in `question_1787278509_823001`, and Plan Review independently blocked the rev-1 plan for the same class of gap at the adapter layer.
 - V6 (new). A merged monorepo version bump is not a consumable client dependency. Node clients need the npm coordinate published, and a Rust Git tag does not supply it. This cost one blocker finding in this run.
 - V7 (new). An adapter that builds an explicit allow-list record silently drops new protocol fields. Any additive DTO field needs a matching adapter passthrough before a consumer can see it.
+
+---
+
+# Revision 3
+
+Revision 3 answers `review_1787363668_187959`. That review approved the architecture, the ownership boundary, the generic production wiring, and the downstream proof, and raised one product finding plus one process finding.
+
+## Plan Review response (rev 2 -> rev 3)
+
+| Finding | Severity | Response |
+| --- | --- | --- |
+| `finding_1787363668_207871` the plan pins the skipped hub-test-support release | high | Fixed. The release ticket deliberately skipped 0.1.40 and published 0.1.41 with conformance fixture revision 46. Rev 2 would have requested an artifact that does not exist. Every live pin now reads 0.1.41 and revision 46: the dependency table, G18, G19, the package pins below, and the rev-3 artifact payload. Verified independently by clean registry install, not by trusting the review. |
+| `finding_1787363668_610561` the latest Plan completion evidence omits the plan artifact fields | info | Fixed procedurally. The rev-3 gate submission and advance request both carry `plan_uri`, `artifact_id`, `checklist_id`, `target_id`, and `target_repository`. |
+
+## Independent release verification
+
+Performed on 2026-08-21 in an empty scratch directory, installing from the public registry rather than from a workspace link or the Hub source tree.
+
+Registry listings:
+
+- `@trybotster/hub-test-support` versions end `... 0.1.38, 0.1.39, 0.1.41`. There is no 0.1.40.
+- `@trybotster/ui-contract` versions end `... 0.3.2, 0.3.3`.
+
+Clean install of `@trybotster/hub-test-support@0.1.41` and `@trybotster/ui-contract@0.3.3`:
+
+| Check | Observed |
+| --- | --- |
+| `metadata.json` package_version | `0.1.41` |
+| `metadata.json` protocol_version | `7` |
+| `metadata.json` conformance_fixture_revision | `46` |
+| `metadata.json` ui_contract.package_version | `0.3.3` |
+| `metadata.json` daemon_protocol.sha256 | `14121c4b1aa15f0728040b7ab3cc0189bf7720dc3159d994926d54e0251c5996` |
+| Recomputed sha256 of the shipped `daemon-protocol.ts` | `14121c4b1aa15f0728040b7ab3cc0189bf7720dc3159d994926d54e0251c5996` — equal, so the declared hash matches the shipped file |
+| `daemon-protocol.ts:609` | `notice_reactions?: PackageNoticeReactionDescriptor[];` |
+| `@trybotster/ui-contract` runtime exports | `resolveNoticeText` is a function; `NOTICE_TEXT_MAX_BYTES` is `512`; `packageVersion` is `0.3.3` |
+
+The reviewer's cited hash matches the recomputed hash exactly.
+
+## Pins Implement must use
+
+- `@trybotster/ui-contract@0.3.3`
+- `@trybotster/hub-test-support@0.1.41`
+- protocol_version 7
+- conformance_fixture_revision 46
+- `daemon-protocol.ts` sha256 `14121c4b1aa15f0728040b7ab3cc0189bf7720dc3159d994926d54e0251c5996`
+
+Do not pin 0.1.40 or revision 45. Those values exist only in the Hub source tree at merge `12e0cc6` and were never published. Every earlier mention of them in this document is historical record, not a pin.
+
+`README.md` and `docs/architecture.md` must state 0.1.41 and revision 46, because the charter requires those claims to equal installed Hub test-support metadata.
+
+## Dependency status after rev 3
+
+All three dependencies are closed:
+
+| Ticket | Repository | Status |
+| --- | --- | --- |
+| `ticket_1787278643_145174` | `botster-hub` | closed — descriptor contract and `DaemonPackage` projection |
+| `ticket_1787278658_151737` | `botster-project-pipelines` | closed — declaration and `payload.subject` emission |
+| `ticket_1787351279_697528` | `botster-hub` | closed — npm publication, released as 0.1.41 rather than 0.1.40 |
+
+The park is over. Nothing blocks Implement after Plan Review approves rev 3.
+
+## Assumptions and risks changed in rev 3
+
+- The rev-2 remaining unknown "the published npm tarball contents cannot be verified until the release closes" is now closed. The tarball is installed and verified, including the content hash.
+- The descriptor contract itself is unchanged by the release. `notice_reactions`, the descriptor fields, `resolveNoticeText`, `NOTICE_TEXT_MAX_BYTES`, and protocol_version 7 are identical to what rev 2 recorded from the merge. Only the package version and the conformance fixture revision moved.
+- R9 (new). A release can skip the version its source tree declares. Pinning a version read from a merged source tree, rather than from the registry, produces an uninstallable plan. Rev 2 made exactly that error. Implement must read pins from the registry and from installed metadata, never from an upstream `package.json` in a source checkout.
+
+## Vault gaps added in rev 3
+
+- V8 (new). A merged source-tree version is not the released version. A release can skip a version, so downstream pins must come from the registry and from installed metadata, not from the upstream source tree. This cost one high finding in this run, immediately after V6 cost a blocker for the same family of mistake.
