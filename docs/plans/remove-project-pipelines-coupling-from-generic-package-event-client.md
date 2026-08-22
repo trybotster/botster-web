@@ -160,7 +160,7 @@ This Web ticket therefore parks after Plan. It cannot start Implement until both
 3. **Make the hook generic.** `src/app/usePackageEventNotices.ts` iterates admitted descriptors, subscribes once per descriptor per connection generation with the current session subject, renders through the declared TTL and severity, clears on session change, and holds no entity demand for any product family. The `entity_pull` and `entity_release` calls for `project-pipelines.run_step` and `project-pipelines.run` are deleted, because subject targeting replaces the identity join.
 4. **Keep `src/App.tsx` product-free.** It composes the generic hook with the admitted package list and the viewed session id. It imports no product constant.
 5. **Replace product-specific client tests with neutral contract fixtures.** New fixture package under `fixtures/package-notice-reaction/` declares a neutral owner, a neutral event name, and a neutral notice reaction. `src/App.test.mjs` drives subscribe, receive, subject filter, gap, reconnect, and notice rendering through that fixture and through the public protocol boundary. The fixture enters at the encoded frame boundary, never after protocol decoding.
-6. **Optional Project Pipelines conformance only.** Keep `fixtures/package-events/` as a live-lane conformance fixture if it costs no production composition. It must not be imported by any production module.
+6. **Optional Project Pipelines conformance only.** Do not keep `fixtures/package-events/` in Web. After the neutral cutover it has no caller and cannot pass the harness package-name check. Project Pipelines owns product `question.opened` proof in its own repository.
 7. **Update documents.** `README.md` and `docs/architecture.md` state the new pinned package and revision metadata, and describe the descriptor-driven reaction. Package and revision claims must equal installed Hub test-support metadata.
 
 ## Non-scope of this Web ticket
@@ -214,7 +214,7 @@ Tests, fixtures, and documents:
 
 - `src/App.test.mjs` — product assertions replaced by neutral fixture assertions.
 - `fixtures/package-notice-reaction/` — new neutral fixture package.
-- `fixtures/package-events/` — retained only as an optional live conformance lane.
+- `fixtures/package-events/` — deleted after Review `review_1787366485_250637`. It had no caller after the cutover.
 - `scripts/live-packaged-protocol-harness.mjs` — package-event lane retargeted to the neutral fixture.
 - `package.json` — pinned contract versions; a neutral notice-reaction smoke script.
 - `README.md`, `docs/architecture.md` — pinned package and revision metadata.
@@ -472,3 +472,9 @@ The park is over. Nothing blocks Implement after Plan Review approves rev 3.
 ## Vault gaps added in rev 3
 
 - V8 (new). A merged source-tree version is not the released version. A release can skip a version, so downstream pins must come from the registry and from installed metadata, not from the upstream source tree. This cost one high finding in this run, immediately after V6 cost a blocker for the same family of mistake.
+
+# Review return (review_1787366485_250637)
+
+Implement Review required deletion of `fixtures/package-events/`. After the Web cutover that directory had no caller and could not satisfy the live harness package-name check. Web keeps only `fixtures/package-notice-reaction/`. Project Pipelines owns product `question.opened` proof.
+
+G20, G21, and G24 must drive `usePackageEventNotices` from encoded `list_packages` and encoded `package_event` frames, not from hand-authored decoded package rows.

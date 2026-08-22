@@ -1,10 +1,11 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { strict as assert } from "node:assert";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer as createNetServer } from "node:net";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -2292,6 +2293,8 @@ assert.match(liveProtocolHarnessScript, /hub_frame/);
 assert.match(liveProtocolHarnessScript, /family: "session"/);
 assert.match(liveProtocolHarnessScript, /BOTSTER_LIVE_PACKAGE_EVENTS/);
 assert.match(liveProtocolHarnessScript, /package-events live proof passed/);
+assert.doesNotMatch(liveProtocolHarnessScript, /fixtures\/package-events/);
+assert.equal(existsSync(fileURLToPath(new URL("../fixtures/package-events", import.meta.url))), false);
 assert.doesNotMatch(liveProtocolHarnessScript, /family: "botster-web\.session"/);
 assert.match(liveProtocolHarnessScript, /runHubCommand\(\["shutdown"/);
 assert.match(liveProtocolHarnessScript, /assertNoBrowserFailures/);
@@ -18078,27 +18081,89 @@ function removeCssAtRules(source) {
     /deliveryKind: "daemon_event"/
   );
 
-  {
-    const previousLocation = globalThis.window?.location;
-    if (!globalThis.window) globalThis.window = globalThis;
-    globalThis.window.location = { origin: "http://127.0.0.1:41821" };
-    const encodedChannels = [createFakeDataChannel()];
+  const noticeVite = await createServer({
+    configFile: false,
+    optimizeDeps: { noDiscovery: true },
+    server: { middlewareMode: true },
+    appType: "custom",
+    logLevel: "error"
+  });
+  const previousLocation = globalThis.window?.location;
+  if (!globalThis.window) globalThis.window = globalThis;
+  globalThis.window.location = { origin: "http://127.0.0.1:41821" };
+  try {
+    const { PackageEventNoticeHarness } = await noticeVite.ssrLoadModule(
+      "/src/app/__fixtures__/packageEventNoticeHarness.tsx"
+    );
+    if (!globalThis.document) {
+      throw new Error("minimal DOM required for package notice tests");
+    }
+    const secret = localWebrtcBootstrapFixture.grant_secret;
+    const encodedChannels = [createFakeDataChannel(), createFakeDataChannel()];
     const encodedClient = createWebrtcTestClient(encodedChannels, localWebrtcBootstrapFixture);
     const encodedTransport = createHubTransport({ bridge: encodedClient });
     const encodedRuntime = createBotsterWebClient({ transport: encodedTransport });
+    const diagnostics = [];
+    const rootEl = globalThis.document.createElement("div");
+    globalThis.document.body.appendChild(rootEl);
+    const root = createRoot(rootEl);
+    let latest = { durationMs: 0 };
+    let viewedSessionId = "web-prod";
+
+    async function decryptSent(channel) {
+      const requests = [];
+      for (const envelope of channel.sent) {
+        requests.push(await decryptTestEnvelope(secret, envelope));
+      }
+      return requests;
+    }
+
+    async function waitForRequestCount(channel, type, minCount) {
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const matches = (await decryptSent(channel)).filter((request) => request.type === type);
+        if (matches.length >= minCount) return matches;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      assert.fail(`timed out waiting for ${minCount} encoded ${type} request(s)`);
+    }
+
+    async function ackResponse(channel, payload, messageId) {
+      await emitChunkedTestResponse(channel, secret, payload, { messageId });
+    }
+
+    async function servePackages(channel, packages, messageId) {
+      const before = (await decryptSent(channel)).filter((request) => request.type === "list_packages").length;
+      const pull = encodedRuntime.hub.send({ kind: "entity_pull", payload: { family: "botster-web.package" } });
+      await waitForRequestCount(channel, "list_packages", before + 1);
+      await ackResponse(channel, { kind: "packages", packages, events: [], diagnostics: [] }, messageId);
+      await pull;
+      await flushMicrotasks();
+    }
+
+    async function renderFromEntities() {
+      await act(async () => {
+        root.render(createElement(PackageEventNoticeHarness, {
+          runtimeClient: encodedRuntime,
+          viewedSessionId,
+          packages: encodedRuntime.entities.list("botster-web.package"),
+          recordDiagnostic: (diagnostic) => {
+            if (diagnostic) diagnostics.push(diagnostic);
+          },
+          onNotices: (next) => { latest = next; }
+        }));
+      });
+    }
+
     const connectPromise = encodedRuntime.hub.connect({ client: "botster-web", capabilities: [] });
-    await waitForEncryptedRequest(
-      encodedChannels[0],
-      localWebrtcBootstrapFixture.grant_secret,
-      (request) => request.type === "status"
-    );
+    await waitForEncryptedRequest(encodedChannels[0], secret, (request) => request.type === "status");
     await emitChunkedTestResponse(
       encodedChannels[0],
-      localWebrtcBootstrapFixture.grant_secret,
+      secret,
       { kind: "status", sessions: [], packages: [], events: [], diagnostics: [] },
       { messageId: "encoded-status" }
     );
     await connectPromise;
+
     const basePackage = {
       package_name: "package-notice-reaction",
       version: "1.0.0",
@@ -18111,91 +18176,6 @@ function removeCssAtRules(source) {
       availability: availablePackageAvailability,
       provider_profile_admitted: false
     };
-    const pullWithout = encodedRuntime.hub.send({ kind: "entity_pull", payload: { family: "botster-web.package" } });
-    await waitForEncryptedRequest(
-      encodedChannels[0],
-      localWebrtcBootstrapFixture.grant_secret,
-      (request) => request.type === "list_packages"
-    );
-    await emitChunkedTestResponse(
-      encodedChannels[0],
-      localWebrtcBootstrapFixture.grant_secret,
-      { kind: "packages", packages: [basePackage], events: [], diagnostics: [] },
-      { messageId: "packages-without-notice-reactions" }
-    );
-    await pullWithout;
-    await flushMicrotasks();
-    assert.deepEqual(
-      encodedRuntime.entities.get("botster-web.package", "package-notice-reaction").notice_reactions,
-      []
-    );
-    const pullWith = encodedRuntime.hub.send({ kind: "entity_pull", payload: { family: "botster-web.package" } });
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      let listPackages = 0;
-      for (const envelope of encodedChannels[0].sent) {
-        const request = await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, envelope);
-        if (request.type === "list_packages") listPackages += 1;
-      }
-      if (listPackages >= 2) break;
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      if (attempt === 19) assert.fail("timed out waiting for second encoded list_packages");
-    }
-    await emitChunkedTestResponse(
-      encodedChannels[0],
-      localWebrtcBootstrapFixture.grant_secret,
-      {
-        kind: "packages",
-        packages: [{
-          ...basePackage,
-          notice_reactions: [{
-            owner: "package-notice-reaction",
-            name: "sample.notice",
-            subject_scope: "session",
-            text_pointer: "/notice",
-            ttl_ms: 10000,
-            severity: "warning"
-          }]
-        }],
-        events: [],
-        diagnostics: []
-      },
-      { messageId: "packages-with-notice-reactions" }
-    );
-    await pullWith;
-    await flushMicrotasks();
-    assert.deepEqual(
-      encodedRuntime.entities.get("botster-web.package", "package-notice-reaction").notice_reactions,
-      [{
-        owner: "package-notice-reaction",
-        name: "sample.notice",
-        subject_scope: "session",
-        text_pointer: "/notice",
-        ttl_ms: 10000,
-        severity: "warning"
-      }]
-    );
-    encodedClient.disconnect();
-    if (previousLocation === undefined) {
-      delete globalThis.window.location;
-    } else {
-      globalThis.window.location = previousLocation;
-    }
-  }
-
-  const noticeVite = await createServer({
-    configFile: false,
-    optimizeDeps: { noDiscovery: true },
-    server: { middlewareMode: true },
-    appType: "custom",
-    logLevel: "error"
-  });
-  try {
-    const { PackageEventNoticeHarness } = await noticeVite.ssrLoadModule(
-      "/src/app/__fixtures__/packageEventNoticeHarness.tsx"
-    );
-    if (!globalThis.document) {
-      throw new Error("minimal DOM required for package notice tests");
-    }
     const descriptor = {
       owner: "package-notice-reaction",
       name: "sample.notice",
@@ -18204,121 +18184,153 @@ function removeCssAtRules(source) {
       ttl_ms: 10000,
       severity: "warning"
     };
-    const sent = [];
-    const listeners = new Set();
-    const diagnostics = [];
-    const runtimeClient = {
-      hub: {
-        async send(frame) {
-          sent.push(frame);
-        },
-        onFrame(handler) {
-          listeners.add(handler);
-          return () => listeners.delete(handler);
-        }
-      }
-    };
-    const rootEl = globalThis.document.createElement("div");
-    globalThis.document.body.appendChild(rootEl);
-    const root = createRoot(rootEl);
-    let latest = { durationMs: 0 };
+    const packageWithNotice = { ...basePackage, notice_reactions: [descriptor] };
 
-    async function renderHarness({ viewedSessionId, packages }) {
-      await act(async () => {
-        root.render(createElement(PackageEventNoticeHarness, {
-          runtimeClient,
-          viewedSessionId,
-          packages,
-          recordDiagnostic: (diagnostic) => {
-            if (diagnostic) diagnostics.push(diagnostic);
-          },
-          onNotices: (next) => { latest = next; }
-        }));
-      });
-    }
+    viewedSessionId = undefined;
+    await servePackages(encodedChannels[0], [packageWithNotice], "packages-no-session");
+    await renderFromEntities();
+    assert.equal(
+      (await decryptSent(encodedChannels[0])).some((request) => request.type === "subscribe_events"),
+      false
+    );
 
-    await renderHarness({ viewedSessionId: undefined, packages: [{ id: "package-notice-reaction", notice_reactions: [descriptor] }] });
-    assert.equal(sent.some((frame) => frame.kind === "events_subscribe"), false);
+    viewedSessionId = "web-prod";
+    await servePackages(encodedChannels[0], [basePackage], "packages-without-notice-reactions");
+    await renderFromEntities();
+    assert.equal(
+      (await decryptSent(encodedChannels[0])).some((request) => request.type === "subscribe_events"),
+      false
+    );
+    assert.deepEqual(
+      encodedRuntime.entities.get("botster-web.package", "package-notice-reaction").notice_reactions,
+      []
+    );
 
-    sent.length = 0;
-    await renderHarness({ viewedSessionId: "web-prod", packages: [{ id: "package-notice-reaction", notice_reactions: [descriptor] }] });
-    await waitForTestCondition(() => sent.some((frame) => frame.kind === "events_subscribe"));
-    const subscribe = sent.filter((frame) => frame.kind === "events_subscribe").at(-1);
-    assert.deepEqual(subscribe.payload, {
+    await servePackages(encodedChannels[0], [packageWithNotice], "packages-late-arrival");
+    await renderFromEntities();
+    const firstSubscribes = await waitForRequestCount(encodedChannels[0], "subscribe_events", 1);
+    assert.equal(firstSubscribes.length, 1);
+    assert.deepEqual(firstSubscribes[0], {
+      type: "subscribe_events",
+      subscription_id: firstSubscribes[0].subscription_id,
       owner: "package-notice-reaction",
       name: "sample.notice",
       subjects: ["web-prod"]
     });
-    assert.equal(JSON.stringify(subscribe.payload.subjects), JSON.stringify(["web-prod"]));
+    assert.equal(JSON.stringify(firstSubscribes[0].subjects), JSON.stringify(["web-prod"]));
+    await ackResponse(
+      encodedChannels[0],
+      { kind: "event_subscribed", events: [], diagnostics: [] },
+      "encoded-event-subscribed-1"
+    );
 
-    await act(async () => {
-      for (const listener of listeners) {
-        listener({
-          kind: "package_event",
-          payload: {
-            owner: "package-notice-reaction",
-            name: "sample.notice",
-            payload: { notice: "Matching session notice", subject: "web-prod" }
-          }
-        });
-      }
-    });
+    await emitChunkedTestResponse(
+      encodedChannels[0],
+      secret,
+      {
+        type: "package_event",
+        subscription_id: firstSubscribes[0].subscription_id,
+        owner: "package-notice-reaction",
+        name: "sample.notice",
+        payload: { notice: "Matching session notice", subject: "web-prod" }
+      },
+      { deliveryKind: "daemon_event", messageId: "encoded-package-event-match" }
+    );
+    await act(async () => { await flushMicrotasks(); });
     await waitForTestCondition(() => latest.toast?.message === "Matching session notice");
     assert.equal(latest.toast.color, "warning");
     assert.equal(latest.durationMs, 10000);
 
-    await act(async () => {
-      for (const listener of listeners) {
-        listener({
-          kind: "package_event",
-          payload: {
-            owner: "package-notice-reaction",
-            name: "sample.notice",
-            payload: { notice: "" }
-          }
-        });
-      }
-    });
-    await waitForTestCondition(() => diagnostics.some((row) => row.id.includes("empty")));
-    assert.equal(latest.toast.message, "Matching session notice");
-    assert.equal(diagnostics.filter((row) => row.title === "Package notice suppressed").length, 1);
+    const errorVectors = resolutionVectors.filter((vector) => vector.error && vector.pointer === "/notice");
+    for (const vector of errorVectors) {
+      const before = diagnostics.length;
+      await emitChunkedTestResponse(
+        encodedChannels[0],
+        secret,
+        {
+          type: "package_event",
+          subscription_id: firstSubscribes[0].subscription_id,
+          owner: "package-notice-reaction",
+          name: "sample.notice",
+          payload: vector.payload
+        },
+        { deliveryKind: "daemon_event", messageId: `encoded-package-event-error-${vector.id}` }
+      );
+      await act(async () => { await flushMicrotasks(); });
+      await waitForTestCondition(() => diagnostics.length === before + 1);
+      assert.equal(diagnostics.at(-1).title, "Package notice suppressed", vector.id);
+      assert.match(diagnostics.at(-1).id, new RegExp(vector.error), vector.id);
+      assert.equal(latest.toast.message, "Matching session notice", vector.id);
+    }
+    assert.equal(diagnostics.length, errorVectors.length);
 
-    sent.length = 0;
-    await renderHarness({ viewedSessionId: "web-prod", packages: [{ id: "package-notice-reaction", notice_reactions: [] }] });
-    await waitForTestCondition(() => sent.some((frame) => frame.kind === "events_release"));
-    assert.equal(sent.some((frame) => frame.kind === "events_subscribe"), false);
+    await servePackages(encodedChannels[0], [{ ...basePackage, notice_reactions: [] }], "packages-descriptor-removed");
+    await renderFromEntities();
+    const unsubscribesAfterRemoval = await waitForRequestCount(encodedChannels[0], "unsubscribe_events", 1);
+    assert.equal(unsubscribesAfterRemoval.length, 1);
+    await ackResponse(encodedChannels[0], { kind: "events", events: [] }, "encoded-event-unsubscribed-1");
+    assert.equal(
+      (await decryptSent(encodedChannels[0])).filter((request) => request.type === "subscribe_events").length,
+      1
+    );
 
-    sent.length = 0;
-    await renderHarness({
-      viewedSessionId: "web-prod",
-      packages: [{ id: "late-package", notice_reactions: [{ ...descriptor, severity: "error", ttl_ms: 4000 }] }]
-    });
-    await waitForTestCondition(() => sent.some((frame) => frame.kind === "events_subscribe"));
-    await act(async () => {
-      for (const listener of listeners) {
-        listener({
-          kind: "package_event",
-          payload: {
-            owner: "package-notice-reaction",
-            name: "sample.notice",
-            payload: { notice: "Late package notice" }
-          }
-        });
-      }
-    });
-    await waitForTestCondition(() => latest.toast?.message === "Late package notice");
-    assert.equal(latest.toast.color, "danger");
-    assert.equal(latest.durationMs, 4000);
+    await servePackages(encodedChannels[0], [packageWithNotice], "packages-after-descriptor-restore");
+    await renderFromEntities();
+    const restoredSubscribes = await waitForRequestCount(encodedChannels[0], "subscribe_events", 2);
+    assert.equal(restoredSubscribes.length, 2);
+    await ackResponse(
+      encodedChannels[0],
+      { kind: "event_subscribed", events: [], diagnostics: [] },
+      "encoded-event-subscribed-2"
+    );
 
-    sent.length = 0;
-    await renderHarness({ viewedSessionId: undefined, packages: [{ id: "late-package", notice_reactions: [descriptor] }] });
-    await waitForTestCondition(() => sent.some((frame) => frame.kind === "events_release"));
-    assert.equal(sent.some((frame) => frame.kind === "events_subscribe"), false);
-    assert.equal(latest.toast, undefined);
+    await servePackages(encodedChannels[0], [], "packages-removed");
+    await renderFromEntities();
+    const unsubscribesAfterPackageRemoval = await waitForRequestCount(encodedChannels[0], "unsubscribe_events", 2);
+    assert.equal(unsubscribesAfterPackageRemoval.length, 2);
+    await ackResponse(encodedChannels[0], { kind: "events", events: [] }, "encoded-event-unsubscribed-2");
+    assert.equal(
+      (await decryptSent(encodedChannels[0])).filter((request) => request.type === "subscribe_events").length,
+      2
+    );
+
+    await servePackages(encodedChannels[0], [packageWithNotice], "packages-before-reconnect");
+    await renderFromEntities();
+    const preReconnectSubscribes = await waitForRequestCount(encodedChannels[0], "subscribe_events", 3);
+    assert.equal(preReconnectSubscribes.length, 3);
+    await ackResponse(
+      encodedChannels[0],
+      { kind: "event_subscribed", events: [], diagnostics: [] },
+      "encoded-event-subscribed-3"
+    );
+    assert.equal(
+      (await decryptSent(encodedChannels[0])).filter((request) =>
+        request.type === "subscribe_events" && Array.isArray(request.subjects) && request.subjects.length === 0
+      ).length,
+      0
+    );
+
+    encodedChannels[0].close();
+    await waitForTestCondition(() => encodedChannels[1].sent.length >= 1);
+    const reconnectSubscribes = (await decryptSent(encodedChannels[1])).filter((request) => request.type === "subscribe_events");
+    assert.equal(reconnectSubscribes.length, 1);
+    assert.deepEqual(reconnectSubscribes[0].subjects, ["web-prod"]);
+    assert.notEqual(reconnectSubscribes[0].subscription_id, preReconnectSubscribes.at(-1).subscription_id);
+    await ackResponse(
+      encodedChannels[1],
+      { kind: "event_subscribed", events: [], diagnostics: [] },
+      "encoded-event-subscribed-reconnect"
+    );
 
     await act(async () => { root.unmount(); });
     if (rootEl.parentNode) rootEl.parentNode.removeChild(rootEl);
+    encodedClient.disconnect();
   } finally {
     await noticeVite.close();
+    if (previousLocation === undefined) {
+      delete globalThis.window.location;
+    } else {
+      globalThis.window.location = previousLocation;
+    }
   }
 }

@@ -2,10 +2,21 @@
 
 Ticket: `ticket_1787278327_274484`
 Run: `run_1787278334_136543`
-Step: `botster_stack_implement` / `run_step_1787364175_274472`
+Step: `botster_stack_implement` / `run_step_1787366500_838328`
 Plan: `docs/plans/remove-project-pipelines-coupling-from-generic-package-event-client.md` revision 3 (`cf1c3db`)
 Plan Review: `review_1787364160_424747` approved
+Implement Review: `review_1787366485_250637` `changes_required`
 Merge policy: direct (no pull request)
+
+## Review return
+
+Review `review_1787366485_250637` sent Implement back after `a05ae02`. Three open findings:
+
+| Finding | Severity | Response |
+| --- | --- | --- |
+| `finding_1787366485_297334` Dead `fixtures/package-events/` after the cutover | high | Deleted the directory. The committed plan now records that Web does not keep that fixture. Product `question.opened` proof stays in Project Pipelines. |
+| `finding_1787366485_805320` G20, G21, and G24 did not use the encoded production boundary | high | The production hook now mounts on `createBotsterWebClient` over encoded WebRTC frames. Encoded `list_packages` proves late arrival, descriptor removal, package removal, reconnect with one fresh subscription, matching toast, and one diagnostic per shared resolver error event. |
+| `finding_1787366485_305012` Unused `noticeReactionIdentity` | low | Deleted the export. |
 
 ## Target repository and target_id
 
@@ -61,10 +72,10 @@ Feature behavior:
 - `src/app/__fixtures__/packageEventNoticeHarness.tsx` — production-hook mount harness
 - `fixtures/package-notice-reaction/` — neutral owner `package-notice-reaction`, event `sample.notice`, session-scoped notice declaration
 - `scripts/live-packaged-protocol-harness.mjs` — retarget the live lane to the neutral fixture and session-subject subscription
-- `src/App.test.mjs` — pin 0.1.41 / 0.3.3 / revision 46 / DTO hash; encoded adapter proof; shared `resolveNoticeText` vectors; hook subscribe/receive/filter/gap/reconnect/notice proofs
+- `src/App.test.mjs` — pin 0.1.41 / 0.3.3 / revision 46 / DTO hash; encoded `list_packages` drives the production hook for G20, G21, and G24
 - `README.md`, `docs/architecture.md` — pin 0.1.41 / revision 46 and descriptor-driven reaction
-
-Retained without production import: `fixtures/package-events/` as an optional historical conformance fixture.
+- `docs/plans/remove-project-pipelines-coupling-from-generic-package-event-client.md` — delete the unused optional `fixtures/package-events/` lane
+- Deleted `fixtures/package-events/`
 
 This report: `docs/reports/remove-project-pipelines-coupling-from-generic-package-event-client-implement.md`
 
@@ -94,9 +105,9 @@ No new cross-repo tickets were required.
 
 ## Deviations from plan
 
-None that change the committed plan contract.
+Review required deletion of `fixtures/package-events/` after the cutover left it with no caller. The committed plan now matches that decision. Product `question.opened` proof stays in Project Pipelines.
 
-The live forced-gap lane now re-opens the session before the burst. A session-scoped descriptor releases its subscription on the dashboard, so a burst with no subscriber cannot produce `event_gap`. That is required by G23 and the human decision, not a product-scope change.
+The live forced-gap lane re-opens the session before the burst. A session-scoped descriptor releases its subscription on the dashboard, so a burst with no subscriber cannot produce `event_gap`. That is required by G23 and the human decision.
 
 TTL clamp uses the Hub admission range 1,000 through 60,000 ms. Declared values inside that range pass through unchanged.
 
@@ -110,13 +121,12 @@ TTL clamp uses the Hub admission range 1,000 through 60,000 ms. Declared values 
 - Live `npm run smoke:package-events` with Hub `e23196f` rebuilt `botster-hub`: `package-events live proof passed (webrtc)`. Flood budgets `control_ms` 21, `entity_ms` 9, `flood_ms` 4407, `emitted` 200, `received_events` 9, `received_notices` 9. Notices did not exceed emitted events.
 - Live `npm run smoke:package-events:gap` with `BOTSTER_ENV=test` and `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX=1` on the isolated Hub child: `package-events forced-gap live proof passed (webrtc)`
 
-Production entry point: `App` passes `runtimeClient.entities.list("botster-web.package")` into `usePackageEventNotices`. `packageRecord()` preserves `notice_reactions`. The hook subscribes with `{ owner, name, subjects: [viewedSessionId] }` from the admitted descriptor. Encoded `list_packages` without `notice_reactions` produces `[]` and no subscription. Encoded `list_packages` with the descriptor produces the subscription and toast path.
+Production entry point: `App` passes `runtimeClient.entities.list("botster-web.package")` into `usePackageEventNotices`. `packageRecord()` preserves `notice_reactions`. The hook subscribes with `{ owner, name, subjects: [viewedSessionId] }` from the admitted descriptor. Unit evidence now mounts that hook on the encoded WebRTC runtime: encoded `list_packages` without `notice_reactions` sends no `subscribe_events`; encoded late arrival sends one `subscribe_events` and a matching toast; descriptor removal and package removal send `unsubscribe_events`; reconnect sends one fresh `subscribe_events`; each shared `/notice` resolver error emits one diagnostic.
 
 ## Unverified behavior or residual risk
 
 - Browser toast colour and duration were asserted from Ionic attributes in the live lane (`color="warning"`) and from hook state in unit tests. Visual colour at both desktop and mobile viewports was not separately screenshot-verified.
 - The first live smoke against the previously built Hub binary failed closed because that binary reported conformance revision 45. Implement rebuilt Hub from `e23196f` locally for evidence. Downstream Verify should use a Hub that reports revision 46.
-- `fixtures/package-events/` remains in the tree and is unused by the default smoke path. It still names Project Pipelines as a live producer. It is not imported by production modules.
 
 ## Missing vault guidance discovered
 

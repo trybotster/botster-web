@@ -110,7 +110,3 @@ export function noticeColorFromSeverity(severity: string | undefined): "medium" 
 export function packageEventSubscriptionKey(spec: PackageEventSubscribeSpec): string {
   return `${spec.owner}\0${spec.name}\0${JSON.stringify(spec.subjects)}`;
 }
-
-export function noticeReactionIdentity(descriptor: PackageNoticeReactionDescriptor): string {
-  return `${descriptor.owner}\0${descriptor.name}`;
-}
