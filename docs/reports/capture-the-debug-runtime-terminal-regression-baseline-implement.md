@@ -2,8 +2,8 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787701069_233514`
-Returned from Review: `review_1787701045_427701`
+Step: `botster_stack_implement` / `run_step_1787701446_843878`
+Returned from Review: `review_1787701425_278522`
 Human decision: `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9, resynced to format version 2
 Approved review: `review_1787638112_854617`
@@ -125,11 +125,17 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787701045_427701` returned one open finding. This visit keys the control send oracle by the selected wire operation.
+`review_1787701425_278522` returned one open finding. This visit keys the control response oracle by the selected wire operation.
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787701046_872600` unrelated send | `observeOutbound` receives the selected semantic name. Modular counts `daemon_request` rows for that arm's wire type only. Legacy counts ledger rows for `resize` or `request_snapshot` only. A snapshot sample rejects when only an unrelated resize is sent before Enter. |
+| `finding_1787701425_914685` unrelated reply | `observeInbound` receives the selected semantic name. Modular counts `webrtc_response_assembly` and tagged reply bytes for that wire type only. Legacy counts inbound ledger rows for `resize` or `request_snapshot` only. A snapshot sample rejects when its reply finishes before Enter and only an unrelated resize reply arrives after `t_key`. |
+
+`review_1787701045_427701` findings from the prior visit remain resolved:
+
+| Finding | Fix |
+| --- | --- |
+| `finding_1787701046_872600` unrelated send | `observeOutbound` still receives the selected semantic name. Modular counts `daemon_request` rows for that arm's wire type only. Legacy counts ledger rows for `resize` or `request_snapshot` only. |
 
 `review_1787699804_592583` findings from the prior visit remain resolved:
 
@@ -186,7 +192,7 @@ Deterministic gates:
 | G2 | `npm run lint` | passed, five known warnings in untouched files |
 | G3 | `npm test` | passed, two known `act(...)` warnings |
 | G4 | `npm run build` | passed |
-| G6 | validator assertions in `src/App.test.mjs` | format version 2, producer starts after settle and marker typing, control send required for the selected wire operation before Enter with one response after t_key, unrelated resize cannot satisfy a snapshot sample, package and sibling inbound required before Enter and after t_key, production sendProbe delay on the positive path, one-shot-before-Enter reject for sustained families, one physical control request per sample, invalid-number reject, and one-armed reject |
+| G6 | validator assertions in `src/App.test.mjs` | format version 2, producer starts after settle and marker typing, control send and reply required for the selected wire operation, unrelated resize send or reply cannot satisfy a snapshot sample, package and sibling inbound required before Enter and after t_key, production sendProbe delay on the positive path, one-shot-before-Enter reject for sustained families, one physical control request per sample, invalid-number reject, and one-armed reject |
 | G13 | `observe:terminal-baseline:validate` | available; used after a written record |
 
 G5 pinned sequence from the prior Implement visit remains the last completed live-packaged proof:

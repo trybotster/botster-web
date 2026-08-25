@@ -18966,6 +18966,40 @@ function removeCssAtRules(source) {
   assert.equal(snapshotSent, 0);
   assert.equal(unrelatedResizeSent, 1);
 
+  let keyedSnapshotSent = 0;
+  let keyedSnapshotInbound = 0;
+  let keyedResizeInbound = 0;
+  const snapshotReplyBeforeEnter = createControlResponseBurst({
+    names: ["terminal_snapshot"],
+    requestCount: 1,
+    issueRequest: async () => {
+      keyedSnapshotSent += 1;
+      keyedSnapshotInbound += 1;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
+      keyedResizeInbound += 1;
+      return { ok: true };
+    },
+    observeOutbound: async (name) => ({
+      sent: name === "terminal_snapshot" ? keyedSnapshotSent : 0
+    }),
+    observeInbound: async (name) => {
+      if (name !== "terminal_snapshot") {
+        return {
+          frames: keyedSnapshotInbound + keyedResizeInbound,
+          bytes: (keyedSnapshotInbound + keyedResizeInbound) * 8
+        };
+      }
+      return { frames: keyedSnapshotInbound, bytes: keyedSnapshotInbound * 8 };
+    }
+  });
+  await snapshotReplyBeforeEnter.start();
+  await assert.rejects(
+    completeAroundProbe(snapshotReplyBeforeEnter, async () => ({ at: Date.now() })),
+    /no inbound progress during the measured interval/
+  );
+  assert.equal(keyedSnapshotInbound, 1);
+  assert.equal(keyedResizeInbound, 1);
+
   let oneShotPackageCount = 0;
   const oneShotPackage = createPackageEventBurst({
     count: 10,

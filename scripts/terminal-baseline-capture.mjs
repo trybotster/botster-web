@@ -464,6 +464,7 @@ export function createControlResponseBurst({
       try {
         const name = sequence[stats.issued];
         const observeSelectedOutbound = () => observeOutbound(name);
+        const observeSelectedInbound = () => observeInbound(name);
         let pending;
         const tKey = await sendProbe({
           beforeEnter: async () => {
@@ -477,9 +478,9 @@ export function createControlResponseBurst({
             );
           }
         });
-        const atKey = await observeInbound();
+        const atKey = await observeSelectedInbound();
         const progress = Promise.all([
-          waitForProgress(observeInbound, atKey, "control_response_saturation", progressTimeoutMs),
+          waitForProgress(observeSelectedInbound, atKey, "control_response_saturation", progressTimeoutMs),
           pending
         ]).then(([after]) => {
           const frameDelta = after.frames - atKey.frames;
@@ -1156,6 +1157,7 @@ export async function installLegacyInboundObserver(page) {
         return;
       }
       transport[methodName] = (...args) => {
+        globalThis.__BOTSTER_BASELINE_LAST_OUTBOUND_WIRE__ = wireType;
         globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.push({
           type: methodName,
           wire: wireType,
@@ -1176,13 +1178,19 @@ export async function installLegacyInboundObserver(page) {
         const prefix = message.data[0];
         const payload = Array.from(message.data);
         if (prefix === 0x02) {
-          globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({ type: "snapshot", payload, at: Date.now() });
+          globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
+            type: "snapshot",
+            wire: "request_snapshot",
+            payload,
+            at: Date.now()
+          });
         } else if (prefix === 0x01) {
           globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__.push({ type: "pty", payload, at: Date.now() });
         }
       } else if (message?.type && message.type !== "raw_output") {
         globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
           type: message.type,
+          wire: globalThis.__BOTSTER_BASELINE_LAST_OUTBOUND_WIRE__ ?? message.type,
           payload: message,
           at: Date.now()
         });
@@ -1219,26 +1227,32 @@ export async function observeControlOutbound(page, arm, semanticName) {
   return { sent, wire_type: wireType, semantic: semanticName };
 }
 
-export async function observeControlInbound(page, arm) {
+export async function observeControlInbound(page, arm, semanticName) {
+  const wireType = expectedOutboundWire(arm.arm_id, semanticName);
   if (arm.arm_id === "modular") {
-    const frames = await page.evaluate(() => {
+    const frames = await page.evaluate((expected) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events.filter((entry) =>
-        entry.kind === "webrtc_response_assembly"
-        && (entry.payload?.request_type === "resize" || entry.payload?.request_type === "read_screen")
+        entry.kind === "webrtc_response_assembly" && entry.payload?.request_type === expected
       ).length;
-    });
-    const bytes = (arm.inboundDecodedPayloads ?? []).reduce(
-      (sum, payload) => sum + countInboundControlBytes(payload),
-      0
-    );
-    return { frames, bytes, unit: INBOUND_BYTE_UNIT };
+    }, wireType);
+    const bytes = (arm.inboundDecodedPayloads ?? []).reduce((sum, entry) => {
+      if (entry?.wire !== wireType) {
+        return sum;
+      }
+      return sum + countInboundControlBytes(entry.payload);
+    }, 0);
+    return { frames, bytes, unit: INBOUND_BYTE_UNIT, wire_type: wireType, semantic: semanticName };
   }
-  const raw = await page.evaluate(() => globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? []);
+  const raw = await page.evaluate((expected) => {
+    return (globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? []).filter((entry) => entry.wire === expected);
+  }, wireType);
   return {
     frames: raw.length,
     bytes: raw.reduce((sum, entry) => sum + countInboundControlBytes(entry.payload), 0),
-    unit: INBOUND_BYTE_UNIT
+    unit: INBOUND_BYTE_UNIT,
+    wire_type: wireType,
+    semantic: semanticName
   };
 }
 
@@ -1315,7 +1329,7 @@ export async function issueControlRequest(arm, semanticName) {
   });
   arm.inboundDecodedPayloads = arm.inboundDecodedPayloads ?? [];
   if (reply != null) {
-    arm.inboundDecodedPayloads.push(reply);
+    arm.inboundDecodedPayloads.push({ payload: reply, wire: wireType });
   }
   return {
     semantic: semanticName,
@@ -1626,7 +1640,7 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
     }
     const burst = createControlResponseBurst({
       issueRequest: (name) => issueControlRequest(arm, name),
-      observeInbound: () => observeControlInbound(arm.page, arm),
+      observeInbound: (name) => observeControlInbound(arm.page, arm, name),
       observeOutbound: (name) => observeControlOutbound(arm.page, arm, name)
     });
     const started = Date.now();
