@@ -463,13 +463,14 @@ export function createControlResponseBurst({
       stats.in_flight = true;
       try {
         const name = sequence[stats.issued];
+        const observeSelectedOutbound = () => observeOutbound(name);
         let pending;
         const tKey = await sendProbe({
           beforeEnter: async () => {
-            const beforeSent = await observeOutbound();
+            const beforeSent = await observeSelectedOutbound();
             pending = Promise.resolve(issueRequest(name));
             await waitForSent(
-              observeOutbound,
+              observeSelectedOutbound,
               beforeSent,
               "control_response_saturation",
               progressTimeoutMs
@@ -1149,19 +1150,23 @@ export async function installLegacyInboundObserver(page) {
     globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ = globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? [];
     globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ = globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? [];
     globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__ = globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__ ?? [];
-    const wrapOutbound = (methodName) => {
+    const wrapOutbound = (methodName, wireType) => {
       const originalSend = transport[methodName]?.bind(transport);
       if (typeof originalSend !== "function" || transport[`__baselineOutboundWrapped_${methodName}`]) {
         return;
       }
       transport[methodName] = (...args) => {
-        globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.push({ type: methodName, at: Date.now() });
+        globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.push({
+          type: methodName,
+          wire: wireType,
+          at: Date.now()
+        });
         return originalSend(...args);
       };
       transport[`__baselineOutboundWrapped_${methodName}`] = true;
     };
-    wrapOutbound("sendResize");
-    wrapOutbound("requestSnapshot");
+    wrapOutbound("sendResize", "resize");
+    wrapOutbound("requestSnapshot", "request_snapshot");
     const original = transport.handleMessage?.bind(transport);
     if (typeof original !== "function") {
       throw new Error("legacy transport handleMessage is not available");
@@ -1188,19 +1193,30 @@ export async function installLegacyInboundObserver(page) {
   });
 }
 
-export async function observeControlOutbound(page, arm) {
+export function expectedOutboundWire(armId, semanticName) {
+  const spec = CONTROL_OPERATIONS[semanticName];
+  if (!spec) {
+    throw new Error(`unknown control operation ${semanticName}`);
+  }
+  return armId === "modular" ? spec.modular_wire : spec.legacy_wire;
+}
+
+export async function observeControlOutbound(page, arm, semanticName) {
+  const wireType = expectedOutboundWire(arm.arm_id, semanticName);
   if (arm.arm_id === "modular") {
-    const sent = await page.evaluate(() => {
+    const sent = await page.evaluate((expected) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events.filter((entry) =>
-        entry.kind === "daemon_request"
-        && (entry.payload?.type === "resize" || entry.payload?.type === "read_screen")
+        entry.kind === "daemon_request" && entry.payload?.type === expected
       ).length;
-    });
-    return { sent };
+    }, wireType);
+    return { sent, wire_type: wireType, semantic: semanticName };
   }
-  const raw = await page.evaluate(() => globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? []);
-  return { sent: raw.length };
+  const sent = await page.evaluate((expected) => {
+    const raw = globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? [];
+    return raw.filter((entry) => entry.wire === expected).length;
+  }, wireType);
+  return { sent, wire_type: wireType, semantic: semanticName };
 }
 
 export async function observeControlInbound(page, arm) {
@@ -1611,7 +1627,7 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
     const burst = createControlResponseBurst({
       issueRequest: (name) => issueControlRequest(arm, name),
       observeInbound: () => observeControlInbound(arm.page, arm),
-      observeOutbound: () => observeControlOutbound(arm.page, arm)
+      observeOutbound: (name) => observeControlOutbound(arm.page, arm, name)
     });
     const started = Date.now();
     await burst.start();

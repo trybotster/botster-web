@@ -124,6 +124,7 @@ import {
   assertCounterGrew,
   awaitProductionSendProbeHooks,
   collectResttyProvenance,
+  expectedOutboundWire,
   createControlResponseBurst,
   createPackageEventBurst,
   createSiblingFloodHandle,
@@ -18925,6 +18926,45 @@ function removeCssAtRules(source) {
     completeAroundProbe(oneShotControl, async () => ({ at: Date.now() })),
     /no inbound progress during the measured interval/
   );
+
+  assert.equal(expectedOutboundWire("modular", "terminal_snapshot"), "read_screen");
+  assert.equal(expectedOutboundWire("legacy", "terminal_snapshot"), "request_snapshot");
+  assert.equal(expectedOutboundWire("modular", "terminal_resize"), "resize");
+  assert.throws(() => expectedOutboundWire("modular", "unknown_op"), /unknown control operation/);
+
+  let snapshotSent = 0;
+  let unrelatedResizeSent = 0;
+  let snapshotInbound = 0;
+  let releaseSnapshotSend;
+  const snapshotBlockedByResize = createControlResponseBurst({
+    names: ["terminal_snapshot"],
+    requestCount: 1,
+    issueRequest: async () => {
+      unrelatedResizeSent += 1;
+      await new Promise((resolvePromise) => {
+        releaseSnapshotSend = resolvePromise;
+      });
+      snapshotSent += 1;
+      snapshotInbound += 1;
+      return { ok: true };
+    },
+    observeInbound: async () => ({ frames: snapshotInbound, bytes: snapshotInbound * 8 }),
+    observeOutbound: async (name) => ({
+      sent: name === "terminal_snapshot" ? snapshotSent : unrelatedResizeSent
+    })
+  });
+  await snapshotBlockedByResize.start();
+  await assert.rejects(
+    completeAroundProbe(snapshotBlockedByResize, async () => {
+      if (typeof releaseSnapshotSend === "function") {
+        releaseSnapshotSend();
+      }
+      return { at: Date.now() };
+    }),
+    /no control request sent at the probe Enter/
+  );
+  assert.equal(snapshotSent, 0);
+  assert.equal(unrelatedResizeSent, 1);
 
   let oneShotPackageCount = 0;
   const oneShotPackage = createPackageEventBurst({

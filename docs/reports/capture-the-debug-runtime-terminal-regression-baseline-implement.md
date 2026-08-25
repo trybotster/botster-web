@@ -2,8 +2,8 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787699822_105035`
-Returned from Review: `review_1787699804_592583`
+Step: `botster_stack_implement` / `run_step_1787701069_233514`
+Returned from Review: `review_1787701045_427701`
 Human decision: `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9, resynced to format version 2
 Approved review: `review_1787638112_854617`
@@ -125,11 +125,17 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787699804_592583` returned one open finding. This visit uses a family-specific control oracle.
+`review_1787701045_427701` returned one open finding. This visit keys the control send oracle by the selected wire operation.
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787699804_683507` one-reply control | `control_response_saturation` proves the browser sent the real request before Enter and that its one response arrives after `t_key`. Modular send uses the production `daemon_request` event. Legacy send wraps `sendResize` and `requestSnapshot`. The positive test issues one send and one delayed reply. Package-event and sibling families still require inbound growth before Enter and after `t_key`. The frozen control request count stays 20. |
+| `finding_1787701046_872600` unrelated send | `observeOutbound` receives the selected semantic name. Modular counts `daemon_request` rows for that arm's wire type only. Legacy counts ledger rows for `resize` or `request_snapshot` only. A snapshot sample rejects when only an unrelated resize is sent before Enter. |
+
+`review_1787699804_592583` findings from the prior visit remain resolved:
+
+| Finding | Fix |
+| --- | --- |
+| `finding_1787699804_683507` one-reply control | `control_response_saturation` still proves the browser sent the selected request before Enter and that its one response arrives after `t_key`. The send counter is now the selected wire operation, not the combined resize-plus-snapshot count. |
 
 `review_1787696822_102316` findings from the prior visit remain resolved:
 
@@ -180,7 +186,7 @@ Deterministic gates:
 | G2 | `npm run lint` | passed, five known warnings in untouched files |
 | G3 | `npm test` | passed, two known `act(...)` warnings |
 | G4 | `npm run build` | passed |
-| G6 | validator assertions in `src/App.test.mjs` | format version 2, producer starts after settle and marker typing, control send required before Enter with one response after t_key, package and sibling inbound required before Enter and after t_key, production sendProbe delay on the positive path, one-shot-before-Enter reject for sustained families, one physical control request per sample, invalid-number reject, and one-armed reject |
+| G6 | validator assertions in `src/App.test.mjs` | format version 2, producer starts after settle and marker typing, control send required for the selected wire operation before Enter with one response after t_key, unrelated resize cannot satisfy a snapshot sample, package and sibling inbound required before Enter and after t_key, production sendProbe delay on the positive path, one-shot-before-Enter reject for sustained families, one physical control request per sample, invalid-number reject, and one-armed reject |
 | G13 | `observe:terminal-baseline:validate` | available; used after a written record |
 
 G5 pinned sequence from the prior Implement visit remains the last completed live-packaged proof:
