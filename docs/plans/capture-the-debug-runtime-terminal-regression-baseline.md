@@ -4,6 +4,27 @@ Plan for ticket `ticket_1787603669_760394` in project `project_1787600579_585482
 (Botster Isolated Subscription Data Plane), pipeline `botster_stack_delivery`,
 run `run_1787632387_839095`, step `botster_stack_plan`.
 
+**Revision 2**, after Plan Review `review_1787633696_367103` returned
+`changes_required`. Changes in this revision:
+
+- `finding_1787633696_107977` (blocker): the wire oracle is deleted. Both arms
+  encrypt terminal bytes at the DataChannel, so a frame-level marker search finds
+  nothing, and echo receipt is not PTY arrival. §6 replaces it with a PTY oracle
+  on the host wall clock plus the paint oracle, and names the metric honestly.
+- `finding_1787633696_468463` (high): §7.1 splits the ambiguous
+  `event_saturation` family into `control_response_saturation` (cross-stack) and
+  `package_event_saturation` (modular-only, legacy `not_applicable`), and defines
+  `sibling_saturation` arm-neutrally. Approved by `question_1787633836_780366`.
+- `finding_1787633696_945152` (high): §7 makes per-arm Restty provenance a
+  required record member, and G14 rejects a missing or unverified one.
+- `finding_1787633696_848106` (high): §14 replaces the bare G5 npm script with
+  the complete pinned build and smoke sequence.
+- `finding_1787633696_171220` (medium): §5 permits `src/App.test.mjs` explicitly
+  while keeping the prohibition on production files under `src/`.
+- `finding_1787633696_983713` (low) and `finding_1787633696_469509` (info) are
+  process and infrastructure items. This visit resubmits complete gate evidence
+  and reuses the existing Plan checklist rather than creating another.
+
 This ticket publishes the observation format that `ticket_1787600689_646958`
 (Restty vendor) and `ticket_1787600679_990088` (integration cold cut) must reuse.
 It records a pre-change product baseline. It changes no terminal transport code
@@ -149,7 +170,8 @@ In scope:
 1. A client-neutral observation harness in `botster-web` that drives both arms.
 2. The frozen observation format, published as a document and as an executable
    schema plus validator.
-3. The seven required observation families of §7.
+3. The eight observation families of §7, which cover the seven the ticket
+   names after §7.1 splits the ambiguous `event_saturation` term.
 4. A recorded local two-arm observation set, marked observational and non-gating.
 5. A `workflow_dispatch` GitHub workflow pinned to `botster-ubuntu-24.04-16core`.
 6. A blocked controlled-runner record that names the exact missing-runner reason
@@ -160,8 +182,10 @@ Non-scope:
 
 - Do not change terminal transport in any repository.
 - Do not change the vendored Restty revision. `ticket_1787600689_646958` owns it.
-- Do not change any file under `src/`. §6 explains why no production change is
-  needed.
+- Do not change any production file under `src/`. §6 explains why no production
+  change is needed. `src/App.test.mjs` is explicitly permitted, because it is this
+  repository's only test entry point and G6 needs it. Nothing under
+  `src/botster/`, `src/app/`, or `src/vendor/` changes.
 - Do not change any file in `~/Rails/trybotster`. The legacy arm is driven from
   an unmodified checkout at the frozen revision.
 - Do not add DataChannel isolation, entity channels, or event channels. Tickets
@@ -169,42 +193,73 @@ Non-scope:
 - Do not assert a wall-clock threshold anywhere. No timing value gates CI.
 - Do not claim a controlled-runner observation set. The runner does not exist.
 
-## 6. Design: one client-neutral oracle for both arms
+## 6. Design: one client-neutral oracle pair for both arms
 
-The Web repository already records rich terminal instrumentation through
-`recordLiveHarnessTerminal` (`src/botster/hubTerminalDataPlane.ts:1399`), and the
-packaged harness reads it. That instrumentation is unavailable in the legacy arm,
-which serves a different client from a different repository. Measuring the two
-arms through different oracles would compare the oracles, not the products.
+Plan Review revision 1 replaced the original design. The first plan proposed a
+wire oracle that wrapped `WebSocket` and `RTCDataChannel` message events and
+searched each frame for a plaintext probe marker. That oracle cannot work.
+`src/botster/webrtcDaemonClient.ts:1726-1745` decrypts AES-GCM envelopes after
+the channel event, so the modular arm delivers ciphertext at that point, and
+`app/frontend/lib/connections/terminal_connection.js:5` states the legacy arm is
+end-to-end encrypted over its own DataChannel as well. The wire oracle would find
+no marker on either arm, and its end point was browser echo receipt, which is not
+PTY arrival. The wire oracle is deleted from this plan.
 
-The harness therefore observes both arms through two oracle classes that need no
-source change in either repository. Playwright `addInitScript` installs both
-before any application code runs.
+The replacement observes both arms at points where plaintext evidence exists and
+no client instrumentation is required.
 
-**Wire oracle.** The init script wraps `WebSocket.prototype.send`, the
-`message` event on `WebSocket`, `RTCDataChannel.prototype.send`, and the
-`message` event on `RTCDataChannel`, and stamps each frame with
-`performance.now()` and a byte length. Both arms carry terminal bytes over one of
-those two browser transports, so the same wrapper serves both. The wrapper
-records only a timestamp, a direction, a byte length, and whether the frame
-contains the current unique probe marker. It never decodes, buffers, or reorders
-a frame.
+**PTY oracle (host wall clock).** Both arms run a real PTY with a real shell. The
+frozen seed script defines one probe command. Executing that command appends one
+line to a host file named by `BOTSTER_BASELINE_LOG`:
 
-**Paint oracle.** The init script installs a `requestAnimationFrame` sampler over
-the mounted terminal canvas. It hashes the canvas pixel buffer each frame and
-records the timestamp of each hash change. First change after attach is the
-paint-ready endpoint. The first sample of a stable hash held for a fixed settle
-window is the paint-settled endpoint.
+```
+printf '%s %s\n' "$EPOCHREALTIME" "$marker" >> "$BOTSTER_BASELINE_LOG"
+```
+
+The harness reads that file directly on the host filesystem. The value is
+plaintext, arm-neutral, and produced by the product's own PTY path, not by a
+harness stub.
+
+**Paint oracle.** An `addInitScript` payload installs a `requestAnimationFrame`
+sampler over the mounted terminal canvas. It hashes the canvas pixel buffer each
+frame and records the timestamp of each hash change. First change after attach is
+the paint-ready endpoint. The first sample of a hash held stable for the frozen
+settle window is the paint-settled endpoint.
+
+**Keydown endpoint.** The same `addInitScript` payload installs a capture-phase
+`keydown` listener that stamps `Date.now()` for the probe key. It records a
+timestamp only. It never cancels, rewrites, or delays the event.
+
+Three endpoints therefore exist per repetition:
+
+| Symbol | Meaning | Source |
+|--------|---------|--------|
+| `t_key` | the browser dispatched the probe key | capture-phase keydown, `Date.now()` |
+| `t_pty` | the session shell executed the probe command | `EPOCHREALTIME` in the host log file |
+| `t_paint` | the echoed output reached the canvas | paint oracle hash change |
+
+`t_key` and `t_pty` share one wall clock because the capture requires the browser
+and the PTY to run on one host. G12 asserts that requirement and the record
+carries `same_host: true`. A capture that cannot prove one host emits no
+`key_to_pty` value.
+
+**Naming.** `key_to_pty` is `t_pty - t_key`: browser keydown dispatch to shell
+execution of the probe command. It includes the shell's own execution cost. The
+plan does not hide that cost. Each capture records
+`shell_exec_calibration_ms` per arm, measured by driving the identical probe
+command on a local PTY with no browser in the path, so a reader can see the floor
+that every `key_to_pty` value sits above. Echo receipt is never called
+`key_to_pty`.
 
 Consequences:
 
-- Zero change under `src/`. The production terminal path is untouched, which the
-  ticket requires.
+- No production file under `src/botster/`, `src/app/`, or `src/vendor/` changes,
+  and no file in the legacy checkout changes.
 - The existing `__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminal` records stay
   available in the modular arm. The harness records them as **arm-local semantic
   context** (`attach`, `ghostsnp_install` READY, `ghostsnp_install` FINISH), never
   as a cross-arm comparison endpoint.
-- Cross-arm comparison uses wire and paint endpoints only.
+- Cross-arm comparison uses the PTY oracle and the paint oracle only.
 
 The existing harness pushes `{kind, payload}` without a timestamp. The observer
 adds timestamps by replacing the two arrays created in
@@ -223,42 +278,105 @@ Each capture writes one JSON record with these top-level members.
 | `format_version` | `1` |
 | `capture_id` | stable id for one two-arm capture |
 | `product_baseline_only` | always `true`, with the §4 causality statement inline |
+| `same_host` | always `true`; the capture refuses to emit a record whose browser and PTY ran on different hosts |
 | `host` | os, kernel, cpu model, logical cpu count, memory, runner label or `local` |
 | `browser` | Playwright channel, Chromium build, viewport, device scale factor |
 | `arms` | exactly two entries, `legacy` and `modular` |
 | `frozen_inputs` | the §8 table, byte for byte identical across arms |
-| `observations` | the seven families below, per arm |
+| `observations` | the eight families below, per arm |
 | `correctness` | the deterministic gate results, per arm |
 | `blocked` | list of observation families that produced no value, each with a typed reason |
 
-Each arm entry records: `revisions` (repository, commit, and for the modular arm
-the locked Core revision from `Cargo.lock`), `build_commands`, `launch_command`,
-`binary_real_paths`, and `env` for every variable the launch sets.
+Each arm entry records `revisions`, `build_commands`, `launch_command`,
+`binary_real_paths`, `client`, `restty`, and `env` for every variable the launch
+sets.
 
-Each observation family records: `endpoint_start`, `endpoint_end`, `oracle`
-(`wire` or `paint`), `unit` (`ms`), `n`, `warmup_discarded`, and the statistic
-set `min`, `p50`, `p95`, `max`. A family that cannot run on an arm records
+`revisions` carries the repository and commit for the arm, and for the modular
+arm the locked Core revision read from the Hub `Cargo.lock`.
+
+`restty` is a required member of every arm entry, because the ticket requires the
+exact Restty revision. It carries:
+
+| Field | Content |
+|-------|---------|
+| `declared_revision` | the Restty source commit the arm declares |
+| `declaration_source` | the exact file or commit that declares it |
+| `artifact_sha256` | the SHA-256 of every vendored Restty distribution file the arm loads |
+| `ghostty_pin` | the Restty-pinned Ghostty commit when the arm declares one, otherwise `null` with a reason |
+
+Known values at plan time. The modular arm declares Restty
+`59c640488f33b10296875471691e43da6890e074` and Ghostty pin
+`eb72ec61304ea256be1d86ed8fa961c84e43ecbd` in `src/vendor/restty/README.md`. The
+legacy arm at `f598075e` vendors `app/frontend/vendor/chunk-02afddvq.js`, declared
+by the commit message of `2b52d0c9` as Restty `cd1911d0f`; that arm declares no
+Ghostty pin. The legacy declaration is a short revision in a commit message, so
+`artifact_sha256` is what makes it verifiable. G14 rejects a record whose
+`declared_revision` or `artifact_sha256` is missing or does not match the loaded
+files.
+
+Each observation family records `endpoint_start`, `endpoint_end`, `oracle`
+(`pty` or `paint`), `unit` (`ms`), `n`, `warmup_discarded`, and the statistic set
+`min`, `p50`, `p95`, `max`. A family that cannot run on an arm records
 `status: "not_applicable"` plus a reason, never a number.
 
-The seven families:
+The eight families:
 
 | Family | `endpoint_start` | `endpoint_end` | Oracle |
 |--------|------------------|----------------|--------|
-| `key_to_pty` | in-page capture-phase keydown for the probe key | first inbound terminal frame containing the probe echo marker | wire |
-| `attach_ready` | outbound attach frame | first canvas hash change after attach | paint |
+| `key_to_pty` | `t_key`, the probe keydown | `t_pty`, the shell executed the probe command | pty |
+| `attach_ready` | the mounted terminal begins attach | first canvas hash change after attach | paint |
 | `history_finish` | first canvas hash change after attach | canvas hash stable for the settle window | paint |
 | `scrollback` | first wheel event dispatch | canvas hash stable for the settle window | paint |
-| `large_history` | outbound attach frame against the seeded session | canvas hash stable for the settle window | paint |
-| `event_saturation` | probe keydown during the event burst | first inbound frame containing the probe echo marker | wire |
-| `sibling_saturation` | probe keydown on terminal B while terminal A is saturated | first inbound frame containing terminal B's probe echo marker | wire |
+| `large_history` | attach against the seeded large-history session | canvas hash stable for the settle window | paint |
+| `control_response_saturation` | `t_key` during the control-response burst | `t_pty` | pty |
+| `package_event_saturation` | `t_key` during the 200 package-event burst | `t_pty` | pty |
+| `sibling_saturation` | `t_key` on terminal B while terminal A is flooded | `t_pty` for terminal B | pty |
 
-`attach_ready` and `history_finish` also record the modular arm's protocol
-states (`ghostsnp_install` READY and FINISH) under `arm_local_semantics`. The
-legacy arm records `arm_local_semantics: null`, because
+The `key_to_pty` entry also carries the sibling statistic sets `pty_to_paint_ms`
+(`t_paint - t_pty`) and `key_to_paint_ms` (`t_paint - t_key`), so the round trip
+stays decomposable without adding a family, and `shell_exec_calibration_ms` from
+§6.
+
+`attach_ready` and `history_finish` also record the modular arm's protocol states
+(`ghostsnp_install` READY and FINISH) under `arm_local_semantics`. The legacy arm
+records `arm_local_semantics: null`, because
 `snapshot_delivery=ready_then_history` is a modular-only feature
 (`[[ready then history is a compatibility feature not an Attach field]]`). The
 cross-arm numbers stay paint-based, so the asymmetry never becomes a silent
 apples-to-oranges comparison.
+
+### 7.1 The two saturation families
+
+Plan Review finding `finding_1787633696_468463` and the answer to
+`question_1787633836_780366` split the original single `event_saturation` family.
+A Hub-authored package-event burst is server-to-client egress. A browser-issued
+request burst adds client-to-server ingress, request dispatch, and response
+generation. Matching aggregate frames and bytes does not make those workloads
+equivalent, so the plan does not pretend it does. The term `event_saturation` is
+retired to keep the vocabulary unambiguous.
+
+**`control_response_saturation` — cross-stack comparison.** Both arms issue the
+same logical browser control request family, `list_configs` and
+`list_session_types`, on the same request schedule. The harness measures ingress
+and egress separately and equalizes the server-to-client **response** frames per
+second and bytes per second within a recorded tolerance. Each arm records
+`request_rate`, `response_rate`, `response_bytes`, `producer`, and `tolerance`.
+Terminal input and output are probed during the response burst through the PTY
+oracle. If the two arms' response shapes differ, the record states that
+limitation, and no row claims isolated transport causality.
+
+**`package_event_saturation` — modular-only diagnostic.** The modular arm runs
+the existing 200 package-event fixture burst
+(`scripts/live-packaged-protocol-harness.mjs:1835`). The legacy arm records
+`status: "not_applicable"` with the exact reason: legacy `f598075e` has no
+harness-drivable package-event plane. The plan does not manufacture a legacy
+package-event equivalent from unrelated control requests.
+
+**`sibling_saturation` — arm-neutral by construction.** Each arm mounts two
+terminals, floods terminal A with the frozen PTY workload from the seed script,
+and probes terminal B. The session script, output bytes, probe sequence, and
+observation fields are identical in both arms. This family needs no
+product-specific plane and no modular harness helper shape.
 
 ## 8. Frozen harness inputs
 
@@ -270,19 +388,21 @@ closed when it cannot prove a value.
 | Viewport | 1440 x 900, device scale factor 1 |
 | Terminal geometry | fixed rows and columns, asserted equal on both arms before any measurement |
 | Browser | one Playwright Chromium build, recorded by revision |
-| Session workload | one seeded shell session started from a fixed script committed under `fixtures/` |
-| Probe input | one printable key per repetition, unique marker per repetition |
+| Session workload | one seeded shell session started from a fixed script committed under `fixtures/terminal-baseline/` |
+| Probe command | one fixed command per repetition, appending `$EPOCHREALTIME` and a unique marker to `$BOTSTER_BASELINE_LOG` |
 | Repetitions | 20 measured, 3 warm-up repetitions discarded and recorded as discarded |
 | Scrollback gesture | fixed wheel delta, fixed event count, fixed pacing |
 | History size | one fixed line count and one fixed byte count, produced by the seed script |
-| Event burst | 200 package events, matching the existing flood lane at `scripts/live-packaged-protocol-harness.mjs:1835` |
-| Sibling saturation | two mounted terminals, one held slow with the shape used by `proveSiblingSlowClientAndHostStayUp` |
+| Control-response burst | one fixed schedule of `list_configs` and `list_session_types`, with the server-to-client response rate and bytes equalized across arms within the recorded tolerance |
+| Package-event burst | 200 package events on the modular arm only, matching the existing lane at `scripts/live-packaged-protocol-harness.mjs:1835` |
+| Sibling flood | two mounted terminals, terminal A flooded with a fixed output byte count from the seed script, terminal B probed |
 | Settle window | one fixed millisecond window for canvas-hash stability |
 | Order | arms run in both orders across the capture, so warm-cache order is not confounded with arm |
 
 Rerunning both arms on one machine in one capture is what makes the comparison
 meaningful. The harness refuses to emit a record whose two arms ran on different
 hosts or different browser builds.
+
 
 ## 9. Runtime-teardown lens answers
 
@@ -298,7 +418,7 @@ baseline must record, not a product behavior change.
 | `teardown_isolation` | Each arm owns an isolated data directory, an isolated Hub process, an isolated session worker, and its own browser context. One arm's failure kills that arm's process tree only. Repetitions inside one arm share the session on purpose; the harness records the session id in each observation so a shared-session effect is visible rather than hidden. |
 | `teardown_bounds` | Every stop path is bounded. The harness sends the arm's stop signal, waits a fixed budget, then escalates to `SIGKILL` on the recorded pid and records `teardown: "escalated"` in the arm entry. No unbounded wait exists in the capture loop. A hung arm marks its families `blocked`, never `0`. |
 | `late_message_matrix` | The harness creates durable ownership through four surfaces. Terminal attach: tagged by session id and, in the modular arm, subscription id and generation; rejected after arm stop because the browser context is closed first; residual state swept by deleting the arm data directory. Entity subscription: tagged by family; released with the existing `releaseEntityFamily` before arm stop. Package-event subscription: tagged by owner package and subject; the burst producer is stopped before the terminal probes of the next repetition. Spawned session: tagged by session id, recorded, and stopped in the arm teardown. A repetition that cannot prove all four are released is discarded and recorded as discarded. |
-| `production_path_proof` | The capture drives the real product path in both arms: real browser, real client build, real Hub process, real PTY. The wire oracle observes the actual browser transport frames, not a harness stub. Arm teardown is proven live: after stop, the harness asserts the recorded Hub pid and worker pid are gone and the arm's socket path is absent. A terminal JSON record alone is not accepted as teardown proof. |
+| `production_path_proof` | The capture drives the real product path in both arms: real browser, real client build, real Hub process, real PTY. The PTY oracle reads a timestamp the session's own shell wrote through the product's real PTY path, not a harness stub. Arm teardown is proven live: after stop, the harness asserts the recorded Hub pid and worker pid are gone and the arm's socket path is absent. A terminal JSON record alone is not accepted as teardown proof. |
 | `ownership_identity` | Each arm entry carries `arm_id`, the Hub pid, the worker pid, the data directory real path, and the session id. Each observation carries the `capture_id`, `arm_id`, repetition index, and session id. A stale sample from a previous repetition therefore cannot be attributed to the current one. |
 | `sibling_fail_closed_policy` | On a clean arm stop, the other arm keeps its already-recorded observations. On an ultimate stop failure, the harness fails the whole capture, marks both arms `blocked`, and emits no partial two-arm comparison. A one-armed record is never published as a baseline. |
 
@@ -314,8 +434,9 @@ New files in `botster-web`:
 - `scripts/terminal-baseline-capture.mjs` — the two-arm orchestrator. Starts each
   arm, runs the seven families in both arm orders, tears each arm down, validates
   the record, and writes it.
-- `fixtures/terminal-baseline/seed.sh` — the frozen session workload and history
-  seed.
+- `fixtures/terminal-baseline/seed.sh` — the frozen session workload, the history
+  seed, the probe command that appends `$EPOCHREALTIME` and the marker to
+  `$BOTSTER_BASELINE_LOG`, and the sibling flood workload.
 - `docs/terminal-baseline-observation-format.md` — the published contract that
   `ticket_1787600689_646958` and `ticket_1787600679_990088` must reuse.
 - `.github/workflows/terminal-regression-baseline.yml` — `workflow_dispatch`,
@@ -329,12 +450,14 @@ Changed files in `botster-web`:
 
 - `package.json` — add `observe:terminal-baseline` and
   `observe:terminal-baseline:validate`. No dependency change.
-- `src/App.test.mjs` — add the format and validator unit assertions. This is the
-  repository's existing test entry point.
+- `src/App.test.mjs` — add the format, validator, Restty-provenance, and
+  same-host assertions. This is the repository's only test entry point, and §5
+  permits it explicitly.
 - `README.md` — one pointer to the published observation format.
 
-Files that must not change: everything under `src/botster/`, `src/app/`,
-`src/vendor/restty/`, and every file in `~/Rails/trybotster`.
+Files that must not change: everything under `src/botster/`, `src/app/`, and
+`src/vendor/restty/`, and every file in `~/Rails/trybotster`. `src/App.test.mjs`
+is the one permitted exception under `src/`, as §5 states.
 
 ## 11. Ownership boundaries and cross-repository dependencies
 
@@ -389,10 +512,20 @@ Assumptions:
    `botster-web` repository runner list is empty, org runner listing returns 403
    for this session, and the Hub campaign recorded it unregistered under
    `question_1787447435_428566`.
-5. The wire oracle sees terminal bytes in both arms because both deliver terminal
-   output over `WebSocket` or `RTCDataChannel`. Implement must verify this on the
-   legacy arm before recording any `key_to_pty` value, and mark the family
+5. Both arms run a real PTY with a real shell that can execute the frozen probe
+   command and append to `$BOTSTER_BASELINE_LOG`. Verified in the modular arm
+   through the existing packaged harness terminal lane. Implement must verify it
+   on the legacy arm before recording any `key_to_pty` value, and mark the family
    `blocked` with a typed reason if it does not hold.
+6. `Date.now()` in the page and `$EPOCHREALTIME` in the session shell read one
+   wall clock, because G12 requires the browser and the PTY to run on one host.
+   The record carries `same_host: true`. A capture that cannot prove one host
+   emits no `key_to_pty` value.
+7. Both arms deliver terminal bytes over an **encrypted** WebRTC DataChannel.
+   Verified: `src/botster/webrtcDaemonClient.ts:1726-1745` decrypts AES-GCM after
+   the channel event, and
+   `app/frontend/lib/connections/terminal_connection.js:5` states the legacy path
+   is end-to-end encrypted. This is why §6 uses no wire oracle.
 
 Unknowns, each with an owner:
 
@@ -406,19 +539,32 @@ Unknowns, each with an owner:
 3. Whether the legacy arm exposes a stable mounted-canvas selector. Owned by this
    ticket's Implement step. If not, the paint oracle falls back to the arm's
    terminal container element and records which selector it used.
+4. Whether the two arms' `list_configs` and `list_session_types` response shapes
+   are close enough to equalize response frames and bytes within a useful
+   tolerance. Owned by this ticket's Implement step, which must record the
+   achieved tolerance and, when the shapes differ, record that limitation in the
+   record rather than dropping the family.
+5. The full Restty revision the legacy arm vendors. `2b52d0c9` declares the short
+   revision `cd1911d0f` in a commit message only. Owned by this ticket's Implement
+   step, which records the short declaration plus `artifact_sha256` and resolves
+   the full revision from the `trybotster/restty` repository when it is
+   reachable.
 
 ## 13. Risks
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | A reader quotes a baseline number as transport causality | A later ticket claims the transport change fixed or broke typing without evidence | `product_baseline_only` is a required record member carrying the §4 statement; the published document repeats it; the ticket already forbids the claim |
-| Two arms measured through two different oracles | The comparison measures the oracles | §6 uses one wire oracle and one paint oracle for both arms; arm-local semantics are recorded but never compared |
+| Two arms measured through two different oracles | The comparison measures the oracles | §6 uses one PTY oracle and one paint oracle for both arms; arm-local semantics are recorded but never compared |
 | Local laptop noise dominates the values | A meaningless baseline is frozen into the format | The local set is explicitly observational and non-gating; both arm orders run; the record carries `n`, `p50`, and `p95`, not a single mean |
 | The legacy arm cannot be provisioned on the controlled runner | The controlled two-arm set never happens | The workflow takes the legacy checkout as an input and fails closed with a typed skip; a one-armed record is never published as a baseline (§9 sibling policy) |
 | A timing value becomes a CI assertion | Flaky CI, and the ticket's separation rule breaks | The deterministic gate and the observation writer are separate entry points; the validator rejects a record that carries a threshold field |
 | A leaked session or subscription between repetitions | Silent corruption of every later value in the arm | §9 late-message matrix; a repetition that cannot prove release is discarded and recorded as discarded |
 | The format needs a change after the Restty ticket | Downstream sets become incomparable | The version token is explicit; a change bumps `format_version` and the changing ticket must restate both sets |
-| `addInitScript` transport wrapping perturbs the measured path | The oracle changes what it measures | The wrapper records a timestamp and a byte length only, performs no decode or copy of the payload, and the harness records a wrapper-overhead calibration sample in the record |
+| The shell's own execution cost is read as transport latency | Every `key_to_pty` value is inflated by an unstated floor | §6 records `shell_exec_calibration_ms` per arm from the identical probe command driven on a local PTY with no browser; the metric name states it includes shell execution |
+| Browser and PTY wall clocks diverge | `key_to_pty` becomes meaningless or negative | G12 requires one host and the record carries `same_host: true`; the harness discards and records any repetition whose `t_pty` precedes `t_key` |
+| The two saturation families get conflated again | A modular-only diagnostic is read as a cross-stack comparison | §7.1 retires the term `event_saturation`; the schema, the report names, and the published document use `control_response_saturation` and `package_event_saturation` |
+| `list_configs` and `list_session_types` response shapes differ between arms | A cross-stack row overstates equivalence | The record stores request rate, response rate, response bytes, producer, and tolerance per arm, and states the shape limitation; no row claims isolated transport causality |
 
 ## 14. Acceptance checks and tests
 
@@ -431,21 +577,54 @@ is independent of every wall-clock value.
 | G2 | Lint passes | `npm run lint` |
 | G3 | Unit and drift tests pass, including new format and validator assertions | `npm test` |
 | G4 | Production build passes | `npm run build` |
-| G5 | The existing packaged live lane still passes on the modular arm | `npm run smoke:live-packaged-protocol` |
+| G5 | The existing packaged live lane still passes on the modular arm, executed to completion rather than aborting on a missing binary | the full pinned sequence below |
 | G6 | The validator rejects a record missing any required member, missing an arm, carrying one arm only, or carrying a threshold field | unit assertions in `src/App.test.mjs` |
 | G7 | Byte fidelity holds in both arms: the probe marker echoed by the PTY appears intact | harness assertion per repetition |
 | G8 | Ordering holds: paint-ready precedes paint-settled in every repetition | harness assertion per repetition |
-| G9 | No terminal delivery queue overflow occurs during the event burst | reuse the existing overflow check at `scripts/live-packaged-protocol-harness.mjs:1906` |
+| G9 | No terminal delivery queue overflow occurs during the package-event burst | reuse the existing overflow check at `scripts/live-packaged-protocol-harness.mjs:1906` |
 | G10 | Package events never enter the terminal adapter path in the modular arm | reuse the existing check at `scripts/live-packaged-protocol-harness.mjs:1923` |
 | G11 | Arm teardown is proven live: recorded Hub and worker pids are gone and the arm socket path is absent after stop | harness assertion per arm |
 | G12 | Both checkouts are clean and at the recorded revisions before the capture starts | harness precondition, fails closed |
 | G13 | The recorded record validates against `format_version=1` | `npm run observe:terminal-baseline:validate` |
+| G14 | Every arm entry carries a Restty `declared_revision`, a `declaration_source`, and an `artifact_sha256` that matches the vendored files the arm actually loads | validator assertion plus a harness precondition, fails closed |
+| G15 | Both arms ran on one host, and no repetition has `t_pty` before `t_key` | harness precondition and per-repetition assertion |
+
+G5 aborts before it reaches any test when it is written as the bare npm script:
+`npm run smoke:live-packaged-protocol` builds Web and then exits, because
+`scripts/live-packaged-protocol-harness.mjs:142-145` requires `BOTSTER_HUB_BIN`
+and lines 9062-9066 require `BOTSTER_SESSION_WORKER_BIN`. Plan Review reproduced
+that pre-execution abort. G5 is therefore the complete pinned sequence:
+
+```sh
+# 1. Pin the Hub checkout to the modular arm revision.
+git -C "$HUB_CHECKOUT" fetch --quiet origin
+git -C "$HUB_CHECKOUT" checkout --quiet f6db5c436f72b151fd6dacde61d3f4836a4dc925
+test -z "$(git -C "$HUB_CHECKOUT" status --porcelain)"
+
+# 2. Prove the locked Core revision before building.
+grep -q '7eafa470a18025895995bbedc20d34b58106a03b' "$HUB_CHECKOUT/Cargo.lock"
+
+# 3. Build both debug binaries from that checkout.
+( cd "$HUB_CHECKOUT" && cargo build --locked --bin botster-hub )
+( cd "$HUB_CHECKOUT" && cargo build --locked -p botster-core-daemon --bin botster-session-worker )
+
+# 4. Run the lane with both binaries supplied.
+BOTSTER_HUB_BIN="$HUB_CHECKOUT/target/debug/botster-hub" \
+BOTSTER_SESSION_WORKER_BIN="$HUB_CHECKOUT/target/debug/botster-session-worker" \
+  npm run smoke:live-packaged-protocol
+```
+
+Implement records the resolved `$HUB_CHECKOUT`, both binary real paths, and the
+`Cargo.lock` grep result in the implement report. `candidateBinaryProvenance` in
+`scripts/live-packaged-protocol-helpers.mjs` already requires both real paths to
+sit under the same cargo target directory, so step 3 must build into the Hub
+checkout's own `target/`.
 
 Observational output, non-gating:
 
 | # | Output | Where |
 |---|--------|-------|
-| O1 | The local two-arm set, all seven families, both arms, both arm orders | `docs/reports/terminal-baseline-observation-local-<capture_id>.json` |
+| O1 | The local two-arm set, all eight families, both arms, both arm orders | `docs/reports/terminal-baseline-observation-local-<capture_id>.json` |
 | O2 | The blocked controlled-runner record with the exact missing-runner reason | the implement report, and `blocked[]` in the record |
 | O3 | The rerun procedure that produces the controlled set with no code change | `docs/terminal-baseline-observation-format.md` |
 
@@ -470,11 +649,16 @@ Explicitly not claimed:
    `run_hub_debug` task, and the modular two-binary debug build are the
    definition of "debug runtime" for this project. That definition existed only
    in an answered pipeline question. Capture it after Implement.
-2. **A cross-arm baseline needs a client-neutral oracle.** Comparing two product
-   stacks through one stack's internal instrumentation compares the
-   instrumentation. §6 states the wire and paint oracle rule. Capture it.
-3. **A product baseline is not a causality experiment.** The required
+2. **A cross-arm baseline needs a client-neutral oracle, and the wire is not one
+   of them.** Comparing two product stacks through one stack's internal
+   instrumentation compares the instrumentation, and both arms encrypt terminal
+   bytes at the DataChannel, so a frame-level marker search finds nothing. §6
+   states the PTY and paint oracle rule. Capture it.
+3. **Egress saturation and request saturation are different workloads.** §7.1
+   records why matching aggregate frames and bytes does not make a Hub-authored
+   event burst equivalent to a browser-issued request burst.
+4. **A product baseline is not a causality experiment.** The required
    `product_baseline_only` member exists because a multi-component baseline
    invites single-component claims. Capture the rule with the format.
-4. **A one-armed capture is not a baseline.** The fail-closed rule of §9 is not
+5. **A one-armed capture is not a baseline.** The fail-closed rule of §9 is not
    in the vault.
