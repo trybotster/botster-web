@@ -334,6 +334,14 @@ export function assertPreKeyProgress(before, atKey, family) {
   }
 }
 
+export async function assertInboundAtEnter(observe, before, family) {
+  const atEnter = await observe();
+  if (!inboundGrew(before, atEnter)) {
+    throw new Error(`${family}: no inbound traffic at the probe Enter`);
+  }
+  return atEnter;
+}
+
 export async function waitForProgress(observe, before, family, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -404,25 +412,11 @@ export function createControlResponseBurst({
       stats.in_flight = true;
       try {
         const name = sequence[stats.issued];
-        let pending = null;
-        let started = false;
-        let producerInFlight = false;
+        const before = await observeInbound();
+        const pending = Promise.resolve(issueRequest(name));
         const tKey = await sendProbe({
-          beforeEnter: () => {
-            started = true;
-            producerInFlight = true;
-            pending = Promise.resolve(issueRequest(name)).finally(() => {
-              producerInFlight = false;
-            });
-          },
-          producerActive: () => producerInFlight
+          beforeEnter: () => assertInboundAtEnter(observeInbound, before, "control_response_saturation")
         });
-        if (!started) {
-          throw new Error("control_response_saturation: sendProbe did not start the producer before Enter");
-        }
-        if (tKey.producer_active_at_enter !== true) {
-          throw new Error("control_response_saturation: producer was idle at the probe Enter");
-        }
         const atKey = await observeInbound();
         const progress = Promise.all([
           waitForProgress(observeInbound, atKey, "control_response_saturation", progressTimeoutMs),
@@ -500,31 +494,17 @@ export function createPackageEventBurst({
       if (stats.completed || stats.produced_count >= count) {
         throw new Error("package_event_saturation: burst already completed before the sample");
       }
-      let pending = null;
-      let started = false;
-      let producerInFlight = false;
+      const before = await observeDelivery();
+      const pending = Promise.resolve(emitBurst(perSample));
       const tKey = await sendProbe({
-          beforeEnter: () => {
-            started = true;
-            producerInFlight = true;
-            pending = Promise.resolve(emitBurst(perSample)).finally(() => {
-              producerInFlight = false;
-            });
-          },
-        producerActive: () => producerInFlight
+        beforeEnter: () => assertInboundAtEnter(observeDelivery, before, "package_event_saturation")
       });
-      if (!started) {
-        throw new Error("package_event_saturation: sendProbe did not start the producer before Enter");
-      }
-      if (tKey.producer_active_at_enter !== true) {
-        throw new Error("package_event_saturation: producer was idle at the probe Enter");
-      }
       const atKey = await observeDelivery();
       const progress = Promise.all([
         waitForProgress(observeDelivery, atKey, "package_event_saturation", progressTimeoutMs),
         pending
       ]).then(([after]) => {
-        stats.produced_count += Number(after.count ?? after.frames ?? 0) - Number(atKey.count ?? atKey.frames ?? 0);
+        stats.produced_count += Number(after.count ?? after.frames ?? 0) - Number(before.count ?? before.frames ?? 0);
         if (stats.produced_count >= count) {
           stats.completed = true;
         }
@@ -585,28 +565,14 @@ export function createSiblingFloodHandle({
           count: Number(next.delivered_bytes ?? next.bytes ?? 0)
         };
       };
-      let pending = null;
-      let started = false;
-      let producerInFlight = false;
+      if (typeof subscribed.restartFlood !== "function") {
+        throw new Error("sibling_saturation: flood producer is not configured");
+      }
+      const before = await readBytes();
+      const pending = Promise.resolve(subscribed.restartFlood());
       const tKey = await sendProbe({
-        beforeEnter: () => {
-          if (typeof subscribed.restartFlood !== "function") {
-            throw new Error("sibling_saturation: flood producer is not configured");
-          }
-          started = true;
-          producerInFlight = true;
-          pending = Promise.resolve(subscribed.restartFlood()).finally(() => {
-            producerInFlight = false;
-          });
-        },
-        producerActive: () => producerInFlight
+        beforeEnter: () => assertInboundAtEnter(readBytes, before, "sibling_saturation")
       });
-      if (!started) {
-        throw new Error("sibling_saturation: sendProbe did not start the producer before Enter");
-      }
-      if (tKey.producer_active_at_enter !== true) {
-        throw new Error("sibling_saturation: producer was idle at the probe Enter");
-      }
       const atKey = await readBytes();
       const progress = Promise.all([
         waitForProgress(readBytes, atKey, "sibling_saturation", progressTimeoutMs),

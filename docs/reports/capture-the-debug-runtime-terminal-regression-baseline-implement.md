@@ -2,8 +2,8 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787693574_739708`
-Returned from Review: `review_1787693555_555784`
+Step: `botster_stack_implement` / `run_step_1787696353_738922`
+Returned from Review: `review_1787696331_611826`
 Human decision: `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9, resynced to format version 2
 Approved review: `review_1787638112_854617`
@@ -125,12 +125,11 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787693555_555784` returned two open findings. This visit keeps one physical producer in flight across Enter and through `t_key` to `t_pty`, and counts every control request in `issued`.
+`review_1787696331_611826` returned one open finding. This visit uses the inbound frame, event, or byte counter as the Enter oracle.
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787693555_360332` idle at Enter | `sendProbe` starts the producer in `beforeEnter`, after settle and marker typing, immediately before Enter. The wrapper rejects a sample when that producer is already settled at Enter. It does not start a second chunk after `t_key`. Measured rates still count only the post-`t_key` interval. |
-| `finding_1787693555_681327` hidden requests | Each measured sample issues one browser control request. `issued` and `requests` both increment by one. After 20 samples, the physical call count equals the frozen count of 20. A completed pre-key chunk that would require a later post-key chunk is rejected. |
+| `finding_1787696331_767389` promise oracle | Each wrapper starts one producer, then `beforeEnter` reads the production inbound counter. Zero delivered frames, events, or bytes at Enter fails. The same producer must deliver more inbound after `t_key`. A launch promise that is still pending at Enter with first traffic only after Enter fails for control, package, and sibling families. |
 
 `review_1787691852_111616` findings from the prior visit remain resolved:
 
@@ -169,7 +168,7 @@ Deterministic gates:
 | G2 | `npm run lint` | passed, five known warnings in untouched files |
 | G3 | `npm test` | passed, two known `act(...)` warnings |
 | G4 | `npm run build` | passed |
-| G6 | validator assertions in `src/App.test.mjs` | format version 2, producer active at Enter, one physical control request per sample, invalid-number reject, inbound-byte unit, and one-armed reject |
+| G6 | validator assertions in `src/App.test.mjs` | format version 2, inbound traffic required at Enter, more inbound after t_key, one physical control request per sample, invalid-number reject, and one-armed reject |
 | G13 | `observe:terminal-baseline:validate` | available; used after a written record |
 
 G5 pinned sequence from the prior Implement visit remains the last completed live-packaged proof:
