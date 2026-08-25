@@ -18423,6 +18423,35 @@ function removeCssAtRules(source) {
   booleanOnly.correctness.control_response_equalization.response_bytes_within_tolerance = false;
   assert.equal(recordIsPublishableBaseline(booleanOnly), true);
   assert.equal(validateObservationRecord(booleanOnly).ok, true);
+  const invalidNumbers = exampleValidRecord();
+  for (const armId of ["legacy", "modular"]) {
+    invalidNumbers.observations[armId].control_response_saturation.request_rate = -1;
+    invalidNumbers.observations[armId].control_response_saturation.response_rate = -1;
+    invalidNumbers.observations[armId].control_response_saturation.response_bytes = -1;
+    invalidNumbers.observations[armId].control_response_saturation.inbound_frame_count = -20;
+    invalidNumbers.observations[armId].control_response_saturation.inbound_bytes = -1;
+    invalidNumbers.observations[armId].key_to_pty.min = "not-a-number";
+  }
+  assert.equal(recordIsPublishableBaseline(invalidNumbers), false);
+  assert.equal(validateObservationRecord(invalidNumbers).ok, false);
+  const nanRate = exampleValidRecord();
+  nanRate.observations.legacy.control_response_saturation.response_rate = Number.NaN;
+  assert.equal(recordIsPublishableBaseline(nanRate), false);
+  const infiniteMax = exampleValidRecord();
+  infiniteMax.observations.modular.attach_ready.max = Number.POSITIVE_INFINITY;
+  assert.equal(recordIsPublishableBaseline(infiniteMax), false);
+  const unordered = exampleValidRecord();
+  unordered.observations.legacy.scrollback.min = 9;
+  unordered.observations.legacy.scrollback.p50 = 2;
+  assert.equal(recordIsPublishableBaseline(unordered), false);
+  assert.match(validateObservationRecord(unordered).errors.join("\n"), /must be ordered/);
+  const inconsistentBytes = exampleValidRecord();
+  inconsistentBytes.observations.modular.control_response_saturation.response_bytes = 8;
+  inconsistentBytes.observations.modular.control_response_saturation.inbound_bytes = 9;
+  assert.equal(recordIsPublishableBaseline(inconsistentBytes), false);
+  const wrongIssued = exampleValidRecord();
+  wrongIssued.observations.legacy.control_response_saturation.issued = 7;
+  assert.match(validateObservationRecord(wrongIssued).errors.join("\n"), /frozen control request count/);
   assert.equal(valid.product_baseline_statement, PRODUCT_BASELINE_STATEMENT);
   assert.equal(valid.same_host, true);
 
@@ -18677,11 +18706,11 @@ function removeCssAtRules(source) {
   await liveBurst.stop();
 
   let probeCalled = false;
-  let producerDoneBeforeProbe = false;
+  let producerStartedBeforeProbe = false;
   const sequenceBurst = createControlResponseBurst({
     issueRequest: async () => {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-      if (!probeCalled) producerDoneBeforeProbe = true;
+      if (!probeCalled) producerStartedBeforeProbe = true;
       inboundFrames += 1;
       inboundBytes += 4;
       return { ok: true };
@@ -18693,7 +18722,80 @@ function removeCssAtRules(source) {
     probeCalled = true;
     return { at: Date.now() };
   });
-  assert.equal(producerDoneBeforeProbe, false);
+  assert.equal(producerStartedBeforeProbe, true);
+
+  let lateProbeReturned = false;
+  let lateFrames = 0;
+  const lateControl = createControlResponseBurst({
+    issueRequest: async () => {
+      if (!lateProbeReturned) {
+        return { skipped: true };
+      }
+      lateFrames += 1;
+      return { ok: true };
+    },
+    observeInbound: async () => ({ frames: lateFrames, bytes: lateFrames * 8 })
+  });
+  await lateControl.start();
+  await assert.rejects(
+    completeAroundProbe(lateControl, async () => {
+      lateProbeReturned = true;
+      return { at: Date.now() };
+    }),
+    /no inbound progress|did not grow|before t_key/
+  );
+
+  let latePackageProbe = false;
+  let latePackageCount = 0;
+  const latePackage = createPackageEventBurst({
+    count: 10,
+    measuredRepetitions: 1,
+    emitBurst: async (n) => {
+      if (!latePackageProbe) {
+        return 0;
+      }
+      latePackageCount += n;
+      return n;
+    },
+    observeDelivery: async () => ({
+      count: latePackageCount,
+      frames: latePackageCount,
+      bytes: latePackageCount * 4
+    })
+  });
+  await latePackage.start();
+  await assert.rejects(
+    completeAroundProbe(latePackage, async () => {
+      latePackageProbe = true;
+      return { at: Date.now() };
+    }),
+    /no inbound progress|did not grow|before t_key/
+  );
+
+  let lateSiblingProbe = false;
+  let lateSiblingBytes = 0;
+  const lateSibling = createSiblingFloodHandle({
+    floodSessionId: "a",
+    probeSessionId: "b",
+    observe: async () => ({
+      terminal_a_subscribed: true,
+      delivered_bytes: lateSiblingBytes,
+      restartFlood: async () => {
+        if (!lateSiblingProbe) {
+          return;
+        }
+        lateSiblingBytes += 64;
+      }
+    })
+  });
+  await lateSibling.start();
+  await assert.rejects(
+    completeAroundProbe(lateSibling, async () => {
+      lateSiblingProbe = true;
+      return { at: Date.now() };
+    }),
+    /no inbound progress|did not grow|before t_key/
+  );
 
   await assert.rejects(
     restoreProbeSession({}, { probeSessionId: "probe-1" }, {

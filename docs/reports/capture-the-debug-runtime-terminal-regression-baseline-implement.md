@@ -2,8 +2,8 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787691871_440352`
-Returned from Review: `review_1787691852_111616`
+Step: `botster_stack_implement` / `run_step_1787692974_614977`
+Returned from Review: `review_1787692957_200267`
 Human decision: `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9, resynced to format version 2
 Approved review: `review_1787638112_854617`
@@ -125,11 +125,18 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787691852_111616` returned three open findings. This visit measures saturation only after `t_key`, recomputes equalization from family values, and counts both arms with one inbound byte unit.
+`review_1787692957_200267` returned two open findings. This visit starts a gated producer before the final Enter, requires inbound growth before and after `t_key`, and rejects invalid numeric family values.
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787691852_727555` pre-key progress | Each saturation wrapper awaits `sendProbe`, snapshots inbound load at `t_key`, then starts the producer. `captureKeyToPty` waits for that progress promise together with the PTY log. Progress that finishes before `t_key` fails closed for control, package, and sibling families. |
+| `finding_1787692957_921930` producer after key | Each saturation wrapper starts the producer, proves inbound growth, then sends the probe. It snapshots again at `t_key` and continues the producer through the PTY wait. A producer that starts only after `sendProbe` returns fails for control, package, and sibling families. Measured rates still count only the post-`t_key` interval. |
+| `finding_1787692958_623142` invalid numbers | Statistic fields must be finite, nonnegative, and ordered. Control rates must be finite and nonnegative. Counts and bytes must be nonnegative integers. `issued` must equal the frozen control request count, and `response_bytes` must equal `inbound_bytes`. Negative, string, `NaN`, `Infinity`, and inconsistent values reject. |
+
+`review_1787691852_111616` findings from the prior visit remain resolved:
+
+| Finding | Fix |
+| --- | --- |
+| `finding_1787691852_727555` pre-key progress | The load snapshot remains at `t_key`. Progress that finishes before `t_key` and does not continue after it still fails closed. |
 | `finding_1787691852_815060` self-asserted booleans | `recordIsPublishableBaseline` and `validateObservationRecord` recompute rate and byte equality from the recorded family values and the frozen tolerance. Stored booleans are derived output only. Mutated rates with booleans left `true` reject. |
 | `finding_1787691852_901374` protocol layers | Both arms count `decoded_inbound_control_payload_bytes`. Modular bytes come from decoded `transportControl.request` replies. Legacy bytes use the same helper on snapshot blobs and decoded control messages. Encrypted assembly `total_bytes` is not the unit. Equal wire fixtures produce equal counted bytes. |
 
@@ -162,7 +169,7 @@ Deterministic gates:
 | G2 | `npm run lint` | passed, five known warnings in untouched files |
 | G3 | `npm test` | passed, two known `act(...)` warnings |
 | G4 | `npm run build` | passed |
-| G6 | validator assertions in `src/App.test.mjs` | format version 2, inbound-byte unit, pre-key reject, recomputed equalization, overlap helpers, and one-armed reject |
+| G6 | validator assertions in `src/App.test.mjs` | format version 2, gated pre-key and post-key producer proof, invalid-number reject, inbound-byte unit, recomputed equalization, and one-armed reject |
 | G13 | `observe:terminal-baseline:validate` | available; used after a written record |
 
 G5 pinned sequence from the prior Implement visit remains the last completed live-packaged proof:

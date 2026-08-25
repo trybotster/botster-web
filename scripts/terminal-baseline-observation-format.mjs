@@ -447,6 +447,47 @@ export function familyIsMeasured(family) {
     && family.n === FROZEN_INPUTS.measured_repetitions;
 }
 
+export function isFiniteNonNegative(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+export function isNonNegativeInteger(value) {
+  return Number.isInteger(value) && value >= 0;
+}
+
+export function statisticFieldsAreValid(family) {
+  if (!isObject(family)) {
+    return false;
+  }
+  const keys = ["min", "p50", "p95", "max"];
+  if (!keys.every((key) => isFiniteNonNegative(family[key]))) {
+    return false;
+  }
+  return family.min <= family.p50 && family.p50 <= family.p95 && family.p95 <= family.max;
+}
+
+export function controlFieldsAreValid(family) {
+  if (!isObject(family)) {
+    return false;
+  }
+  if (!isFiniteNonNegative(family.request_rate) || !isFiniteNonNegative(family.response_rate)) {
+    return false;
+  }
+  if (!isNonNegativeInteger(family.response_bytes) || !isNonNegativeInteger(family.inbound_bytes)) {
+    return false;
+  }
+  if (!isNonNegativeInteger(family.inbound_frame_count)) {
+    return false;
+  }
+  if (family.issued !== FROZEN_INPUTS.control_request_count) {
+    return false;
+  }
+  if (family.response_bytes !== family.inbound_bytes) {
+    return false;
+  }
+  return true;
+}
+
 export function recordIsPublishableBaseline(record) {
   if (!isObject(record?.observations)) {
     return false;
@@ -464,7 +505,10 @@ export function recordIsPublishableBaseline(record) {
         }
         continue;
       }
-      if (!familyIsMeasured(family)) {
+      if (!familyIsMeasured(family) || !statisticFieldsAreValid(family)) {
+        return false;
+      }
+      if (name === "control_response_saturation" && !controlFieldsAreValid(family)) {
         return false;
       }
     }
@@ -504,6 +548,20 @@ function validateFamily(family, name, armId, ptyClock, errors) {
     return;
   }
   requireKeys(family, REQUIRED_FAMILY_STATS, label, errors);
+  for (const key of ["min", "p50", "p95", "max"]) {
+    if (!isFiniteNonNegative(family[key])) {
+      errors.push(`${label}.${key} must be a finite nonnegative number`);
+    }
+  }
+  if (
+    isFiniteNonNegative(family.min)
+    && isFiniteNonNegative(family.p50)
+    && isFiniteNonNegative(family.p95)
+    && isFiniteNonNegative(family.max)
+    && !(family.min <= family.p50 && family.p50 <= family.p95 && family.p95 <= family.max)
+  ) {
+    errors.push(`${label} min, p50, p95, and max must be ordered`);
+  }
   const contract = FAMILY_CONTRACTS[name];
   if (family.endpoint_start !== contract.endpoint_start) {
     errors.push(`${label}.endpoint_start must be ${contract.endpoint_start}`);
@@ -533,12 +591,34 @@ function validateFamily(family, name, armId, ptyClock, errors) {
       "inbound_frame_count",
       "inbound_bytes",
       "inbound_byte_unit",
+      "issued",
       "wire_request_types",
       "tolerance"
     ]) {
       if (!Object.hasOwn(family, key)) {
         errors.push(`${label} is missing ${key}`);
       }
+    }
+    if (!isFiniteNonNegative(family.request_rate)) {
+      errors.push(`${label}.request_rate must be a finite nonnegative number`);
+    }
+    if (!isFiniteNonNegative(family.response_rate)) {
+      errors.push(`${label}.response_rate must be a finite nonnegative number`);
+    }
+    if (!isNonNegativeInteger(family.response_bytes)) {
+      errors.push(`${label}.response_bytes must be a nonnegative integer`);
+    }
+    if (!isNonNegativeInteger(family.inbound_bytes)) {
+      errors.push(`${label}.inbound_bytes must be a nonnegative integer`);
+    }
+    if (!isNonNegativeInteger(family.inbound_frame_count)) {
+      errors.push(`${label}.inbound_frame_count must be a nonnegative integer`);
+    }
+    if (family.issued !== FROZEN_INPUTS.control_request_count) {
+      errors.push(`${label}.issued must be the frozen control request count`);
+    }
+    if (family.response_bytes !== family.inbound_bytes) {
+      errors.push(`${label} response_bytes must equal inbound_bytes`);
     }
     if (family.producer !== "browser_control_connection") {
       errors.push(`${label}.producer must be browser_control_connection`);
@@ -759,6 +839,7 @@ export function exampleValidRecord(overrides = {}) {
       inbound_frame_count: 20,
       inbound_bytes: 1024,
       inbound_byte_unit: INBOUND_BYTE_UNIT,
+      issued: FROZEN_INPUTS.control_request_count,
       wire_request_types: wireRequestTypesForArm(armId),
       tolerance: CONTROL_RESPONSE_TOLERANCE
     }),

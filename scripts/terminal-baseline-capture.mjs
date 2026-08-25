@@ -320,6 +320,20 @@ export function assertCounterGrew(before, after, family) {
   }
 }
 
+export function inboundGrew(before, after) {
+  const beforeFrames = Number(before?.frames ?? before?.count ?? before?.bytes ?? 0);
+  const afterFrames = Number(after?.frames ?? after?.count ?? after?.bytes ?? 0);
+  const beforeBytes = Number(before?.bytes ?? 0);
+  const afterBytes = Number(after?.bytes ?? 0);
+  return afterFrames > beforeFrames || afterBytes > beforeBytes;
+}
+
+export function assertPreKeyProgress(before, atKey, family) {
+  if (!inboundGrew(before, atKey)) {
+    throw new Error(`${family}: no inbound progress before t_key`);
+  }
+}
+
 export async function waitForProgress(observe, before, family, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -390,17 +404,24 @@ export function createControlResponseBurst({
       stats.in_flight = true;
       try {
         const name = sequence[stats.issued];
-        const tKey = await sendProbe();
         const before = await observeInbound();
-        const pending = Promise.resolve().then(() => issueRequest(name));
-        const progress = Promise.all([
+        const prePending = Promise.resolve().then(() => issueRequest(name));
+        await Promise.all([
           waitForProgress(observeInbound, before, "control_response_saturation", progressTimeoutMs),
-          pending
+          prePending
+        ]);
+        const tKey = await sendProbe();
+        const atKey = await observeInbound();
+        assertPreKeyProgress(before, atKey, "control_response_saturation");
+        const postPending = Promise.resolve().then(() => issueRequest(name));
+        const progress = Promise.all([
+          waitForProgress(observeInbound, atKey, "control_response_saturation", progressTimeoutMs),
+          postPending
         ]).then(([after]) => {
-          const frameDelta = after.frames - before.frames;
-          const byteDelta = after.bytes - before.bytes;
+          const frameDelta = after.frames - atKey.frames;
+          const byteDelta = after.bytes - atKey.bytes;
           stats.issued += 1;
-          stats.requests += 1;
+          stats.requests += 2;
           stats.responses += frameDelta;
           stats.produced_count += frameDelta;
           stats.response_bytes += byteDelta;
@@ -469,12 +490,20 @@ export function createPackageEventBurst({
       if (stats.completed || stats.produced_count >= count) {
         throw new Error("package_event_saturation: burst already completed before the sample");
       }
-      const tKey = await sendProbe();
+      const half = perSample / 2;
       const before = await observeDelivery();
-      const pending = Promise.resolve().then(() => emitBurst(perSample));
-      const progress = Promise.all([
+      const prePending = Promise.resolve().then(() => emitBurst(half));
+      await Promise.all([
         waitForProgress(observeDelivery, before, "package_event_saturation", progressTimeoutMs),
-        pending
+        prePending
+      ]);
+      const tKey = await sendProbe();
+      const atKey = await observeDelivery();
+      assertPreKeyProgress(before, atKey, "package_event_saturation");
+      const postPending = Promise.resolve().then(() => emitBurst(half));
+      const progress = Promise.all([
+        waitForProgress(observeDelivery, atKey, "package_event_saturation", progressTimeoutMs),
+        postPending
       ]).then(([after]) => {
         stats.produced_count += Number(after.count ?? after.frames ?? 0) - Number(before.count ?? before.frames ?? 0);
         if (stats.produced_count >= count) {
@@ -527,16 +556,7 @@ export function createSiblingFloodHandle({
       if (!subscribed?.terminal_a_subscribed) {
         throw new Error("sibling_saturation: terminal A is not subscribed");
       }
-      const tKey = await sendProbe();
-      const snapshot = await observe();
-      const before = {
-        bytes: Number(snapshot.delivered_bytes ?? snapshot.bytes ?? 0),
-        count: Number(snapshot.delivered_bytes ?? snapshot.bytes ?? 0)
-      };
-      if (typeof subscribed.restartFlood === "function") {
-        void subscribed.restartFlood();
-      }
-      const progress = waitForProgress(async () => {
+      const readBytes = async () => {
         const next = await observe();
         if (!next?.terminal_a_subscribed) {
           throw new Error("sibling_saturation: terminal A is not subscribed");
@@ -545,7 +565,19 @@ export function createSiblingFloodHandle({
           bytes: Number(next.delivered_bytes ?? next.bytes ?? 0),
           count: Number(next.delivered_bytes ?? next.bytes ?? 0)
         };
-      }, before, "sibling_saturation", progressTimeoutMs).then((after) => {
+      };
+      const before = await readBytes();
+      if (typeof subscribed.restartFlood === "function") {
+        void subscribed.restartFlood();
+      }
+      await waitForProgress(readBytes, before, "sibling_saturation", progressTimeoutMs);
+      const tKey = await sendProbe();
+      const atKey = await readBytes();
+      assertPreKeyProgress(before, atKey, "sibling_saturation");
+      if (typeof subscribed.restartFlood === "function") {
+        void subscribed.restartFlood();
+      }
+      const progress = waitForProgress(readBytes, atKey, "sibling_saturation", progressTimeoutMs).then((after) => {
         stats.terminal_a_subscribed = true;
         stats.produced_count = after.bytes;
         return after;
