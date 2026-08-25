@@ -4,8 +4,30 @@ Plan for ticket `ticket_1787603669_760394` in project `project_1787600579_585482
 (Botster Isolated Subscription Data Plane), pipeline `botster_stack_delivery`,
 run `run_1787632387_839095`, step `botster_stack_plan`.
 
+**Revision 4**, after Plan Review `review_1787635233_314942` returned
+`changes_required` a third time. Both findings were correct and both concerned
+the paint endpoint. Changes in this revision:
+
+- `finding_1787635233_741153` (blocker): the revision 3 dispatcher ran
+  `stty -echo` and wrote only the log, so it produced no terminal output and every
+  paint endpoint had nothing to observe. §6.2 adds a second `printf` that emits
+  `botster-baseline-paint:<marker>` through the PTY after the log append, fixes
+  that output order, and explains why `stty -echo` now helps: the typed probe line
+  does not paint, so the first change after the measured Enter is attributable to
+  the dispatcher's marker alone. G16 gains a warm-up precondition that requires
+  the same marker to change the rendered terminal before any paint measurement.
+- `finding_1787635233_778119` (high): the in-page `requestAnimationFrame`
+  canvas-pixel sampler cannot execute. Restty requests a WebGPU context
+  (`src/vendor/restty/chunk-3mc71e83.js:1522`) and can use WebGL2 (`:1723`), an
+  injected script does not own that device, and a container element exposes no
+  pixel buffer, so calling it a fallback was wrong. §6.3 moves the paint oracle to
+  the host: a CDP `Page.startScreencast` session, compositor-timestamped frames
+  cropped to a frozen terminal bounding box and hashed, with a recorded
+  `screenshot_poll` fallback and its quantizing interval. Both arms reach it
+  identically through the same Playwright Chromium.
+
 **Revision 3**, after Plan Review `review_1787634482_723479` returned
-`changes_required` a second time. Changes in this revision:
+`changes_required` a second time. Changes in that revision:
 
 - `finding_1787634482_538653` (blocker): the revision 2 probe could not execute.
   `$EPOCHREALTIME` is a bash feature and the modular production session runs `sh`
@@ -275,13 +297,26 @@ while IFS= read -r line; do
       m=${line#botster-baseline-probe:}
       m=${m%$cr}
       printf '%s\n' "$m" >> /ABSOLUTE/BASELINE/LOG/PATH
+      printf 'botster-baseline-paint:%s\n' "$m"
       ;;
     botster-baseline-exit) exit 0 ;;
   esac
 done
 ```
 
-Three properties matter and each answers a review point:
+**Output order is fixed and load-bearing.** The dispatcher appends to the log
+first and prints the visible marker second. `t_pty` therefore never follows the
+paint change for the same repetition, which is what makes the §14 ordering
+assertion meaningful rather than accidental.
+
+Revision 4 added the second `printf`. Revision 3 wrote the log only, so the
+dispatcher produced no terminal output at all and every paint endpoint had
+nothing to observe. `stty -echo` stays, and it is now a stated advantage: the
+typed probe line does not paint, so the first change in the sampled region after
+the measured Enter is attributable to the dispatcher's own marker and to nothing
+else.
+
+Three further properties matter and each answers a review point:
 
 1. **No bash feature.** `printf` and the append redirect are POSIX. `cr` is set
    once at start, so carriage-return stripping costs one fork for the whole
@@ -294,7 +329,7 @@ Three properties matter and each answers a review point:
    every measurement and swamp the value being recorded.
 
 Each repetition types `botster-baseline-probe:<marker>` where `<marker>` is
-unique per capture, arm, and repetition. The harness waits for the canvas hash to
+unique per capture, arm, and repetition. The harness waits for the sampled region's hash to
 hold stable for the settle window before it sends the final key, so typing
 latency sits outside the measurement. **The measured keydown is the final Enter
 and nothing else.**
@@ -305,13 +340,43 @@ and nothing else.**
 |--------|---------|--------|
 | `t_key` | the browser dispatched the final Enter of the probe line | capture-phase `keydown` listener installed by `addInitScript`, `Date.now()` |
 | `t_pty` | the host observed the marker line the session shell wrote | host watcher over the arm's baseline log |
-| `t_paint` | the echoed output reached the canvas | paint oracle hash change |
+| `t_paint` | the dispatcher's visible probe marker reached the rendered terminal | paint oracle hash change over the frozen terminal region |
 
-The **paint oracle** installs a `requestAnimationFrame` sampler over the mounted
-terminal canvas through the same `addInitScript` payload. It hashes the canvas
-pixel buffer each frame and records the timestamp of each hash change. First
-change after attach is the paint-ready endpoint. The first sample of a hash held
-stable for the frozen settle window is the paint-settled endpoint.
+The **paint oracle runs on the host, not in the page.** Revision 4 replaced an
+in-page `requestAnimationFrame` canvas-pixel sampler, which cannot execute. The
+modular Restty renderer requests a WebGPU context
+(`src/vendor/restty/chunk-3mc71e83.js:1522`, `requestAdapter` nearby) and can use
+WebGL2 (`:1723`). An injected script does not own that GPU device, so it cannot
+read the drawing buffer, and a terminal container element exposes no pixel buffer
+at all. Naming a container selector a pixel-buffer fallback was wrong.
+
+The executable oracle is a Chrome DevTools Protocol screencast, which both arms
+reach identically because both run the same Playwright Chromium
+(`playwright` 1.60.0, `chromium.launch` already used across `scripts/`):
+
+1. The harness opens a CDP session with `context.newCDPSession(page)` and calls
+   `Page.startScreencast` with a frozen format, quality, and `maxWidth`.
+2. Chromium emits a frame whenever the compositor paints, carrying
+   `metadata.timestamp`. The harness converts that timestamp to milliseconds and
+   records `paint_clock_offset_calibration_ms`, measured by comparing a frame
+   timestamp against a host `Date.now()` at a known change, so paint values share
+   the wall clock the PTY endpoints use.
+3. The harness crops each decoded frame to the terminal element's bounding box,
+   measured once per arm and frozen, then hashes the cropped bytes. Cropping keeps
+   unrelated page animation out of the signal.
+4. A hash change is a paint change. The first change after attach is the
+   paint-ready endpoint. The first sample of a hash held stable for the frozen
+   settle window is the paint-settled endpoint.
+
+Screencast frames arrive only when the compositor paints, so this oracle costs no
+per-sample round trip and never touches Restty's GPU device.
+
+**Fallback.** If `Page.startScreencast` is unavailable on an arm, the harness
+falls back to timed `elementHandle.screenshot()` sampling over the same bounding
+box. The record then carries `paint_oracle: "screenshot_poll"` and the exact
+`paint_sample_interval_ms`, because that interval quantizes every paint value in
+that arm. The primary oracle records `paint_oracle: "cdp_screencast"`. An arm may
+not silently mix the two.
 
 The **keydown listener** records a timestamp only. It never cancels, rewrites, or
 delays the event.
@@ -352,7 +417,14 @@ G16 fails closed on each of these, per arm:
 2. One warm-up probe added exactly one line to the arm's baseline log, and that
    line equals the expected marker exactly. An empty or malformed line blocks the
    arm's PTY families with a typed reason instead of recording a number.
-3. The watcher calibration produced a non-empty sample set.
+3. The same warm-up probe changed the hashed region: the paint oracle observed at
+   least one hash change after that probe's `t_pty`, and the arm's rendered
+   terminal shows `botster-baseline-paint:<marker>`. A warm-up that writes the log
+   but paints nothing blocks the arm's paint families with a typed reason. This is
+   the precondition revision 3 lacked, and it is why the missing dispatcher output
+   would have been caught before any number was recorded.
+4. The watcher calibration and the paint calibration each produced a non-empty
+   sample set, and the arm recorded which `paint_oracle` it used.
 
 ### 6.6 What does not change
 
@@ -426,6 +498,11 @@ for source identity, and G14 requires both. An arm whose exact source revision
 cannot be proved is marked blocked rather than recorded with a short or inferred
 value.
 
+Every arm entry also records `paint_oracle` (`cdp_screencast` or
+`screenshot_poll`), the frozen terminal bounding box, and, for
+`screenshot_poll`, the exact `paint_sample_interval_ms` that quantizes that arm's
+paint values.
+
 Each observation family records `endpoint_start`, `endpoint_end`, `oracle`
 (`pty` or `paint`), `unit` (`ms`), `n`, `warmup_discarded`, and the statistic set
 `min`, `p50`, `p95`, `max`. A family that cannot run on an arm records
@@ -436,10 +513,10 @@ The eight families:
 | Family | `endpoint_start` | `endpoint_end` | Oracle |
 |--------|------------------|----------------|--------|
 | `key_to_pty` | `t_key`, the probe keydown | `t_pty`, the shell executed the probe command | pty |
-| `attach_ready` | the mounted terminal begins attach | first canvas hash change after attach | paint |
-| `history_finish` | first canvas hash change after attach | canvas hash stable for the settle window | paint |
-| `scrollback` | first wheel event dispatch | canvas hash stable for the settle window | paint |
-| `large_history` | attach against the seeded large-history session | canvas hash stable for the settle window | paint |
+| `attach_ready` | the mounted terminal begins attach | first sampled-region hash change after attach | paint |
+| `history_finish` | first sampled-region hash change after attach | sampled-region hash stable for the settle window | paint |
+| `scrollback` | first wheel event dispatch | sampled-region hash stable for the settle window | paint |
+| `large_history` | attach against the seeded large-history session | sampled-region hash stable for the settle window | paint |
 | `control_response_saturation` | `t_key` during the control-response burst | `t_pty` | pty |
 | `package_event_saturation` | `t_key` during the 200 package-event burst | `t_pty` | pty |
 | `sibling_saturation` | `t_key` on terminal B while terminal A is flooded | `t_pty` for terminal B | pty |
@@ -509,7 +586,8 @@ closed when it cannot prove a value.
 | Control-response burst | one fixed schedule of `list_configs` and `list_session_types`, with the server-to-client response rate and bytes equalized across arms within the recorded tolerance |
 | Package-event burst | 200 package events on the modular arm only, matching the existing lane at `scripts/live-packaged-protocol-harness.mjs:1835` |
 | Sibling flood | two mounted terminals, terminal A flooded with a fixed output byte count from the seed script, terminal B probed |
-| Settle window | one fixed millisecond window for canvas-hash stability |
+| Settle window | one fixed millisecond window for sampled-region hash stability |
+| Paint sampling | CDP `Page.startScreencast` with frozen format, quality, and `maxWidth`, cropped to the frozen terminal bounding box; the `screenshot_poll` fallback records its exact interval |
 | Order | arms run in both orders across the capture, so warm-cache order is not confounded with arm |
 
 Rerunning both arms on one machine in one capture is what makes the comparison
@@ -543,9 +621,10 @@ New files in `botster-web`:
   version token, the statistic helper, and the validator. One source of truth for
   the harness, the validator, and the tests.
 - `scripts/terminal-baseline-observer.mjs` — the `addInitScript` payload (the
-  capture-phase keydown stamp, the paint oracle, and the timestamped harness
-  arrays), the host-side baseline-log watcher, and the per-arm capture routine.
-  It contains no wire oracle; §6.1 records why that design was removed.
+  capture-phase keydown stamp and the timestamped harness arrays), the host-side
+  CDP screencast paint oracle with its crop and hash, the host-side baseline-log
+  watcher, and the per-arm capture routine. It contains no wire oracle and no
+  in-page canvas readback; §6.1 and §6.3 record why both were removed.
 - `scripts/terminal-baseline-capture.mjs` — the two-arm orchestrator. Starts each
   arm, starts the dispatcher and proves the §6.5 preconditions, runs all eight
   families of §7 in both arm orders, tears each arm down, validates the record,
@@ -660,9 +739,12 @@ Unknowns, each with an owner:
 3. Whether the legacy arm's shell session accepts the typed dispatcher setup
    command and keeps `stty -echo` in effect. Owned by this ticket's Implement
    step, gated by G16, which blocks rather than guesses.
-4. Whether the legacy arm exposes a stable mounted-canvas selector. Owned by this
-   ticket's Implement step. If not, the paint oracle falls back to the arm's
-   terminal container element and records which selector it used.
+4. The exact terminal bounding box in each arm, and whether
+   `Page.startScreencast` is available on both. Owned by this ticket's Implement
+   step. The bounding box is measured once per arm and frozen into the record. An
+   arm without screencast records `paint_oracle: "screenshot_poll"` with its exact
+   interval rather than mixing oracles, and G16 blocks the arm's paint families if
+   neither oracle observes the warm-up marker.
 5. Whether the two arms' `list_configs` and `list_session_types` response shapes
    are close enough to equalize response frames and bytes within a useful
    tolerance. Owned by this ticket's Implement step, which must record the
@@ -682,6 +764,8 @@ Unknowns, each with an owner:
 | A leaked session or subscription between repetitions | Silent corruption of every later value in the arm | §9 late-message matrix; a repetition that cannot prove release is discarded and recorded as discarded |
 | The format needs a change after the Restty ticket | Downstream sets become incomparable | The version token is explicit; a change bumps `format_version` and the changing ticket must restate both sets |
 | The watcher and dispatcher costs are read as transport latency | Every `key_to_pty` value is inflated by an unstated floor | §6.4 names every included component and records `watcher_detection_calibration_ms` and `dispatcher_append_calibration_ms` per arm per capture |
+| The paint oracle is moved back into the page for convenience | Four observation families silently stop working on a WebGPU or WebGL2 canvas | §6.3 fixes the oracle on the host through CDP screencast and records `paint_oracle` per arm; G16 blocks an arm whose warm-up probe paints nothing |
+| The `screenshot_poll` fallback quantization is read as product latency | Paint values carry an unstated floor equal to the sample interval | The record carries `paint_oracle` and `paint_sample_interval_ms` per arm, and an arm may not mix the two oracles |
 | A per-probe helper process is added later for convenience | Process startup swamps the value being measured | §6.2 fixes the dispatcher as builtin `printf` plus an append redirect, with the one `cr` fork at session start only |
 | Browser and host-watcher wall clocks diverge | `key_to_pty` becomes meaningless or negative | Both stamps are `Date.now()` in one host's clock; G12 requires one host, the record carries `same_host: true`, and G15 discards and records any repetition whose `t_pty` precedes `t_key` |
 | The probe expands empty and records a zero-length marker | A silently wrong number enters the baseline | G16 requires `botster-baseline-ready` plus a warm-up probe whose log line equals the expected marker exactly, and blocks the arm otherwise |
@@ -702,7 +786,7 @@ is independent of every wall-clock value.
 | G5 | The existing packaged live lane still passes on the modular arm, executed to completion rather than aborting on a missing binary | the full pinned sequence below |
 | G6 | The validator rejects a record missing any required member, missing an arm, carrying one arm only, or carrying a threshold field | unit assertions in `src/App.test.mjs` |
 | G7 | Byte fidelity holds in both arms: the probe marker echoed by the PTY appears intact | harness assertion per repetition |
-| G8 | Ordering holds: paint-ready precedes paint-settled in every repetition | harness assertion per repetition |
+| G8 | Ordering holds in every repetition: `t_key` precedes `t_pty`, `t_pty` precedes the probe's paint change, and paint-ready precedes paint-settled | harness assertion per repetition, enforced by the §6.2 output order |
 | G9 | No terminal delivery queue overflow occurs during the package-event burst | reuse the existing overflow check at `scripts/live-packaged-protocol-harness.mjs:1906` |
 | G10 | Package events never enter the terminal adapter path in the modular arm | reuse the existing check at `scripts/live-packaged-protocol-harness.mjs:1923` |
 | G11 | Arm teardown is proven live: recorded Hub and worker pids are gone and the arm socket path is absent after stop | harness assertion per arm |
@@ -710,7 +794,7 @@ is independent of every wall-clock value.
 | G13 | The recorded record validates against `format_version=1` | `npm run observe:terminal-baseline:validate` |
 | G14 | Every arm entry carries a full 40-character Restty `declared_revision`, a `declaration_source`, and an `artifact_sha256` that matches the vendored files the arm actually loads; a short revision is rejected and the arm is blocked | validator assertion plus a harness precondition, fails closed |
 | G15 | Both arms ran on one host, and no repetition has `t_pty` before `t_key` | harness precondition and per-repetition assertion |
-| G16 | Per arm, the dispatcher printed `botster-baseline-ready`, one warm-up probe added exactly one log line equal to the expected marker, and the watcher calibration produced a non-empty sample set | harness precondition, fails closed and blocks that arm's PTY families |
+| G16 | Per arm, the dispatcher printed `botster-baseline-ready`; one warm-up probe added exactly one log line equal to the expected marker; the same warm-up produced at least one sampled-region hash change after its `t_pty` and rendered `botster-baseline-paint:<marker>`; and the watcher and paint calibrations each produced a non-empty sample set | harness precondition, fails closed; a log failure blocks that arm's PTY families and a paint failure blocks that arm's paint families |
 | G17 | Neither supplied checkout changed: each `HEAD` and each `git status --porcelain` is identical before and after the capture | harness precondition and post-condition, fails closed |
 
 G5 aborts before it reaches any test when it is written as the bare npm script:
