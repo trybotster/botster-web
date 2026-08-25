@@ -88,6 +88,26 @@ import {
   WORKSPACES_SPAWN_OPENER_ACTION_ID,
   WORKSPACES_SPAWN_OPENER_SELECTOR
 } from "../scripts/workspaces-shared-hub-browser-helpers.mjs";
+import {
+  PAINT_ORACLE,
+  PINNED_REVISIONS,
+  PRODUCT_BASELINE_STATEMENT,
+  acceptShellClockHandshake,
+  exampleValidRecord,
+  mapCssBoxToFramePixels,
+  measureFrameScale,
+  negotiateCaptureClock,
+  parseDispatcherLogLine,
+  statisticSet,
+  validateObservationRecord
+} from "../scripts/terminal-baseline-observation-format.mjs";
+import {
+  decodePngRgba,
+  hashBytes,
+  handshakeCommand,
+  substituteDispatcherSource
+} from "../scripts/terminal-baseline-observer.mjs";
+import { collectResttyProvenance, RESTTY_RUNTIME_FILES } from "../scripts/terminal-baseline-capture.mjs";
 
 const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
@@ -18332,5 +18352,112 @@ function removeCssAtRules(source) {
     } else {
       globalThis.window.location = previousLocation;
     }
+  }
+}
+
+{
+  const valid = exampleValidRecord();
+  assert.equal(validateObservationRecord(valid).ok, true);
+  assert.equal(valid.paint_oracle, PAINT_ORACLE);
+  assert.equal(valid.product_baseline_statement, PRODUCT_BASELINE_STATEMENT);
+  assert.equal(valid.same_host, true);
+
+  const missingMember = exampleValidRecord();
+  delete missingMember.capture_id;
+  assert.equal(validateObservationRecord(missingMember).ok, false);
+
+  const oneArm = exampleValidRecord();
+  delete oneArm.arms.legacy;
+  assert.match(validateObservationRecord(oneArm).errors.join("\n"), /one-armed record is not a baseline|must contain exactly legacy and modular/);
+
+  const threshold = exampleValidRecord();
+  threshold.observations.modular.key_to_pty.threshold_ms = 25;
+  assert.match(validateObservationRecord(threshold).errors.join("\n"), /threshold field/);
+
+  const wrongPaint = exampleValidRecord();
+  wrongPaint.paint_oracle = "screenshot_poll";
+  assert.match(validateObservationRecord(wrongPaint).errors.join("\n"), /paint_oracle must be cdp_screencast/);
+
+  const shortRestty = exampleValidRecord();
+  shortRestty.arms.legacy.restty.declared_revision = "cd1911d0f";
+  assert.match(validateObservationRecord(shortRestty).errors.join("\n"), /full 40-character commit/);
+
+  const hostSplit = exampleValidRecord();
+  hostSplit.same_host = false;
+  assert.match(validateObservationRecord(hostSplit).errors.join("\n"), /same_host must be true/);
+
+  const mixedClock = exampleValidRecord({ pty_clock: "shell_epochrealtime" });
+  mixedClock.arms.legacy.implied_pty_clock = "host_watcher";
+  assert.match(validateObservationRecord(mixedClock).errors.join("\n"), /different pty_clock/);
+
+  const hostWatcher = exampleValidRecord({ pty_clock: "host_watcher" });
+  assert.equal(hostWatcher.observations.legacy.key_to_pty.decomposition_valid, false);
+  assert.equal(validateObservationRecord(hostWatcher).ok, true);
+  hostWatcher.observations.legacy.key_to_pty.discarded_negative_pty_to_paint = true;
+  assert.match(validateObservationRecord(hostWatcher).errors.join("\n"), /negative pty_to_paint_ms/);
+
+  const shellClock = exampleValidRecord({ pty_clock: "shell_epochrealtime" });
+  delete shellClock.observations.modular.key_to_pty.append_cost_calibration_ms;
+  assert.match(validateObservationRecord(shellClock).errors.join("\n"), /append_cost_calibration_ms/);
+
+  const stats = statisticSet([4, 1, 3, 2]);
+  assert.equal(stats.n, 4);
+  assert.equal(stats.min, 1);
+  assert.equal(stats.max, 4);
+  assert.equal(stats.p50, 2);
+  assert.equal(stats.p95, 4);
+
+  const now = 1_777_000_000_000;
+  const accepted = acceptShellClockHandshake("1777000000.000001 1777000000.000002", now, 2000);
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.pty_clock, "shell_epochrealtime");
+  const emptyHandshake = acceptShellClockHandshake("", now);
+  assert.equal(emptyHandshake.accepted, false);
+  assert.equal(emptyHandshake.pty_clock, "host_watcher");
+  assert.equal(negotiateCaptureClock(accepted, emptyHandshake), "host_watcher");
+  assert.equal(negotiateCaptureClock(accepted, accepted), "shell_epochrealtime");
+
+  const shellLine = parseDispatcherLogLine("1777000000.123456 marker-1", "shell_epochrealtime");
+  assert.equal(shellLine.ok, true);
+  assert.equal(shellLine.marker, "marker-1");
+  assert.equal(parseDispatcherLogLine("marker-1", "shell_epochrealtime").ok, false);
+  assert.equal(parseDispatcherLogLine("marker-1", "host_watcher").ok, true);
+  assert.equal(parseDispatcherLogLine("1777000000.123456 marker-1", "host_watcher").ok, false);
+
+  const scale = measureFrameScale(1440, 1440);
+  assert.equal(scale, 1);
+  const mapped = mapCssBoxToFramePixels(
+    { x: 10, y: 20, width: 100, height: 50 },
+    { scrollOffsetX: 0, scrollOffsetY: 0, pageScaleFactor: 1, offsetTop: 0 },
+    1
+  );
+  assert.deepEqual(mapped, { x: 10, y: 20, width: 100, height: 50 });
+
+  const handshake = handshakeCommand("/tmp/handshake");
+  assert.match(handshake, /EPOCHREALTIME/);
+  assert.match(handshake, /\/tmp\/handshake/);
+  assert.equal(
+    substituteDispatcherSource("printf >> __BOTSTER_BASELINE_LOG_PATH__", "/abs/log"),
+    "printf >> /abs/log"
+  );
+
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64"
+  );
+  const decoded = decodePngRgba(png);
+  assert.equal(decoded.width, 1);
+  assert.equal(decoded.height, 1);
+  assert.equal(decoded.rgba.length, 4);
+  assert.equal(hashBytes(decoded.rgba).length, 64);
+
+  const modularRestty = await collectResttyProvenance("modular", fileURLToPath(new URL("..", import.meta.url)));
+  assert.equal(modularRestty.declared_revision, PINNED_REVISIONS.modular_restty);
+  assert.equal(modularRestty.declared_revision.length, 40);
+  assert.equal(modularRestty.ghostty_pin.commit, PINNED_REVISIONS.modular_ghostty);
+  for (const file of RESTTY_RUNTIME_FILES) {
+    const digest = modularRestty.artifact_sha256[file];
+    assert.equal(typeof digest, "string");
+    assert.equal(digest.length, 64);
   }
 }

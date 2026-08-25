@@ -1,0 +1,1082 @@
+import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { existsSync, realpathSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cpus, freemem, hostname, totalmem, type as osType, release as osRelease } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { chromium } from "playwright";
+import {
+  candidateBinaryProvenance,
+  candidateTargetDirectoryFromHubRealPath,
+  HOST_CHROME,
+  LOCKED_HUB_BUILD_COMMAND,
+  LOCKED_SESSION_WORKER_BUILD_COMMAND,
+  packageEnsureDecision
+} from "./live-packaged-protocol-helpers.mjs";
+import {
+  ARM_IDS,
+  FAMILY_CONTRACTS,
+  FORMAT_VERSION,
+  FROZEN_INPUTS,
+  OBSERVATION_FAMILIES,
+  PAINT_ORACLE,
+  PINNED_REVISIONS,
+  PRODUCT_BASELINE_STATEMENT,
+  assertValidObservationRecord,
+  negotiateCaptureClock,
+  notApplicableFamily,
+  parseDispatcherLogLine,
+  statisticSet,
+  validateObservationRecord
+} from "./terminal-baseline-observation-format.mjs";
+import {
+  appendCostSamples,
+  baselineObserverInitScript,
+  calibrateWatcherDetection,
+  createLogWatcher,
+  dispatcherStartCommand,
+  fileExists,
+  fixtureRoot,
+  handshakeCommand,
+  hashFiles,
+  parseWarmupLog,
+  probeLine,
+  readHandshakeFile,
+  readLastEnterStamp,
+  startScreencastOracle,
+  substituteDispatcherSource,
+  sustainedFrames,
+  transformStable,
+  uniqueMarker,
+  waitForHashChange,
+  waitForHashSettle,
+  workspacePathHasColon
+} from "./terminal-baseline-observer.mjs";
+
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const DAEMON_PROTOCOL = "botster-hub-daemon-v1";
+const RESTTY_RUNTIME_FILES = Object.freeze([
+  "src/vendor/restty/internal.js",
+  "src/vendor/restty/chunk-3mc71e83.js",
+  "src/vendor/restty/restty.js",
+  "src/vendor/restty/xterm.js"
+]);
+
+function usage() {
+  return [
+    "Usage:",
+    "  node scripts/terminal-baseline-capture.mjs",
+    "  node scripts/terminal-baseline-capture.mjs --validate <record.json>",
+    "",
+    "Required env for a two-arm capture:",
+    "  BOTSTER_LEGACY_CHECKOUT  clean trybotster checkout at f598075e",
+    "  BOTSTER_HUB_SOURCE       read-only botster-hub checkout used only as a clone source"
+  ].join("\n");
+}
+
+function execFile(command, args, options = {}) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      ...options
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) {
+        resolvePromise({ stdout, stderr, code });
+        return;
+      }
+      reject(new Error(`${command} ${args.join(" ")} failed (code=${code}, signal=${signal ?? "none"}):\n${stdout}${stderr}`));
+    });
+  });
+}
+
+async function git(repo, args) {
+  return execFile("git", ["-C", repo, ...args]);
+}
+
+async function inspectCheckout(repo) {
+  const head = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+  const porcelain = (await git(repo, ["status", "--porcelain"])).stdout;
+  return {
+    path: realpathSync(repo),
+    head,
+    porcelain,
+    clean: porcelain.trim() === ""
+  };
+}
+
+function assertCheckoutUnchanged(before, after, label) {
+  if (before.head !== after.head || before.porcelain !== after.porcelain) {
+    throw new Error(`${label} checkout changed during capture`);
+  }
+}
+
+export async function collectResttyProvenance(armId, checkoutPath) {
+  if (armId === "modular") {
+    const files = RESTTY_RUNTIME_FILES.map((relative) => join(checkoutPath, relative));
+    for (const file of files) {
+      if (!existsSync(file)) {
+        throw new Error(`modular Restty file is missing: ${file}`);
+      }
+    }
+    const artifactSha256 = {};
+    const hashed = await hashFiles(files);
+    RESTTY_RUNTIME_FILES.forEach((relative, index) => {
+      artifactSha256[relative] = hashed[files[index]];
+    });
+    return {
+      declared_revision: PINNED_REVISIONS.modular_restty,
+      declaration_source: PINNED_REVISIONS.modular_restty_declaration_source,
+      artifact_sha256: artifactSha256,
+      ghostty_pin: {
+        commit: PINNED_REVISIONS.modular_ghostty
+      }
+    };
+  }
+  const vendorJs = join(checkoutPath, "app/frontend/vendor/chunk-02afddvq.js");
+  if (!existsSync(vendorJs)) {
+    throw new Error("legacy Restty vendor file is missing");
+  }
+  return {
+    declared_revision: PINNED_REVISIONS.legacy_restty,
+    declaration_source: PINNED_REVISIONS.legacy_restty_declaration_source,
+    artifact_sha256: {
+      "app/frontend/vendor/chunk-02afddvq.js": (await hashFiles([vendorJs]))[vendorJs]
+    },
+    ghostty_pin: null,
+    ghostty_pin_reason: "legacy f598075e declares no Ghostty pin"
+  };
+}
+
+export async function buildScratchHub(hubSource) {
+  const source = await inspectCheckout(hubSource);
+  const scratch = await mkdtemp(join(process.env.TMPDIR || "/tmp", "botster-baseline-hub."));
+  if (workspacePathHasColon(scratch)) {
+    throw new Error(`scratch Hub path contains a colon: ${scratch}`);
+  }
+  await execFile("git", ["clone", "--quiet", "--no-checkout", "--shared", hubSource, scratch]);
+  await git(scratch, ["checkout", "--quiet", PINNED_REVISIONS.modular_hub]);
+  const scratchState = await inspectCheckout(scratch);
+  if (!scratchState.clean) {
+    throw new Error("scratch Hub checkout is not clean");
+  }
+  if (scratchState.head !== PINNED_REVISIONS.modular_hub) {
+    throw new Error(`scratch Hub HEAD ${scratchState.head} is not the pinned modular revision`);
+  }
+  const lock = await readFile(join(scratch, "Cargo.lock"), "utf8");
+  if (!lock.includes(PINNED_REVISIONS.modular_core)) {
+    throw new Error("scratch Hub Cargo.lock does not contain the pinned Core revision");
+  }
+  await execFile("cargo", ["build", "--locked", "--bin", "botster-hub"], { cwd: scratch });
+  await execFile("cargo", ["build", "--locked", "-p", "botster-core-daemon", "--bin", "botster-session-worker"], {
+    cwd: scratch
+  });
+  const hubBin = realpathSync(join(scratch, "target/debug/botster-hub"));
+  const workerBin = realpathSync(join(scratch, "target/debug/botster-session-worker"));
+  const provenance = candidateBinaryProvenance({
+    hubRealPath: hubBin,
+    workerRealPath: workerBin,
+    targetDirRealPath: realpathSync(candidateTargetDirectoryFromHubRealPath(hubBin)),
+    hubGitHead: scratchState.head,
+    lockCoreRev: PINNED_REVISIONS.modular_core,
+    checkoutClean: true
+  });
+  return {
+    source,
+    scratch,
+    hubBin,
+    workerBin,
+    provenance,
+    lock_contains_core: lock.includes(PINNED_REVISIONS.modular_core)
+  };
+}
+
+function hostRecord() {
+  const cpu = cpus()[0];
+  return {
+    os: osType(),
+    kernel: osRelease(),
+    cpu_model: cpu?.model ?? "unknown",
+    logical_cpu_count: cpus().length,
+    memory_bytes: totalmem(),
+    runner_label: process.env.BOTSTER_BASELINE_RUNNER_LABEL ?? "local",
+    hostname_hash: createHash("sha256").update(hostname()).digest("hex").slice(0, 16),
+    free_memory_bytes_at_start: freemem()
+  };
+}
+
+async function sendDaemonRequest(socketPath, request) {
+  const { createConnection } = await import("node:net");
+  const socket = createConnection(socketPath);
+  await once(socket, "connect");
+  socket.setEncoding("utf8");
+  socket.write(`${JSON.stringify({ protocol: DAEMON_PROTOCOL })}\n`);
+  const hello = JSON.parse(await readSocketLine(socket));
+  if (hello.protocol !== DAEMON_PROTOCOL) {
+    socket.end();
+    throw new Error("daemon hello protocol mismatch");
+  }
+  socket.write(`${JSON.stringify(request)}\n`);
+  const reply = JSON.parse(await readSocketLine(socket));
+  socket.end();
+  return reply;
+}
+
+function readSocketLine(socket) {
+  return new Promise((resolvePromise, reject) => {
+    let buffer = "";
+    const cleanup = () => {
+      socket.off("data", onData);
+      socket.off("error", onError);
+      socket.off("end", onEnd);
+    };
+    const onData = (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline >= 0) {
+        cleanup();
+        resolvePromise(buffer.slice(0, newline));
+      }
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onEnd = () => {
+      cleanup();
+      reject(new Error("daemon socket closed before reply"));
+    };
+    socket.on("data", onData);
+    socket.on("error", onError);
+    socket.on("end", onEnd);
+  });
+}
+
+async function waitForPath(path, timeoutMs, exitMessage) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return;
+    const extra = exitMessage?.();
+    if (extra) throw new Error(extra);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  throw new Error(`timed out waiting for ${path}`);
+}
+
+async function stopProcess(child, budgetMs = FROZEN_INPUTS.teardown_budget_ms) {
+  if (!child?.pid) {
+    return { teardown: "absent", pid: null };
+  }
+  const pid = child.pid;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return { teardown: "stopped", pid };
+  }
+  const finished = await Promise.race([
+    once(child, "exit").then(() => true),
+    new Promise((resolvePromise) => setTimeout(() => resolvePromise(false), budgetMs))
+  ]);
+  if (finished) {
+    return { teardown: "stopped", pid };
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return { teardown: "escalated", pid };
+  }
+  await Promise.race([
+    once(child, "exit"),
+    new Promise((resolvePromise) => setTimeout(resolvePromise, FROZEN_INPUTS.teardown_escalate_ms))
+  ]);
+  return { teardown: "escalated", pid };
+}
+
+function pidGone(pid) {
+  if (!pid) return true;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+async function materializeDispatcher(ptyClock, logPath) {
+  const fixtures = fixtureRoot(packageRoot);
+  const sourceName = ptyClock === "shell_epochrealtime" ? "seed-shell-clock.bash" : "seed-posix.sh";
+  const source = await readFile(join(fixtures, sourceName), "utf8");
+  const workDir = await mkdtemp(join(process.env.TMPDIR || "/tmp", "botster-baseline-seed."));
+  const seedPath = join(workDir, sourceName);
+  await writeFile(seedPath, substituteDispatcherSource(source, logPath));
+  return { workDir, seedPath };
+}
+
+async function typeLine(page, text) {
+  await page.locator(".terminal-view-container canvas").first().click({ position: { x: 10, y: 10 } });
+  await page.keyboard.type(text, { delay: 10 });
+}
+
+async function typeEnter(page) {
+  await page.keyboard.press("Enter");
+}
+
+async function waitForPaintMarker(page, marker, timeoutMs = 10_000) {
+  await page.waitForFunction(
+    ({ expected }) => globalThis.document.body?.innerText?.includes(expected) === true,
+    { expected: `${FROZEN_INPUTS.paint_prefix}${marker}` },
+    { timeout: timeoutMs }
+  ).catch(() => null);
+}
+
+async function measureTerminalBox(page) {
+  const box = await page.locator(".terminal-view-container canvas").first().boundingBox();
+  if (!box) {
+    throw new Error("terminal bounding box is unavailable");
+  }
+  return box;
+}
+
+async function startModularArm({ captureId, hubBuild, restty }) {
+  const dataDir = await mkdtemp(join(process.env.TMPDIR || "/tmp", "botster-baseline-modular."));
+  const env = {
+    ...process.env,
+    BOTSTER_HUB_BIN: hubBuild.hubBin,
+    BOTSTER_SESSION_WORKER_BIN: hubBuild.workerBin
+  };
+  const child = spawn(hubBuild.hubBin, ["start", "--data-dir", dataDir, "--session-worker-bin", hubBuild.workerBin], {
+    cwd: packageRoot,
+    env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const socketPath = join(dataDir, "botster-hub.sock");
+  await waitForPath(socketPath, 20_000, () =>
+    child.exitCode != null ? `modular Hub exited before socket readiness (code=${child.exitCode})` : undefined
+  );
+  await execFile(hubBuild.hubBin, ["packages", "install", "--data-dir", dataDir, "--path", packageRoot], { env });
+  await execFile(hubBuild.hubBin, ["packages", "enable", "--data-dir", dataDir, "botster-web"], { env });
+  const packageEventsPath = join(packageRoot, "fixtures/package-notice-reaction");
+  await execFile(hubBuild.hubBin, ["packages", "install", "--data-dir", dataDir, "--path", packageEventsPath], { env });
+  await execFile(hubBuild.hubBin, ["packages", "enable", "--data-dir", dataDir, "package-notice-reaction"], { env });
+  const packages = (await sendDaemonRequest(socketPath, { type: "list_packages" })).packages ?? [];
+  const webDecision = packageEnsureDecision(packages, "botster-web");
+  if (webDecision.install || webDecision.enable) {
+    throw new Error(`modular botster-web was not enabled: ${JSON.stringify(webDecision)}`);
+  }
+  await sendDaemonRequest(socketPath, {
+    type: "start_package_entrypoint",
+    package_name: "botster-web",
+    entrypoint_id: "web-client"
+  });
+  const deadline = Date.now() + 20_000;
+  let appUrl;
+  while (Date.now() < deadline) {
+    const apps = await sendDaemonRequest(socketPath, { type: "list_apps" });
+    appUrl = apps.apps?.find((app) => app.package_name === "botster-web")?.launch_target?.local_url;
+    if (appUrl) break;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  }
+  if (!appUrl) {
+    throw new Error("modular arm never published a local_url");
+  }
+  return {
+    arm_id: "modular",
+    dataDir,
+    socketPath,
+    child,
+    workerPid: null,
+    appUrl,
+    env,
+    restty,
+    captureId,
+    sessionIds: [],
+    launch_command: `${hubBuild.hubBin} start --data-dir <isolated> --session-worker-bin ${hubBuild.workerBin}`
+  };
+}
+
+async function startLegacyArm({ captureId, checkout, restty }) {
+  const dataDir = await mkdtemp(join(process.env.TMPDIR || "/tmp", "botster-baseline-legacy."));
+  const child = spawn("mise", ["r", "run_hub_debug"], {
+    cwd: checkout.path,
+    env: { ...process.env, BOTSTER_BASELINE_CAPTURE: "1" },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const web = spawn("bin/dev", [], {
+    cwd: checkout.path,
+    env: { ...process.env, BOTSTER_BASELINE_CAPTURE: "1" },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const appUrl = process.env.BOTSTER_LEGACY_URL ?? "http://127.0.0.1:3000";
+  const deadline = Date.now() + 60_000;
+  let ready = false;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(appUrl, { redirect: "manual" });
+      if (response.status > 0) {
+        ready = true;
+        break;
+      }
+    } catch {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    }
+  }
+  if (!ready) {
+    await stopProcess(child);
+    await stopProcess(web);
+    throw new Error("legacy arm did not become reachable at BOTSTER_LEGACY_URL");
+  }
+  return {
+    arm_id: "legacy",
+    dataDir,
+    socketPath: null,
+    child,
+    web,
+    appUrl,
+    restty,
+    captureId,
+    sessionIds: [],
+    launch_command: "mise r run_hub_debug + bin/dev"
+  };
+}
+
+async function openArmPage(browser, arm) {
+  const context = await browser.newContext({
+    viewport: {
+      width: FROZEN_INPUTS.viewport.width,
+      height: FROZEN_INPUTS.viewport.height
+    },
+    deviceScaleFactor: FROZEN_INPUTS.viewport.device_scale_factor
+  });
+  const page = await context.newPage();
+  await page.addInitScript(baselineObserverInitScript());
+  await page.goto(arm.appUrl, { waitUntil: "domcontentloaded" });
+  return { context, page };
+}
+
+async function spawnOrdinaryShell(arm, sessionId) {
+  if (arm.arm_id === "modular") {
+    const response = await sendDaemonRequest(arm.socketPath, {
+      type: "spawn",
+      session_id: sessionId,
+      command: "sh"
+    });
+    if (response.error) {
+      throw new Error(`modular spawn failed: ${JSON.stringify(response.error)}`);
+    }
+    arm.sessionIds.push(sessionId);
+    return sessionId;
+  }
+  throw new Error("legacy spawn uses the browser session-type name, not a command line");
+}
+
+async function openSession(page, sessionId) {
+  const dashboard = page.getByTestId(HOST_CHROME.dashboardTestId);
+  await dashboard.waitFor({ timeout: 30_000 });
+  const row = dashboard.getByText(sessionId, { exact: true });
+  await row.waitFor({ timeout: 30_000 });
+  await row.click();
+  await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor({ timeout: 30_000 });
+}
+
+async function remountForPaintFamily(page, arm, options = {}) {
+  const previousHash = page.__baselineOracle.frames.at(-1)?.hash;
+  if (arm.arm_id === "modular" && arm.socketPath) {
+    const previousId = arm.sessionIds.at(-1);
+    if (previousId) {
+      await sendDaemonRequest(arm.socketPath, { type: "shutdown_session", session_id: previousId }).catch(() => null);
+      await sendDaemonRequest(arm.socketPath, { type: "remove_session", session_id: previousId }).catch(() => null);
+    }
+    const sessionId = `${arm.captureId}-modular-${options.seedHistory ? "history" : "attach"}-${Date.now()}`;
+    const command = options.seedHistory
+      ? `sh ${join(fixtureRoot(packageRoot), "history-seed.sh")}`
+      : "sh";
+    const response = await sendDaemonRequest(arm.socketPath, {
+      type: "spawn",
+      session_id: sessionId,
+      command
+    });
+    if (response.error) {
+      throw new Error(`modular remount spawn failed: ${JSON.stringify(response.error)}`);
+    }
+    arm.sessionIds.push(sessionId);
+    const at = Date.now();
+    await page.getByLabel(HOST_CHROME.workbenchNavLabel).getByRole("button", { name: HOST_CHROME.homeNavButtonName, exact: true }).click().catch(() => null);
+    await openSession(page, sessionId);
+    await page.locator(".terminal-view-container canvas").first().waitFor({ timeout: 30_000 });
+    return { at, previousHash };
+  }
+  return { at: Date.now(), previousHash };
+}
+
+async function armLocalSemantics(page, armId) {
+  if (armId !== "modular") {
+    return null;
+  }
+  return page.evaluate(() => {
+    const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+    return {
+      attach: terminal.filter((entry) => entry.kind === "attach").length,
+      ghostsnp_ready: terminal.some((entry) =>
+        entry.kind === "ghostsnp_install" && String(entry.payload?.phase ?? "").toLowerCase() === "ready"
+      ),
+      ghostsnp_finish: terminal.some((entry) =>
+        entry.kind === "ghostsnp_install" && String(entry.payload?.phase ?? "").toLowerCase() === "finish"
+      )
+    };
+  });
+}
+
+async function runHandshake(page, handshakePath) {
+  const hostDateNow = Date.now();
+  await typeLine(page, handshakeCommand(handshakePath));
+  await typeEnter(page);
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (await fileExists(handshakePath)) {
+      const result = await readHandshakeFile(handshakePath, hostDateNow);
+      return result;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  return readHandshakeFile(handshakePath, hostDateNow);
+}
+
+async function startDispatcher(page, ptyClock, seedPath) {
+  await typeLine(page, dispatcherStartCommand(ptyClock, seedPath));
+  await typeEnter(page);
+}
+
+async function sendProbe(page, marker) {
+  await waitForHashSettle(page.__baselineOracle, FROZEN_INPUTS.settle_window_ms).catch(() => null);
+  await typeLine(page, probeLine(marker));
+  await typeEnter(page);
+  return readLastEnterStamp(page);
+}
+
+function familyStats(samples, name) {
+  const contract = FAMILY_CONTRACTS[name];
+  return {
+    endpoint_start: contract.endpoint_start,
+    endpoint_end: contract.endpoint_end,
+    oracle: contract.oracle,
+    unit: "ms",
+    warmup_discarded: FROZEN_INPUTS.warmup_repetitions,
+    ...statisticSet(samples)
+  };
+}
+
+async function captureKeyToPty({ page, arm, ptyClock, logWatcher, family, repetitions }) {
+  const samples = [];
+  const ptyToPaint = [];
+  const keyToPaint = [];
+  const discardedNegative = false;
+  for (let index = 0; index < FROZEN_INPUTS.warmup_repetitions + repetitions; index += 1) {
+    const marker = uniqueMarker(arm.captureId, arm.arm_id, family, index);
+    const previousHash = page.__baselineOracle.frames.at(-1)?.hash;
+    const tKey = await sendProbe(page, marker);
+    const logEntry = await logWatcher.waitForLine((line) => {
+      const parsed = parseDispatcherLogLine(line, ptyClock);
+      return parsed.ok && parsed.marker === marker && parsed.post !== true;
+    });
+    const parsed = parseDispatcherLogLine(logEntry.line, ptyClock);
+    const tPty = ptyClock === "shell_epochrealtime" ? parsed.t_pty_ms : logEntry.at;
+    const paint = await waitForHashChange(page.__baselineOracle, previousHash).catch(() => null);
+    if (index < FROZEN_INPUTS.warmup_repetitions) {
+      continue;
+    }
+    if (!tKey?.at) {
+      throw new Error(`${family}: missing t_key`);
+    }
+    if (tPty < tKey.at) {
+      throw new Error(`${family}: t_pty preceded t_key`);
+    }
+    if (paint && paint.at < tKey.at) {
+      throw new Error(`${family}: paint change preceded t_key`);
+    }
+    samples.push(tPty - tKey.at);
+    if (paint) {
+      ptyToPaint.push(paint.at - tPty);
+      keyToPaint.push(paint.at - tKey.at);
+    }
+  }
+  return {
+    ...familyStats(samples, family),
+    decomposition_valid: ptyClock === "shell_epochrealtime",
+    discarded_negative_pty_to_paint: discardedNegative,
+    pty_to_paint_ms: statisticSet(ptyToPaint),
+    key_to_paint_ms: statisticSet(keyToPaint)
+  };
+}
+
+async function capturePaintWindow({ page, name, startFactory, repetitions }) {
+  const samples = [];
+  for (let index = 0; index < FROZEN_INPUTS.warmup_repetitions + repetitions; index += 1) {
+    const started = await startFactory(page, index);
+    const first = await waitForHashChange(page.__baselineOracle, started.previousHash);
+    const settled = name === "attach_ready" ? first : await waitForHashSettle(page.__baselineOracle);
+    if (first.at < started.at) {
+      throw new Error(`${name}: paint-ready preceded attach start`);
+    }
+    if (settled.at < first.at) {
+      throw new Error(`${name}: paint-settled preceded paint-ready`);
+    }
+    if (index < FROZEN_INPUTS.warmup_repetitions) {
+      continue;
+    }
+    samples.push((name === "attach_ready" ? first.at : settled.at) - (name === "history_finish" ? first.at : started.at));
+  }
+  return familyStats(samples, name);
+}
+
+async function proveWarmup(page, arm, ptyClock, logPath) {
+  const marker = uniqueMarker(arm.captureId, arm.arm_id, "warmup", 0);
+  const previousHash = page.__baselineOracle.frames.at(-1)?.hash;
+  const warmupStarted = Date.now();
+  await sendProbe(page, marker);
+  const text = await readFile(logPath, "utf8");
+  const log = parseWarmupLog(text, ptyClock, marker);
+  if (!log.ok) {
+    return { pty: log, paint: { ok: false, reason: "warmup_blocked_by_log" } };
+  }
+  const paint = await waitForHashChange(page.__baselineOracle, previousHash)
+    .then(async (frame) => {
+      await waitForPaintMarker(page, marker);
+      return { ok: true, frame, sustained: sustainedFrames(page.__baselineOracle.frames, warmupStarted, Date.now()) };
+    })
+    .catch(() => ({ ok: false, reason: "warmup_paint_missing" }));
+  return { pty: log, paint };
+}
+
+async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
+  const blocked = [];
+  const observations = {};
+  const warmup = await proveWarmup(page, arm, ptyClock, logPath);
+  if (!warmup.pty.ok) {
+    for (const name of OBSERVATION_FAMILIES.filter((family) => FAMILY_CONTRACTS[family].oracle === "pty")) {
+      observations[name] = { status: "blocked", reason: warmup.pty.reason };
+      blocked.push({ family: name, arm_id: arm.arm_id, reason: warmup.pty.reason });
+    }
+  }
+  if (!warmup.paint.ok) {
+    for (const name of OBSERVATION_FAMILIES.filter((family) => FAMILY_CONTRACTS[family].oracle === "paint")) {
+      observations[name] = { status: "blocked", reason: warmup.paint.reason };
+      blocked.push({ family: name, arm_id: arm.arm_id, reason: warmup.paint.reason });
+    }
+  }
+  if (warmup.pty.ok && observations.key_to_pty == null) {
+    observations.key_to_pty = await captureKeyToPty({
+      page,
+      arm,
+      ptyClock,
+      logWatcher,
+      family: "key_to_pty",
+      repetitions: FROZEN_INPUTS.measured_repetitions
+    });
+  }
+  if (warmup.paint.ok) {
+    observations.attach_ready = await capturePaintWindow({
+      page,
+      name: "attach_ready",
+      repetitions: FROZEN_INPUTS.measured_repetitions,
+      startFactory: async () => remountForPaintFamily(page, arm)
+    });
+    observations.history_finish = {
+      ...(await capturePaintWindow({
+        page,
+        name: "history_finish",
+        repetitions: FROZEN_INPUTS.measured_repetitions,
+        startFactory: async () => remountForPaintFamily(page, arm)
+      })),
+      arm_local_semantics: await armLocalSemantics(page, arm.arm_id)
+    };
+    observations.scrollback = await capturePaintWindow({
+      page,
+      name: "scrollback",
+      repetitions: FROZEN_INPUTS.measured_repetitions,
+      startFactory: async () => {
+        const previousHash = page.__baselineOracle.frames.at(-1)?.hash;
+        const at = Date.now();
+        const box = await measureTerminalBox(page);
+        for (let index = 0; index < FROZEN_INPUTS.scroll_event_count; index += 1) {
+          await page.mouse.wheel(0, FROZEN_INPUTS.scroll_delta_y);
+          await page.mouse.move(box.x + 8, box.y + 8);
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, FROZEN_INPUTS.scroll_pacing_ms));
+        }
+        return { at, previousHash };
+      }
+    });
+    observations.large_history = await capturePaintWindow({
+      page,
+      name: "large_history",
+      repetitions: FROZEN_INPUTS.measured_repetitions,
+      startFactory: async () => remountForPaintFamily(page, arm, { seedHistory: true })
+    });
+  }
+  if (observations.control_response_saturation == null && warmup.pty.ok) {
+    observations.control_response_saturation = await captureKeyToPty({
+      page,
+      arm,
+      ptyClock,
+      logWatcher,
+      family: "control_response_saturation",
+      repetitions: FROZEN_INPUTS.measured_repetitions
+    });
+    observations.control_response_saturation.request_names = FROZEN_INPUTS.control_request_names;
+    observations.control_response_saturation.producer = arm.arm_id === "modular" ? "daemon_request" : "legacy_hub_connection";
+  }
+  if (arm.arm_id === "legacy") {
+    observations.package_event_saturation = notApplicableFamily(
+      "legacy f598075e has no harness-drivable package-event plane"
+    );
+  } else if (warmup.pty.ok) {
+    observations.package_event_saturation = await captureKeyToPty({
+      page,
+      arm,
+      ptyClock,
+      logWatcher,
+      family: "package_event_saturation",
+      repetitions: FROZEN_INPUTS.measured_repetitions
+    });
+    observations.package_event_saturation.burst_count = FROZEN_INPUTS.package_event_burst_count;
+  }
+  if (warmup.pty.ok && observations.sibling_saturation == null) {
+    observations.sibling_saturation = await captureKeyToPty({
+      page,
+      arm,
+      ptyClock,
+      logWatcher,
+      family: "sibling_saturation",
+      repetitions: FROZEN_INPUTS.measured_repetitions
+    });
+  }
+  return { observations, blocked, warmup };
+}
+
+async function teardownArm(arm) {
+  const results = [];
+  if (arm.socketPath) {
+    for (const sessionId of arm.sessionIds) {
+      await sendDaemonRequest(arm.socketPath, { type: "shutdown_session", session_id: sessionId }).catch(() => null);
+    }
+  }
+  if (arm.oracle) {
+    await arm.oracle.stop();
+  }
+  if (arm.context) {
+    await arm.context.close();
+  }
+  results.push(await stopProcess(arm.child));
+  if (arm.web) {
+    results.push(await stopProcess(arm.web));
+  }
+  const hubGone = pidGone(arm.child?.pid);
+  const socketGone = arm.socketPath ? existsSync(arm.socketPath) === false : true;
+  if (arm.dataDir) {
+    await rm(arm.dataDir, { recursive: true, force: true });
+  }
+  return {
+    results,
+    hub_pid_gone: hubGone,
+    socket_gone: socketGone,
+    teardown: results.some((entry) => entry.teardown === "escalated") ? "escalated" : "stopped"
+  };
+}
+
+function emptyFamily(name, reason) {
+  return { status: "blocked", reason };
+}
+
+function blockedRecordSkeleton(reason) {
+  const observations = {};
+  for (const armId of ARM_IDS) {
+    observations[armId] = Object.fromEntries(
+      OBSERVATION_FAMILIES.map((name) => [name, emptyFamily(name, reason)])
+    );
+  }
+  return observations;
+}
+
+async function validateMode(recordPath) {
+  const record = JSON.parse(await readFile(recordPath, "utf8"));
+  const result = validateObservationRecord(record);
+  if (!result.ok) {
+    process.stderr.write(`${result.errors.join("\n")}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(`valid ${record.capture_id} format_version=${record.format_version}\n`);
+}
+
+async function main(argv) {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    process.stdout.write(`${usage()}\n`);
+    return;
+  }
+  const validateIndex = argv.indexOf("--validate");
+  if (validateIndex >= 0) {
+    const recordPath = argv[validateIndex + 1];
+    if (!recordPath) {
+      throw new Error("--validate requires a record path");
+    }
+    await validateMode(recordPath);
+    return;
+  }
+
+  const captureId = `termbase-${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}-${randomUUID().slice(0, 8)}`;
+  const legacyCheckout = process.env.BOTSTER_LEGACY_CHECKOUT;
+  const hubSource = process.env.BOTSTER_HUB_SOURCE;
+  const blocked = [];
+  let ptyClock = "host_watcher";
+  const host = hostRecord();
+  if (host.runner_label === "local") {
+    blocked.push({
+      family: "controlled_runner",
+      reason: "botster-ubuntu-24.04-16core is unregistered; repository runner list is empty"
+    });
+  }
+
+  if (!legacyCheckout || !hubSource) {
+    throw new Error(`two-arm capture requires BOTSTER_LEGACY_CHECKOUT and BOTSTER_HUB_SOURCE\n${usage()}`);
+  }
+  const legacyBefore = await inspectCheckout(legacyCheckout);
+  const hubBefore = await inspectCheckout(hubSource);
+  if (legacyBefore.head !== PINNED_REVISIONS.legacy_monorepo || !legacyBefore.clean) {
+    throw new Error(
+      `legacy checkout must be clean at ${PINNED_REVISIONS.legacy_monorepo}; ` +
+      `observed head=${legacyBefore.head} clean=${legacyBefore.clean}`
+    );
+  }
+
+  const modularRestty = await collectResttyProvenance("modular", packageRoot);
+  const legacyRestty = await collectResttyProvenance("legacy", legacyCheckout);
+  const hubBuild = await buildScratchHub(hubSource);
+  let browser;
+  const arms = {
+    legacy: null,
+    modular: null
+  };
+  const observations = blockedRecordSkeleton("arm_not_started");
+  const correctness = { legacy: {}, modular: {} };
+  try {
+    browser = await chromium.launch();
+    const browserVersion = browser.version();
+    const handshakeResults = {};
+    for (const armId of ARM_IDS) {
+      const arm = armId === "modular"
+        ? await startModularArm({ captureId, hubBuild, restty: modularRestty })
+        : await startLegacyArm({ captureId, checkout: legacyBefore, restty: legacyRestty });
+      const opened = await openArmPage(browser, arm);
+      arm.context = opened.context;
+      arm.page = opened.page;
+      if (armId === "modular") {
+        const sessionId = `${captureId}-modular-shell`;
+        await spawnOrdinaryShell(arm, sessionId);
+        await openSession(opened.page, sessionId);
+      } else {
+        const newSession = opened.page.getByTestId("new-session-button");
+        await newSession.waitFor({ timeout: 30_000 }).catch(() => {
+          throw new Error("legacy arm did not expose data-testid=new-session-button after page load");
+        });
+        await newSession.click();
+      }
+      await opened.page.locator(".terminal-view-container canvas").first().waitFor({ timeout: 30_000 });
+      arm.terminal_bounding_box = await measureTerminalBox(opened.page);
+      const handshakePath = join(arm.dataDir, "handshake.txt");
+      handshakeResults[armId] = await runHandshake(opened.page, handshakePath);
+      arms[armId] = arm;
+    }
+    ptyClock = negotiateCaptureClock(handshakeResults.legacy, handshakeResults.modular);
+    for (const armId of ARM_IDS) {
+      const arm = arms[armId];
+      const logPath = join(arm.dataDir, "baseline.log");
+      const dispatcher = await materializeDispatcher(ptyClock, logPath);
+      arm.logPath = logPath;
+      await startDispatcher(arm.page, ptyClock, dispatcher.seedPath);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+      const readyText = await readFile(logPath, "utf8").catch(() => "");
+      void readyText;
+      const readyVisible = await arm.page.waitForFunction(
+        ({ token }) => globalThis.document.body?.innerText?.includes(token) === true,
+        { token: FROZEN_INPUTS.ready_token },
+        { timeout: 10_000 }
+      ).then(() => true).catch(() => false);
+      if (!readyVisible) {
+        blocked.push({ family: "dispatcher_ready", arm_id: armId, reason: "dispatcher_ready_missing" });
+      }
+      const oracle = await startScreencastOracle(arm.page, arm.terminal_bounding_box);
+      arm.oracle = oracle;
+      arm.page.__baselineOracle = oracle;
+      const watcher = await createLogWatcher(logPath);
+      arm.logWatcher = watcher;
+      const watcherCal = ptyClock === "host_watcher"
+        ? await calibrateWatcherDetection(join(arm.dataDir, "watcher-cal.log"))
+        : null;
+      const familyResult = await runArmFamilies({
+        page: arm.page,
+        arm,
+        ptyClock,
+        logPath,
+        logWatcher: watcher
+      });
+      observations[armId] = familyResult.observations;
+      if (observations[armId].key_to_pty && observations[armId].key_to_pty.status == null) {
+        const dispatcherCal = [];
+        for (let index = 0; index < FROZEN_INPUTS.measured_repetitions; index += 1) {
+          const marker = `dispatcher-cal-${index}`;
+          const started = Date.now();
+          if (ptyClock === "shell_epochrealtime") {
+            await execFile("bash", ["-c", `printf '%s %s\\n' "$EPOCHREALTIME" "${marker}" >> ${JSON.stringify(logPath).slice(1, -1)}`]);
+          } else {
+            await execFile("sh", ["-c", `printf '%s\\n' "${marker}" >> ${JSON.stringify(logPath).slice(1, -1)}`]);
+          }
+          dispatcherCal.push(Date.now() - started);
+        }
+        observations[armId].key_to_pty.dispatcher_append_calibration_ms = statisticSet(dispatcherCal);
+        if (watcherCal) {
+          observations[armId].key_to_pty.watcher_detection_calibration_ms = watcherCal;
+        }
+        if (ptyClock === "shell_epochrealtime") {
+          const parsed = (await readFile(logPath, "utf8"))
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => parseDispatcherLogLine(line, ptyClock));
+          observations[armId].key_to_pty.append_cost_calibration_ms = appendCostSamples(parsed);
+          observations[armId].key_to_pty.shell_clock_handshake = handshakeResults[armId];
+        }
+      }
+      correctness[armId] = {
+        dispatcher_ready: readyVisible,
+        handshake: handshakeResults[armId],
+        warmup: familyResult.warmup,
+        screencast_scale: oracle.scale,
+        discarded_frame_count: oracle.discardedTimestampCount,
+        transform_stable: transformStable(oracle.transformSamples)
+      };
+      blocked.push(...familyResult.blocked);
+      watcher.close();
+    }
+    const browserInfo = {
+      playwright_channel: "chromium",
+      chromium_revision: browserVersion,
+      viewport: FROZEN_INPUTS.viewport,
+      device_scale_factor: FROZEN_INPUTS.viewport.device_scale_factor
+    };
+    const record = {
+      format_version: FORMAT_VERSION,
+      capture_id: captureId,
+      product_baseline_only: true,
+      product_baseline_statement: PRODUCT_BASELINE_STATEMENT,
+      same_host: true,
+      paint_oracle: PAINT_ORACLE,
+      pty_clock: ptyClock,
+      host,
+      browser: browserInfo,
+      arms: {
+        legacy: {
+          arm_id: "legacy",
+          revisions: {
+            repository: "trybotster/trybotster",
+            commit: PINNED_REVISIONS.legacy_monorepo
+          },
+          build_commands: ["mise r run_hub_debug"],
+          launch_command: arms.legacy.launch_command,
+          binary_real_paths: {},
+          client: "rails_app_frontend",
+          restty: legacyRestty,
+          env: { launch: "mise r run_hub_debug" },
+          terminal_bounding_box: arms.legacy.terminal_bounding_box,
+          frame_scale: arms.legacy.oracle?.scale ?? null,
+          discarded_frame_count: arms.legacy.oracle?.discardedTimestampCount ?? 0,
+          hub_pid: arms.legacy.child?.pid ?? null,
+          data_directory: arms.legacy.dataDir,
+          session_ids: arms.legacy.sessionIds,
+          shell_clock_handshake: handshakeResults.legacy
+        },
+        modular: {
+          arm_id: "modular",
+          revisions: {
+            repository: "trybotster/botster-hub",
+            commit: PINNED_REVISIONS.modular_hub,
+            locked_core: PINNED_REVISIONS.modular_core,
+            web: PINNED_REVISIONS.modular_web
+          },
+          build_commands: [LOCKED_HUB_BUILD_COMMAND, LOCKED_SESSION_WORKER_BUILD_COMMAND],
+          launch_command: arms.modular.launch_command,
+          binary_real_paths: {
+            hub: hubBuild.hubBin,
+            session_worker: hubBuild.workerBin
+          },
+          client: "ionic_react_packaged",
+          restty: modularRestty,
+          env: {
+            BOTSTER_HUB_BIN: hubBuild.hubBin,
+            BOTSTER_SESSION_WORKER_BIN: hubBuild.workerBin
+          },
+          terminal_bounding_box: arms.modular.terminal_bounding_box,
+          frame_scale: arms.modular.oracle?.scale ?? null,
+          discarded_frame_count: arms.modular.oracle?.discardedTimestampCount ?? 0,
+          hub_pid: arms.modular.child?.pid ?? null,
+          data_directory: arms.modular.dataDir,
+          session_ids: arms.modular.sessionIds,
+          shell_clock_handshake: handshakeResults.modular
+        }
+      },
+      frozen_inputs: FROZEN_INPUTS,
+      observations,
+      correctness,
+      blocked
+    };
+    assertValidObservationRecord(record);
+    const outputPath = join(packageRoot, "docs/reports", `terminal-baseline-observation-local-${captureId}.json`);
+    await writeFile(outputPath, `${JSON.stringify(record, null, 2)}\n`);
+    process.stdout.write(`wrote ${outputPath}\n`);
+  } finally {
+    const teardownFailures = [];
+    for (const armId of ARM_IDS) {
+      if (arms[armId]) {
+        const teardown = await teardownArm(arms[armId]);
+        if (!teardown.hub_pid_gone || !teardown.socket_gone) {
+          teardownFailures.push(`${armId} teardown did not prove live stop`);
+        }
+      }
+    }
+    if (browser) {
+      await browser.close();
+    }
+    const legacyAfter = await inspectCheckout(legacyCheckout);
+    const hubAfter = await inspectCheckout(hubSource);
+    assertCheckoutUnchanged(legacyBefore, legacyAfter, "legacy");
+    assertCheckoutUnchanged(hubBefore, hubAfter, "hub source");
+    await rm(hubBuild.scratch, { recursive: true, force: true }).catch(() => null);
+    if (teardownFailures.length > 0) {
+      process.stderr.write(`${teardownFailures.join("\n")}\n`);
+      process.exitCode = 1;
+    }
+  }
+}
+
+const invokedDirectly = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+if (invokedDirectly) {
+  main(process.argv.slice(2)).catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
+}
+
+export {
+  inspectCheckout,
+  RESTTY_RUNTIME_FILES
+};

@@ -47,6 +47,19 @@ The incremental attach smoke feeds authentic READY, PAGE, and FINISH frames
 through the shared Restty reader. It proves READY paint before FINISH. It also
 proves the resize, input, and live-output barriers.
 
+The debug-runtime terminal regression baseline is a product observation, not a
+transport-causality experiment. The frozen format is
+[docs/terminal-baseline-observation-format.md](docs/terminal-baseline-observation-format.md)
+(`terminal_baseline_observation_format=1`). Downstream Restty and integration
+tickets must reuse that version.
+
+```bash
+BOTSTER_LEGACY_CHECKOUT=/path/to/clean-f598075e \
+BOTSTER_HUB_SOURCE=/path/to/botster-hub \
+npm run observe:terminal-baseline
+npm run observe:terminal-baseline:validate -- docs/reports/terminal-baseline-observation-local-<capture_id>.json
+```
+
 ## Live WebRTC acceptance
 
 ```bash

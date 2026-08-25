@@ -1,0 +1,54 @@
+name: Terminal regression baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      legacy_checkout:
+        description: Absolute path or repository URL for a clean trybotster checkout at f598075e
+        required: true
+        type: string
+      hub_source:
+        description: Absolute path or repository URL used only as a read-only Hub clone source
+        required: true
+        type: string
+
+jobs:
+  capture:
+    runs-on: botster-ubuntu-24.04-16core
+    timeout-minutes: 180
+    steps:
+      - name: Require the controlled runner label
+        run: |
+          echo "runner_label=botster-ubuntu-24.04-16core"
+          echo "This job must not run on a generic GitHub-hosted runner."
+
+      - name: Checkout botster-web
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Deterministic gates
+        run: |
+          npm run typecheck
+          npm run lint
+          npm test
+          npm run build
+
+      - name: Capture two-arm baseline
+        env:
+          BOTSTER_LEGACY_CHECKOUT: ${{ inputs.legacy_checkout }}
+          BOTSTER_HUB_SOURCE: ${{ inputs.hub_source }}
+          BOTSTER_BASELINE_RUNNER_LABEL: botster-ubuntu-24.04-16core
+        run: npm run observe:terminal-baseline
+
+      - name: Validate the written record
+        run: |
+          record="$(ls docs/reports/terminal-baseline-observation-local-*.json | tail -n 1)"
+          npm run observe:terminal-baseline:validate -- "$record"
