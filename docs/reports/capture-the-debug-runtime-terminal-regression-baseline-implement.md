@@ -2,8 +2,8 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787696849_534095`
-Returned from Review: `review_1787696822_102316`
+Step: `botster_stack_implement` / `run_step_1787699822_105035`
+Returned from Review: `review_1787699804_592583`
 Human decision: `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9, resynced to format version 2
 Approved review: `review_1787638112_854617`
@@ -125,17 +125,23 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787696822_102316` returned one open finding. This visit starts the producer after the settle window and marker typing.
+`review_1787699804_592583` returned one open finding. This visit uses a family-specific control oracle.
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787696822_729346` settle delay | Each wrapper starts one producer in `beforeEnter`, after the 250 ms settle window and marker typing. `beforeEnter` waits for real inbound growth, then Enter. The same producer must deliver more inbound after `t_key`. Positive tests run that production `sendProbe` delay. A fast one-shot that finishes before Enter fails for control, package, and sibling families. |
+| `finding_1787699804_683507` one-reply control | `control_response_saturation` proves the browser sent the real request before Enter and that its one response arrives after `t_key`. Modular send uses the production `daemon_request` event. Legacy send wraps `sendResize` and `requestSnapshot`. The positive test issues one send and one delayed reply. Package-event and sibling families still require inbound growth before Enter and after `t_key`. The frozen control request count stays 20. |
+
+`review_1787696822_102316` findings from the prior visit remain resolved:
+
+| Finding | Fix |
+| --- | --- |
+| `finding_1787696822_729346` settle delay | Each wrapper still starts one producer in `beforeEnter`, after the 250 ms settle window and marker typing. Package and sibling wait for inbound growth before Enter. Control waits for the outbound send before Enter. |
 
 `review_1787696331_611826` findings from the prior visit remain resolved:
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787696331_767389` promise oracle | Enter still uses the production inbound counter. Zero delivered frames, events, or bytes before Enter fails. A launch promise that is still pending at Enter with first traffic only after Enter fails. |
+| `finding_1787696331_767389` promise oracle | Package and sibling Enter still use the production inbound counter. Control Enter uses the production outbound send counter, not a local promise flag. |
 
 `review_1787691852_111616` findings from the prior visit remain resolved:
 
@@ -174,7 +180,7 @@ Deterministic gates:
 | G2 | `npm run lint` | passed, five known warnings in untouched files |
 | G3 | `npm test` | passed, two known `act(...)` warnings |
 | G4 | `npm run build` | passed |
-| G6 | validator assertions in `src/App.test.mjs` | format version 2, producer starts after settle and marker typing, inbound traffic required before Enter, more inbound after t_key, production sendProbe delay on the positive path, one-shot-before-Enter reject, one physical control request per sample, invalid-number reject, and one-armed reject |
+| G6 | validator assertions in `src/App.test.mjs` | format version 2, producer starts after settle and marker typing, control send required before Enter with one response after t_key, package and sibling inbound required before Enter and after t_key, production sendProbe delay on the positive path, one-shot-before-Enter reject for sustained families, one physical control request per sample, invalid-number reject, and one-armed reject |
 | G13 | `observe:terminal-baseline:validate` | available; used after a written record |
 
 G5 pinned sequence from the prior Implement visit remains the last completed live-packaged proof:
@@ -219,7 +225,7 @@ Later tickets must not use this ticket as evidence for a measured latency improv
 - Legacy Rails provisioning on Linux CI is unproven.
 - Exact canvas settle-window calibration is frozen at 250 ms and may need a later `format_version` bump if both arms prove a different stable window.
 - Control-response equalization records a 0.25 tolerance. Achieved live values still require a completed two-arm set.
-- Live `issueControlRequest` is one browser RPC. The harness requires inbound before Enter and more inbound after `t_key` from that same call. A one-reply request that finishes before Enter fails closed. Test doubles stream two increments from one call. A live package burst or sibling flood can span both windows only when events or flood bytes continue after `t_key`.
+- Live `issueControlRequest` is one browser RPC. The harness requires the production send before Enter and the one response after `t_key`. A reply that arrives before Enter fails closed. Package-event and sibling families still require inbound growth on both sides of Enter.
 
 ## Missing vault guidance discovered
 

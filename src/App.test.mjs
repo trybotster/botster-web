@@ -18527,6 +18527,10 @@ function removeCssAtRules(source) {
   assert.match(validateObservationRecord(oneArmedMeasured).errors.join("\n"), /one-armed or partial record is not a publishable baseline/);
 
   assert.throws(() => createControlResponseBurst({ issueRequest: async () => ({ ok: true }) }), /observeInbound is required/);
+  assert.throws(() => createControlResponseBurst({
+    issueRequest: async () => ({ ok: true }),
+    observeInbound: async () => ({ frames: 0, bytes: 0 })
+  }), /observeOutbound is required/);
   const completeAroundProbe = async (handle, sendProbe) => {
     const result = await handle.aroundProbe({
       measured: true,
@@ -18577,16 +18581,17 @@ function removeCssAtRules(source) {
 
   let inboundFrames = 0;
   let inboundBytes = 0;
+  let controlSent = 0;
   const overlappingControl = createControlResponseBurst({
     issueRequest: async () => {
-      inboundFrames += 1;
-      inboundBytes += 32;
+      controlSent += 1;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 15));
       inboundFrames += 1;
       inboundBytes += 32;
       return { wrapper: true, bytes: 9999 };
     },
-    observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes })
+    observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes }),
+    observeOutbound: async () => ({ sent: controlSent })
   });
   await overlappingControl.start();
   await completeProductionAroundProbe(overlappingControl, async () => ({ at: Date.now() }));
@@ -18597,12 +18602,15 @@ function removeCssAtRules(source) {
   assert.notEqual(overlappingControl.stats.inbound_bytes, 9999);
   await overlappingControl.stop();
 
+  let deadSent = 0;
   const deadInbound = createControlResponseBurst({
     issueRequest: async () => {
+      deadSent += 1;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
       return { ok: true };
     },
-    observeInbound: async () => ({ frames: 0, bytes: 0 })
+    observeInbound: async () => ({ frames: 0, bytes: 0 }),
+    observeOutbound: async () => ({ sent: deadSent })
   });
   await deadInbound.start();
   await assert.rejects(
@@ -18613,7 +18621,8 @@ function removeCssAtRules(source) {
   let preKeyControlFrames = 8;
   const preKeyControl = createControlResponseBurst({
     issueRequest: async () => ({ ok: true }),
-    observeInbound: async () => ({ frames: preKeyControlFrames, bytes: preKeyControlFrames * 8 })
+    observeInbound: async () => ({ frames: preKeyControlFrames, bytes: preKeyControlFrames * 8 }),
+    observeOutbound: async () => ({ sent: 0 })
   });
   await preKeyControl.start();
   await assert.rejects(
@@ -18621,7 +18630,7 @@ function removeCssAtRules(source) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
       return { at: Date.now() };
     }),
-    /no inbound progress|did not grow|idle at the probe Enter|no inbound traffic/
+    /no control request sent at the probe Enter|no inbound progress|did not grow|idle at the probe Enter|no inbound traffic/
   );
 
   let packageCount = 0;
@@ -18714,17 +18723,18 @@ function removeCssAtRules(source) {
   assert.throws(() => assertCounterGrew(4, 4, "control_response_saturation"));
 
   let liveIssueCalls = 0;
+  let liveSent = 0;
   const liveBurst = createControlResponseBurst({
     issueRequest: async (name) => {
       liveIssueCalls += 1;
-      inboundFrames += 1;
-      inboundBytes += 8;
+      liveSent += 1;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
       inboundFrames += 1;
       inboundBytes += 8;
       return { type: name, ok: true };
     },
-    observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes })
+    observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes }),
+    observeOutbound: async () => ({ sent: liveSent })
   });
   await liveBurst.start();
   for (let index = 0; index < FROZEN_INPUTS.control_request_count; index += 1) {
@@ -18744,17 +18754,18 @@ function removeCssAtRules(source) {
 
   let settleFinished = false;
   let startedBeforeSettle = false;
+  let sequenceSent = 0;
   const sequenceBurst = createControlResponseBurst({
     issueRequest: async () => {
       if (!settleFinished) startedBeforeSettle = true;
-      inboundFrames += 1;
-      inboundBytes += 4;
+      sequenceSent += 1;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
       inboundFrames += 1;
       inboundBytes += 4;
       return { ok: true };
     },
-    observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes })
+    observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes }),
+    observeOutbound: async () => ({ sent: sequenceSent })
   });
   await sequenceBurst.start();
   await completeProductionAroundProbe(sequenceBurst, async () => ({ at: Date.now() }), {
@@ -18766,15 +18777,18 @@ function removeCssAtRules(source) {
 
   let lateProbeReturned = false;
   let lateFrames = 0;
+  let lateSent = 0;
   const lateControl = createControlResponseBurst({
     issueRequest: async () => {
       if (!lateProbeReturned) {
         return { skipped: true };
       }
+      lateSent += 1;
       lateFrames += 1;
       return { ok: true };
     },
-    observeInbound: async () => ({ frames: lateFrames, bytes: lateFrames * 8 })
+    observeInbound: async () => ({ frames: lateFrames, bytes: lateFrames * 8 }),
+    observeOutbound: async () => ({ sent: lateSent })
   });
   await lateControl.start();
   await assert.rejects(
@@ -18782,7 +18796,7 @@ function removeCssAtRules(source) {
       lateProbeReturned = true;
       return { at: Date.now() };
     }),
-    /no inbound progress|did not grow|before t_key|idle at the probe Enter|no inbound traffic/
+    /no control request sent at the probe Enter|no inbound progress|did not grow|before t_key|idle at the probe Enter|no inbound traffic/
   );
 
   let latePackageProbe = false;
@@ -18838,13 +18852,16 @@ function removeCssAtRules(source) {
   );
 
   let delayedControlFrames = 0;
+  let delayedControlSent = 0;
   const delayedControl = createControlResponseBurst({
     issueRequest: async () => {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
+      delayedControlSent += 1;
       delayedControlFrames += 1;
       return { ok: true };
     },
-    observeInbound: async () => ({ frames: delayedControlFrames, bytes: delayedControlFrames * 8 })
+    observeInbound: async () => ({ frames: delayedControlFrames, bytes: delayedControlFrames * 8 }),
+    observeOutbound: async () => ({ sent: delayedControlSent })
   });
   await delayedControl.start();
   await assert.rejects(
@@ -18893,12 +18910,15 @@ function removeCssAtRules(source) {
   );
 
   let oneShotControlFrames = 0;
+  let oneShotControlSent = 0;
   const oneShotControl = createControlResponseBurst({
     issueRequest: async () => {
+      oneShotControlSent += 1;
       oneShotControlFrames += 1;
       return { ok: true };
     },
-    observeInbound: async () => ({ frames: oneShotControlFrames, bytes: oneShotControlFrames * 8 })
+    observeInbound: async () => ({ frames: oneShotControlFrames, bytes: oneShotControlFrames * 8 }),
+    observeOutbound: async () => ({ sent: oneShotControlSent })
   });
   await oneShotControl.start();
   await assert.rejects(

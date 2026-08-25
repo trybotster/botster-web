@@ -373,6 +373,22 @@ export async function awaitProductionSendProbeHooks(hooks = {}, options = {}) {
   };
 }
 
+export function outboundGrew(before, after) {
+  return Number(after?.sent ?? 0) > Number(before?.sent ?? 0);
+}
+
+export async function waitForSent(observe, before, family, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const snapshot = await observe();
+    if (outboundGrew(before, snapshot)) {
+      return snapshot;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+  throw new Error(`${family}: no control request sent at the probe Enter`);
+}
+
 export async function waitForProgress(observe, before, family, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -398,6 +414,7 @@ export async function waitForProgress(observe, before, family, timeoutMs = 5_000
 export function createControlResponseBurst({
   issueRequest,
   observeInbound,
+  observeOutbound,
   names = FROZEN_INPUTS.control_request_names,
   requestCount = FROZEN_INPUTS.control_request_count
 }) {
@@ -419,6 +436,9 @@ export function createControlResponseBurst({
   };
   if (typeof observeInbound !== "function") {
     throw new Error("control_response_saturation: observeInbound is required");
+  }
+  if (typeof observeOutbound !== "function") {
+    throw new Error("control_response_saturation: observeOutbound is required");
   }
   return {
     stats,
@@ -446,11 +466,11 @@ export function createControlResponseBurst({
         let pending;
         const tKey = await sendProbe({
           beforeEnter: async () => {
-            const before = await observeInbound();
+            const beforeSent = await observeOutbound();
             pending = Promise.resolve(issueRequest(name));
-            await waitForInboundAtEnter(
-              observeInbound,
-              before,
+            await waitForSent(
+              observeOutbound,
+              beforeSent,
               "control_response_saturation",
               progressTimeoutMs
             );
@@ -1127,7 +1147,21 @@ export async function installLegacyInboundObserver(page) {
       return;
     }
     globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ = globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? [];
+    globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ = globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? [];
     globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__ = globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__ ?? [];
+    const wrapOutbound = (methodName) => {
+      const originalSend = transport[methodName]?.bind(transport);
+      if (typeof originalSend !== "function" || transport[`__baselineOutboundWrapped_${methodName}`]) {
+        return;
+      }
+      transport[methodName] = (...args) => {
+        globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.push({ type: methodName, at: Date.now() });
+        return originalSend(...args);
+      };
+      transport[`__baselineOutboundWrapped_${methodName}`] = true;
+    };
+    wrapOutbound("sendResize");
+    wrapOutbound("requestSnapshot");
     const original = transport.handleMessage?.bind(transport);
     if (typeof original !== "function") {
       throw new Error("legacy transport handleMessage is not available");
@@ -1152,6 +1186,21 @@ export async function installLegacyInboundObserver(page) {
     };
     transport.__baselineInboundWrapped = true;
   });
+}
+
+export async function observeControlOutbound(page, arm) {
+  if (arm.arm_id === "modular") {
+    const sent = await page.evaluate(() => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return events.filter((entry) =>
+        entry.kind === "daemon_request"
+        && (entry.payload?.type === "resize" || entry.payload?.type === "read_screen")
+      ).length;
+    });
+    return { sent };
+  }
+  const raw = await page.evaluate(() => globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? []);
+  return { sent: raw.length };
 }
 
 export async function observeControlInbound(page, arm) {
@@ -1561,7 +1610,8 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
     }
     const burst = createControlResponseBurst({
       issueRequest: (name) => issueControlRequest(arm, name),
-      observeInbound: () => observeControlInbound(arm.page, arm)
+      observeInbound: () => observeControlInbound(arm.page, arm),
+      observeOutbound: () => observeControlOutbound(arm.page, arm)
     });
     const started = Date.now();
     await burst.start();
