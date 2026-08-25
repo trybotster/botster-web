@@ -43,6 +43,44 @@ export const CONTROL_RESPONSE_TOLERANCE = Object.freeze({
   response_bytes: 0.25
 });
 
+export const INBOUND_BYTE_UNIT = "decoded_inbound_control_payload_bytes";
+
+export function countInboundControlBytes(payload) {
+  if (payload == null) {
+    return 0;
+  }
+  if (typeof payload === "string") {
+    return Buffer.byteLength(payload);
+  }
+  if (Buffer.isBuffer(payload)) {
+    if (payload.length > 0 && (payload[0] === 0x00 || payload[0] === 0x01 || payload[0] === 0x02)) {
+      return payload.length - 1;
+    }
+    return payload.length;
+  }
+  if (ArrayBuffer.isView(payload)) {
+    return countInboundControlBytes(Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength));
+  }
+  if (Array.isArray(payload) && payload.length > 0 && payload.every((value) => Number.isInteger(value))) {
+    return countInboundControlBytes(Buffer.from(payload));
+  }
+  return Buffer.byteLength(JSON.stringify(payload));
+}
+
+export function equalizeControlResponses(legacyFamily, modularFamily, tolerance = CONTROL_RESPONSE_TOLERANCE.response_rate) {
+  const legacyRate = Number(legacyFamily?.response_rate ?? 0);
+  const modularRate = Number(modularFamily?.response_rate ?? 0);
+  const legacyBytes = Number(legacyFamily?.response_bytes ?? 0);
+  const modularBytes = Number(modularFamily?.response_bytes ?? 0);
+  const maxRate = Math.max(legacyRate, modularRate, 0.001);
+  const maxBytes = Math.max(legacyBytes, modularBytes, 1);
+  return {
+    tolerance,
+    response_rate_within_tolerance: Math.abs(legacyRate - modularRate) / maxRate <= tolerance,
+    response_bytes_within_tolerance: Math.abs(legacyBytes - modularBytes) / maxBytes <= tolerance
+  };
+}
+
 export const CONTROL_OPERATIONS = Object.freeze({
   terminal_resize: Object.freeze({
     semantic: "terminal_resize",
@@ -431,11 +469,11 @@ export function recordIsPublishableBaseline(record) {
       }
     }
   }
-  const equalization = record.correctness?.control_response_equalization;
-  if (
-    equalization?.response_rate_within_tolerance !== true
-    || equalization?.response_bytes_within_tolerance !== true
-  ) {
+  const computed = equalizeControlResponses(
+    record.observations.legacy?.control_response_saturation,
+    record.observations.modular?.control_response_saturation
+  );
+  if (!computed.response_rate_within_tolerance || !computed.response_bytes_within_tolerance) {
     return false;
   }
   return true;
@@ -494,6 +532,7 @@ function validateFamily(family, name, armId, ptyClock, errors) {
       "response_bytes",
       "inbound_frame_count",
       "inbound_bytes",
+      "inbound_byte_unit",
       "wire_request_types",
       "tolerance"
     ]) {
@@ -503,6 +542,9 @@ function validateFamily(family, name, armId, ptyClock, errors) {
     }
     if (family.producer !== "browser_control_connection") {
       errors.push(`${label}.producer must be browser_control_connection`);
+    }
+    if (family.inbound_byte_unit !== INBOUND_BYTE_UNIT) {
+      errors.push(`${label}.inbound_byte_unit must be ${INBOUND_BYTE_UNIT}`);
     }
     if (JSON.stringify(family.request_names) !== JSON.stringify(FROZEN_INPUTS.control_request_names)) {
       errors.push(`${label}.request_names must be the version-2 semantic operations`);
@@ -608,10 +650,13 @@ export function validateObservationRecord(record) {
     if (!recordIsPublishableBaseline(record)) {
       errors.push("a one-armed or partial record is not a publishable baseline");
     }
-    const equalization = record.correctness?.control_response_equalization;
+    const computedEqualization = equalizeControlResponses(
+      record.observations.legacy?.control_response_saturation,
+      record.observations.modular?.control_response_saturation
+    );
     if (
-      equalization?.response_rate_within_tolerance !== true
-      || equalization?.response_bytes_within_tolerance !== true
+      !computedEqualization.response_rate_within_tolerance
+      || !computedEqualization.response_bytes_within_tolerance
     ) {
       errors.push("control_response_equalization must be within the frozen tolerance");
     }
@@ -713,6 +758,7 @@ export function exampleValidRecord(overrides = {}) {
       response_bytes: 1024,
       inbound_frame_count: 20,
       inbound_bytes: 1024,
+      inbound_byte_unit: INBOUND_BYTE_UNIT,
       wire_request_types: wireRequestTypesForArm(armId),
       tolerance: CONTROL_RESPONSE_TOLERANCE
     }),

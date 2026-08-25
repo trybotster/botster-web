@@ -94,11 +94,13 @@ import {
   FAMILY_CONTRACTS,
   FORMAT_VERSION,
   FROZEN_INPUTS,
+  INBOUND_BYTE_UNIT,
   OBSERVATION_FAMILIES,
   PAINT_ORACLE,
   PINNED_REVISIONS,
   PRODUCT_BASELINE_STATEMENT,
   acceptShellClockHandshake,
+  countInboundControlBytes,
   exampleValidRecord,
   mapCssBoxToFramePixels,
   measureFrameScale,
@@ -18404,10 +18406,23 @@ function removeCssAtRules(source) {
   );
   assert.equal(equalized.response_rate_within_tolerance, true);
   assert.equal(equalized.response_bytes_within_tolerance, true);
-  const unequal = exampleValidRecord();
-  unequal.correctness.control_response_equalization.response_rate_within_tolerance = false;
-  assert.equal(recordIsPublishableBaseline(unequal), false);
-  assert.match(validateObservationRecord(unequal).errors.join("\n"), /control_response_equalization must be within the frozen tolerance/);
+  const lyingBooleans = exampleValidRecord();
+  lyingBooleans.observations.legacy.control_response_saturation.response_rate = 1;
+  lyingBooleans.observations.modular.control_response_saturation.response_rate = 1000;
+  lyingBooleans.observations.legacy.control_response_saturation.response_bytes = 1;
+  lyingBooleans.observations.modular.control_response_saturation.response_bytes = 1_000_000;
+  lyingBooleans.correctness.control_response_equalization.response_rate_within_tolerance = true;
+  lyingBooleans.correctness.control_response_equalization.response_bytes_within_tolerance = true;
+  assert.equal(recordIsPublishableBaseline(lyingBooleans), false);
+  assert.match(
+    validateObservationRecord(lyingBooleans).errors.join("\n"),
+    /control_response_equalization must be within the frozen tolerance/
+  );
+  const booleanOnly = exampleValidRecord();
+  booleanOnly.correctness.control_response_equalization.response_rate_within_tolerance = false;
+  booleanOnly.correctness.control_response_equalization.response_bytes_within_tolerance = false;
+  assert.equal(recordIsPublishableBaseline(booleanOnly), true);
+  assert.equal(validateObservationRecord(booleanOnly).ok, true);
   assert.equal(valid.product_baseline_statement, PRODUCT_BASELINE_STATEMENT);
   assert.equal(valid.same_host, true);
 
@@ -18482,6 +18497,31 @@ function removeCssAtRules(source) {
   assert.match(validateObservationRecord(oneArmedMeasured).errors.join("\n"), /one-armed or partial record is not a publishable baseline/);
 
   assert.throws(() => createControlResponseBurst({ issueRequest: async () => ({ ok: true }) }), /observeInbound is required/);
+  const completeAroundProbe = async (handle, sendProbe) => {
+    const result = await handle.aroundProbe({
+      measured: true,
+      sendProbe,
+      progressTimeoutMs: 200
+    });
+    if (result?.progress) {
+      await result.progress;
+    }
+    return result;
+  };
+  const sameJson = { type: "read_screen", text: "abcd" };
+  assert.equal(countInboundControlBytes(sameJson), countInboundControlBytes({ type: "read_screen", text: "abcd" }));
+  const prefixedSnapshot = Buffer.from([0x02, 65, 66, 67, 68]);
+  assert.equal(countInboundControlBytes(prefixedSnapshot), 4);
+  assert.equal(countInboundControlBytes([0x02, 65, 66, 67, 68]), 4);
+  assert.equal(countInboundControlBytes(prefixedSnapshot), countInboundControlBytes([2, 65, 66, 67, 68]));
+  const resizeBody = { type: "resize", rows: 32, cols: 120 };
+  assert.equal(countInboundControlBytes(resizeBody), Buffer.byteLength(JSON.stringify(resizeBody)));
+  const assemblyLayer = { request_type: "resize", total_bytes: 5000 };
+  assert.equal(countInboundControlBytes(assemblyLayer), Buffer.byteLength(JSON.stringify(assemblyLayer)));
+  assert.notEqual(countInboundControlBytes(assemblyLayer), 5000);
+  assert.equal(INBOUND_BYTE_UNIT, "decoded_inbound_control_payload_bytes");
+  assert.equal(valid.observations.legacy.control_response_saturation.inbound_byte_unit, INBOUND_BYTE_UNIT);
+
   let inboundFrames = 0;
   let inboundBytes = 0;
   const overlappingControl = createControlResponseBurst({
@@ -18494,10 +18534,7 @@ function removeCssAtRules(source) {
     observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes })
   });
   await overlappingControl.start();
-  await overlappingControl.aroundProbe({
-    measured: true,
-    sendProbe: async () => ({ at: Date.now() })
-  });
+  await completeAroundProbe(overlappingControl, async () => ({ at: Date.now() }));
   assert.equal(overlappingControl.stats.inbound_frame_count, 1);
   assert.equal(overlappingControl.stats.inbound_bytes, 32);
   assert.notEqual(overlappingControl.stats.inbound_bytes, 9999);
@@ -18512,9 +18549,20 @@ function removeCssAtRules(source) {
   });
   await deadInbound.start();
   await assert.rejects(
-    deadInbound.aroundProbe({
-      measured: true,
-      sendProbe: async () => ({ at: Date.now() })
+    completeAroundProbe(deadInbound, async () => ({ at: Date.now() })),
+    /no inbound progress|did not grow/
+  );
+
+  let preKeyControlFrames = 8;
+  const preKeyControl = createControlResponseBurst({
+    issueRequest: async () => ({ ok: true }),
+    observeInbound: async () => ({ frames: preKeyControlFrames, bytes: preKeyControlFrames * 8 })
+  });
+  await preKeyControl.start();
+  await assert.rejects(
+    completeAroundProbe(preKeyControl, async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
+      return { at: Date.now() };
     }),
     /no inbound progress|did not grow/
   );
@@ -18531,16 +18579,33 @@ function removeCssAtRules(source) {
     observeDelivery: async () => ({ count: packageCount, frames: packageCount, bytes: packageCount * 4 })
   });
   await packageBurst.start();
-  await packageBurst.aroundProbe({
-    measured: true,
-    sendProbe: async () => ({ at: Date.now() })
-  });
+  await completeAroundProbe(packageBurst, async () => ({ at: Date.now() }));
   await assert.rejects(
     packageBurst.aroundProbe({
       measured: true,
       sendProbe: async () => ({ at: Date.now() })
     }),
     /already completed before the sample/
+  );
+
+  let preKeyPackageCount = 10;
+  const preKeyPackage = createPackageEventBurst({
+    count: 10,
+    measuredRepetitions: 1,
+    emitBurst: async () => 0,
+    observeDelivery: async () => ({
+      count: preKeyPackageCount,
+      frames: preKeyPackageCount,
+      bytes: preKeyPackageCount * 4
+    })
+  });
+  await preKeyPackage.start();
+  await assert.rejects(
+    completeAroundProbe(preKeyPackage, async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
+      return { at: Date.now() };
+    }),
+    /no inbound progress|did not grow/
   );
 
   let siblingBytes = 0;
@@ -18557,10 +18622,7 @@ function removeCssAtRules(source) {
     })
   });
   await sibling.start();
-  await sibling.aroundProbe({
-    measured: true,
-    sendProbe: async () => ({ at: Date.now() })
-  });
+  await completeAroundProbe(sibling, async () => ({ at: Date.now() }));
   assert.equal(sibling.stats.produced_count > 0, true);
   const staleSibling = createSiblingFloodHandle({
     floodSessionId: "a",
@@ -18569,9 +18631,24 @@ function removeCssAtRules(source) {
   });
   await staleSibling.start();
   await assert.rejects(
-    staleSibling.aroundProbe({
-      measured: true,
-      sendProbe: async () => ({ at: Date.now() })
+    completeAroundProbe(staleSibling, async () => ({ at: Date.now() })),
+    /no inbound progress|did not grow/
+  );
+  let preKeySiblingBytes = 64;
+  const preKeySibling = createSiblingFloodHandle({
+    floodSessionId: "a",
+    probeSessionId: "b",
+    observe: async () => ({
+      terminal_a_subscribed: true,
+      delivered_bytes: preKeySiblingBytes,
+      restartFlood: async () => {}
+    })
+  });
+  await preKeySibling.start();
+  await assert.rejects(
+    completeAroundProbe(preKeySibling, async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
+      return { at: Date.now() };
     }),
     /no inbound progress|did not grow/
   );
@@ -18588,10 +18665,7 @@ function removeCssAtRules(source) {
   });
   await liveBurst.start();
   for (let index = 0; index < FROZEN_INPUTS.control_request_count; index += 1) {
-    await liveBurst.aroundProbe({
-      measured: true,
-      sendProbe: async () => ({ at: Date.now() })
-    });
+    await completeAroundProbe(liveBurst, async () => ({ at: Date.now() }));
   }
   await assert.rejects(
     liveBurst.aroundProbe({
@@ -18615,12 +18689,9 @@ function removeCssAtRules(source) {
     observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes })
   });
   await sequenceBurst.start();
-  await sequenceBurst.aroundProbe({
-    measured: true,
-    sendProbe: async () => {
-      probeCalled = true;
-      return { at: Date.now() };
-    }
+  await completeAroundProbe(sequenceBurst, async () => {
+    probeCalled = true;
+    return { at: Date.now() };
   });
   assert.equal(producerDoneBeforeProbe, false);
 

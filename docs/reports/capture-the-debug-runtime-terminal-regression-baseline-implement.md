@@ -2,9 +2,9 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787677900_817703`
-Returned from Review: `review_1787682036_465458`
-Human decision: `question_1787678013_829162` chose B and D
+Step: `botster_stack_implement` / `run_step_1787691871_440352`
+Returned from Review: `review_1787691852_111616`
+Human decision: `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9, resynced to format version 2
 Approved review: `review_1787638112_854617`
 
@@ -125,12 +125,20 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787682036_465458` returned four open findings. This visit implements the harness and report defects. The same-laptop JSON remains blocked on GitHub sign-in (`question_1787689401_836936`).
+`review_1787691852_111616` returned three open findings. This visit measures saturation only after `t_key`, recomputes equalization from family values, and counts both arms with one inbound byte unit.
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787682036_650514` overlap | Saturation helpers now wrap `sendProbe`. The producer starts, the PTY probe is sent, then inbound progress must grow during that interval. A producer that finishes before `sendProbe` fails closed. |
-| `finding_1787682036_551936` inbound frames | Control rates count modular `webrtc_response_assembly` frames and legacy inbound `handleMessage` snapshot/control bytes. The local request wrapper is not counted. Publication requires both equalization booleans. |
+| `finding_1787691852_727555` pre-key progress | Each saturation wrapper awaits `sendProbe`, snapshots inbound load at `t_key`, then starts the producer. `captureKeyToPty` waits for that progress promise together with the PTY log. Progress that finishes before `t_key` fails closed for control, package, and sibling families. |
+| `finding_1787691852_815060` self-asserted booleans | `recordIsPublishableBaseline` and `validateObservationRecord` recompute rate and byte equality from the recorded family values and the frozen tolerance. Stored booleans are derived output only. Mutated rates with booleans left `true` reject. |
+| `finding_1787691852_901374` protocol layers | Both arms count `decoded_inbound_control_payload_bytes`. Modular bytes come from decoded `transportControl.request` replies. Legacy bytes use the same helper on snapshot blobs and decoded control messages. Encrypted assembly `total_bytes` is not the unit. Equal wire fixtures produce equal counted bytes. |
+
+`review_1787682036_465458` findings from the prior visit remain resolved or waived. The same-laptop JSON remains blocked on GitHub sign-in (`question_1787689401_836936`).
+
+| Finding | Fix |
+| --- | --- |
+| `finding_1787682036_650514` overlap | Saturation helpers wrap `sendProbe`. `review_1787691852_111616` then moved the load snapshot to `t_key` and required post-key progress. |
+| `finding_1787682036_551936` inbound frames | Control rates still count modular `webrtc_response_assembly` frames and legacy inbound `handleMessage` events. Byte counts now use the shared decoded-payload unit. The local request wrapper is not counted. |
 | `finding_1787682036_522359` local record | Waived for this ticket (`question_1787689401_836936` choice B). This ticket did not capture a performance baseline. No incomplete record is marked publishable. |
 | `finding_1787682036_946083` developer path | Removed the developer Hub absolute path from the public report. |
 
@@ -154,7 +162,7 @@ Deterministic gates:
 | G2 | `npm run lint` | passed, five known warnings in untouched files |
 | G3 | `npm test` | passed, two known `act(...)` warnings |
 | G4 | `npm run build` | passed |
-| G6 | validator assertions in `src/App.test.mjs` | format version 2, inbound-frame rates, overlap helpers, equalization reject, and one-armed reject |
+| G6 | validator assertions in `src/App.test.mjs` | format version 2, inbound-byte unit, pre-key reject, recomputed equalization, overlap helpers, and one-armed reject |
 | G13 | `observe:terminal-baseline:validate` | available; used after a written record |
 
 G5 pinned sequence from the prior Implement visit remains the last completed live-packaged proof:

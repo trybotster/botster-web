@@ -26,6 +26,9 @@ import {
   PINNED_REVISIONS,
   PRODUCT_BASELINE_STATEMENT,
   CONTROL_RESPONSE_TOLERANCE,
+  INBOUND_BYTE_UNIT,
+  countInboundControlBytes,
+  equalizeControlResponses,
   wireRequestTypesForArm,
   assertValidObservationRecord,
   negotiateCaptureClock,
@@ -371,7 +374,7 @@ export function createControlResponseBurst({
       stats.active = true;
       return stats;
     },
-    async aroundProbe({ sendProbe, measured }) {
+    async aroundProbe({ sendProbe, measured, progressTimeoutMs = 5_000 }) {
       if (typeof sendProbe !== "function") {
         throw new Error("control_response_saturation: sendProbe is required");
       }
@@ -384,36 +387,34 @@ export function createControlResponseBurst({
       if (stats.issued >= requestCount) {
         throw new Error("control_response_saturation: frozen request count already issued");
       }
-      const before = await observeInbound();
       stats.in_flight = true;
-      let probeStarted = false;
       try {
         const name = sequence[stats.issued];
-        const pending = Promise.resolve().then(() => issueRequest(name)).then((reply) => {
-          if (!probeStarted) {
-            throw new Error("control_response_saturation: producer finished before sendProbe");
-          }
-          return reply;
-        });
         const tKey = await sendProbe();
-        probeStarted = true;
-        const [after] = await Promise.all([
-          waitForProgress(observeInbound, before, "control_response_saturation"),
+        const before = await observeInbound();
+        const pending = Promise.resolve().then(() => issueRequest(name));
+        const progress = Promise.all([
+          waitForProgress(observeInbound, before, "control_response_saturation", progressTimeoutMs),
           pending
-        ]);
-        const frameDelta = after.frames - before.frames;
-        const byteDelta = after.bytes - before.bytes;
-        stats.issued += 1;
-        stats.requests += 1;
-        stats.responses += frameDelta;
-        stats.produced_count += frameDelta;
-        stats.response_bytes += byteDelta;
-        stats.inbound_frame_count += frameDelta;
-        stats.inbound_bytes += byteDelta;
-        stats.last_at = Date.now();
-        return tKey;
-      } finally {
+        ]).then(([after]) => {
+          const frameDelta = after.frames - before.frames;
+          const byteDelta = after.bytes - before.bytes;
+          stats.issued += 1;
+          stats.requests += 1;
+          stats.responses += frameDelta;
+          stats.produced_count += frameDelta;
+          stats.response_bytes += byteDelta;
+          stats.inbound_frame_count += frameDelta;
+          stats.inbound_bytes += byteDelta;
+          stats.last_at = Date.now();
+          return after;
+        }).finally(() => {
+          stats.in_flight = false;
+        });
+        return { ...tKey, progress };
+      } catch (error) {
         stats.in_flight = false;
+        throw error;
       }
     },
     async stop() {
@@ -428,6 +429,7 @@ export function createControlResponseBurst({
         response_bytes: stats.response_bytes,
         inbound_frame_count: stats.inbound_frame_count,
         inbound_bytes: stats.inbound_bytes,
+        inbound_byte_unit: INBOUND_BYTE_UNIT,
         issued: stats.issued,
         tolerance: CONTROL_RESPONSE_TOLERANCE
       };
@@ -457,7 +459,7 @@ export function createPackageEventBurst({
       stats.active = true;
       return stats;
     },
-    async aroundProbe({ sendProbe, measured }) {
+    async aroundProbe({ sendProbe, measured, progressTimeoutMs = 5_000 }) {
       if (typeof sendProbe !== "function") {
         throw new Error("package_event_saturation: sendProbe is required");
       }
@@ -467,25 +469,20 @@ export function createPackageEventBurst({
       if (stats.completed || stats.produced_count >= count) {
         throw new Error("package_event_saturation: burst already completed before the sample");
       }
-      const before = await observeDelivery();
-      let probeStarted = false;
-      const pending = Promise.resolve().then(() => emitBurst(perSample)).then((emitted) => {
-        if (!probeStarted) {
-          throw new Error("package_event_saturation: producer finished before sendProbe");
-        }
-        return emitted;
-      });
       const tKey = await sendProbe();
-      probeStarted = true;
-      const [after] = await Promise.all([
-        waitForProgress(observeDelivery, before, "package_event_saturation"),
+      const before = await observeDelivery();
+      const pending = Promise.resolve().then(() => emitBurst(perSample));
+      const progress = Promise.all([
+        waitForProgress(observeDelivery, before, "package_event_saturation", progressTimeoutMs),
         pending
-      ]);
-      stats.produced_count += Number(after.count ?? after.frames ?? 0) - Number(before.count ?? before.frames ?? 0);
-      if (stats.produced_count >= count) {
-        stats.completed = true;
-      }
-      return tKey;
+      ]).then(([after]) => {
+        stats.produced_count += Number(after.count ?? after.frames ?? 0) - Number(before.count ?? before.frames ?? 0);
+        if (stats.produced_count >= count) {
+          stats.completed = true;
+        }
+        return after;
+      });
+      return { ...tKey, progress };
     },
     async stop() {
       stats.active = false;
@@ -519,26 +516,27 @@ export function createSiblingFloodHandle({
       stats.active = true;
       return stats;
     },
-    async aroundProbe({ sendProbe, measured }) {
+    async aroundProbe({ sendProbe, measured, progressTimeoutMs = 5_000 }) {
       if (typeof sendProbe !== "function") {
         throw new Error("sibling_saturation: sendProbe is required");
       }
       if (!measured) {
         return sendProbe();
       }
-      const snapshot = await observe();
-      if (!snapshot?.terminal_a_subscribed) {
+      const subscribed = await observe();
+      if (!subscribed?.terminal_a_subscribed) {
         throw new Error("sibling_saturation: terminal A is not subscribed");
       }
+      const tKey = await sendProbe();
+      const snapshot = await observe();
       const before = {
         bytes: Number(snapshot.delivered_bytes ?? snapshot.bytes ?? 0),
         count: Number(snapshot.delivered_bytes ?? snapshot.bytes ?? 0)
       };
-      if (before.bytes <= stats.produced_count && typeof snapshot.restartFlood === "function") {
-        void snapshot.restartFlood();
+      if (typeof subscribed.restartFlood === "function") {
+        void subscribed.restartFlood();
       }
-      const tKey = await sendProbe();
-      const after = await waitForProgress(async () => {
+      const progress = waitForProgress(async () => {
         const next = await observe();
         if (!next?.terminal_a_subscribed) {
           throw new Error("sibling_saturation: terminal A is not subscribed");
@@ -547,10 +545,12 @@ export function createSiblingFloodHandle({
           bytes: Number(next.delivered_bytes ?? next.bytes ?? 0),
           count: Number(next.delivered_bytes ?? next.bytes ?? 0)
         };
-      }, before, "sibling_saturation");
-      stats.terminal_a_subscribed = true;
-      stats.produced_count = after.bytes;
-      return tKey;
+      }, before, "sibling_saturation", progressTimeoutMs).then((after) => {
+        stats.terminal_a_subscribed = true;
+        stats.produced_count = after.bytes;
+        return after;
+      });
+      return { ...tKey, progress };
     },
     async stop() {
       stats.active = false;
@@ -604,19 +604,7 @@ export function proveOwnedProcessesGone(arm) {
   };
 }
 
-export function equalizeControlResponses(legacyFamily, modularFamily, tolerance = CONTROL_RESPONSE_TOLERANCE.response_rate) {
-  const legacyRate = Number(legacyFamily?.response_rate ?? 0);
-  const modularRate = Number(modularFamily?.response_rate ?? 0);
-  const legacyBytes = Number(legacyFamily?.response_bytes ?? 0);
-  const modularBytes = Number(modularFamily?.response_bytes ?? 0);
-  const maxRate = Math.max(legacyRate, modularRate, 0.001);
-  const maxBytes = Math.max(legacyBytes, modularBytes, 1);
-  return {
-    tolerance,
-    response_rate_within_tolerance: Math.abs(legacyRate - modularRate) / maxRate <= tolerance,
-    response_bytes_within_tolerance: Math.abs(legacyBytes - modularBytes) / maxBytes <= tolerance
-  };
-}
+export { equalizeControlResponses, countInboundControlBytes, INBOUND_BYTE_UNIT };
 
 export function publicationDecision({ record, teardownProof }) {
   if (!teardownProof?.ok) {
@@ -1064,16 +1052,16 @@ export async function installLegacyInboundObserver(page) {
     transport.handleMessage = (message) => {
       if (message?.type === "raw_output" && message.data?.length > 0) {
         const prefix = message.data[0];
-        const bytes = Math.max(0, message.data.length - 1);
+        const payload = Array.from(message.data);
         if (prefix === 0x02) {
-          globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({ type: "snapshot", bytes, at: Date.now() });
+          globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({ type: "snapshot", payload, at: Date.now() });
         } else if (prefix === 0x01) {
-          globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__.push({ type: "pty", bytes, at: Date.now() });
+          globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__.push({ type: "pty", payload, at: Date.now() });
         }
       } else if (message?.type && message.type !== "raw_output") {
         globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
           type: message.type,
-          bytes: JSON.stringify(message).length,
+          payload: message,
           at: Date.now()
         });
       }
@@ -1083,23 +1071,27 @@ export async function installLegacyInboundObserver(page) {
   });
 }
 
-export async function observeControlInbound(page, armId) {
-  return page.evaluate((id) => {
-    if (id === "modular") {
+export async function observeControlInbound(page, arm) {
+  if (arm.arm_id === "modular") {
+    const frames = await page.evaluate(() => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      const frames = events.filter((entry) =>
+      return events.filter((entry) =>
         entry.kind === "webrtc_response_assembly"
         && (entry.payload?.request_type === "resize" || entry.payload?.request_type === "read_screen")
-      );
-      const bytes = frames.reduce((sum, entry) => sum + Number(entry.payload?.total_bytes ?? 0), 0);
-      return { frames: frames.length, bytes };
-    }
-    const frames = globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? [];
-    return {
-      frames: frames.length,
-      bytes: frames.reduce((sum, entry) => sum + Number(entry.bytes ?? 0), 0)
-    };
-  }, armId);
+      ).length;
+    });
+    const bytes = (arm.inboundDecodedPayloads ?? []).reduce(
+      (sum, payload) => sum + countInboundControlBytes(payload),
+      0
+    );
+    return { frames, bytes, unit: INBOUND_BYTE_UNIT };
+  }
+  const raw = await page.evaluate(() => globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? []);
+  return {
+    frames: raw.length,
+    bytes: raw.reduce((sum, entry) => sum + countInboundControlBytes(entry.payload), 0),
+    unit: INBOUND_BYTE_UNIT
+  };
 }
 
 export async function observePackageDelivery(page) {
@@ -1118,20 +1110,19 @@ export async function observePackageDelivery(page) {
 }
 
 export async function observeSiblingDelivery(page, armId) {
-  return page.evaluate((id) => {
-    if (id === "modular") {
+  if (armId === "modular") {
+    const payloads = await page.evaluate(() => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      const frames = events.filter((entry) =>
-        entry.kind === "daemon_terminal_event" || entry.kind === "webrtc_terminal_frame_assembly"
-      );
-      const bytes = frames.reduce((sum, entry) =>
-        sum + Number(entry.payload?.total_bytes ?? JSON.stringify(entry.payload ?? {}).length), 0);
-      return { delivered_bytes: bytes, bytes, frames: frames.length };
-    }
-    const frames = globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__ ?? [];
-    const bytes = frames.reduce((sum, entry) => sum + Number(entry.bytes ?? 0), 0);
-    return { delivered_bytes: bytes, bytes, frames: frames.length };
-  }, armId);
+      return events
+        .filter((entry) => entry.kind === "daemon_terminal_event")
+        .map((entry) => entry.payload);
+    });
+    const bytes = payloads.reduce((sum, payload) => sum + countInboundControlBytes(payload), 0);
+    return { delivered_bytes: bytes, bytes, frames: payloads.length };
+  }
+  const raw = await page.evaluate(() => globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__ ?? []);
+  const bytes = raw.reduce((sum, entry) => sum + countInboundControlBytes(entry.payload), 0);
+  return { delivered_bytes: bytes, bytes, frames: raw.length };
 }
 
 export async function issueControlRequest(arm, semanticName) {
@@ -1174,6 +1165,10 @@ export async function issueControlRequest(arm, semanticName) {
     rows: FROZEN_INPUTS.terminal_geometry.rows,
     cols: FROZEN_INPUTS.terminal_geometry.cols
   });
+  arm.inboundDecodedPayloads = arm.inboundDecodedPayloads ?? [];
+  if (reply != null) {
+    arm.inboundDecodedPayloads.push(reply);
+  }
   return {
     semantic: semanticName,
     wire_type: wireType,
@@ -1326,10 +1321,14 @@ export async function captureKeyToPty({ page, arm, ptyClock, logWatcher, family,
     const tKey = typeof aroundProbe === "function"
       ? await aroundProbe({ index, family, measured, sendProbe: send })
       : await send();
-    const logEntry = await logWatcher.waitForLine((line) => {
+    const logWait = logWatcher.waitForLine((line) => {
       const parsed = parseDispatcherLogLine(line, ptyClock);
       return parsed.ok && parsed.marker === marker && parsed.post !== true;
     });
+    const [logEntry] = await Promise.all([
+      logWait,
+      Promise.resolve(tKey?.progress)
+    ]);
     const parsed = parseDispatcherLogLine(logEntry.line, ptyClock);
     const tPty = ptyClock === "shell_epochrealtime" ? parsed.t_pty_ms : logEntry.at;
     const paint = await waitForHashChange(page.__baselineOracle, previousHash).catch(() => null);
@@ -1471,7 +1470,7 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
     }
     const burst = createControlResponseBurst({
       issueRequest: (name) => issueControlRequest(arm, name),
-      observeInbound: () => observeControlInbound(arm.page, arm.arm_id)
+      observeInbound: () => observeControlInbound(arm.page, arm)
     });
     const started = Date.now();
     await burst.start();

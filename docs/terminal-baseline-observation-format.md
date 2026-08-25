@@ -89,9 +89,14 @@ control connection. The harness must not use a direct daemon Unix socket.
 | `terminal_snapshot` | `request_snapshot` | `read_screen` |
 
 The record stores the semantic name and the arm-specific wire type. Each arm
-records `request_rate`, `response_rate`, `response_bytes`, `producer`,
-`wire_request_types`, and `tolerance`. The harness equalizes the measured
-server-to-browser frame rate and byte rate and records the achieved values.
+records `request_rate`, `response_rate`, `response_bytes`, `inbound_byte_unit`,
+`producer`, `wire_request_types`, and `tolerance`. Both arms count
+`decoded_inbound_control_payload_bytes`: the decoded control payload after
+decrypt or decode, excluding DataChannel or WebRTC framing and a leading
+`0x00`, `0x01`, or `0x02` prefix. Encrypted assembly `total_bytes` is not the
+unit. The validator recomputes rate and byte equality from the recorded family
+values and the frozen tolerance. Stored equalization booleans are derived
+output only.
 
 The retired names `list_configs` and `list_session_types` must not reappear.
 Do not add unsupported aliases to either product.
