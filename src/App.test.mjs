@@ -89,7 +89,10 @@ import {
   WORKSPACES_SPAWN_OPENER_SELECTOR
 } from "../scripts/workspaces-shared-hub-browser-helpers.mjs";
 import {
+  CONTROL_OPERATIONS,
+  CONTROL_RESPONSE_TOLERANCE,
   FAMILY_CONTRACTS,
+  FORMAT_VERSION,
   FROZEN_INPUTS,
   OBSERVATION_FAMILIES,
   PAINT_ORACLE,
@@ -116,13 +119,15 @@ import {
   RESTTY_RUNTIME_FILES,
   admitControlledHost,
   admitRunner,
-  assertWorkloadActive,
+  assertCounterGrew,
   collectResttyProvenance,
   createControlResponseBurst,
   createPackageEventBurst,
   createSiblingFloodHandle,
+  equalizeControlResponses,
   publicationDecision,
   remountForPaintFamily,
+  restoreProbeSession,
   writeBaselineRecord
 } from "../scripts/terminal-baseline-capture.mjs";
 
@@ -18375,7 +18380,30 @@ function removeCssAtRules(source) {
 {
   const valid = exampleValidRecord();
   assert.equal(validateObservationRecord(valid).ok, true);
+  assert.equal(valid.format_version, FORMAT_VERSION);
+  assert.equal(valid.format_version, 2);
   assert.equal(valid.paint_oracle, PAINT_ORACLE);
+  assert.deepEqual([...FROZEN_INPUTS.control_request_names], ["terminal_resize", "terminal_snapshot"]);
+  assert.equal(CONTROL_OPERATIONS.terminal_resize.modular_wire, "resize");
+  assert.equal(CONTROL_OPERATIONS.terminal_snapshot.legacy_wire, "request_snapshot");
+  assert.equal(CONTROL_OPERATIONS.terminal_snapshot.modular_wire, "read_screen");
+  const versionOne = exampleValidRecord();
+  versionOne.format_version = 1;
+  assert.match(validateObservationRecord(versionOne).errors.join("\n"), /format_version must be 2/);
+  assert.deepEqual(valid.observations.legacy.control_response_saturation.tolerance, CONTROL_RESPONSE_TOLERANCE);
+  assert.equal(valid.observations.modular.control_response_saturation.producer, "browser_control_connection");
+  const daemonProducer = exampleValidRecord();
+  daemonProducer.observations.modular.control_response_saturation.producer = "daemon_unix_socket";
+  assert.match(validateObservationRecord(daemonProducer).errors.join("\n"), /producer must be browser_control_connection/);
+  const retiredNames = exampleValidRecord();
+  retiredNames.observations.legacy.control_response_saturation.request_names = ["list_configs", "list_session_types"];
+  assert.match(validateObservationRecord(retiredNames).errors.join("\n"), /version-2 semantic operations|removed version-1 request names/);
+  const equalized = equalizeControlResponses(
+    valid.observations.legacy.control_response_saturation,
+    valid.observations.modular.control_response_saturation
+  );
+  assert.equal(equalized.response_rate_within_tolerance, true);
+  assert.equal(equalized.response_bytes_within_tolerance, true);
   assert.equal(valid.product_baseline_statement, PRODUCT_BASELINE_STATEMENT);
   assert.equal(valid.same_host, true);
 
@@ -18442,26 +18470,53 @@ function removeCssAtRules(source) {
   assert.equal(recordIsPublishableBaseline(allBlocked), false);
   assert.match(validateObservationRecord(allBlocked).errors.join("\n"), /not a publishable baseline/);
 
-  await assert.rejects(
-    createControlResponseBurst({ issueRequest: async () => null }).start(),
-    /workload producer is not active/
-  );
-  await assert.rejects(
-    createPackageEventBurst({ emitBurst: async () => 0 }).start(),
-    /workload producer is not active/
-  );
-  assert.throws(
-    () => createSiblingFloodHandle({ floodSessionId: null, probeSessionId: "b" }).proveActive(),
-    /workload producer is not active/
-  );
-  assert.throws(() => assertWorkloadActive({ active: false, produced_count: 0 }, "control_response_saturation"));
+  const oneArmedMeasured = exampleValidRecord();
+  for (const name of OBSERVATION_FAMILIES) {
+    oneArmedMeasured.observations.legacy[name] = { status: "blocked", reason: "synthetic" };
+  }
+  assert.equal(recordIsPublishableBaseline(oneArmedMeasured), false);
+  assert.match(validateObservationRecord(oneArmedMeasured).errors.join("\n"), /one-armed or partial record is not a publishable baseline/);
+
+  const deadControl = createControlResponseBurst({ issueRequest: async () => null });
+  await deadControl.start();
+  await assert.rejects(deadControl.stepMeasuredSample(), /produced no reply|did not grow/);
+  const completedPackage = createPackageEventBurst({ emitBurst: async () => 200 });
+  await completedPackage.start();
+  await completedPackage.stepMeasuredSample();
+  await assert.rejects(completedPackage.stepMeasuredSample(), /already completed before the sample/);
+  const inventedSibling = createSiblingFloodHandle({
+    floodSessionId: "a",
+    probeSessionId: "b",
+    observe: async () => ({ terminal_a_subscribed: true, produced_count: 1 })
+  });
+  await inventedSibling.start();
+  await inventedSibling.stepMeasuredSample();
+  await assert.rejects(inventedSibling.stepMeasuredSample(), /did not grow|not subscribed/);
+  assert.throws(() => assertCounterGrew(4, 4, "control_response_saturation"));
 
   const liveBurst = createControlResponseBurst({
     issueRequest: async (name) => ({ type: name, ok: true })
   });
   await liveBurst.start();
-  liveBurst.proveActive();
+  for (let index = 0; index < FROZEN_INPUTS.control_request_count; index += 1) {
+    await liveBurst.stepMeasuredSample();
+  }
+  assert.equal(liveBurst.stats.issued, FROZEN_INPUTS.control_request_count);
+  await assert.rejects(liveBurst.stepMeasuredSample(), /frozen request count already issued/);
   await liveBurst.stop();
+
+  await assert.rejects(
+    restoreProbeSession({}, { probeSessionId: "probe-1" }, {
+      reopen: async () => "history-99"
+    }),
+    /saturation probe is on history-99, not probe-1/
+  );
+  assert.equal(
+    await restoreProbeSession({}, { probeSessionId: "probe-1" }, {
+      reopen: async () => "probe-1"
+    }),
+    "probe-1"
+  );
 
   await assert.rejects(
     remountForPaintFamily({}, { arm_id: "legacy", sessionIds: [] }, {

@@ -2,9 +2,10 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787672466_225063`
-Returned from Review: `review_1787672435_131226`
-Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9
+Step: `botster_stack_implement` / `run_step_1787677900_817703`
+Returned from Review: `review_1787677878_514675`
+Human decision: `question_1787678013_829162` chose B and D
+Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9, resynced to format version 2
 Approved review: `review_1787638112_854617`
 
 ## Target repository and target_id
@@ -83,8 +84,9 @@ New:
 Changed:
 
 - `package.json` — `observe:terminal-baseline` and `observe:terminal-baseline:validate`
-- `src/App.test.mjs` — format, validator, Restty-provenance, same-host, saturation-workload, remount, teardown-publication, and runner-admission assertions
-- `README.md` — pointer to the published format
+- `src/App.test.mjs` — format version 2, control-operation, remount-restore, concurrent-workload, one-armed publication, and runner-admission assertions
+- `README.md` — pointer to format version 2
+- `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` — resynced to format version 2 and the B+D control operations
 
 Unchanged production paths: everything under `src/botster/`, `src/app/`, and `src/vendor/restty/`. No file in the supplied Hub checkout or `~/Rails/trybotster` was written.
 
@@ -97,7 +99,7 @@ Unchanged production paths: everything under `src/botster/`, `src/app/`, and `sr
 - `ticket_1787600670_129312` (`botster-hub`, closed) remains the registered parent.
 - No new dependency ticket was opened.
 - Modular binaries were built from Hub `f6db5c436f72b151fd6dacde61d3f4836a4dc925` as a build input, not as a published release.
-- Downstream consumers remain `ticket_1787600689_646958` and `ticket_1787600679_990088`, both required to reuse `format_version=1`.
+- Downstream consumers remain `ticket_1787600689_646958` and `ticket_1787600679_990088`. Both now require `format_version=2`.
 
 ## Runtime-teardown lenses
 
@@ -108,30 +110,30 @@ Implemented in harness scope. No lens was dropped to informal follow-up.
 | Isolation | Isolated data directory, Hub process, and browser context per arm. One arm failure stops that arm's process tree only. |
 | Bounds | SIGTERM, then SIGKILL after `teardown_budget_ms`. Escalation is recorded. No unbounded wait. |
 | Late-message matrix | Terminal attach, entity family, package-event burst, and spawned session are tagged and released before the next repetition or arm stop. |
-| Production-path proof | Real browser, real client build, real Hub, real PTY dispatcher. The candidate record stays in memory until both arm process trees and required sockets are gone. A JSON record is written only after that proof. |
-| Ownership identity | Each arm records `arm_id`, Hub pid, data directory, and session ids. Each probe marker includes capture, arm, family, and repetition. |
-| Sibling fail-closed | A one-armed record is not a baseline. Ultimate stop failure fails the capture. |
+| Production-path proof | Real browser, real client build, real Hub, real PTY dispatcher. Control saturation uses each stack's production browser control connection. The candidate record stays in memory until both arm process trees and required sockets are gone. A JSON record is written only after that proof. |
+| Ownership identity | Each arm records `arm_id`, Hub pid, data directory, and session ids. Each probe marker includes capture, arm, family, and repetition. Paint remounts restore the saturation probe session before the next probe. |
+| Sibling fail-closed | A one-armed or partial record is not a baseline. Ultimate stop failure fails the capture. |
 
 ## Deviations from plan
 
 1. `dispatcher_append_calibration_ms` measures the same builtin `printf` plus append on the host, without the browser. It does not yet open the session PTY device node directly.
 2. Family collection runs after both arms have started. The frozen `n=20` is one pass per family per arm. The capture does not yet repeat the full 20-rep set in the opposite arm order as a second isolated campaign.
-3. Modular `control_response_saturation` issues `list_packages` in the `list_configs` slot because modular Hub has no `list_configs`. The family records that limitation. The frozen logical names stay `list_configs` and `list_session_types`.
+3. Format version 2 is now the committed contract (`question_1787678013_829162`). The plan, format document, README, and downstream citations were resynced in this visit. Version 1 is retired before any baseline is authoritative.
 4. Vault checklist creation timed out at the plugin worker on the first Implement visit. This visit reuses the existing run checklist when list/create is available.
 
-These deviations do not change the frozen schema, the two dispatcher variants, the single paint oracle, or the prohibition on transport and Restty edits.
+These deviations do not change the two dispatcher variants, the single paint oracle, or the prohibition on transport and Restty edits.
 
 ## Review findings addressed
 
-`review_1787672435_131226` returned five open findings. This visit implements each one:
+`review_1787677878_514675` returned five open findings. This visit implements each one:
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787672435_179122` saturation workloads | Control, package-event, and sibling families now start their producers and prove them on every sample. A removed producer fails closed. |
-| `finding_1787672435_127057` legacy remount | Legacy paint families use `new-session-button` and seed `history-seed.sh` before attach. A remount that returns timestamps only is rejected. |
-| `finding_1787672435_340637` publish before teardown | The candidate stays in memory. Both arm process trees and sockets must be gone before the record is written. |
-| `finding_1787672435_407878` validator contract | The validator now checks endpoints, `n=20`, warmup count, frozen inputs, and rejects an all-blocked record. |
-| `finding_1787672435_318148` runner admission | Controlled publication requires Linux, Ubuntu 24.04, x64, 16 CPUs, and the exact runner label. Any other label fails closed. |
+| `finding_1787677878_907488` remount identity | Paint remounts restore the saturation probe session. The harness asserts the mounted session id before each saturation probe. A remount that leaves the probe on the history session fails closed. |
+| `finding_1787677878_840670` live producer proof | Control burst issues exactly 20 sequential browser requests. Package burst emits 20 slices of 10. Sibling flood keeps terminal A mounted and requires subscription plus counter growth on every measured sample. |
+| `finding_1787677878_764546` equal browser control | Version 2 uses `terminal_resize` and `terminal_snapshot` through each arm's production browser control connection. The record stores semantic names, wire types, rates, bytes, and tolerance. Direct daemon Unix sockets are not used for this family. |
+| `finding_1787677878_148374` one-armed publication | The validator requires every required family measured on both arms, except legacy `package_event_saturation` as `not_applicable`. A blocked publication family is not a publishable baseline. |
+| `finding_1787677878_719710` controlled runner | Waived for this ticket only (`question_1787678013_829162` choice B). The workflow, schema validation, teardown proof, and rerun instructions remain. The controlled record is deferred because the runner is unregistered. This report does not claim a controlled baseline exists. |
 
 ## Tests and downstream proof
 
@@ -143,10 +145,10 @@ Deterministic gates:
 | G2 | `npm run lint` | passed, five known warnings in untouched files |
 | G3 | `npm test` | passed, two known `act(...)` warnings |
 | G4 | `npm run build` | passed |
-| G6 | validator assertions in `src/App.test.mjs` | passed |
+| G6 | validator assertions in `src/App.test.mjs` | format version 2, browser producer, retired names, and one-armed reject |
 | G13 | `observe:terminal-baseline:validate` | available; used after a written record |
 
-G5 pinned sequence:
+G5 pinned sequence from the prior Implement visit remains the last completed live-packaged proof:
 
 | Field | Value |
 | --- | --- |
@@ -159,34 +161,36 @@ G5 pinned sequence:
 | Smoke | `npm run smoke:live-packaged-protocol` passed |
 | Source after smoke | HEAD and porcelain unchanged |
 
-Downstream proof: `docs/terminal-baseline-observation-format.md` states that `ticket_1787600689_646958` records the post-Restty set in `format_version=1` and that `ticket_1787600679_990088` compares against that baseline.
+Downstream proof: `docs/terminal-baseline-observation-format.md` states that `ticket_1787600689_646958` records the post-Restty set in `format_version=2` and that `ticket_1787600679_990088` compares against that baseline.
 
 ## Observational output
 
-### O2. Blocked controlled runner
+### O2. Deferred controlled runner
 
-`botster-ubuntu-24.04-16core` is still unregistered. The `botster-web` repository runner list was empty during Plan. The workflow is pinned to that label and will fail closed until a runner exists. A one-armed workflow result is not a baseline.
+`botster-ubuntu-24.04-16core` is still unregistered. Human choice B waives the controlled record for this ticket only. The project still requires that record when the runner exists. Later tickets must not describe a local record as controlled-runner evidence.
 
 ### O3. Rerun procedure
 
-See `docs/terminal-baseline-observation-format.md`. Register the runner, provision both product arms, dispatch the workflow, keep `format_version=1`.
+See `docs/terminal-baseline-observation-format.md`. Register the runner, provision both product arms, dispatch the workflow, keep `format_version=2`.
 
 ### O1. Local two-arm set
 
-The developer legacy tree at the frozen revision is dirty, so the harness refuses it. Implement created a separate clean scratch clone at `f598075e` without writing to that developer tree, then ran `npm run observe:terminal-baseline`.
+This visit keeps the local same-laptop two-arm record as non-gating observation evidence. The developer legacy tree at the frozen revision is dirty, so the harness refuses it. A clean scratch clone at `f598075e` was used without writing to that developer tree.
 
-The capture reached a reachable legacy URL and then failed closed:
-`legacy arm did not expose a shell session control`. The harness then targeted
-`data-testid=new-session-button`. No partial two-arm JSON was written. This
-report does not invent wall-clock numbers.
+This visit ran `npm run observe:terminal-baseline` against that clone and `/Users/jasonconigliari/Projects/botster-hub`. The capture reached a reachable legacy URL and then failed closed:
+
+`legacy remount: new-session-button is not available`
+
+The pinned legacy product renders `data-testid=new-session-button` only after a signed-in GitHub session and a workbench shell. The home page offers `Sign in with GitHub`. The harness now fails with that typed reason instead of inventing a login bypass. No partial two-arm JSON was written. This report does not invent wall-clock numbers and does not claim a publishable baseline exists.
 
 ## Unverified behavior or residual risk
 
-- Controlled-runner wall-clock values do not exist.
+- No controlled-runner JSON exists. The requirement is waived for this ticket only.
+- A complete local two-arm JSON is still unpublished. The clean legacy arm reached HTTP but stopped at GitHub sign-in. The harness does not automate OAuth and does not write to the supplied trees.
+- Live G7, G9, G10, G16, and G18 product-arm proof still needs a successful two-arm capture.
 - Legacy Rails provisioning on Linux CI is unproven.
 - Exact canvas settle-window calibration is frozen at 250 ms and may need a later `format_version` bump if both arms prove a different stable window.
-- `list_configs` and `list_session_types` response-shape equalization is recorded per arm when the live capture runs; this visit did not freeze an achieved tolerance from a completed two-arm set.
-- Sibling flood and package-event burst paths now have executable producers and negative controls. A live two-arm capture is still required to prove G7, G9, G10, G16, and G18 on real product arms.
+- Control-response equalization records achieved rates, bytes, and a 0.25 tolerance. A completed two-arm set is still required to freeze achieved values.
 
 ## Missing vault guidance discovered
 

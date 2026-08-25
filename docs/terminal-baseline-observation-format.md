@@ -1,12 +1,14 @@
 # Terminal baseline observation format
 
-Version token: `terminal_baseline_observation_format=1`
+Version token: `terminal_baseline_observation_format=2`
 
 This is the published observation format for ticket `ticket_1787603669_760394`.
-Downstream tickets must reuse this version. They must not re-derive the schema.
+Version 2 supersedes version 1 before any baseline becomes authoritative
+(`question_1787678013_829162`). Downstream tickets must reuse this version.
+They must not re-derive the schema.
 
 - `ticket_1787600689_646958` records the post-Restty transport baseline in
-  `format_version=1`.
+  `format_version=2`.
 - `ticket_1787600679_990088` compares its post-cut set against that post-Restty
   baseline (architecture contract §14 row A20).
 
@@ -14,7 +16,7 @@ Downstream tickets must reuse this version. They must not re-derive the schema.
 
 This format records a **product baseline**, not a transport-causality experiment.
 The two arms differ in Hub, Core, client, and Lua runtime at once. No row of a
-`format_version=1` record may be read as evidence that any single component
+`format_version=2` record may be read as evidence that any single component
 caused a difference. Every record carries `product_baseline_only: true` and the
 same inline statement.
 
@@ -70,8 +72,29 @@ The validator requires:
 - `endpoint_start` and `endpoint_end` to match the family contract
 - `n=20` and `warmup_discarded=3` on every measured family
 - `frozen_inputs` to match the frozen constants
-- at least one measured family, so an all-blocked record is not a publishable
-  baseline
+- every required family measured on both arms, except legacy
+  `package_event_saturation` as `not_applicable`
+- no blocked publication family, so a one-armed or partial record is not a
+  publishable baseline
+
+## Control-response operations
+
+`control_response_saturation` uses two shared browser-issued semantic
+operations. Both arms issue them through each stack's production browser
+control connection. The harness must not use a direct daemon Unix socket.
+
+| Semantic name | Legacy wire type | Modular wire type |
+|---------------|------------------|-------------------|
+| `terminal_resize` | `resize` | `resize` |
+| `terminal_snapshot` | `request_snapshot` | `read_screen` |
+
+The record stores the semantic name and the arm-specific wire type. Each arm
+records `request_rate`, `response_rate`, `response_bytes`, `producer`,
+`wire_request_types`, and `tolerance`. The harness equalizes the measured
+server-to-browser frame rate and byte rate and records the achieved values.
+
+The retired names `list_configs` and `list_session_types` must not reappear.
+Do not add unsupported aliases to either product.
 
 ## Frozen inputs
 
@@ -100,7 +123,8 @@ Validate a record:
 npm run observe:terminal-baseline:validate -- docs/reports/terminal-baseline-observation-local-<capture_id>.json
 ```
 
-The local set is observational and non-gating.
+The local set is observational and non-gating. Later tickets must not describe
+a local record as controlled-runner evidence.
 
 ## Controlled runner rerun
 
@@ -115,7 +139,9 @@ to produce the controlled set.
    Rails toolchain.
 3. Dispatch the workflow with a clean legacy checkout at `f598075e` and a Hub
    source that can clone `f6db5c4`.
-4. Keep `format_version=1`. Do not add a threshold field.
+4. Keep `format_version=2`. Do not add a threshold field.
 
-Until that runner exists, the controlled set stays blocked. A one-armed
-workflow result is not a baseline.
+Until that runner exists, the controlled set stays deferred. A one-armed
+workflow result is not a baseline. This ticket waives the controlled record
+only (`question_1787678013_829162`). The project still requires the controlled
+record when the runner exists.

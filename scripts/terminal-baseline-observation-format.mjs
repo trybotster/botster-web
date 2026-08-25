@@ -1,5 +1,5 @@
-export const FORMAT_VERSION = 1;
-export const VERSION_TOKEN = "terminal_baseline_observation_format=1";
+export const FORMAT_VERSION = 2;
+export const VERSION_TOKEN = "terminal_baseline_observation_format=2";
 export const PAINT_ORACLE = "cdp_screencast";
 export const PTY_CLOCKS = Object.freeze(["shell_epochrealtime", "host_watcher"]);
 export const ARM_IDS = Object.freeze(["legacy", "modular"]);
@@ -23,7 +23,7 @@ export const FROZEN_INPUTS = Object.freeze({
   scroll_event_count: 8,
   scroll_pacing_ms: 16,
   package_event_burst_count: 200,
-  control_request_names: Object.freeze(["list_configs", "list_session_types"]),
+  control_request_names: Object.freeze(["terminal_resize", "terminal_snapshot"]),
   control_request_count: 20,
   screencast: Object.freeze({
     format: "png",
@@ -37,6 +37,32 @@ export const FROZEN_INPUTS = Object.freeze({
   ready_token: "botster-baseline-ready",
   exit_token: "botster-baseline-exit"
 });
+
+export const CONTROL_RESPONSE_TOLERANCE = Object.freeze({
+  response_rate: 0.25,
+  response_bytes: 0.25
+});
+
+export const CONTROL_OPERATIONS = Object.freeze({
+  terminal_resize: Object.freeze({
+    semantic: "terminal_resize",
+    legacy_wire: "resize",
+    modular_wire: "resize"
+  }),
+  terminal_snapshot: Object.freeze({
+    semantic: "terminal_snapshot",
+    legacy_wire: "request_snapshot",
+    modular_wire: "read_screen"
+  })
+});
+
+export function wireRequestTypesForArm(armId) {
+  const field = armId === "modular" ? "modular_wire" : "legacy_wire";
+  return Object.freeze({
+    terminal_resize: CONTROL_OPERATIONS.terminal_resize[field],
+    terminal_snapshot: CONTROL_OPERATIONS.terminal_snapshot[field]
+  });
+}
 
 export const PINNED_REVISIONS = Object.freeze({
   modular_hub: "f6db5c436f72b151fd6dacde61d3f4836a4dc925",
@@ -387,19 +413,25 @@ export function recordIsPublishableBaseline(record) {
   if (!isObject(record?.observations)) {
     return false;
   }
-  let measured = 0;
   for (const armId of ARM_IDS) {
     const armObs = record.observations[armId];
     if (!isObject(armObs)) {
       return false;
     }
     for (const name of OBSERVATION_FAMILIES) {
-      if (familyIsMeasured(armObs[name])) {
-        measured += 1;
+      const family = armObs[name];
+      if (name === "package_event_saturation" && armId === "legacy") {
+        if (family?.status !== "not_applicable") {
+          return false;
+        }
+        continue;
+      }
+      if (!familyIsMeasured(family)) {
+        return false;
       }
     }
   }
-  return measured > 0;
+  return true;
 }
 
 function validateFamily(family, name, armId, ptyClock, errors) {
@@ -423,6 +455,7 @@ function validateFamily(family, name, armId, ptyClock, errors) {
     if (typeof family.reason !== "string" || family.reason.length === 0) {
       errors.push(`${label} blocked requires a typed reason`);
     }
+    errors.push(`${label} blocked family is not a publishable baseline`);
     return;
   }
   requireKeys(family, REQUIRED_FAMILY_STATS, label, errors);
@@ -446,10 +479,22 @@ function validateFamily(family, name, armId, ptyClock, errors) {
     errors.push(`${label}.unit must be ms`);
   }
   if (name === "control_response_saturation") {
-    for (const key of ["request_names", "producer", "request_rate", "response_rate", "response_bytes"]) {
+    for (const key of ["request_names", "producer", "request_rate", "response_rate", "response_bytes", "wire_request_types", "tolerance"]) {
       if (!Object.hasOwn(family, key)) {
         errors.push(`${label} is missing ${key}`);
       }
+    }
+    if (family.producer !== "browser_control_connection") {
+      errors.push(`${label}.producer must be browser_control_connection`);
+    }
+    if (JSON.stringify(family.request_names) !== JSON.stringify(FROZEN_INPUTS.control_request_names)) {
+      errors.push(`${label}.request_names must be the version-2 semantic operations`);
+    }
+    if (JSON.stringify(family.wire_request_types) !== JSON.stringify(wireRequestTypesForArm(armId))) {
+      errors.push(`${label}.wire_request_types must match the version-2 arm mapping`);
+    }
+    if (JSON.stringify(family.request_names ?? []).includes("list_configs") || JSON.stringify(family.request_names ?? []).includes("list_session_types")) {
+      errors.push(`${label} must not carry removed version-1 request names`);
     }
   }
   if (name === "package_event_saturation" && !Object.hasOwn(family, "burst_count")) {
@@ -483,7 +528,7 @@ export function validateObservationRecord(record) {
   }
   requireKeys(record, REQUIRED_TOP_LEVEL, "record", errors);
   if (record.format_version !== FORMAT_VERSION) {
-    errors.push("format_version must be 1");
+    errors.push("format_version must be 2");
   }
   if (typeof record.capture_id !== "string" || record.capture_id.length === 0) {
     errors.push("capture_id is required");
@@ -544,7 +589,7 @@ export function validateObservationRecord(record) {
       }
     }
     if (!recordIsPublishableBaseline(record)) {
-      errors.push("a record whose every family is blocked is not a publishable baseline");
+      errors.push("a one-armed or partial record is not a publishable baseline");
     }
   }
   if (!Array.isArray(record.blocked)) {
@@ -638,10 +683,12 @@ export function exampleValidRecord(overrides = {}) {
     large_history: measuredFamily("large_history"),
     control_response_saturation: measuredFamily("control_response_saturation", {
       request_names: FROZEN_INPUTS.control_request_names,
-      producer: armId === "modular" ? "daemon_request" : "legacy_hub_connection",
+      producer: "browser_control_connection",
       request_rate: 4,
       response_rate: 4,
-      response_bytes: 1024
+      response_bytes: 1024,
+      wire_request_types: wireRequestTypesForArm(armId),
+      tolerance: CONTROL_RESPONSE_TOLERANCE
     }),
     package_event_saturation: armId === "legacy"
       ? notApplicableFamily("legacy f598075e has no harness-drivable package-event plane")

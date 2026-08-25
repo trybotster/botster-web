@@ -17,6 +17,7 @@ import {
 } from "./live-packaged-protocol-helpers.mjs";
 import {
   ARM_IDS,
+  CONTROL_OPERATIONS,
   FAMILY_CONTRACTS,
   FORMAT_VERSION,
   FROZEN_INPUTS,
@@ -24,6 +25,8 @@ import {
   PAINT_ORACLE,
   PINNED_REVISIONS,
   PRODUCT_BASELINE_STATEMENT,
+  CONTROL_RESPONSE_TOLERANCE,
+  wireRequestTypesForArm,
   assertValidObservationRecord,
   negotiateCaptureClock,
   notApplicableFamily,
@@ -308,52 +311,66 @@ export function admitRunner(profile) {
   };
 }
 
-export function assertWorkloadActive(handle, family) {
-  if (!handle || handle.active !== true || (handle.produced_count ?? 0) < 1) {
-    throw new Error(`${family}: workload producer is not active`);
+export function assertCounterGrew(before, after, family) {
+  if (!Number.isFinite(after) || after <= before) {
+    throw new Error(`${family}: workload did not grow during the sample`);
   }
 }
 
-export function createControlResponseBurst({ issueRequest, names = FROZEN_INPUTS.control_request_names, intervalMs = 25 }) {
+export function createControlResponseBurst({
+  issueRequest,
+  names = FROZEN_INPUTS.control_request_names,
+  requestCount = FROZEN_INPUTS.control_request_count
+}) {
+  const sequence = [];
+  while (sequence.length < requestCount) {
+    sequence.push(names[sequence.length % names.length]);
+  }
   const stats = {
     active: false,
     produced_count: 0,
     requests: 0,
     responses: 0,
     response_bytes: 0,
+    issued: 0,
+    in_flight: false,
     last_at: 0
-  };
-  let timer = null;
-  const tick = async () => {
-    if (!stats.active) return;
-    for (const name of names) {
-      const reply = await issueRequest(name);
-      if (reply == null) continue;
-      stats.requests += 1;
-      stats.responses += 1;
-      stats.produced_count += 1;
-      stats.response_bytes += Buffer.byteLength(JSON.stringify(reply));
-      stats.last_at = Date.now();
-    }
   };
   return {
     stats,
     names,
     async start() {
       stats.active = true;
-      await tick();
-      assertWorkloadActive(stats, "control_response_saturation");
-      timer = setInterval(() => {
-        void tick();
-      }, intervalMs);
       return stats;
     },
-    proveActive() {
-      assertWorkloadActive(stats, "control_response_saturation");
+    async stepMeasuredSample() {
+      if (stats.in_flight) {
+        throw new Error("control_response_saturation: overlapping request callback");
+      }
+      if (stats.issued >= requestCount) {
+        throw new Error("control_response_saturation: frozen request count already issued");
+      }
+      const before = stats.produced_count;
+      stats.in_flight = true;
+      try {
+        const name = sequence[stats.issued];
+        const reply = await issueRequest(name);
+        if (reply == null) {
+          throw new Error(`control_response_saturation: ${name} produced no reply`);
+        }
+        stats.issued += 1;
+        stats.requests += 1;
+        stats.responses += 1;
+        stats.produced_count += 1;
+        stats.response_bytes += Buffer.byteLength(JSON.stringify(reply));
+        stats.last_at = Date.now();
+      } finally {
+        stats.in_flight = false;
+      }
+      assertCounterGrew(before, stats.produced_count, "control_response_saturation");
     },
     async stop() {
       stats.active = false;
-      if (timer) clearInterval(timer);
     },
     metrics(elapsedMs) {
       const seconds = Math.max(elapsedMs / 1000, 0.001);
@@ -362,29 +379,42 @@ export function createControlResponseBurst({ issueRequest, names = FROZEN_INPUTS
         request_rate: stats.requests / seconds,
         response_rate: stats.responses / seconds,
         response_bytes: stats.response_bytes,
-        tolerance: { response_rate: 0.25, response_bytes: 0.25 }
+        issued: stats.issued,
+        tolerance: CONTROL_RESPONSE_TOLERANCE
       };
     }
   };
 }
 
-export function createPackageEventBurst({ emitBurst, count = FROZEN_INPUTS.package_event_burst_count }) {
+export function createPackageEventBurst({
+  emitBurst,
+  count = FROZEN_INPUTS.package_event_burst_count,
+  measuredRepetitions = FROZEN_INPUTS.measured_repetitions
+}) {
+  const perSample = count / measuredRepetitions;
   const stats = {
     active: false,
     produced_count: 0,
-    burst_count: count
+    burst_count: count,
+    completed: false
   };
   return {
     stats,
     async start() {
-      const emitted = await emitBurst(count);
-      stats.produced_count = Number(emitted ?? 0);
-      stats.active = stats.produced_count === count;
-      assertWorkloadActive(stats, "package_event_saturation");
+      stats.active = true;
       return stats;
     },
-    proveActive() {
-      assertWorkloadActive(stats, "package_event_saturation");
+    async stepMeasuredSample() {
+      if (stats.completed || stats.produced_count >= count) {
+        throw new Error("package_event_saturation: burst already completed before the sample");
+      }
+      const before = stats.produced_count;
+      const emitted = Number(await emitBurst(perSample) ?? 0);
+      stats.produced_count += emitted;
+      if (stats.produced_count >= count) {
+        stats.completed = true;
+      }
+      assertCounterGrew(before, stats.produced_count, "package_event_saturation");
     },
     async stop() {
       stats.active = false;
@@ -392,23 +422,78 @@ export function createPackageEventBurst({ emitBurst, count = FROZEN_INPUTS.packa
   };
 }
 
-export function createSiblingFloodHandle({ floodSessionId, probeSessionId, floodBytes = FROZEN_INPUTS.sibling_flood_bytes }) {
+export function createSiblingFloodHandle({
+  floodSessionId,
+  probeSessionId,
+  floodBytes = FROZEN_INPUTS.sibling_flood_bytes,
+  observe
+}) {
   const stats = {
-    active: Boolean(floodSessionId && probeSessionId && floodBytes === FROZEN_INPUTS.sibling_flood_bytes),
-    produced_count: floodSessionId ? 1 : 0,
+    active: false,
+    produced_count: 0,
     floodSessionId,
     probeSessionId,
-    flood_bytes: floodBytes
+    flood_bytes: floodBytes,
+    terminal_a_subscribed: false
   };
   return {
     stats,
-    proveActive() {
-      assertWorkloadActive(stats, "sibling_saturation");
+    async start() {
+      if (!floodSessionId || !probeSessionId || floodBytes !== FROZEN_INPUTS.sibling_flood_bytes) {
+        throw new Error("sibling_saturation: flood producer is not configured");
+      }
+      if (typeof observe !== "function") {
+        throw new Error("sibling_saturation: observe callback is required");
+      }
+      stats.active = true;
+      return stats;
+    },
+    async stepMeasuredSample() {
+      const snapshot = await observe();
+      if (!snapshot?.terminal_a_subscribed) {
+        throw new Error("sibling_saturation: terminal A is not subscribed");
+      }
+      const before = stats.produced_count;
+      let produced = Number(snapshot.produced_count ?? 0);
+      if (produced <= before && typeof snapshot.restartFlood === "function") {
+        await snapshot.restartFlood();
+        const again = await observe();
+        if (!again?.terminal_a_subscribed) {
+          throw new Error("sibling_saturation: terminal A left after restart");
+        }
+        produced = Number(again.produced_count ?? 0);
+      }
+      stats.terminal_a_subscribed = true;
+      stats.produced_count = produced;
+      assertCounterGrew(before, stats.produced_count, "sibling_saturation");
     },
     async stop() {
       stats.active = false;
     }
   };
+}
+
+export async function restoreProbeSession(page, arm, options = {}) {
+  const reopen = options.reopen ?? defaultReopenProbe;
+  if (typeof reopen !== "function") {
+    throw new Error("saturation reopen is missing");
+  }
+  const probeSessionId = arm.probeSessionId;
+  if (!probeSessionId) {
+    throw new Error("probe session id is missing");
+  }
+  const mounted = await reopen(page, arm, probeSessionId);
+  if (mounted !== probeSessionId) {
+    throw new Error(`saturation probe is on ${mounted}, not ${probeSessionId}`);
+  }
+  return mounted;
+}
+
+async function defaultReopenProbe(page, arm, probeSessionId) {
+  await goHome(page);
+  await openSession(page, probeSessionId);
+  await page.locator(".terminal-view-container canvas").first().waitFor({ timeout: 30_000 });
+  return readMountedSessionId(page);
 }
 
 export function processGroupGone(pgid) {
@@ -431,6 +516,20 @@ export function proveOwnedProcessesGone(arm) {
     live_pids: livePids,
     live_groups: liveGroups,
     socket_gone: socketGone
+  };
+}
+
+export function equalizeControlResponses(legacyFamily, modularFamily, tolerance = CONTROL_RESPONSE_TOLERANCE.response_rate) {
+  const legacyRate = Number(legacyFamily?.response_rate ?? 0);
+  const modularRate = Number(modularFamily?.response_rate ?? 0);
+  const legacyBytes = Number(legacyFamily?.response_bytes ?? 0);
+  const modularBytes = Number(modularFamily?.response_bytes ?? 0);
+  const maxRate = Math.max(legacyRate, modularRate, 0.001);
+  const maxBytes = Math.max(legacyBytes, modularBytes, 1);
+  return {
+    tolerance,
+    response_rate_within_tolerance: Math.abs(legacyRate - modularRate) / maxRate <= tolerance,
+    response_bytes_within_tolerance: Math.abs(legacyBytes - modularBytes) / maxBytes <= tolerance
   };
 }
 
@@ -758,9 +857,21 @@ async function readMountedSessionId(page) {
 
 async function completeLegacyNewSession(page) {
   const button = page.getByTestId("new-session-button");
-  await button.waitFor({ timeout: 30_000 }).catch(() => {
-    throw new Error("legacy remount: new-session-button is not available");
-  });
+  const signIn = page.getByRole("link", { name: "Sign in with GitHub", exact: true });
+  const appeared = await Promise.race([
+    button.waitFor({ timeout: 30_000 }).then(() => "new-session"),
+    signIn.waitFor({ timeout: 30_000 }).then(() => "github-sign-in")
+  ]).catch(() => "missing");
+  if (appeared === "github-sign-in") {
+    throw new Error(
+      `legacy arm requires a signed-in GitHub session before new-session-button; url=${page.url()}`
+    );
+  }
+  if (appeared !== "new-session") {
+    throw new Error(
+      `legacy remount: new-session-button is not available; url=${page.url()}`
+    );
+  }
   await button.click();
   const start = page.getByRole("button", { name: HOST_CHROME.newSessionSubmitName, exact: true });
   if (await start.count() > 0) {
@@ -840,29 +951,60 @@ async function remountLegacySession(page, arm, options = {}) {
   return { at, previousHash, didRemount: true, sessionId };
 }
 
-export async function issueControlRequest(arm, name) {
-  if (arm.arm_id === "modular") {
-    const issuedName = name === "list_configs" ? "list_packages" : name;
-    return sendDaemonRequest(arm.socketPath, { type: issuedName });
+export async function waitForBrowserControl(page, armId) {
+  await page.waitForFunction((id) => {
+    if (id === "modular") {
+      return typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.request === "function";
+    }
+    return Object.keys(globalThis._botsterTestTerminal ?? {}).length > 0;
+  }, armId, { timeout: 30_000 });
+}
+
+export async function issueControlRequest(arm, semanticName) {
+  const spec = CONTROL_OPERATIONS[semanticName];
+  if (!spec) {
+    throw new Error(`unknown control operation ${semanticName}`);
   }
-  return arm.page.evaluate(async (requestName) => {
-    const connection = globalThis.__BOTSTER_HUB_CONNECTION__
-      ?? globalThis.hubConnection
-      ?? globalThis.__hubConnection;
-    if (!connection) {
-      throw new Error("legacy hub connection is not exposed");
+  if (!arm.page) {
+    throw new Error("browser page is required for control requests");
+  }
+  const wireType = arm.arm_id === "modular" ? spec.modular_wire : spec.legacy_wire;
+  await waitForBrowserControl(arm.page, arm.arm_id);
+  const reply = await arm.page.evaluate(async ({ armId, wireType: nextType, sessionId, rows, cols }) => {
+    if (armId === "modular") {
+      const request = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.request;
+      if (typeof request !== "function") {
+        throw new Error("modular browser control connection is not available");
+      }
+      const payload = nextType === "resize"
+        ? { type: "resize", session_id: sessionId, rows, cols }
+        : { type: "read_screen", session_id: sessionId };
+      return request(payload);
     }
-    if (requestName === "list_configs" && typeof connection.requestAgentConfig === "function") {
-      return connection.requestAgentConfig(connection.targetId ?? connection.target_id ?? null);
+    const entry = Object.values(globalThis._botsterTestTerminal ?? {})[0];
+    const transport = entry?.transport;
+    if (!transport) {
+      throw new Error("legacy browser terminal connection is not available");
     }
-    if (requestName === "list_session_types" && typeof connection.requestSessionTypes === "function") {
-      return connection.requestSessionTypes(connection.agentId ?? connection.agent_id ?? null);
+    if (nextType === "resize" && typeof transport.sendResize === "function") {
+      return transport.sendResize(cols, rows);
     }
-    if (typeof connection.sendCommand === "function") {
-      return connection.sendCommand(requestName, {});
+    if (nextType === "request_snapshot" && typeof transport.requestSnapshot === "function") {
+      return transport.requestSnapshot({ rows, cols });
     }
-    throw new Error(`legacy cannot issue ${requestName}`);
-  }, name);
+    throw new Error(`legacy cannot issue ${nextType}`);
+  }, {
+    armId: arm.arm_id,
+    wireType,
+    sessionId: arm.probeSessionId,
+    rows: FROZEN_INPUTS.terminal_geometry.rows,
+    cols: FROZEN_INPUTS.terminal_geometry.cols
+  });
+  return {
+    semantic: semanticName,
+    wire_type: wireType,
+    reply
+  };
 }
 
 async function startSiblingFlood(page, arm) {
@@ -877,22 +1019,42 @@ async function startSiblingFlood(page, arm) {
     const response = await sendDaemonRequest(arm.socketPath, {
       type: "spawn",
       session_id: floodSessionId,
-      command: `sh ${floodScript}`
+      command: "sh"
     });
     if (response.error) {
       throw new Error(`sibling flood spawn failed: ${JSON.stringify(response.error)}`);
     }
     arm.sessionIds.push(floodSessionId);
-    await goHome(page);
-    await openSession(page, floodSessionId);
-    await page.locator(".terminal-view-container canvas").first().waitFor({ timeout: 30_000 });
   } else {
     floodSessionId = await completeLegacyNewSession(page);
     arm.sessionIds.push(floodSessionId);
-    await typeLine(page, `sh ${floodScript}`);
-    await typeEnter(page);
   }
-  return createSiblingFloodHandle({ floodSessionId, probeSessionId });
+  if (!arm.context) {
+    throw new Error("sibling_saturation: a second mounted page is required for terminal A");
+  }
+  const floodPage = await arm.context.newPage();
+  await floodPage.addInitScript(baselineObserverInitScript());
+  await floodPage.goto(arm.appUrl, { waitUntil: "domcontentloaded" });
+  await openSession(floodPage, floodSessionId);
+  await floodPage.locator(".terminal-view-container canvas").first().waitFor({ timeout: 30_000 });
+  await typeLine(floodPage, `sh ${floodScript}`);
+  await typeEnter(floodPage);
+  arm.siblingFloodCycles = 1;
+  const handle = createSiblingFloodHandle({
+    floodSessionId,
+    probeSessionId,
+    observe: async () => ({
+      terminal_a_subscribed: (await readMountedSessionId(floodPage)) === floodSessionId,
+      produced_count: arm.siblingFloodCycles,
+      restartFlood: async () => {
+        await typeLine(floodPage, `sh ${floodScript}`);
+        await typeEnter(floodPage);
+        arm.siblingFloodCycles += 1;
+      }
+    })
+  });
+  await handle.start();
+  return handle;
 }
 
 export async function emitPackageEventBurst(arm, count = FROZEN_INPUTS.package_event_burst_count) {
@@ -976,8 +1138,15 @@ async function captureKeyToPty({ page, arm, ptyClock, logWatcher, family, repeti
   const keyToPaint = [];
   const discardedNegative = false;
   for (let index = 0; index < FROZEN_INPUTS.warmup_repetitions + repetitions; index += 1) {
+    const measured = index >= FROZEN_INPUTS.warmup_repetitions;
     if (typeof prove === "function") {
-      prove({ index, family });
+      await prove({ index, family, measured });
+    }
+    if (arm.probeSessionId && ["control_response_saturation", "package_event_saturation", "sibling_saturation"].includes(family)) {
+      const mounted = await readMountedSessionId(page);
+      if (mounted !== arm.probeSessionId) {
+        throw new Error(`${family}: mounted session ${mounted} is not probe session ${arm.probeSessionId}`);
+      }
     }
     const marker = uniqueMarker(arm.captureId, arm.arm_id, family, index);
     const previousHash = page.__baselineOracle.frames.at(-1)?.hash;
@@ -1119,8 +1288,12 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
       repetitions: FROZEN_INPUTS.measured_repetitions,
       startFactory: async () => remountForPaintFamily(page, arm, { seedHistory: true })
     });
+    await restoreProbeSession(page, arm);
   }
   if (observations.control_response_saturation == null && warmup.pty.ok) {
+    if (warmup.paint.ok) {
+      await restoreProbeSession(page, arm);
+    }
     const burst = createControlResponseBurst({
       issueRequest: (name) => issueControlRequest(arm, name)
     });
@@ -1134,13 +1307,15 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
         logWatcher,
         family: "control_response_saturation",
         repetitions: FROZEN_INPUTS.measured_repetitions,
-        prove: () => burst.proveActive()
+        prove: async ({ measured }) => {
+          if (measured) {
+            await burst.stepMeasuredSample();
+          }
+        }
       });
       Object.assign(observations.control_response_saturation, burst.metrics(Date.now() - started), {
-        producer: arm.arm_id === "modular" ? "daemon_request" : "legacy_hub_connection",
-        limitation: arm.arm_id === "modular"
-          ? "modular Hub has no list_configs; the harness issues list_packages for that slot"
-          : null
+        producer: "browser_control_connection",
+        wire_request_types: wireRequestTypesForArm(arm.arm_id)
       });
     } finally {
       await burst.stop();
@@ -1151,6 +1326,9 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
       "legacy f598075e has no harness-drivable package-event plane"
     );
   } else if (warmup.pty.ok) {
+    if (warmup.paint.ok) {
+      await restoreProbeSession(page, arm);
+    }
     const burst = createPackageEventBurst({
       emitBurst: (count) => emitPackageEventBurst(arm, count)
     });
@@ -1163,7 +1341,11 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
         logWatcher,
         family: "package_event_saturation",
         repetitions: FROZEN_INPUTS.measured_repetitions,
-        prove: () => burst.proveActive()
+        prove: async ({ measured }) => {
+          if (measured) {
+            await burst.stepMeasuredSample();
+          }
+        }
       });
       observations.package_event_saturation.burst_count = FROZEN_INPUTS.package_event_burst_count;
     } finally {
@@ -1171,10 +1353,12 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
     }
   }
   if (warmup.pty.ok && observations.sibling_saturation == null) {
+    if (warmup.paint.ok) {
+      await restoreProbeSession(page, arm);
+    }
     const flood = await startSiblingFlood(page, arm);
+    await restoreProbeSession(page, arm);
     try {
-      flood.proveActive();
-      await openSession(page, arm.probeSessionId ?? flood.stats.probeSessionId);
       observations.sibling_saturation = await captureKeyToPty({
         page,
         arm,
@@ -1182,7 +1366,11 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
         logWatcher,
         family: "sibling_saturation",
         repetitions: FROZEN_INPUTS.measured_repetitions,
-        prove: () => flood.proveActive()
+        prove: async ({ measured }) => {
+          if (measured) {
+            await flood.stepMeasuredSample();
+          }
+        }
       });
       observations.sibling_saturation.flood_bytes = FROZEN_INPUTS.sibling_flood_bytes;
       observations.sibling_saturation.terminal_a = flood.stats.floodSessionId;
@@ -1324,6 +1512,7 @@ async function main(argv) {
         arm.probeSessionId = sessionId;
       }
       await opened.page.locator(".terminal-view-container canvas").first().waitFor({ timeout: 30_000 });
+      await waitForBrowserControl(opened.page, armId);
       arm.terminal_bounding_box = await measureTerminalBox(opened.page);
       const handshakePath = join(arm.dataDir, "handshake.txt");
       handshakeResults[armId] = await runHandshake(opened.page, handshakePath);
@@ -1399,6 +1588,10 @@ async function main(argv) {
       blocked.push(...familyResult.blocked);
       watcher.close();
     }
+    correctness.control_response_equalization = equalizeControlResponses(
+      observations.legacy?.control_response_saturation,
+      observations.modular?.control_response_saturation
+    );
     const browserInfo = {
       playwright_channel: "chromium",
       chromium_revision: browserVersion,

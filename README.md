@@ -50,8 +50,8 @@ proves the resize, input, and live-output barriers.
 The debug-runtime terminal regression baseline is a product observation, not a
 transport-causality experiment. The frozen format is
 [docs/terminal-baseline-observation-format.md](docs/terminal-baseline-observation-format.md)
-(`terminal_baseline_observation_format=1`). Downstream Restty and integration
-tickets must reuse that version.
+(`terminal_baseline_observation_format=2`). Downstream Restty and integration
+tickets must reuse that version. Version 2 supersedes version 1.
 
 ```bash
 BOTSTER_LEGACY_CHECKOUT=/path/to/clean-f598075e \
