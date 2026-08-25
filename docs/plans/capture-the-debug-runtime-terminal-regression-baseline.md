@@ -4,6 +4,29 @@ Plan for ticket `ticket_1787603669_760394` in project `project_1787600579_585482
 (Botster Isolated Subscription Data Plane), pipeline `botster_stack_delivery`,
 run `run_1787632387_839095`, step `botster_stack_plan`.
 
+**Revision 8**, after Plan Review `review_1787637212_457290` returned
+`changes_required` a seventh time, with one blocker:
+
+- `finding_1787637212_599586`: the acceptance table still carried the revision 4
+  G16 row, which requires exactly one warm-up log line, requires the paint change
+  after `t_pty`, and requires a paint calibration that §6.3.2 deleted. As written
+  that gate rejected a valid capture under either clock, and it contradicted
+  §6.2, §6.3, and §6.5.
+
+  **This one is worse than a stale row.** I reported G16 as fixed in two earlier
+  finding resolutions, but the edit never landed in the file: it targeted text
+  that a previous revision had already changed, so the replacement silently did
+  nothing and I did not check the result. Revision 8 rewrites G16 to match §6.5
+  exactly, and I verified the row in the file afterwards rather than trusting the
+  edit.
+
+  The same unverified-edit failure had left two other claims unbacked, and this
+  revision fixes both: G6 now rejects any `paint_oracle` other than
+  `cdp_screencast`, and G19 now requires `append_cost_calibration_ms` under
+  `shell_epochrealtime`. The audit the finding asked for also corrected G18's
+  dispatcher-variant clause, the `key_to_pty` endpoint wording in §7, and two risk
+  rows that still described a per-arm paint oracle.
+
 **Revision 7**, after Plan Review `review_1787636833_416607` returned
 `changes_required` a sixth time, with one finding:
 
@@ -775,7 +798,7 @@ The eight families:
 
 | Family | `endpoint_start` | `endpoint_end` | Oracle |
 |--------|------------------|----------------|--------|
-| `key_to_pty` | `t_key`, the final Enter of the probe line | `t_pty`, the shell appended the marker, per §6.3.1 | pty |
+| `key_to_pty` | `t_key`, the final Enter of the probe line | `t_pty` as §6.3.1 defines it for the negotiated clock | pty |
 | `attach_ready` | the mounted terminal begins attach | first sampled-region hash change after attach | paint |
 | `history_finish` | first sampled-region hash change after attach | sampled-region hash stable for the settle window | paint |
 | `scrollback` | first wheel event dispatch | sampled-region hash stable for the settle window | paint |
@@ -1043,13 +1066,13 @@ Unknowns, each with an owner:
 | The format needs a change after the Restty ticket | Downstream sets become incomparable | The version token is explicit; a change bumps `format_version` and the changing ticket must restate both sets |
 | The watcher and dispatcher costs are read as transport latency | Every `key_to_pty` value is inflated by an unstated floor | §6.4 names every included component and records `watcher_detection_calibration_ms` and `dispatcher_append_calibration_ms` per arm per capture |
 | Observer order is inferred from shell write order | A false invariant becomes a gate that rejects valid samples and biases the set toward fast watcher callbacks | §6.3.1 withdraws the claim; G8 asserts only `t_key` before both endpoints; negative `pty_to_paint_ms` is recorded rather than discarded and `decomposition_valid` marks when the split is not real |
-| The two arms resolve different oracles or clocks | The capture compares the instruments rather than the products | §6.3.2 negotiates `paint_oracle` and `pty_clock` once per capture, both are capture-level record members, and G18 rejects a record whose arms imply different values |
+| The two arms resolve different clocks or dispatcher variants | The capture compares the instruments rather than the products | §6.3.2 negotiates `pty_clock` once per capture and pins `paint_oracle` to `cdp_screencast`; both are capture-level record members, and G18 rejects a record whose arms imply different values |
 | Screencast frames stop after the first | A silent stall reads as no paint change | Every frame is acknowledged with its `sessionId`, and G18 runs a sustained-frame check across the warm-up |
 | A paint calibration absorbs the latency it is meant to bound | The measured value is silently deflated | `metadata.timestamp * 1000` is used directly as epoch milliseconds; the revision 4 known-change offset calibration is deleted and must not reappear |
 | The paint oracle is moved back into the page for convenience | Four observation families silently stop working on a WebGPU or WebGL2 canvas | §6.3 fixes the oracle on the host through CDP screencast and records `paint_oracle` per arm; G16 blocks an arm whose warm-up probe paints nothing |
 | A second paint instrument is added as a convenience fallback | Its capture-time endpoint and instrument cost go unstated, and paint values lose a stable endpoint | §6.3.2 deletes `screenshot_poll` outright; `cdp_screencast` is the only oracle, the validator rejects any other value, and an arm without screencast blocks the cross-arm paint families |
 | A per-probe helper process is added later for convenience | Process startup swamps the value being measured | §6.2 fixes the dispatcher as builtin `printf` plus an append redirect, with the one `cr` fork at session start only |
-| Browser and host-watcher wall clocks diverge | `key_to_pty` becomes meaningless or negative | Both stamps are `Date.now()` in one host's clock; G12 requires one host, the record carries `same_host: true`, and G15 discards and records any repetition whose `t_pty` precedes `t_key` |
+| Browser, shell, and host-watcher wall clocks diverge | `key_to_pty` becomes meaningless or negative | Both stamps are `Date.now()` in one host's clock; G12 requires one host, the record carries `same_host: true`, and G15 discards and records any repetition whose `t_pty` precedes `t_key` |
 | The probe expands empty and records a zero-length marker | A silently wrong number enters the baseline | G16 requires `botster-baseline-ready` plus a warm-up probe whose log line equals the expected marker exactly, and blocks the arm otherwise |
 | The two saturation families get conflated again | A modular-only diagnostic is read as a cross-stack comparison | §7.1 retires the term `event_saturation`; the schema, the report names, and the published document use `control_response_saturation` and `package_event_saturation` |
 | `list_configs` and `list_session_types` response shapes differ between arms | A cross-stack row overstates equivalence | The record stores request rate, response rate, response bytes, producer, and tolerance per arm, and states the shape limitation; no row claims isolated transport causality |
@@ -1066,7 +1089,7 @@ is independent of every wall-clock value.
 | G3 | Unit and drift tests pass, including new format and validator assertions | `npm test` |
 | G4 | Production build passes | `npm run build` |
 | G5 | The existing packaged live lane still passes on the modular arm, executed to completion rather than aborting on a missing binary | the full pinned sequence below |
-| G6 | The validator rejects a record missing any required member, missing an arm, carrying one arm only, or carrying a threshold field | unit assertions in `src/App.test.mjs` |
+| G6 | The validator rejects a record missing any required member, missing an arm, carrying one arm only, carrying a threshold field, or carrying any `paint_oracle` other than `cdp_screencast` | unit assertions in `src/App.test.mjs` |
 | G7 | Byte fidelity holds in both arms: the probe marker echoed by the PTY appears intact | harness assertion per repetition |
 | G8 | The only asserted ordering holds in every repetition: `t_key` precedes `t_pty`, `t_key` precedes the probe's paint change, and paint-ready precedes paint-settled. No ordering between `t_pty` and `t_paint` is asserted, because §6.3.1 shows the mechanism does not guarantee one under `host_watcher` | harness assertion per repetition |
 | G9 | No terminal delivery queue overflow occurs during the package-event burst | reuse the existing overflow check at `scripts/live-packaged-protocol-harness.mjs:1906` |
@@ -1076,10 +1099,10 @@ is independent of every wall-clock value.
 | G13 | The recorded record validates against `format_version=1` | `npm run observe:terminal-baseline:validate` |
 | G14 | Every arm entry carries a full 40-character Restty `declared_revision`, a `declaration_source`, and an `artifact_sha256` that matches the vendored files the arm actually loads; a short revision is rejected and the arm is blocked | validator assertion plus a harness precondition, fails closed |
 | G15 | Both arms ran on one host, and no repetition has `t_pty` or the probe's paint change before `t_key` | harness precondition and per-repetition assertion |
-| G16 | Per arm, the dispatcher printed `botster-baseline-ready`; one warm-up probe added exactly one log line equal to the expected marker; the same warm-up produced at least one sampled-region hash change after its `t_pty` and rendered `botster-baseline-paint:<marker>`; and the watcher and paint calibrations each produced a non-empty sample set | harness precondition, fails closed; a log failure blocks that arm's PTY families and a paint failure blocks that arm's paint families |
+| G16 | Per arm, matching §6.5 exactly: the dispatcher printed `botster-baseline-ready`; the §6.2.1 handshake resolved and both arms report the same `pty_clock`; one warm-up probe added exactly the lines the negotiated §6.2.4 format prescribes, one line under `host_watcher` and two under `shell_epochrealtime`, with the marker matching exactly and a wrong-format line blocking the arm; the same warm-up produced a sampled-region hash change **attributed by marker, with no ordering required against `t_pty`**, and the rendered terminal shows `botster-baseline-paint:<marker>`; `Page.startScreencast` works in both arms; and every calibration the negotiated clock requires produced a non-empty sample set, meaning `watcher_detection_calibration_ms` only under `host_watcher`, `append_cost_calibration_ms` only under `shell_epochrealtime`, `dispatcher_append_calibration_ms` always, and no paint calibration of any kind | harness precondition, fails closed; a log failure blocks that arm's PTY families and a paint failure blocks that arm's paint families |
 | G17 | Neither supplied checkout changed: each `HEAD` and each `git status --porcelain` is identical before and after the capture | harness precondition and post-condition, fails closed |
-| G18 | Capture-level oracle integrity: `paint_oracle` is `cdp_screencast` and both arms resolved the same `pty_clock`; under `cdp_screencast` every frame was acknowledged with its `sessionId`, the sustained-frame check never stalled, `scale`, `pageScaleFactor`, `scrollOffsetX`, and `scrollOffsetY` were stable across the capture, and no measured endpoint depended on a frame lacking `metadata.timestamp`; the screencast was stopped and the CDP session detached in teardown | harness precondition, per-frame assertion, and post-condition, fails closed |
-| G19 | Under `pty_clock: "host_watcher"`, `decomposition_valid` is `false` and no negative `pty_to_paint_ms` sample was discarded; under `shell_epochrealtime`, the handshake record is present and `decomposition_valid` is `true` | validator assertion plus a harness assertion |
+| G18 | Capture-level oracle integrity: `paint_oracle` is `cdp_screencast`, both arms resolved the same `pty_clock`, and both arms ran the same §6.2 dispatcher variant; every frame was acknowledged with its `sessionId`, the sustained-frame check never stalled, `scale`, `pageScaleFactor`, `scrollOffsetX`, and `scrollOffsetY` were stable across the capture, and no measured endpoint depended on a frame lacking `metadata.timestamp`; the screencast was stopped and the CDP session detached in teardown | harness precondition, per-frame assertion, and post-condition, fails closed |
+| G19 | Under `pty_clock: "host_watcher"`, `decomposition_valid` is `false` and no negative `pty_to_paint_ms` sample was discarded; under `shell_epochrealtime`, the handshake record and `append_cost_calibration_ms` are present and `decomposition_valid` is `true` | validator assertion plus a harness assertion |
 
 G5 aborts before it reaches any test when it is written as the bare npm script:
 `npm run smoke:live-packaged-protocol` builds Web and then exits, because
