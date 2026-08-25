@@ -4,6 +4,19 @@ Plan for ticket `ticket_1787603669_760394` in project `project_1787600579_585482
 (Botster Isolated Subscription Data Plane), pipeline `botster_stack_delivery`,
 run `run_1787632387_839095`, step `botster_stack_plan`.
 
+**Revision 9**, after Plan Review `review_1787637601_156332` returned
+`changes_required` an eighth time, with one low finding:
+
+- `finding_1787637601_996900`: two risk mitigations contradicted the final
+  contract. One said the plan records `paint_oracle` per arm, although §6.3.2 and
+  §7 pin one capture-level `cdp_screencast` constant. The other said both stamps
+  are `Date.now()`, although `t_pty` comes from Bash `$EPOCHREALTIME` under
+  `shell_epochrealtime`. Both rows are rewritten and both were read back out of
+  the file. The same sweep found §12 assumption 6 carrying the identical pair of
+  stale claims, plus a sentence saying revision 3 removed the shell timestamp
+  dependency without noting that revisions 5 and 6 reinstated it behind the
+  §6.2.1 handshake. That assumption is rewritten too.
+
 **Revision 8**, after Plan Review `review_1787637212_457290` returned
 `changes_required` a seventh time, with one blocker:
 
@@ -1013,13 +1026,17 @@ Assumptions:
    plan does not rely on either arm accepting an arbitrary spawn command. G16
    proves the dispatcher started and answered a warm-up probe before any
    measurement, and blocks the arm's PTY families with a typed reason otherwise.
-6. `Date.now()` in the page and the host watcher's `Date.now()` read one wall
-   clock, because G12 requires the browser and the PTY to run on one host. The
-   record carries `same_host: true`. A capture that cannot prove one host emits no
-   `key_to_pty` value. Revision 3 removed the earlier dependency on the shell
-   producing its own timestamp: `$EPOCHREALTIME` is a bash feature and the modular
-   production session runs `sh`
-   (`scripts/live-packaged-protocol-harness.mjs:6024`).
+6. Every endpoint reads one host's wall clock, because G12 requires the browser
+   and the PTY to run on one host and the record carries `same_host: true`. The
+   sources differ by endpoint and by negotiated clock: `t_key` and `t_paint` come
+   from the browser, and `t_pty` comes from the host watcher's `Date.now()` under
+   `host_watcher` or from Bash `$EPOCHREALTIME` under `shell_epochrealtime`. A
+   capture that cannot prove one host emits no `key_to_pty` value. The shell
+   source is never assumed: `$EPOCHREALTIME` is a bash feature and the modular
+   production session starts with `sh`
+   (`scripts/live-packaged-protocol-harness.mjs:6024`), which is why revision 3
+   removed the assumed shell timestamp and revisions 5 and 6 reinstated it only
+   behind the §6.2.1 handshake and its 2000 ms acceptance band.
 7. Both arms deliver terminal bytes over an **encrypted** WebRTC DataChannel.
    Verified: `src/botster/webrtcDaemonClient.ts:1726-1745` decrypts AES-GCM after
    the channel event, and
@@ -1069,10 +1086,10 @@ Unknowns, each with an owner:
 | The two arms resolve different clocks or dispatcher variants | The capture compares the instruments rather than the products | §6.3.2 negotiates `pty_clock` once per capture and pins `paint_oracle` to `cdp_screencast`; both are capture-level record members, and G18 rejects a record whose arms imply different values |
 | Screencast frames stop after the first | A silent stall reads as no paint change | Every frame is acknowledged with its `sessionId`, and G18 runs a sustained-frame check across the warm-up |
 | A paint calibration absorbs the latency it is meant to bound | The measured value is silently deflated | `metadata.timestamp * 1000` is used directly as epoch milliseconds; the revision 4 known-change offset calibration is deleted and must not reappear |
-| The paint oracle is moved back into the page for convenience | Four observation families silently stop working on a WebGPU or WebGL2 canvas | §6.3 fixes the oracle on the host through CDP screencast and records `paint_oracle` per arm; G16 blocks an arm whose warm-up probe paints nothing |
+| The paint oracle is moved back into the page for convenience | Four observation families silently stop working on a WebGPU or WebGL2 canvas | §6.3.2 fixes the oracle on the host through CDP screencast and pins `paint_oracle` to the single capture-level constant `cdp_screencast`, which G6 and G18 enforce; G16 blocks an arm whose warm-up probe paints nothing |
 | A second paint instrument is added as a convenience fallback | Its capture-time endpoint and instrument cost go unstated, and paint values lose a stable endpoint | §6.3.2 deletes `screenshot_poll` outright; `cdp_screencast` is the only oracle, the validator rejects any other value, and an arm without screencast blocks the cross-arm paint families |
 | A per-probe helper process is added later for convenience | Process startup swamps the value being measured | §6.2 fixes the dispatcher as builtin `printf` plus an append redirect, with the one `cr` fork at session start only |
-| Browser, shell, and host-watcher wall clocks diverge | `key_to_pty` becomes meaningless or negative | Both stamps are `Date.now()` in one host's clock; G12 requires one host, the record carries `same_host: true`, and G15 discards and records any repetition whose `t_pty` precedes `t_key` |
+| Browser, shell, and host-watcher wall clocks diverge | `key_to_pty` becomes meaningless or negative | All endpoints read one host's wall clock: `t_key` and `t_paint` from the browser, `t_pty` from the host watcher's `Date.now()` under `host_watcher` or from Bash `$EPOCHREALTIME` under `shell_epochrealtime`, where §6.2.1 accepts that clock only after it parses, advances, and sits within 2000 ms of the host clock. G12 requires one host, the record carries `same_host: true`, and G15 discards and records any repetition whose `t_pty` precedes `t_key` |
 | The probe expands empty and records a zero-length marker | A silently wrong number enters the baseline | G16 requires `botster-baseline-ready` plus a warm-up probe whose log line equals the expected marker exactly, and blocks the arm otherwise |
 | The two saturation families get conflated again | A modular-only diagnostic is read as a cross-stack comparison | §7.1 retires the term `event_saturation`; the schema, the report names, and the published document use `control_response_saturation` and `package_event_saturation` |
 | `list_configs` and `list_session_types` response shapes differ between arms | A cross-stack row overstates equivalence | The record stores request rate, response rate, response bytes, producer, and tolerance per arm, and states the shape limitation; no row claims isolated transport causality |
