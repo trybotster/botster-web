@@ -132,6 +132,7 @@ import {
   publicationDecision,
   remountForPaintFamily,
   restoreProbeSession,
+  wrapLegacyControlTransport,
   writeBaselineRecord
 } from "../scripts/terminal-baseline-capture.mjs";
 
@@ -18999,6 +19000,29 @@ function removeCssAtRules(source) {
   );
   assert.equal(keyedSnapshotInbound, 1);
   assert.equal(keyedResizeInbound, 1);
+
+  const legacyStore = {
+    __BOTSTER_BASELINE_CONTROL_INBOUND__: [],
+    __BOTSTER_BASELINE_CONTROL_OUTBOUND__: [],
+    __BOTSTER_BASELINE_TERMINAL_INBOUND__: []
+  };
+  const legacyTransport = {
+    sendResize: async () => ({ ok: true }),
+    requestSnapshot: async () => ({ ok: true }),
+    handleMessage: () => {}
+  };
+  wrapLegacyControlTransport(legacyTransport, legacyStore);
+  await legacyTransport.sendResize(120, 32);
+  const resizeBeforeUnrelated = legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.filter((entry) => entry.wire === "resize");
+  legacyTransport.handleMessage({ type: "unrelated_status" });
+  const resizeAfterUnrelated = legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.filter((entry) => entry.wire === "resize");
+  assert.equal(resizeAfterUnrelated.length, resizeBeforeUnrelated.length);
+  assert.equal(resizeAfterUnrelated.length, 1);
+  assert.equal(resizeAfterUnrelated[0].source, "send_completion");
+  assert.equal(
+    legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.some((entry) => entry.type === "unrelated_status"),
+    false
+  );
 
   let oneShotPackageCount = 0;
   const oneShotPackage = createPackageEventBurst({

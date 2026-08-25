@@ -2,8 +2,8 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787701446_843878`
-Returned from Review: `review_1787701425_278522`
+Step: `botster_stack_implement` / `run_step_1787701823_324641`
+Returned from Review: `review_1787701804_526198`
 Human decision: `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9, resynced to format version 2
 Approved review: `review_1787638112_854617`
@@ -125,11 +125,17 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787701425_278522` returned one open finding. This visit keys the control response oracle by the selected wire operation.
+`review_1787701804_526198` returned one open finding. This visit stops labeling later legacy messages as the last send.
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787701425_914685` unrelated reply | `observeInbound` receives the selected semantic name. Modular counts `webrtc_response_assembly` and tagged reply bytes for that wire type only. Legacy counts inbound ledger rows for `resize` or `request_snapshot` only. A snapshot sample rejects when its reply finishes before Enter and only an unrelated resize reply arrives after `t_key`. |
+| `finding_1787701804_845506` sticky last-send | The legacy observer no longer copies a last-send wire onto later messages. Snapshot replies remain the producer `0x02` snapshot payload. Legacy resize has no typed reply, so its response oracle is `sendResize` completion. An unrelated `{type:'unrelated_status'}` after `sendResize` does not change the resize inbound counter. |
+
+`review_1787701425_278522` findings from the prior visit remain resolved:
+
+| Finding | Fix |
+| --- | --- |
+| `finding_1787701425_914685` unrelated reply | `observeInbound` still receives the selected semantic name. Modular counts `webrtc_response_assembly` and tagged reply bytes for that wire type only. Legacy snapshot still counts `0x02` rows. Legacy resize now counts send completion, not later untyped messages. |
 
 `review_1787701045_427701` findings from the prior visit remain resolved:
 
@@ -238,6 +244,7 @@ Later tickets must not use this ticket as evidence for a measured latency improv
 - Exact canvas settle-window calibration is frozen at 250 ms and may need a later `format_version` bump if both arms prove a different stable window.
 - Control-response equalization records a 0.25 tolerance. Achieved live values still require a completed two-arm set.
 - Live `issueControlRequest` is one browser RPC. The harness requires the production send before Enter and the one response after `t_key`. A reply that arrives before Enter fails closed. Package-event and sibling families still require inbound growth on both sides of Enter.
+- Legacy resize has no typed reply in this client. The resize response oracle is `sendResize` completion, not a later `handleMessage` type. Snapshot replies remain the producer `0x02` payload.
 
 ## Missing vault guidance discovered
 

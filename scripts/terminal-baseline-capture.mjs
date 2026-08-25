@@ -1141,64 +1141,78 @@ export async function waitForBrowserControl(page, armId) {
   }
 }
 
-export async function installLegacyInboundObserver(page) {
-  await page.evaluate(() => {
-    const entry = Object.values(globalThis._botsterTestTerminal ?? {})[0];
-    const transport = entry?.transport;
-    if (!transport || transport.__baselineInboundWrapped) {
+export function wrapLegacyControlTransport(transport, store = globalThis) {
+  if (!transport || transport.__baselineInboundWrapped) {
+    return store;
+  }
+  store.__BOTSTER_BASELINE_CONTROL_INBOUND__ = store.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? [];
+  store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ = store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? [];
+  store.__BOTSTER_BASELINE_TERMINAL_INBOUND__ = store.__BOTSTER_BASELINE_TERMINAL_INBOUND__ ?? [];
+  const wrapOutbound = (methodName, wireType, recordCompletion) => {
+    const originalSend = transport[methodName]?.bind(transport);
+    if (typeof originalSend !== "function" || transport[`__baselineOutboundWrapped_${methodName}`]) {
       return;
     }
-    globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ = globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? [];
-    globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ = globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? [];
-    globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__ = globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__ ?? [];
-    const wrapOutbound = (methodName, wireType) => {
-      const originalSend = transport[methodName]?.bind(transport);
-      if (typeof originalSend !== "function" || transport[`__baselineOutboundWrapped_${methodName}`]) {
-        return;
+    transport[methodName] = (...args) => {
+      store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.push({
+        type: methodName,
+        wire: wireType,
+        at: Date.now()
+      });
+      const result = originalSend(...args);
+      if (!recordCompletion) {
+        return result;
       }
-      transport[methodName] = (...args) => {
-        globalThis.__BOTSTER_BASELINE_LAST_OUTBOUND_WIRE__ = wireType;
-        globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.push({
-          type: methodName,
-          wire: wireType,
+      return Promise.resolve(result).then((reply) => {
+        store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
+          type: "resize",
+          wire: "resize",
+          source: "send_completion",
+          payload: reply ?? { type: "resize", source: "send_completion" },
           at: Date.now()
         });
-        return originalSend(...args);
-      };
-      transport[`__baselineOutboundWrapped_${methodName}`] = true;
+        return reply;
+      });
     };
-    wrapOutbound("sendResize", "resize");
-    wrapOutbound("requestSnapshot", "request_snapshot");
-    const original = transport.handleMessage?.bind(transport);
-    if (typeof original !== "function") {
-      throw new Error("legacy transport handleMessage is not available");
+    transport[`__baselineOutboundWrapped_${methodName}`] = true;
+  };
+  wrapOutbound("sendResize", "resize", true);
+  wrapOutbound("requestSnapshot", "request_snapshot", false);
+  const original = transport.handleMessage?.bind(transport);
+  if (typeof original !== "function") {
+    throw new Error("legacy transport handleMessage is not available");
+  }
+  transport.handleMessage = (message) => {
+    if (message?.type === "raw_output" && message.data?.length > 0) {
+      const prefix = message.data[0];
+      const payload = Array.from(message.data);
+      if (prefix === 0x02) {
+        store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
+          type: "snapshot",
+          wire: "request_snapshot",
+          payload,
+          at: Date.now()
+        });
+      } else if (prefix === 0x01) {
+        store.__BOTSTER_BASELINE_TERMINAL_INBOUND__.push({ type: "pty", payload, at: Date.now() });
+      }
     }
-    transport.handleMessage = (message) => {
-      if (message?.type === "raw_output" && message.data?.length > 0) {
-        const prefix = message.data[0];
-        const payload = Array.from(message.data);
-        if (prefix === 0x02) {
-          globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
-            type: "snapshot",
-            wire: "request_snapshot",
-            payload,
-            at: Date.now()
-          });
-        } else if (prefix === 0x01) {
-          globalThis.__BOTSTER_BASELINE_TERMINAL_INBOUND__.push({ type: "pty", payload, at: Date.now() });
-        }
-      } else if (message?.type && message.type !== "raw_output") {
-        globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
-          type: message.type,
-          wire: globalThis.__BOTSTER_BASELINE_LAST_OUTBOUND_WIRE__ ?? message.type,
-          payload: message,
-          at: Date.now()
-        });
-      }
-      return original(message);
-    };
-    transport.__baselineInboundWrapped = true;
-  });
+    return original(message);
+  };
+  transport.__baselineInboundWrapped = true;
+  return store;
+}
+
+export async function installLegacyInboundObserver(page) {
+  await page.evaluate((source) => {
+    const wrapLegacyControlTransport = new Function(`return (${source});`)();
+    const entry = Object.values(globalThis._botsterTestTerminal ?? {})[0];
+    const transport = entry?.transport;
+    if (!transport) {
+      return;
+    }
+    wrapLegacyControlTransport(transport, globalThis);
+  }, wrapLegacyControlTransport.toString());
 }
 
 export function expectedOutboundWire(armId, semanticName) {
