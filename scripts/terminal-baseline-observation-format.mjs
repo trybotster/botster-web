@@ -431,6 +431,13 @@ export function recordIsPublishableBaseline(record) {
       }
     }
   }
+  const equalization = record.correctness?.control_response_equalization;
+  if (
+    equalization?.response_rate_within_tolerance !== true
+    || equalization?.response_bytes_within_tolerance !== true
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -479,7 +486,17 @@ function validateFamily(family, name, armId, ptyClock, errors) {
     errors.push(`${label}.unit must be ms`);
   }
   if (name === "control_response_saturation") {
-    for (const key of ["request_names", "producer", "request_rate", "response_rate", "response_bytes", "wire_request_types", "tolerance"]) {
+    for (const key of [
+      "request_names",
+      "producer",
+      "request_rate",
+      "response_rate",
+      "response_bytes",
+      "inbound_frame_count",
+      "inbound_bytes",
+      "wire_request_types",
+      "tolerance"
+    ]) {
       if (!Object.hasOwn(family, key)) {
         errors.push(`${label} is missing ${key}`);
       }
@@ -591,6 +608,13 @@ export function validateObservationRecord(record) {
     if (!recordIsPublishableBaseline(record)) {
       errors.push("a one-armed or partial record is not a publishable baseline");
     }
+    const equalization = record.correctness?.control_response_equalization;
+    if (
+      equalization?.response_rate_within_tolerance !== true
+      || equalization?.response_bytes_within_tolerance !== true
+    ) {
+      errors.push("control_response_equalization must be within the frozen tolerance");
+    }
   }
   if (!Array.isArray(record.blocked)) {
     errors.push("blocked must be an array");
@@ -687,6 +711,8 @@ export function exampleValidRecord(overrides = {}) {
       request_rate: 4,
       response_rate: 4,
       response_bytes: 1024,
+      inbound_frame_count: 20,
+      inbound_bytes: 1024,
       wire_request_types: wireRequestTypesForArm(armId),
       tolerance: CONTROL_RESPONSE_TOLERANCE
     }),
@@ -732,7 +758,15 @@ export function exampleValidRecord(overrides = {}) {
       legacy: observations("legacy"),
       modular: observations("modular")
     },
-    correctness: { legacy: {}, modular: {} },
+    correctness: {
+      legacy: {},
+      modular: {},
+      control_response_equalization: {
+        tolerance: CONTROL_RESPONSE_TOLERANCE.response_rate,
+        response_rate_within_tolerance: true,
+        response_bytes_within_tolerance: true
+      }
+    },
     blocked: [],
     ...overrides
   };

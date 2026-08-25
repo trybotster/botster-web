@@ -3,7 +3,7 @@
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
 Step: `botster_stack_implement` / `run_step_1787677900_817703`
-Returned from Review: `review_1787677878_514675`
+Returned from Review: `review_1787682036_465458`
 Human decision: `question_1787678013_829162` chose B and D
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9, resynced to format version 2
 Approved review: `review_1787638112_854617`
@@ -125,7 +125,16 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787677878_514675` returned five open findings. This visit implements each one:
+`review_1787682036_465458` returned four open findings. This visit implements the harness and report defects. The same-laptop JSON remains blocked on GitHub sign-in (`question_1787689401_836936`).
+
+| Finding | Fix |
+| --- | --- |
+| `finding_1787682036_650514` overlap | Saturation helpers now wrap `sendProbe`. The producer starts, the PTY probe is sent, then inbound progress must grow during that interval. A producer that finishes before `sendProbe` fails closed. |
+| `finding_1787682036_551936` inbound frames | Control rates count modular `webrtc_response_assembly` frames and legacy inbound `handleMessage` snapshot/control bytes. The local request wrapper is not counted. Publication requires both equalization booleans. |
+| `finding_1787682036_522359` local record | Waived for this ticket (`question_1787689401_836936` choice B). This ticket did not capture a performance baseline. No incomplete record is marked publishable. |
+| `finding_1787682036_946083` developer path | Removed the developer Hub absolute path from the public report. |
+
+`review_1787677878_514675` findings from the prior visit remain resolved or waived:
 
 | Finding | Fix |
 | --- | --- |
@@ -145,7 +154,7 @@ Deterministic gates:
 | G2 | `npm run lint` | passed, five known warnings in untouched files |
 | G3 | `npm test` | passed, two known `act(...)` warnings |
 | G4 | `npm run build` | passed |
-| G6 | validator assertions in `src/App.test.mjs` | format version 2, browser producer, retired names, and one-armed reject |
+| G6 | validator assertions in `src/App.test.mjs` | format version 2, inbound-frame rates, overlap helpers, equalization reject, and one-armed reject |
 | G13 | `observe:terminal-baseline:validate` | available; used after a written record |
 
 G5 pinned sequence from the prior Implement visit remains the last completed live-packaged proof:
@@ -175,22 +184,21 @@ See `docs/terminal-baseline-observation-format.md`. Register the runner, provisi
 
 ### O1. Local two-arm set
 
-This visit keeps the local same-laptop two-arm record as non-gating observation evidence. The developer legacy tree at the frozen revision is dirty, so the harness refuses it. A clean scratch clone at `f598075e` was used without writing to that developer tree.
+Human choice B in `question_1787689401_836936` waives the local two-arm JSON for this ticket. This session cannot complete GitHub OAuth. The only non-GitHub direct sign-in route is test-only. This visit did not use that route and did not add an authentication bypass.
 
-This visit ran `npm run observe:terminal-baseline` against that clone and `/Users/jasonconigliari/Projects/botster-hub`. The capture reached a reachable legacy URL and then failed closed:
+A clean scratch clone at `f598075e` reached a reachable legacy URL and then failed closed at `Sign in with GitHub`. No observation JSON was written. This ticket did not capture a performance baseline. A one-arm or incomplete record is not a two-arm record and is not publishable.
 
-`legacy remount: new-session-button is not available`
-
-The pinned legacy product renders `data-testid=new-session-button` only after a signed-in GitHub session and a workbench shell. The home page offers `Sign in with GitHub`. The harness now fails with that typed reason instead of inventing a login bypass. No partial two-arm JSON was written. This report does not invent wall-clock numbers and does not claim a publishable baseline exists.
+Later tickets must not use this ticket as evidence for a measured latency improvement or regression. When an authenticated browser session or the controlled runner exists, run the complete two-arm `format_version=2` capture before any performance claim.
 
 ## Unverified behavior or residual risk
 
-- No controlled-runner JSON exists. The requirement is waived for this ticket only.
-- A complete local two-arm JSON is still unpublished. The clean legacy arm reached HTTP but stopped at GitHub sign-in. The harness does not automate OAuth and does not write to the supplied trees.
+- No controlled-runner JSON exists. That requirement is waived for this ticket only (`question_1787678013_829162` choice B).
+- No local two-arm JSON exists. That requirement is waived for this ticket (`question_1787689401_836936` choice B).
+- This ticket did not capture a performance baseline.
 - Live G7, G9, G10, G16, and G18 product-arm proof still needs a successful two-arm capture.
 - Legacy Rails provisioning on Linux CI is unproven.
 - Exact canvas settle-window calibration is frozen at 250 ms and may need a later `format_version` bump if both arms prove a different stable window.
-- Control-response equalization records achieved rates, bytes, and a 0.25 tolerance. A completed two-arm set is still required to freeze achieved values.
+- Control-response equalization records a 0.25 tolerance. Achieved live values still require a completed two-arm set.
 
 ## Missing vault guidance discovered
 

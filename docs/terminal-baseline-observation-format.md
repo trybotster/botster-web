@@ -123,8 +123,10 @@ Validate a record:
 npm run observe:terminal-baseline:validate -- docs/reports/terminal-baseline-observation-local-<capture_id>.json
 ```
 
-The local set is observational and non-gating. Later tickets must not describe
-a local record as controlled-runner evidence.
+The local set is observational and non-gating. This ticket did not publish a
+local record. Later tickets must not describe a local record as
+controlled-runner evidence, and must not use this ticket as evidence for a
+measured latency improvement or regression.
 
 ## Controlled runner rerun
 
@@ -142,6 +144,8 @@ to produce the controlled set.
 4. Keep `format_version=2`. Do not add a threshold field.
 
 Until that runner exists, the controlled set stays deferred. A one-armed
-workflow result is not a baseline. This ticket waives the controlled record
-only (`question_1787678013_829162`). The project still requires the controlled
-record when the runner exists.
+workflow result is not a baseline. This ticket waives both the local record
+(`question_1787689401_836936`) and the controlled record
+(`question_1787678013_829162`). The project still requires those records
+when an authenticated session or the runner exists. Do not mark an incomplete
+record as publishable.

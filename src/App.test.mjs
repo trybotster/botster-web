@@ -18404,6 +18404,10 @@ function removeCssAtRules(source) {
   );
   assert.equal(equalized.response_rate_within_tolerance, true);
   assert.equal(equalized.response_bytes_within_tolerance, true);
+  const unequal = exampleValidRecord();
+  unequal.correctness.control_response_equalization.response_rate_within_tolerance = false;
+  assert.equal(recordIsPublishableBaseline(unequal), false);
+  assert.match(validateObservationRecord(unequal).errors.join("\n"), /control_response_equalization must be within the frozen tolerance/);
   assert.equal(valid.product_baseline_statement, PRODUCT_BASELINE_STATEMENT);
   assert.equal(valid.same_host, true);
 
@@ -18477,33 +18481,148 @@ function removeCssAtRules(source) {
   assert.equal(recordIsPublishableBaseline(oneArmedMeasured), false);
   assert.match(validateObservationRecord(oneArmedMeasured).errors.join("\n"), /one-armed or partial record is not a publishable baseline/);
 
-  const deadControl = createControlResponseBurst({ issueRequest: async () => null });
-  await deadControl.start();
-  await assert.rejects(deadControl.stepMeasuredSample(), /produced no reply|did not grow/);
-  const completedPackage = createPackageEventBurst({ emitBurst: async () => 200 });
-  await completedPackage.start();
-  await completedPackage.stepMeasuredSample();
-  await assert.rejects(completedPackage.stepMeasuredSample(), /already completed before the sample/);
-  const inventedSibling = createSiblingFloodHandle({
+  assert.throws(() => createControlResponseBurst({ issueRequest: async () => ({ ok: true }) }), /observeInbound is required/);
+  let inboundFrames = 0;
+  let inboundBytes = 0;
+  const overlappingControl = createControlResponseBurst({
+    issueRequest: async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 15));
+      inboundFrames += 1;
+      inboundBytes += 32;
+      return { wrapper: true, bytes: 9999 };
+    },
+    observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes })
+  });
+  await overlappingControl.start();
+  await overlappingControl.aroundProbe({
+    measured: true,
+    sendProbe: async () => ({ at: Date.now() })
+  });
+  assert.equal(overlappingControl.stats.inbound_frame_count, 1);
+  assert.equal(overlappingControl.stats.inbound_bytes, 32);
+  assert.notEqual(overlappingControl.stats.inbound_bytes, 9999);
+  await overlappingControl.stop();
+
+  const deadInbound = createControlResponseBurst({
+    issueRequest: async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+      return { ok: true };
+    },
+    observeInbound: async () => ({ frames: 0, bytes: 0 })
+  });
+  await deadInbound.start();
+  await assert.rejects(
+    deadInbound.aroundProbe({
+      measured: true,
+      sendProbe: async () => ({ at: Date.now() })
+    }),
+    /no inbound progress|did not grow/
+  );
+
+  let packageCount = 0;
+  const packageBurst = createPackageEventBurst({
+    count: 10,
+    measuredRepetitions: 1,
+    emitBurst: async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 15));
+      packageCount += 10;
+      return 10;
+    },
+    observeDelivery: async () => ({ count: packageCount, frames: packageCount, bytes: packageCount * 4 })
+  });
+  await packageBurst.start();
+  await packageBurst.aroundProbe({
+    measured: true,
+    sendProbe: async () => ({ at: Date.now() })
+  });
+  await assert.rejects(
+    packageBurst.aroundProbe({
+      measured: true,
+      sendProbe: async () => ({ at: Date.now() })
+    }),
+    /already completed before the sample/
+  );
+
+  let siblingBytes = 0;
+  const sibling = createSiblingFloodHandle({
     floodSessionId: "a",
     probeSessionId: "b",
-    observe: async () => ({ terminal_a_subscribed: true, produced_count: 1 })
+    observe: async () => ({
+      terminal_a_subscribed: true,
+      delivered_bytes: siblingBytes,
+      restartFlood: async () => {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+        siblingBytes += 64;
+      }
+    })
   });
-  await inventedSibling.start();
-  await inventedSibling.stepMeasuredSample();
-  await assert.rejects(inventedSibling.stepMeasuredSample(), /did not grow|not subscribed/);
+  await sibling.start();
+  await sibling.aroundProbe({
+    measured: true,
+    sendProbe: async () => ({ at: Date.now() })
+  });
+  assert.equal(sibling.stats.produced_count > 0, true);
+  const staleSibling = createSiblingFloodHandle({
+    floodSessionId: "a",
+    probeSessionId: "b",
+    observe: async () => ({ terminal_a_subscribed: true, delivered_bytes: 1 })
+  });
+  await staleSibling.start();
+  await assert.rejects(
+    staleSibling.aroundProbe({
+      measured: true,
+      sendProbe: async () => ({ at: Date.now() })
+    }),
+    /no inbound progress|did not grow/
+  );
   assert.throws(() => assertCounterGrew(4, 4, "control_response_saturation"));
 
   const liveBurst = createControlResponseBurst({
-    issueRequest: async (name) => ({ type: name, ok: true })
+    issueRequest: async (name) => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+      inboundFrames += 1;
+      inboundBytes += 8;
+      return { type: name, ok: true };
+    },
+    observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes })
   });
   await liveBurst.start();
   for (let index = 0; index < FROZEN_INPUTS.control_request_count; index += 1) {
-    await liveBurst.stepMeasuredSample();
+    await liveBurst.aroundProbe({
+      measured: true,
+      sendProbe: async () => ({ at: Date.now() })
+    });
   }
-  assert.equal(liveBurst.stats.issued, FROZEN_INPUTS.control_request_count);
-  await assert.rejects(liveBurst.stepMeasuredSample(), /frozen request count already issued/);
+  await assert.rejects(
+    liveBurst.aroundProbe({
+      measured: true,
+      sendProbe: async () => ({ at: Date.now() })
+    }),
+    /frozen request count already issued/
+  );
   await liveBurst.stop();
+
+  let probeCalled = false;
+  let producerDoneBeforeProbe = false;
+  const sequenceBurst = createControlResponseBurst({
+    issueRequest: async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      if (!probeCalled) producerDoneBeforeProbe = true;
+      inboundFrames += 1;
+      inboundBytes += 4;
+      return { ok: true };
+    },
+    observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes })
+  });
+  await sequenceBurst.start();
+  await sequenceBurst.aroundProbe({
+    measured: true,
+    sendProbe: async () => {
+      probeCalled = true;
+      return { at: Date.now() };
+    }
+  });
+  assert.equal(producerDoneBeforeProbe, false);
 
   await assert.rejects(
     restoreProbeSession({}, { probeSessionId: "probe-1" }, {
