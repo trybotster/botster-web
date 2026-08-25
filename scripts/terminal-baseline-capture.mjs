@@ -342,6 +342,37 @@ export async function assertInboundAtEnter(observe, before, family) {
   return atEnter;
 }
 
+export async function waitForInboundAtEnter(observe, before, family, timeoutMs = 5_000) {
+  try {
+    return await waitForProgress(observe, before, family, timeoutMs);
+  } catch (error) {
+    throw new Error(`${family}: no inbound traffic at the probe Enter`, { cause: error });
+  }
+}
+
+export const PRODUCTION_KEY_DELAY_MS = 10;
+
+export async function awaitProductionSendProbeHooks(hooks = {}, options = {}) {
+  const settleWindowMs = options.settleWindowMs ?? FROZEN_INPUTS.settle_window_ms;
+  const keyDelayMs = options.keyDelayMs ?? PRODUCTION_KEY_DELAY_MS;
+  const marker = options.marker ?? "probe-1";
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, settleWindowMs));
+  if (typeof options.afterSettle === "function") {
+    options.afterSettle();
+  }
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, keyDelayMs * probeLine(marker).length));
+  if (typeof hooks.beforeEnter === "function") {
+    await hooks.beforeEnter();
+    await Promise.resolve();
+  }
+  return {
+    at: Date.now(),
+    producer_active_at_enter: typeof hooks.producerActive === "function"
+      ? hooks.producerActive() === true
+      : hooks.beforeEnter == null
+  };
+}
+
 export async function waitForProgress(observe, before, family, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -412,10 +443,18 @@ export function createControlResponseBurst({
       stats.in_flight = true;
       try {
         const name = sequence[stats.issued];
-        const before = await observeInbound();
-        const pending = Promise.resolve(issueRequest(name));
+        let pending;
         const tKey = await sendProbe({
-          beforeEnter: () => assertInboundAtEnter(observeInbound, before, "control_response_saturation")
+          beforeEnter: async () => {
+            const before = await observeInbound();
+            pending = Promise.resolve(issueRequest(name));
+            await waitForInboundAtEnter(
+              observeInbound,
+              before,
+              "control_response_saturation",
+              progressTimeoutMs
+            );
+          }
         });
         const atKey = await observeInbound();
         const progress = Promise.all([
@@ -494,10 +533,19 @@ export function createPackageEventBurst({
       if (stats.completed || stats.produced_count >= count) {
         throw new Error("package_event_saturation: burst already completed before the sample");
       }
-      const before = await observeDelivery();
-      const pending = Promise.resolve(emitBurst(perSample));
+      let pending;
+      let before;
       const tKey = await sendProbe({
-        beforeEnter: () => assertInboundAtEnter(observeDelivery, before, "package_event_saturation")
+        beforeEnter: async () => {
+          before = await observeDelivery();
+          pending = Promise.resolve(emitBurst(perSample));
+          await waitForInboundAtEnter(
+            observeDelivery,
+            before,
+            "package_event_saturation",
+            progressTimeoutMs
+          );
+        }
       });
       const atKey = await observeDelivery();
       const progress = Promise.all([
@@ -568,10 +616,13 @@ export function createSiblingFloodHandle({
       if (typeof subscribed.restartFlood !== "function") {
         throw new Error("sibling_saturation: flood producer is not configured");
       }
-      const before = await readBytes();
-      const pending = Promise.resolve(subscribed.restartFlood());
+      let pending;
       const tKey = await sendProbe({
-        beforeEnter: () => assertInboundAtEnter(readBytes, before, "sibling_saturation")
+        beforeEnter: async () => {
+          const before = await readBytes();
+          pending = Promise.resolve(subscribed.restartFlood());
+          await waitForInboundAtEnter(readBytes, before, "sibling_saturation", progressTimeoutMs);
+        }
       });
       const atKey = await readBytes();
       const progress = Promise.all([

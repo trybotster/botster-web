@@ -122,6 +122,7 @@ import {
   admitControlledHost,
   admitRunner,
   assertCounterGrew,
+  awaitProductionSendProbeHooks,
   collectResttyProvenance,
   createControlResponseBurst,
   createPackageEventBurst,
@@ -18545,6 +18546,21 @@ function removeCssAtRules(source) {
     }
     return result;
   };
+  const completeProductionAroundProbe = async (handle, sendProbe, options = {}) => {
+    const result = await handle.aroundProbe({
+      measured: true,
+      progressTimeoutMs: 400,
+      sendProbe: async (hooks) => {
+        const production = await awaitProductionSendProbeHooks(hooks, options);
+        const inner = await sendProbe();
+        return { ...production, ...inner };
+      }
+    });
+    if (result?.progress) {
+      await result.progress;
+    }
+    return result;
+  };
   const sameJson = { type: "read_screen", text: "abcd" };
   assert.equal(countInboundControlBytes(sameJson), countInboundControlBytes({ type: "read_screen", text: "abcd" }));
   const prefixedSnapshot = Buffer.from([0x02, 65, 66, 67, 68]);
@@ -18573,7 +18589,7 @@ function removeCssAtRules(source) {
     observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes })
   });
   await overlappingControl.start();
-  await completeAroundProbe(overlappingControl, async () => ({ at: Date.now() }));
+  await completeProductionAroundProbe(overlappingControl, async () => ({ at: Date.now() }));
   assert.equal(overlappingControl.stats.inbound_frame_count, 1);
   assert.equal(overlappingControl.stats.inbound_bytes, 32);
   assert.equal(overlappingControl.stats.issued, 1);
@@ -18621,7 +18637,7 @@ function removeCssAtRules(source) {
     observeDelivery: async () => ({ count: packageCount, frames: packageCount, bytes: packageCount * 4 })
   });
   await packageBurst.start();
-  await completeAroundProbe(packageBurst, async () => ({ at: Date.now() }));
+  await completeProductionAroundProbe(packageBurst, async () => ({ at: Date.now() }));
   await assert.rejects(
     packageBurst.aroundProbe({
       measured: true,
@@ -18665,7 +18681,7 @@ function removeCssAtRules(source) {
     })
   });
   await sibling.start();
-  await completeAroundProbe(sibling, async () => ({ at: Date.now() }));
+  await completeProductionAroundProbe(sibling, async () => ({ at: Date.now() }));
   assert.equal(sibling.stats.produced_count > 0, true);
   const staleSibling = createSiblingFloodHandle({
     floodSessionId: "a",
@@ -18726,11 +18742,11 @@ function removeCssAtRules(source) {
   );
   await liveBurst.stop();
 
-  let probeCalled = false;
-  let producerStartedBeforeProbe = false;
+  let settleFinished = false;
+  let startedBeforeSettle = false;
   const sequenceBurst = createControlResponseBurst({
     issueRequest: async () => {
-      if (!probeCalled) producerStartedBeforeProbe = true;
+      if (!settleFinished) startedBeforeSettle = true;
       inboundFrames += 1;
       inboundBytes += 4;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
@@ -18741,11 +18757,12 @@ function removeCssAtRules(source) {
     observeInbound: async () => ({ frames: inboundFrames, bytes: inboundBytes })
   });
   await sequenceBurst.start();
-  await completeAroundProbe(sequenceBurst, async () => {
-    probeCalled = true;
-    return { at: Date.now() };
+  await completeProductionAroundProbe(sequenceBurst, async () => ({ at: Date.now() }), {
+    afterSettle: () => {
+      settleFinished = true;
+    }
   });
-  assert.equal(producerStartedBeforeProbe, true);
+  assert.equal(startedBeforeSettle, false);
 
   let lateProbeReturned = false;
   let lateFrames = 0;
@@ -18832,7 +18849,7 @@ function removeCssAtRules(source) {
   await delayedControl.start();
   await assert.rejects(
     completeAroundProbe(delayedControl, async () => ({ at: Date.now() })),
-    /no inbound traffic at the probe Enter/
+    /no inbound progress during the measured interval|no inbound traffic at the probe Enter/
   );
 
   let delayedPackageCount = 0;
@@ -18853,7 +18870,7 @@ function removeCssAtRules(source) {
   await delayedPackage.start();
   await assert.rejects(
     completeAroundProbe(delayedPackage, async () => ({ at: Date.now() })),
-    /no inbound traffic at the probe Enter/
+    /no inbound progress during the measured interval|no inbound traffic at the probe Enter/
   );
 
   let delayedSiblingBytes = 0;
@@ -18872,7 +18889,59 @@ function removeCssAtRules(source) {
   await delayedSibling.start();
   await assert.rejects(
     completeAroundProbe(delayedSibling, async () => ({ at: Date.now() })),
-    /no inbound traffic at the probe Enter/
+    /no inbound progress during the measured interval|no inbound traffic at the probe Enter/
+  );
+
+  let oneShotControlFrames = 0;
+  const oneShotControl = createControlResponseBurst({
+    issueRequest: async () => {
+      oneShotControlFrames += 1;
+      return { ok: true };
+    },
+    observeInbound: async () => ({ frames: oneShotControlFrames, bytes: oneShotControlFrames * 8 })
+  });
+  await oneShotControl.start();
+  await assert.rejects(
+    completeAroundProbe(oneShotControl, async () => ({ at: Date.now() })),
+    /no inbound progress during the measured interval/
+  );
+
+  let oneShotPackageCount = 0;
+  const oneShotPackage = createPackageEventBurst({
+    count: 10,
+    measuredRepetitions: 1,
+    emitBurst: async () => {
+      oneShotPackageCount += 10;
+      return 10;
+    },
+    observeDelivery: async () => ({
+      count: oneShotPackageCount,
+      frames: oneShotPackageCount,
+      bytes: oneShotPackageCount * 4
+    })
+  });
+  await oneShotPackage.start();
+  await assert.rejects(
+    completeAroundProbe(oneShotPackage, async () => ({ at: Date.now() })),
+    /no inbound progress during the measured interval/
+  );
+
+  let oneShotSiblingBytes = 0;
+  const oneShotSibling = createSiblingFloodHandle({
+    floodSessionId: "a",
+    probeSessionId: "b",
+    observe: async () => ({
+      terminal_a_subscribed: true,
+      delivered_bytes: oneShotSiblingBytes,
+      restartFlood: async () => {
+        oneShotSiblingBytes += 64;
+      }
+    })
+  });
+  await oneShotSibling.start();
+  await assert.rejects(
+    completeAroundProbe(oneShotSibling, async () => ({ at: Date.now() })),
+    /no inbound progress during the measured interval/
   );
 
   await assert.rejects(
