@@ -18529,8 +18529,16 @@ function removeCssAtRules(source) {
   const completeAroundProbe = async (handle, sendProbe) => {
     const result = await handle.aroundProbe({
       measured: true,
-      sendProbe,
-      progressTimeoutMs: 200
+      progressTimeoutMs: 200,
+      sendProbe: async (hooks) => {
+        if (hooks?.beforeEnter) {
+          await hooks.beforeEnter();
+        }
+        await Promise.resolve();
+        const producer_active_at_enter = hooks?.producerActive?.() === true;
+        const inner = await sendProbe();
+        return { ...inner, producer_active_at_enter };
+      }
     });
     if (result?.progress) {
       await result.progress;
@@ -18566,6 +18574,8 @@ function removeCssAtRules(source) {
   await completeAroundProbe(overlappingControl, async () => ({ at: Date.now() }));
   assert.equal(overlappingControl.stats.inbound_frame_count, 1);
   assert.equal(overlappingControl.stats.inbound_bytes, 32);
+  assert.equal(overlappingControl.stats.issued, 1);
+  assert.equal(overlappingControl.stats.requests, 1);
   assert.notEqual(overlappingControl.stats.inbound_bytes, 9999);
   await overlappingControl.stop();
 
@@ -18579,7 +18589,7 @@ function removeCssAtRules(source) {
   await deadInbound.start();
   await assert.rejects(
     completeAroundProbe(deadInbound, async () => ({ at: Date.now() })),
-    /no inbound progress|did not grow/
+    /no inbound progress|did not grow|idle at the probe Enter/
   );
 
   let preKeyControlFrames = 8;
@@ -18593,7 +18603,7 @@ function removeCssAtRules(source) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
       return { at: Date.now() };
     }),
-    /no inbound progress|did not grow/
+    /no inbound progress|did not grow|idle at the probe Enter/
   );
 
   let packageCount = 0;
@@ -18634,7 +18644,7 @@ function removeCssAtRules(source) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
       return { at: Date.now() };
     }),
-    /no inbound progress|did not grow/
+    /no inbound progress|did not grow|idle at the probe Enter/
   );
 
   let siblingBytes = 0;
@@ -18661,7 +18671,7 @@ function removeCssAtRules(source) {
   await staleSibling.start();
   await assert.rejects(
     completeAroundProbe(staleSibling, async () => ({ at: Date.now() })),
-    /no inbound progress|did not grow/
+    /no inbound progress|did not grow|idle at the probe Enter|flood producer is not configured/
   );
   let preKeySiblingBytes = 64;
   const preKeySibling = createSiblingFloodHandle({
@@ -18679,12 +18689,14 @@ function removeCssAtRules(source) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
       return { at: Date.now() };
     }),
-    /no inbound progress|did not grow/
+    /no inbound progress|did not grow|idle at the probe Enter/
   );
   assert.throws(() => assertCounterGrew(4, 4, "control_response_saturation"));
 
+  let liveIssueCalls = 0;
   const liveBurst = createControlResponseBurst({
     issueRequest: async (name) => {
+      liveIssueCalls += 1;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
       inboundFrames += 1;
       inboundBytes += 8;
@@ -18696,6 +18708,9 @@ function removeCssAtRules(source) {
   for (let index = 0; index < FROZEN_INPUTS.control_request_count; index += 1) {
     await completeAroundProbe(liveBurst, async () => ({ at: Date.now() }));
   }
+  assert.equal(liveIssueCalls, FROZEN_INPUTS.control_request_count);
+  assert.equal(liveBurst.stats.issued, FROZEN_INPUTS.control_request_count);
+  assert.equal(liveBurst.stats.requests, liveIssueCalls);
   await assert.rejects(
     liveBurst.aroundProbe({
       measured: true,
@@ -18709,8 +18724,8 @@ function removeCssAtRules(source) {
   let producerStartedBeforeProbe = false;
   const sequenceBurst = createControlResponseBurst({
     issueRequest: async () => {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
       if (!probeCalled) producerStartedBeforeProbe = true;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
       inboundFrames += 1;
       inboundBytes += 4;
       return { ok: true };
@@ -18742,7 +18757,7 @@ function removeCssAtRules(source) {
       lateProbeReturned = true;
       return { at: Date.now() };
     }),
-    /no inbound progress|did not grow|before t_key/
+    /no inbound progress|did not grow|before t_key|idle at the probe Enter/
   );
 
   let latePackageProbe = false;
@@ -18769,7 +18784,7 @@ function removeCssAtRules(source) {
       latePackageProbe = true;
       return { at: Date.now() };
     }),
-    /no inbound progress|did not grow|before t_key/
+    /no inbound progress|did not grow|before t_key|idle at the probe Enter/
   );
 
   let lateSiblingProbe = false;
@@ -18794,8 +18809,25 @@ function removeCssAtRules(source) {
       lateSiblingProbe = true;
       return { at: Date.now() };
     }),
-    /no inbound progress|did not grow|before t_key/
+    /no inbound progress|did not grow|before t_key|idle at the probe Enter/
   );
+
+  let splitCalls = 0;
+  let splitFrames = 0;
+  const splitChunk = createControlResponseBurst({
+    issueRequest: async () => {
+      splitCalls += 1;
+      splitFrames += 1;
+      return { ok: true };
+    },
+    observeInbound: async () => ({ frames: splitFrames, bytes: splitFrames * 8 })
+  });
+  await splitChunk.start();
+  await assert.rejects(
+    completeAroundProbe(splitChunk, async () => ({ at: Date.now() })),
+    /idle at the probe Enter/
+  );
+  assert.equal(splitCalls <= 1, true);
 
   await assert.rejects(
     restoreProbeSession({}, { probeSessionId: "probe-1" }, {

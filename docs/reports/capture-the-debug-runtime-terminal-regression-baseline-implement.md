@@ -2,8 +2,8 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787692974_614977`
-Returned from Review: `review_1787692957_200267`
+Step: `botster_stack_implement` / `run_step_1787693574_739708`
+Returned from Review: `review_1787693555_555784`
 Human decision: `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9, resynced to format version 2
 Approved review: `review_1787638112_854617`
@@ -125,12 +125,12 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787692957_200267` returned two open findings. This visit starts a gated producer before the final Enter, requires inbound growth before and after `t_key`, and rejects invalid numeric family values.
+`review_1787693555_555784` returned two open findings. This visit keeps one physical producer in flight across Enter and through `t_key` to `t_pty`, and counts every control request in `issued`.
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787692957_921930` producer after key | Each saturation wrapper starts the producer, proves inbound growth, then sends the probe. It snapshots again at `t_key` and continues the producer through the PTY wait. A producer that starts only after `sendProbe` returns fails for control, package, and sibling families. Measured rates still count only the post-`t_key` interval. |
-| `finding_1787692958_623142` invalid numbers | Statistic fields must be finite, nonnegative, and ordered. Control rates must be finite and nonnegative. Counts and bytes must be nonnegative integers. `issued` must equal the frozen control request count, and `response_bytes` must equal `inbound_bytes`. Negative, string, `NaN`, `Infinity`, and inconsistent values reject. |
+| `finding_1787693555_360332` idle at Enter | `sendProbe` starts the producer in `beforeEnter`, after settle and marker typing, immediately before Enter. The wrapper rejects a sample when that producer is already settled at Enter. It does not start a second chunk after `t_key`. Measured rates still count only the post-`t_key` interval. |
+| `finding_1787693555_681327` hidden requests | Each measured sample issues one browser control request. `issued` and `requests` both increment by one. After 20 samples, the physical call count equals the frozen count of 20. A completed pre-key chunk that would require a later post-key chunk is rejected. |
 
 `review_1787691852_111616` findings from the prior visit remain resolved:
 
@@ -169,7 +169,7 @@ Deterministic gates:
 | G2 | `npm run lint` | passed, five known warnings in untouched files |
 | G3 | `npm test` | passed, two known `act(...)` warnings |
 | G4 | `npm run build` | passed |
-| G6 | validator assertions in `src/App.test.mjs` | format version 2, gated pre-key and post-key producer proof, invalid-number reject, inbound-byte unit, recomputed equalization, and one-armed reject |
+| G6 | validator assertions in `src/App.test.mjs` | format version 2, producer active at Enter, one physical control request per sample, invalid-number reject, inbound-byte unit, and one-armed reject |
 | G13 | `observe:terminal-baseline:validate` | available; used after a written record |
 
 G5 pinned sequence from the prior Implement visit remains the last completed live-packaged proof:

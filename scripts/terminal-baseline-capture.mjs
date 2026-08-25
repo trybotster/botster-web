@@ -404,24 +404,34 @@ export function createControlResponseBurst({
       stats.in_flight = true;
       try {
         const name = sequence[stats.issued];
-        const before = await observeInbound();
-        const prePending = Promise.resolve().then(() => issueRequest(name));
-        await Promise.all([
-          waitForProgress(observeInbound, before, "control_response_saturation", progressTimeoutMs),
-          prePending
-        ]);
-        const tKey = await sendProbe();
+        let pending = null;
+        let started = false;
+        let producerInFlight = false;
+        const tKey = await sendProbe({
+          beforeEnter: () => {
+            started = true;
+            producerInFlight = true;
+            pending = Promise.resolve(issueRequest(name)).finally(() => {
+              producerInFlight = false;
+            });
+          },
+          producerActive: () => producerInFlight
+        });
+        if (!started) {
+          throw new Error("control_response_saturation: sendProbe did not start the producer before Enter");
+        }
+        if (tKey.producer_active_at_enter !== true) {
+          throw new Error("control_response_saturation: producer was idle at the probe Enter");
+        }
         const atKey = await observeInbound();
-        assertPreKeyProgress(before, atKey, "control_response_saturation");
-        const postPending = Promise.resolve().then(() => issueRequest(name));
         const progress = Promise.all([
           waitForProgress(observeInbound, atKey, "control_response_saturation", progressTimeoutMs),
-          postPending
+          pending
         ]).then(([after]) => {
           const frameDelta = after.frames - atKey.frames;
           const byteDelta = after.bytes - atKey.bytes;
           stats.issued += 1;
-          stats.requests += 2;
+          stats.requests += 1;
           stats.responses += frameDelta;
           stats.produced_count += frameDelta;
           stats.response_bytes += byteDelta;
@@ -490,22 +500,31 @@ export function createPackageEventBurst({
       if (stats.completed || stats.produced_count >= count) {
         throw new Error("package_event_saturation: burst already completed before the sample");
       }
-      const half = perSample / 2;
-      const before = await observeDelivery();
-      const prePending = Promise.resolve().then(() => emitBurst(half));
-      await Promise.all([
-        waitForProgress(observeDelivery, before, "package_event_saturation", progressTimeoutMs),
-        prePending
-      ]);
-      const tKey = await sendProbe();
+      let pending = null;
+      let started = false;
+      let producerInFlight = false;
+      const tKey = await sendProbe({
+          beforeEnter: () => {
+            started = true;
+            producerInFlight = true;
+            pending = Promise.resolve(emitBurst(perSample)).finally(() => {
+              producerInFlight = false;
+            });
+          },
+        producerActive: () => producerInFlight
+      });
+      if (!started) {
+        throw new Error("package_event_saturation: sendProbe did not start the producer before Enter");
+      }
+      if (tKey.producer_active_at_enter !== true) {
+        throw new Error("package_event_saturation: producer was idle at the probe Enter");
+      }
       const atKey = await observeDelivery();
-      assertPreKeyProgress(before, atKey, "package_event_saturation");
-      const postPending = Promise.resolve().then(() => emitBurst(half));
       const progress = Promise.all([
         waitForProgress(observeDelivery, atKey, "package_event_saturation", progressTimeoutMs),
-        postPending
+        pending
       ]).then(([after]) => {
-        stats.produced_count += Number(after.count ?? after.frames ?? 0) - Number(before.count ?? before.frames ?? 0);
+        stats.produced_count += Number(after.count ?? after.frames ?? 0) - Number(atKey.count ?? atKey.frames ?? 0);
         if (stats.produced_count >= count) {
           stats.completed = true;
         }
@@ -566,18 +585,33 @@ export function createSiblingFloodHandle({
           count: Number(next.delivered_bytes ?? next.bytes ?? 0)
         };
       };
-      const before = await readBytes();
-      if (typeof subscribed.restartFlood === "function") {
-        void subscribed.restartFlood();
+      let pending = null;
+      let started = false;
+      let producerInFlight = false;
+      const tKey = await sendProbe({
+        beforeEnter: () => {
+          if (typeof subscribed.restartFlood !== "function") {
+            throw new Error("sibling_saturation: flood producer is not configured");
+          }
+          started = true;
+          producerInFlight = true;
+          pending = Promise.resolve(subscribed.restartFlood()).finally(() => {
+            producerInFlight = false;
+          });
+        },
+        producerActive: () => producerInFlight
+      });
+      if (!started) {
+        throw new Error("sibling_saturation: sendProbe did not start the producer before Enter");
       }
-      await waitForProgress(readBytes, before, "sibling_saturation", progressTimeoutMs);
-      const tKey = await sendProbe();
+      if (tKey.producer_active_at_enter !== true) {
+        throw new Error("sibling_saturation: producer was idle at the probe Enter");
+      }
       const atKey = await readBytes();
-      assertPreKeyProgress(before, atKey, "sibling_saturation");
-      if (typeof subscribed.restartFlood === "function") {
-        void subscribed.restartFlood();
-      }
-      const progress = waitForProgress(readBytes, atKey, "sibling_saturation", progressTimeoutMs).then((after) => {
+      const progress = Promise.all([
+        waitForProgress(readBytes, atKey, "sibling_saturation", progressTimeoutMs),
+        pending
+      ]).then(([after]) => {
         stats.terminal_a_subscribed = true;
         stats.produced_count = after.bytes;
         return after;
@@ -1315,11 +1349,19 @@ async function startDispatcher(page, ptyClock, seedPath) {
   await typeEnter(page);
 }
 
-async function sendProbe(page, marker) {
+async function sendProbe(page, marker, hooks = {}) {
   await waitForHashSettle(page.__baselineOracle, FROZEN_INPUTS.settle_window_ms).catch(() => null);
   await typeLine(page, probeLine(marker));
+  if (typeof hooks.beforeEnter === "function") {
+    await hooks.beforeEnter();
+    await Promise.resolve();
+  }
+  const producer_active_at_enter = typeof hooks.producerActive === "function"
+    ? hooks.producerActive() === true
+    : hooks.beforeEnter == null;
   await typeEnter(page);
-  return readLastEnterStamp(page);
+  const stamp = await readLastEnterStamp(page);
+  return { ...stamp, producer_active_at_enter };
 }
 
 function familyStats(samples, name) {
@@ -1349,7 +1391,7 @@ export async function captureKeyToPty({ page, arm, ptyClock, logWatcher, family,
     }
     const marker = uniqueMarker(arm.captureId, arm.arm_id, family, index);
     const previousHash = page.__baselineOracle.frames.at(-1)?.hash;
-    const send = () => sendProbe(page, marker);
+    const send = (hooks) => sendProbe(page, marker, hooks);
     const tKey = typeof aroundProbe === "function"
       ? await aroundProbe({ index, family, measured, sendProbe: send })
       : await send();
