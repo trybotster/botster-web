@@ -4,6 +4,20 @@ Plan for ticket `ticket_1787603669_760394` in project `project_1787600579_585482
 (Botster Isolated Subscription Data Plane), pipeline `botster_stack_delivery`,
 run `run_1787632387_839095`, step `botster_stack_plan`.
 
+**Revision 7**, after Plan Review `review_1787636833_416607` returned
+`changes_required` a sixth time, with one finding:
+
+- `finding_1787636833_238713` (high): the `screenshot_poll` fallback defined only
+  a polling interval, never whether `t_paint` was the screenshot request start,
+  its completion, or a point between, and never bounded the variable capture
+  duration of that host-to-browser round trip. Its paint values would have had no
+  stable endpoint. This revision takes the finding's preferred smallest fix and
+  **deletes the fallback**. `cdp_screencast` is the only paint oracle, the
+  validator rejects any other value, and an arm without `Page.startScreencast`
+  blocks the cross-arm paint families rather than substituting a second
+  instrument. The fallback was speculative in the first place: both arms run the
+  same Playwright Chromium, so either both reach the protocol or neither does.
+
 **Revision 6**, after Plan Review `review_1787636271_653821` returned
 `changes_required` a fifth time. All three findings were correct, and all three
 were consequences of revision 5 describing a two-clock design without writing it
@@ -83,9 +97,9 @@ the paint endpoint. Changes in that revision:
   injected script does not own that device, and a container element exposes no
   pixel buffer, so calling it a fallback was wrong. §6.3 moves the paint oracle to
   the host: a CDP `Page.startScreencast` session, compositor-timestamped frames
-  cropped to a frozen terminal bounding box and hashed, with a recorded
-  `screenshot_poll` fallback and its quantizing interval. Both arms reach it
-  identically through the same Playwright Chromium.
+  cropped to a frozen terminal bounding box and hashed. Both arms reach it
+  identically through the same Playwright Chromium. That revision also added a
+  `screenshot_poll` fallback, which revision 7 later deleted.
 
 **Revision 3**, after Plan Review `review_1787634482_723479` returned
 `changes_required` a second time. Changes in that revision:
@@ -583,20 +597,23 @@ The capture holds `scrollOffsetX`, `scrollOffsetY`, and `pageScaleFactor` fixed 
 construction, and G18 asserts they do not change mid-capture, so the transform
 stays constant for a whole capture.
 
-**One oracle for the whole capture.** The harness negotiates the paint oracle
-**once for the two-arm capture**, not per arm. Revision 4 allowed one arm to use
-compositor timestamps while the other used polling, which would have compared the
-oracles and violated the ticket's rule that every harness input outside the
-measured change is frozen. The negotiation is:
+**One oracle, and no fallback.** `cdp_screencast` is the only paint oracle. If
+`Page.startScreencast` is unavailable in either arm, the capture blocks the
+cross-arm paint families with a typed reason. It does not substitute a second
+instrument.
 
-1. If both arms support `Page.startScreencast`, both use `cdp_screencast`.
-2. Otherwise both use `screenshot_poll` with one identical
-   `paint_sample_interval_ms`, recorded because that interval quantizes every
-   paint value in the capture.
-3. If either arm can support neither, the capture blocks the cross-arm paint
-   families with a typed reason rather than recording a mixed comparison.
+Revision 7 deleted the `screenshot_poll` fallback that revisions 4 through 6
+carried. A timed `elementHandle.screenshot()` loop is a host-to-browser round trip
+with a variable capture duration, and the plan defined only its polling interval,
+never whether `t_paint` was the request start, the completion, or something
+between. Its paint values would have had no stable endpoint and an unrecorded
+instrument cost. The fallback was also speculative: both arms run the same
+Playwright Chromium, so either both reach the protocol or neither does. Deleting
+it removes a branch, removes a whole class of unstated instrument error, and makes
+`paint_oracle` a constant that a future change must bump `format_version` to
+alter.
 
-The same one-per-capture rule governs `pty_clock`: both arms use
+The one-per-capture rule still governs `pty_clock`: both arms use
 `shell_epochrealtime` or both use `host_watcher`, never one of each.
 
 
@@ -653,10 +670,12 @@ G16 fails closed on each of these, per arm, and G18 on the capture as a whole:
    because §6.3.1 shows no such ordering exists under `host_watcher`. A warm-up
    that writes the log but paints nothing blocks the arm's paint families with a
    typed reason.
-5. The negotiated paint oracle is the same for both arms, and under
-   `cdp_screencast` the measured `scale`, `pageScaleFactor`, `scrollOffsetX`, and
-   `scrollOffsetY` are stable, and a sustained-frame check received acknowledged
-   frames continuously across the warm-up rather than stalling after the first.
+5. `Page.startScreencast` works in both arms, the measured `scale`,
+   `pageScaleFactor`, `scrollOffsetX`, and `scrollOffsetY` are stable, and a
+   sustained-frame check received acknowledged frames continuously across the
+   warm-up rather than stalling after the first. If either arm cannot start a
+   screencast, the capture blocks the cross-arm paint families rather than
+   substituting a second instrument.
 6. Every calibration the negotiated clock and oracle require produced a non-empty
    sample set. `watcher_detection_calibration_ms` is required only under
    `host_watcher`; `append_cost_calibration_ms` only under
@@ -735,14 +754,13 @@ for source identity, and G14 requires both. An arm whose exact source revision
 cannot be proved is marked blocked rather than recorded with a short or inferred
 value.
 
-`paint_oracle` (`cdp_screencast` or `screenshot_poll`) and `pty_clock`
-(`shell_epochrealtime` or `host_watcher`) are **capture-level** members, not
-per-arm members, because §6.3.2 negotiates each once for the whole two-arm
-capture. A record whose two arms imply different values for either is invalid and
-G18 rejects it. Each arm entry records the frozen terminal bounding box, the
-measured frame `scale` under `cdp_screencast`, the discarded-frame count, and,
-under `screenshot_poll`, the one shared `paint_sample_interval_ms` that quantizes
-every paint value in the capture.
+`paint_oracle` and `pty_clock` are **capture-level** members, not per-arm members.
+`paint_oracle` is always `"cdp_screencast"`; §6.3.2 explains why there is no second
+value and the validator rejects any other. `pty_clock` is `shell_epochrealtime` or
+`host_watcher`, negotiated once for the whole two-arm capture. A record whose two
+arms imply different `pty_clock` values is invalid and G18 rejects it. Each arm
+entry records the frozen terminal bounding box, the measured frame `scale`, and
+the discarded-frame count.
 
 The `key_to_pty` family also records `decomposition_valid`, which is `true` only
 under `pty_clock: "shell_epochrealtime"`. Under `host_watcher` it is `false`, and
@@ -832,7 +850,7 @@ closed when it cannot prove a value.
 | Package-event burst | 200 package events on the modular arm only, matching the existing lane at `scripts/live-packaged-protocol-harness.mjs:1835` |
 | Sibling flood | two mounted terminals, terminal A flooded with a fixed output byte count from `fixtures/terminal-baseline/sibling-flood.sh`, terminal B probed |
 | Settle window | one fixed millisecond window for sampled-region hash stability |
-| Paint sampling | one oracle for the whole capture: CDP `Page.startScreencast` with frozen format, quality, and `maxWidth`/`maxHeight` at or above the viewport in device pixels, every frame acknowledged, cropped by the §6.3.2 transform; or `screenshot_poll` for both arms with one shared interval |
+| Paint sampling | CDP `Page.startScreencast` with frozen format, quality, and `maxWidth`/`maxHeight` at or above the viewport in device pixels, every frame acknowledged, cropped by the §6.3.2 transform. There is no second oracle |
 | PTY clock | one clock for the whole capture, `shell_epochrealtime` when the §6.3.1 handshake proves it in both arms, otherwise `host_watcher` in both |
 | Order | arms run in both orders across the capture, so warm-cache order is not confounded with arm |
 
@@ -870,12 +888,13 @@ New files in `botster-web`:
   capture-phase keydown stamp and the timestamped harness arrays), the host-side
   CDP screencast paint oracle with its crop and hash, the host-side baseline-log
   watcher, the §6.2.1 clock handshake and its acceptance band, the parser for both
-  §6.2.4 log formats, and the per-arm capture routine. It contains no wire oracle
-  and no in-page canvas readback; §6.1 and §6.3 record why both were removed.
-- `scripts/terminal-baseline-capture.mjs` — the two-arm orchestrator. Starts each
-  arm, starts the dispatcher and proves the §6.5 preconditions, runs all eight
-  families of §7 in both arm orders, tears each arm down, validates the record,
-  and writes it.
+  §6.2.4 log formats, and the per-arm capture routine. It contains no wire oracle,
+  no in-page canvas readback, and no second paint instrument; §6.1, §6.3.2, and the
+  revision 7 note record why each was removed.
+- `scripts/terminal-baseline-capture.mjs` — the two-arm orchestrator. Negotiates
+  `pty_clock` once and requires `Page.startScreencast` in both arms. It starts each
+  arm and its dispatcher, proves the §6.5 preconditions, runs all eight families of
+  §7 in both arm orders, tears each arm down, validates the record, and writes it.
 - `fixtures/terminal-baseline/seed-shell-clock.bash` — dispatcher variant A of
   §6.2.2, used when the capture negotiates `pty_clock: "shell_epochrealtime"`. It
   writes its own clock reading beside the marker, plus the second append that
@@ -999,10 +1018,11 @@ Unknowns, each with an owner:
 4. The exact terminal bounding box in each arm, whether `Page.startScreencast`
    works in both, and whether the §6.3.1 shell-clock handshake passes in both.
    Owned by this ticket's Implement step. Each bounding box is measured once per
-   arm and frozen. Both the paint oracle and the PTY clock are negotiated once for
-   the capture, so a capability missing in one arm downgrades both arms together
-   or blocks the cross-arm families; G16 and G18 enforce that rather than allowing
-   a mixed comparison.
+   arm and frozen. The PTY clock is negotiated once for the capture, so a missing
+   `bash` clock in one arm downgrades both arms together. The paint oracle has no
+   downgrade path at all: an arm without `Page.startScreencast` blocks the
+   cross-arm paint families. G16 and G18 enforce both rules rather than allowing a
+   mixed comparison.
 5. Whether the two arms' `list_configs` and `list_session_types` response shapes
    are close enough to equalize response frames and bytes within a useful
    tolerance. Owned by this ticket's Implement step, which must record the
@@ -1027,7 +1047,7 @@ Unknowns, each with an owner:
 | Screencast frames stop after the first | A silent stall reads as no paint change | Every frame is acknowledged with its `sessionId`, and G18 runs a sustained-frame check across the warm-up |
 | A paint calibration absorbs the latency it is meant to bound | The measured value is silently deflated | `metadata.timestamp * 1000` is used directly as epoch milliseconds; the revision 4 known-change offset calibration is deleted and must not reappear |
 | The paint oracle is moved back into the page for convenience | Four observation families silently stop working on a WebGPU or WebGL2 canvas | §6.3 fixes the oracle on the host through CDP screencast and records `paint_oracle` per arm; G16 blocks an arm whose warm-up probe paints nothing |
-| The `screenshot_poll` fallback quantization is read as product latency | Paint values carry an unstated floor equal to the sample interval | `paint_oracle` and the single shared `paint_sample_interval_ms` are capture-level members, and both arms use the same interval or the cross-arm paint families block |
+| A second paint instrument is added as a convenience fallback | Its capture-time endpoint and instrument cost go unstated, and paint values lose a stable endpoint | §6.3.2 deletes `screenshot_poll` outright; `cdp_screencast` is the only oracle, the validator rejects any other value, and an arm without screencast blocks the cross-arm paint families |
 | A per-probe helper process is added later for convenience | Process startup swamps the value being measured | §6.2 fixes the dispatcher as builtin `printf` plus an append redirect, with the one `cr` fork at session start only |
 | Browser and host-watcher wall clocks diverge | `key_to_pty` becomes meaningless or negative | Both stamps are `Date.now()` in one host's clock; G12 requires one host, the record carries `same_host: true`, and G15 discards and records any repetition whose `t_pty` precedes `t_key` |
 | The probe expands empty and records a zero-length marker | A silently wrong number enters the baseline | G16 requires `botster-baseline-ready` plus a warm-up probe whose log line equals the expected marker exactly, and blocks the arm otherwise |
@@ -1058,7 +1078,7 @@ is independent of every wall-clock value.
 | G15 | Both arms ran on one host, and no repetition has `t_pty` or the probe's paint change before `t_key` | harness precondition and per-repetition assertion |
 | G16 | Per arm, the dispatcher printed `botster-baseline-ready`; one warm-up probe added exactly one log line equal to the expected marker; the same warm-up produced at least one sampled-region hash change after its `t_pty` and rendered `botster-baseline-paint:<marker>`; and the watcher and paint calibrations each produced a non-empty sample set | harness precondition, fails closed; a log failure blocks that arm's PTY families and a paint failure blocks that arm's paint families |
 | G17 | Neither supplied checkout changed: each `HEAD` and each `git status --porcelain` is identical before and after the capture | harness precondition and post-condition, fails closed |
-| G18 | Capture-level oracle integrity: both arms resolved the same `paint_oracle` and the same `pty_clock`; under `cdp_screencast` every frame was acknowledged with its `sessionId`, the sustained-frame check never stalled, `scale`, `pageScaleFactor`, `scrollOffsetX`, and `scrollOffsetY` were stable across the capture, and no measured endpoint depended on a frame lacking `metadata.timestamp`; the screencast was stopped and the CDP session detached in teardown | harness precondition, per-frame assertion, and post-condition, fails closed |
+| G18 | Capture-level oracle integrity: `paint_oracle` is `cdp_screencast` and both arms resolved the same `pty_clock`; under `cdp_screencast` every frame was acknowledged with its `sessionId`, the sustained-frame check never stalled, `scale`, `pageScaleFactor`, `scrollOffsetX`, and `scrollOffsetY` were stable across the capture, and no measured endpoint depended on a frame lacking `metadata.timestamp`; the screencast was stopped and the CDP session detached in teardown | harness precondition, per-frame assertion, and post-condition, fails closed |
 | G19 | Under `pty_clock: "host_watcher"`, `decomposition_valid` is `false` and no negative `pty_to_paint_ms` sample was discarded; under `shell_epochrealtime`, the handshake record is present and `decomposition_valid` is `true` | validator assertion plus a harness assertion |
 
 G5 aborts before it reaches any test when it is written as the bare npm script:
