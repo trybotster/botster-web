@@ -65,6 +65,14 @@ Each measured family records `n`, `warmup_discarded`, `min`, `p50`, `p95`, and
 `max` in milliseconds. A family that cannot run records `status` plus a typed
 reason, never a number. The record must not carry a threshold field.
 
+The validator requires:
+
+- `endpoint_start` and `endpoint_end` to match the family contract
+- `n=20` and `warmup_discarded=3` on every measured family
+- `frozen_inputs` to match the frozen constants
+- at least one measured family, so an all-blocked record is not a publishable
+  baseline
+
 ## Frozen inputs
 
 The harness fails closed when it cannot prove a frozen input. The constants live
@@ -97,7 +105,9 @@ The local set is observational and non-gating.
 ## Controlled runner rerun
 
 The workflow `.github/workflows/terminal-regression-baseline.yml` is
-`workflow_dispatch` on `botster-ubuntu-24.04-16core`. No code change is required
+`workflow_dispatch` on `botster-ubuntu-24.04-16core`. The harness admits that
+host only after it proves Linux, Ubuntu 24.04, x64, and 16 logical CPUs. A
+mislabeled host cannot publish the controlled record. No code change is required
 to produce the controlled set.
 
 1. Register a GitHub Actions runner with label `botster-ubuntu-24.04-16core`.

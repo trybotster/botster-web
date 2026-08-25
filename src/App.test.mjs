@@ -89,6 +89,9 @@ import {
   WORKSPACES_SPAWN_OPENER_SELECTOR
 } from "../scripts/workspaces-shared-hub-browser-helpers.mjs";
 import {
+  FAMILY_CONTRACTS,
+  FROZEN_INPUTS,
+  OBSERVATION_FAMILIES,
   PAINT_ORACLE,
   PINNED_REVISIONS,
   PRODUCT_BASELINE_STATEMENT,
@@ -98,6 +101,7 @@ import {
   measureFrameScale,
   negotiateCaptureClock,
   parseDispatcherLogLine,
+  recordIsPublishableBaseline,
   statisticSet,
   validateObservationRecord
 } from "../scripts/terminal-baseline-observation-format.mjs";
@@ -107,7 +111,20 @@ import {
   handshakeCommand,
   substituteDispatcherSource
 } from "../scripts/terminal-baseline-observer.mjs";
-import { collectResttyProvenance, RESTTY_RUNTIME_FILES } from "../scripts/terminal-baseline-capture.mjs";
+import {
+  CONTROLLED_RUNNER_PROFILE,
+  RESTTY_RUNTIME_FILES,
+  admitControlledHost,
+  admitRunner,
+  assertWorkloadActive,
+  collectResttyProvenance,
+  createControlResponseBurst,
+  createPackageEventBurst,
+  createSiblingFloodHandle,
+  publicationDecision,
+  remountForPaintFamily,
+  writeBaselineRecord
+} from "../scripts/terminal-baseline-capture.mjs";
 
 const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
@@ -18399,6 +18416,103 @@ function removeCssAtRules(source) {
   const shellClock = exampleValidRecord({ pty_clock: "shell_epochrealtime" });
   delete shellClock.observations.modular.key_to_pty.append_cost_calibration_ms;
   assert.match(validateObservationRecord(shellClock).errors.join("\n"), /append_cost_calibration_ms/);
+
+  const wrongEndpoint = exampleValidRecord();
+  wrongEndpoint.observations.legacy.key_to_pty.endpoint_start = "t_pty";
+  assert.match(validateObservationRecord(wrongEndpoint).errors.join("\n"), /endpoint_start must be t_key/);
+
+  const wrongN = exampleValidRecord();
+  wrongN.observations.modular.attach_ready.n = 5;
+  assert.match(validateObservationRecord(wrongN).errors.join("\n"), /n must be 20/);
+
+  const wrongWarmup = exampleValidRecord();
+  wrongWarmup.observations.legacy.scrollback.warmup_discarded = 0;
+  assert.match(validateObservationRecord(wrongWarmup).errors.join("\n"), /warmup_discarded must be 3/);
+
+  const mutatedFrozen = exampleValidRecord();
+  mutatedFrozen.frozen_inputs = { ...FROZEN_INPUTS, settle_window_ms: 1 };
+  assert.match(validateObservationRecord(mutatedFrozen).errors.join("\n"), /frozen_inputs must match FROZEN_INPUTS/);
+
+  const allBlocked = exampleValidRecord();
+  for (const armId of ["legacy", "modular"]) {
+    for (const name of OBSERVATION_FAMILIES) {
+      allBlocked.observations[armId][name] = { status: "blocked", reason: "synthetic" };
+    }
+  }
+  assert.equal(recordIsPublishableBaseline(allBlocked), false);
+  assert.match(validateObservationRecord(allBlocked).errors.join("\n"), /not a publishable baseline/);
+
+  await assert.rejects(
+    createControlResponseBurst({ issueRequest: async () => null }).start(),
+    /workload producer is not active/
+  );
+  await assert.rejects(
+    createPackageEventBurst({ emitBurst: async () => 0 }).start(),
+    /workload producer is not active/
+  );
+  assert.throws(
+    () => createSiblingFloodHandle({ floodSessionId: null, probeSessionId: "b" }).proveActive(),
+    /workload producer is not active/
+  );
+  assert.throws(() => assertWorkloadActive({ active: false, produced_count: 0 }, "control_response_saturation"));
+
+  const liveBurst = createControlResponseBurst({
+    issueRequest: async (name) => ({ type: name, ok: true })
+  });
+  await liveBurst.start();
+  liveBurst.proveActive();
+  await liveBurst.stop();
+
+  await assert.rejects(
+    remountForPaintFamily({}, { arm_id: "legacy", sessionIds: [] }, {
+      remountAction: async () => ({ at: Date.now(), previousHash: "x" })
+    }),
+    /did not remount a session/
+  );
+  const remounted = await remountForPaintFamily({}, { arm_id: "legacy", sessionIds: [] }, {
+    remountAction: async () => ({ at: 1, previousHash: "x", didRemount: true, sessionId: "s1" })
+  });
+  assert.equal(remounted.didRemount, true);
+
+  const teardownDenied = publicationDecision({
+    record: exampleValidRecord(),
+    teardownProof: { ok: false }
+  });
+  assert.equal(teardownDenied.publish, false);
+  assert.equal(teardownDenied.reason, "teardown_unproven");
+  const deniedPath = fileURLToPath(new URL(`../docs/reports/terminal-baseline-must-not-write-${Date.now()}.json`, import.meta.url));
+  await assert.rejects(
+    writeBaselineRecord(deniedPath, exampleValidRecord(), { ok: false }),
+    /teardown_unproven/
+  );
+  assert.equal(existsSync(deniedPath), false);
+
+  const darwinHost = admitControlledHost({
+    label: CONTROLLED_RUNNER_PROFILE.label,
+    os: "Darwin",
+    distro_id: "ubuntu",
+    distro_version_id: "24.04",
+    arch: "x64",
+    logical_cpu_count: 16
+  });
+  assert.equal(darwinHost.ok, false);
+  assert.deepEqual(darwinHost.errors, ["os"]);
+  const wrongDistro = admitControlledHost({ ...CONTROLLED_RUNNER_PROFILE, distro_id: "debian" });
+  assert.deepEqual(wrongDistro.errors, ["distro_id"]);
+  const wrongVersion = admitControlledHost({ ...CONTROLLED_RUNNER_PROFILE, distro_version_id: "22.04" });
+  assert.deepEqual(wrongVersion.errors, ["distro_version_id"]);
+  const wrongArch = admitControlledHost({ ...CONTROLLED_RUNNER_PROFILE, arch: "arm64" });
+  assert.deepEqual(wrongArch.errors, ["arch"]);
+  const wrongCpus = admitControlledHost({ ...CONTROLLED_RUNNER_PROFILE, logical_cpu_count: 8 });
+  assert.deepEqual(wrongCpus.errors, ["logical_cpu_count"]);
+  const wrongLabel = admitControlledHost({ ...CONTROLLED_RUNNER_PROFILE, label: "ubuntu-latest" });
+  assert.deepEqual(wrongLabel.errors, ["label"]);
+  assert.equal(admitControlledHost({ ...CONTROLLED_RUNNER_PROFILE }).ok, true);
+  const unknownLabel = admitRunner({ ...CONTROLLED_RUNNER_PROFILE, label: "github-hosted" });
+  assert.equal(unknownLabel.ok, false);
+  const localRunner = admitRunner({ ...CONTROLLED_RUNNER_PROFILE, label: "local" });
+  assert.equal(localRunner.publication_class, "local");
+  assert.equal(FAMILY_CONTRACTS.sibling_saturation.endpoint_start, "t_key_terminal_b");
 
   const stats = statisticSet([4, 1, 3, 2]);
   assert.equal(stats.n, 4);

@@ -17,10 +17,15 @@ jobs:
     runs-on: botster-ubuntu-24.04-16core
     timeout-minutes: 180
     steps:
-      - name: Require the controlled runner label
+      - name: Admit the controlled host profile
         run: |
+          test "$(uname -s)" = "Linux"
+          test "$(uname -m)" = "x86_64"
+          test "$(nproc)" = "16"
+          . /etc/os-release
+          test "$ID" = "ubuntu"
+          test "$VERSION_ID" = "24.04"
           echo "runner_label=botster-ubuntu-24.04-16core"
-          echo "This job must not run on a generic GitHub-hosted runner."
 
       - name: Checkout botster-web
         uses: actions/checkout@v4

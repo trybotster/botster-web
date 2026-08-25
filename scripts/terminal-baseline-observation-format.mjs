@@ -368,6 +368,40 @@ function validateRestty(restty, armId, errors) {
   }
 }
 
+export function frozenInputsMatch(actual) {
+  try {
+    return JSON.stringify(actual) === JSON.stringify(FROZEN_INPUTS);
+  } catch {
+    return false;
+  }
+}
+
+export function familyIsMeasured(family) {
+  return isObject(family)
+    && family.status !== "blocked"
+    && family.status !== "not_applicable"
+    && family.n === FROZEN_INPUTS.measured_repetitions;
+}
+
+export function recordIsPublishableBaseline(record) {
+  if (!isObject(record?.observations)) {
+    return false;
+  }
+  let measured = 0;
+  for (const armId of ARM_IDS) {
+    const armObs = record.observations[armId];
+    if (!isObject(armObs)) {
+      return false;
+    }
+    for (const name of OBSERVATION_FAMILIES) {
+      if (familyIsMeasured(armObs[name])) {
+        measured += 1;
+      }
+    }
+  }
+  return measured > 0;
+}
+
 function validateFamily(family, name, armId, ptyClock, errors) {
   const label = `observations.${armId}.${name}`;
   if (!isObject(family)) {
@@ -393,11 +427,40 @@ function validateFamily(family, name, armId, ptyClock, errors) {
   }
   requireKeys(family, REQUIRED_FAMILY_STATS, label, errors);
   const contract = FAMILY_CONTRACTS[name];
+  if (family.endpoint_start !== contract.endpoint_start) {
+    errors.push(`${label}.endpoint_start must be ${contract.endpoint_start}`);
+  }
+  if (family.endpoint_end !== contract.endpoint_end) {
+    errors.push(`${label}.endpoint_end must be ${contract.endpoint_end}`);
+  }
+  if (family.n !== FROZEN_INPUTS.measured_repetitions) {
+    errors.push(`${label}.n must be ${FROZEN_INPUTS.measured_repetitions}`);
+  }
+  if (family.warmup_discarded !== FROZEN_INPUTS.warmup_repetitions) {
+    errors.push(`${label}.warmup_discarded must be ${FROZEN_INPUTS.warmup_repetitions}`);
+  }
   if (family.oracle !== contract.oracle) {
     errors.push(`${label}.oracle must be ${contract.oracle}`);
   }
   if (family.unit !== "ms") {
     errors.push(`${label}.unit must be ms`);
+  }
+  if (name === "control_response_saturation") {
+    for (const key of ["request_names", "producer", "request_rate", "response_rate", "response_bytes"]) {
+      if (!Object.hasOwn(family, key)) {
+        errors.push(`${label} is missing ${key}`);
+      }
+    }
+  }
+  if (name === "package_event_saturation" && !Object.hasOwn(family, "burst_count")) {
+    errors.push(`${label} is missing burst_count`);
+  }
+  if (name === "sibling_saturation") {
+    for (const key of ["flood_bytes", "terminal_a", "terminal_b"]) {
+      if (!Object.hasOwn(family, key)) {
+        errors.push(`${label} is missing ${key}`);
+      }
+    }
   }
   if (name === "key_to_pty") {
     if (typeof family.decomposition_valid !== "boolean") {
@@ -464,6 +527,9 @@ export function validateObservationRecord(record) {
       }
     }
   }
+  if (!frozenInputsMatch(record.frozen_inputs)) {
+    errors.push("frozen_inputs must match FROZEN_INPUTS");
+  }
   if (!isObject(record.observations)) {
     errors.push("observations must be an object");
   } else {
@@ -476,6 +542,9 @@ export function validateObservationRecord(record) {
       for (const name of OBSERVATION_FAMILIES) {
         validateFamily(armObs[name], name, armId, record.pty_clock, errors);
       }
+    }
+    if (!recordIsPublishableBaseline(record)) {
+      errors.push("a record whose every family is blocked is not a publishable baseline");
     }
   }
   if (!Array.isArray(record.blocked)) {
@@ -567,11 +636,23 @@ export function exampleValidRecord(overrides = {}) {
     }),
     scrollback: measuredFamily("scrollback"),
     large_history: measuredFamily("large_history"),
-    control_response_saturation: measuredFamily("control_response_saturation"),
+    control_response_saturation: measuredFamily("control_response_saturation", {
+      request_names: FROZEN_INPUTS.control_request_names,
+      producer: armId === "modular" ? "daemon_request" : "legacy_hub_connection",
+      request_rate: 4,
+      response_rate: 4,
+      response_bytes: 1024
+    }),
     package_event_saturation: armId === "legacy"
       ? notApplicableFamily("legacy f598075e has no harness-drivable package-event plane")
-      : measuredFamily("package_event_saturation"),
-    sibling_saturation: measuredFamily("sibling_saturation")
+      : measuredFamily("package_event_saturation", {
+        burst_count: FROZEN_INPUTS.package_event_burst_count
+      }),
+    sibling_saturation: measuredFamily("sibling_saturation", {
+      flood_bytes: FROZEN_INPUTS.sibling_flood_bytes,
+      terminal_a: `${armId}-flood`,
+      terminal_b: `${armId}-probe`
+    })
   });
   return {
     format_version: FORMAT_VERSION,

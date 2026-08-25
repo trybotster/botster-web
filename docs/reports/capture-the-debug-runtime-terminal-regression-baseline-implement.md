@@ -2,7 +2,8 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787638135_256523`
+Step: `botster_stack_implement` / `run_step_1787672466_225063`
+Returned from Review: `review_1787672435_131226`
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9
 Approved review: `review_1787638112_854617`
 
@@ -82,7 +83,7 @@ New:
 Changed:
 
 - `package.json` — `observe:terminal-baseline` and `observe:terminal-baseline:validate`
-- `src/App.test.mjs` — format, validator, Restty-provenance, and same-host assertions
+- `src/App.test.mjs` — format, validator, Restty-provenance, same-host, saturation-workload, remount, teardown-publication, and runner-admission assertions
 - `README.md` — pointer to the published format
 
 Unchanged production paths: everything under `src/botster/`, `src/app/`, and `src/vendor/restty/`. No file in the supplied Hub checkout or `~/Rails/trybotster` was written.
@@ -107,7 +108,7 @@ Implemented in harness scope. No lens was dropped to informal follow-up.
 | Isolation | Isolated data directory, Hub process, and browser context per arm. One arm failure stops that arm's process tree only. |
 | Bounds | SIGTERM, then SIGKILL after `teardown_budget_ms`. Escalation is recorded. No unbounded wait. |
 | Late-message matrix | Terminal attach, entity family, package-event burst, and spawned session are tagged and released before the next repetition or arm stop. |
-| Production-path proof | Real browser, real client build, real Hub, real PTY dispatcher. Teardown asserts Hub pid gone and socket path absent. A JSON record alone is not teardown proof. |
+| Production-path proof | Real browser, real client build, real Hub, real PTY dispatcher. The candidate record stays in memory until both arm process trees and required sockets are gone. A JSON record is written only after that proof. |
 | Ownership identity | Each arm records `arm_id`, Hub pid, data directory, and session ids. Each probe marker includes capture, arm, family, and repetition. |
 | Sibling fail-closed | A one-armed record is not a baseline. Ultimate stop failure fails the capture. |
 
@@ -115,10 +116,22 @@ Implemented in harness scope. No lens was dropped to informal follow-up.
 
 1. `dispatcher_append_calibration_ms` measures the same builtin `printf` plus append on the host, without the browser. It does not yet open the session PTY device node directly.
 2. Family collection runs after both arms have started. The frozen `n=20` is one pass per family per arm. The capture does not yet repeat the full 20-rep set in the opposite arm order as a second isolated campaign.
-3. Legacy remount for `attach_ready`, `history_finish`, and `large_history` still uses the already-open session when the browser session-type control cannot spawn a fresh session. Modular remount uses daemon `spawn` plus dashboard open.
-4. Vault checklist creation timed out at the plugin worker. Evidence lives in this report and in the gate payload. No second checklist create was retried after the timeout.
+3. Modular `control_response_saturation` issues `list_packages` in the `list_configs` slot because modular Hub has no `list_configs`. The family records that limitation. The frozen logical names stay `list_configs` and `list_session_types`.
+4. Vault checklist creation timed out at the plugin worker on the first Implement visit. This visit reuses the existing run checklist when list/create is available.
 
 These deviations do not change the frozen schema, the two dispatcher variants, the single paint oracle, or the prohibition on transport and Restty edits.
+
+## Review findings addressed
+
+`review_1787672435_131226` returned five open findings. This visit implements each one:
+
+| Finding | Fix |
+| --- | --- |
+| `finding_1787672435_179122` saturation workloads | Control, package-event, and sibling families now start their producers and prove them on every sample. A removed producer fails closed. |
+| `finding_1787672435_127057` legacy remount | Legacy paint families use `new-session-button` and seed `history-seed.sh` before attach. A remount that returns timestamps only is rejected. |
+| `finding_1787672435_340637` publish before teardown | The candidate stays in memory. Both arm process trees and sockets must be gone before the record is written. |
+| `finding_1787672435_407878` validator contract | The validator now checks endpoints, `n=20`, warmup count, frozen inputs, and rejects an all-blocked record. |
+| `finding_1787672435_318148` runner admission | Controlled publication requires Linux, Ubuntu 24.04, x64, 16 CPUs, and the exact runner label. Any other label fails closed. |
 
 ## Tests and downstream proof
 
@@ -173,7 +186,7 @@ report does not invent wall-clock numbers.
 - Legacy Rails provisioning on Linux CI is unproven.
 - Exact canvas settle-window calibration is frozen at 250 ms and may need a later `format_version` bump if both arms prove a different stable window.
 - `list_configs` and `list_session_types` response-shape equalization is recorded per arm when the live capture runs; this visit did not freeze an achieved tolerance from a completed two-arm set.
-- Sibling flood and package-event burst paths need the live capture to prove G7, G9, G10, G16, and G18 on real product arms.
+- Sibling flood and package-event burst paths now have executable producers and negative controls. A live two-arm capture is still required to prove G7, G9, G10, G16, and G18 on real product arms.
 
 ## Missing vault guidance discovered
 

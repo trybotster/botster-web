@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { cpus, freemem, hostname, totalmem, type as osType, release as osRelease } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -28,6 +28,7 @@ import {
   negotiateCaptureClock,
   notApplicableFamily,
   parseDispatcherLogLine,
+  recordIsPublishableBaseline,
   statisticSet,
   validateObservationRecord
 } from "./terminal-baseline-observation-format.mjs";
@@ -57,6 +58,25 @@ import {
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DAEMON_PROTOCOL = "botster-hub-daemon-v1";
+export const CONTROLLED_RUNNER_PROFILE = Object.freeze({
+  label: "botster-ubuntu-24.04-16core",
+  os: "Linux",
+  distro_id: "ubuntu",
+  distro_version_id: "24.04",
+  arch: "x64",
+  logical_cpu_count: 16
+});
+const PACKAGE_EVENT_BURST_ACTION = Object.freeze({
+  package_name: "package-notice-reaction",
+  request: Object.freeze({
+    request_id: "terminal-baseline-package-burst",
+    surface_id: "package-notice-reaction.events",
+    action_id: "package-notice-reaction.emit_burst",
+    node_id: "package-notice-reaction-emit-burst",
+    kind: "submit",
+    payload: Object.freeze({ count: FROZEN_INPUTS.package_event_burst_count })
+  })
+});
 const RESTTY_RUNTIME_FILES = Object.freeze([
   "src/vendor/restty/internal.js",
   "src/vendor/restty/chunk-3mc71e83.js",
@@ -204,18 +224,237 @@ export async function buildScratchHub(hubSource) {
   };
 }
 
-function hostRecord() {
+function hostRecord(profile) {
   const cpu = cpus()[0];
   return {
-    os: osType(),
+    os: profile.os,
     kernel: osRelease(),
     cpu_model: cpu?.model ?? "unknown",
-    logical_cpu_count: cpus().length,
+    logical_cpu_count: profile.logical_cpu_count,
     memory_bytes: totalmem(),
-    runner_label: process.env.BOTSTER_BASELINE_RUNNER_LABEL ?? "local",
+    runner_label: profile.label,
+    distro_id: profile.distro_id,
+    distro_version_id: profile.distro_version_id,
+    arch: profile.arch,
     hostname_hash: createHash("sha256").update(hostname()).digest("hex").slice(0, 16),
     free_memory_bytes_at_start: freemem()
   };
+}
+
+export function readOsRelease(text) {
+  const fields = {};
+  for (const line of String(text).split("\n")) {
+    const match = line.match(/^([A-Z_]+)=(.*)$/);
+    if (!match) continue;
+    fields[match[1]] = match[2].replace(/^"(.*)"$/, "$1");
+  }
+  return fields;
+}
+
+export function inspectHostProfile(overrides = {}) {
+  const osReleaseText = overrides.osReleaseText
+    ?? (existsSync("/etc/os-release") ? readFileSync("/etc/os-release", "utf8") : "");
+  const fields = readOsRelease(osReleaseText);
+  return {
+    label: overrides.label ?? process.env.BOTSTER_BASELINE_RUNNER_LABEL ?? "local",
+    os: overrides.os ?? osType(),
+    arch: overrides.arch ?? process.arch,
+    logical_cpu_count: overrides.logical_cpu_count ?? cpus().length,
+    distro_id: overrides.distro_id ?? fields.ID ?? null,
+    distro_version_id: overrides.distro_version_id ?? fields.VERSION_ID ?? null
+  };
+}
+
+export function admitControlledHost(profile) {
+  const errors = [];
+  const expected = CONTROLLED_RUNNER_PROFILE;
+  if (profile.label !== expected.label) errors.push("label");
+  if (profile.os !== expected.os) errors.push("os");
+  if (profile.distro_id !== expected.distro_id) errors.push("distro_id");
+  if (profile.distro_version_id !== expected.distro_version_id) errors.push("distro_version_id");
+  if (profile.arch !== expected.arch) errors.push("arch");
+  if (profile.logical_cpu_count !== expected.logical_cpu_count) errors.push("logical_cpu_count");
+  return {
+    ok: errors.length === 0,
+    errors,
+    publication_class: errors.length === 0 ? "controlled" : "ineligible"
+  };
+}
+
+export function admitRunner(profile) {
+  if (profile.label === "local") {
+    return {
+      ok: true,
+      publication_class: "local",
+      errors: [],
+      blocked: [{
+        family: "controlled_runner",
+        reason: "botster-ubuntu-24.04-16core is unregistered; repository runner list is empty"
+      }]
+    };
+  }
+  if (profile.label !== CONTROLLED_RUNNER_PROFILE.label) {
+    return {
+      ok: false,
+      publication_class: "ineligible",
+      errors: [`unknown runner label ${profile.label}`],
+      blocked: []
+    };
+  }
+  const admission = admitControlledHost(profile);
+  return {
+    ...admission,
+    blocked: []
+  };
+}
+
+export function assertWorkloadActive(handle, family) {
+  if (!handle || handle.active !== true || (handle.produced_count ?? 0) < 1) {
+    throw new Error(`${family}: workload producer is not active`);
+  }
+}
+
+export function createControlResponseBurst({ issueRequest, names = FROZEN_INPUTS.control_request_names, intervalMs = 25 }) {
+  const stats = {
+    active: false,
+    produced_count: 0,
+    requests: 0,
+    responses: 0,
+    response_bytes: 0,
+    last_at: 0
+  };
+  let timer = null;
+  const tick = async () => {
+    if (!stats.active) return;
+    for (const name of names) {
+      const reply = await issueRequest(name);
+      if (reply == null) continue;
+      stats.requests += 1;
+      stats.responses += 1;
+      stats.produced_count += 1;
+      stats.response_bytes += Buffer.byteLength(JSON.stringify(reply));
+      stats.last_at = Date.now();
+    }
+  };
+  return {
+    stats,
+    names,
+    async start() {
+      stats.active = true;
+      await tick();
+      assertWorkloadActive(stats, "control_response_saturation");
+      timer = setInterval(() => {
+        void tick();
+      }, intervalMs);
+      return stats;
+    },
+    proveActive() {
+      assertWorkloadActive(stats, "control_response_saturation");
+    },
+    async stop() {
+      stats.active = false;
+      if (timer) clearInterval(timer);
+    },
+    metrics(elapsedMs) {
+      const seconds = Math.max(elapsedMs / 1000, 0.001);
+      return {
+        request_names: names,
+        request_rate: stats.requests / seconds,
+        response_rate: stats.responses / seconds,
+        response_bytes: stats.response_bytes,
+        tolerance: { response_rate: 0.25, response_bytes: 0.25 }
+      };
+    }
+  };
+}
+
+export function createPackageEventBurst({ emitBurst, count = FROZEN_INPUTS.package_event_burst_count }) {
+  const stats = {
+    active: false,
+    produced_count: 0,
+    burst_count: count
+  };
+  return {
+    stats,
+    async start() {
+      const emitted = await emitBurst(count);
+      stats.produced_count = Number(emitted ?? 0);
+      stats.active = stats.produced_count === count;
+      assertWorkloadActive(stats, "package_event_saturation");
+      return stats;
+    },
+    proveActive() {
+      assertWorkloadActive(stats, "package_event_saturation");
+    },
+    async stop() {
+      stats.active = false;
+    }
+  };
+}
+
+export function createSiblingFloodHandle({ floodSessionId, probeSessionId, floodBytes = FROZEN_INPUTS.sibling_flood_bytes }) {
+  const stats = {
+    active: Boolean(floodSessionId && probeSessionId && floodBytes === FROZEN_INPUTS.sibling_flood_bytes),
+    produced_count: floodSessionId ? 1 : 0,
+    floodSessionId,
+    probeSessionId,
+    flood_bytes: floodBytes
+  };
+  return {
+    stats,
+    proveActive() {
+      assertWorkloadActive(stats, "sibling_saturation");
+    },
+    async stop() {
+      stats.active = false;
+    }
+  };
+}
+
+export function processGroupGone(pgid) {
+  if (!pgid) return true;
+  try {
+    process.kill(-pgid, 0);
+    return false;
+  } catch {
+    return pidGone(pgid);
+  }
+}
+
+export function proveOwnedProcessesGone(arm) {
+  const pids = [arm?.child?.pid, arm?.web?.pid].filter(Boolean);
+  const livePids = pids.filter((pid) => !pidGone(pid));
+  const liveGroups = pids.filter((pid) => !processGroupGone(pid));
+  const socketGone = arm?.socketPath ? existsSync(arm.socketPath) === false : true;
+  return {
+    ok: livePids.length === 0 && liveGroups.length === 0 && socketGone,
+    live_pids: livePids,
+    live_groups: liveGroups,
+    socket_gone: socketGone
+  };
+}
+
+export function publicationDecision({ record, teardownProof }) {
+  if (!teardownProof?.ok) {
+    return { publish: false, reason: "teardown_unproven" };
+  }
+  const validation = validateObservationRecord(record);
+  if (!validation.ok) {
+    return { publish: false, reason: "invalid_record", errors: validation.errors };
+  }
+  if (!recordIsPublishableBaseline(record)) {
+    return { publish: false, reason: "not_publishable_baseline" };
+  }
+  return { publish: true };
+}
+
+export async function writeBaselineRecord(outputPath, record, teardownProof) {
+  const decision = publicationDecision({ record, teardownProof });
+  if (!decision.publish) {
+    throw new Error(`refusing to publish baseline: ${decision.reason}`);
+  }
+  await writeFile(outputPath, `${JSON.stringify(record, null, 2)}\n`);
+  return outputPath;
 }
 
 async function sendDaemonRequest(socketPath, request) {
@@ -276,33 +515,43 @@ async function waitForPath(path, timeoutMs, exitMessage) {
   throw new Error(`timed out waiting for ${path}`);
 }
 
+function signalProcessTree(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch {
+    try {
+      process.kill(pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 async function stopProcess(child, budgetMs = FROZEN_INPUTS.teardown_budget_ms) {
   if (!child?.pid) {
-    return { teardown: "absent", pid: null };
+    return { teardown: "absent", pid: null, process_group_gone: true };
   }
   const pid = child.pid;
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    return { teardown: "stopped", pid };
-  }
+  signalProcessTree(pid, "SIGTERM");
   const finished = await Promise.race([
     once(child, "exit").then(() => true),
     new Promise((resolvePromise) => setTimeout(() => resolvePromise(false), budgetMs))
   ]);
-  if (finished) {
-    return { teardown: "stopped", pid };
+  if (finished && processGroupGone(pid)) {
+    return { teardown: "stopped", pid, process_group_gone: true };
   }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    return { teardown: "escalated", pid };
-  }
+  signalProcessTree(pid, "SIGKILL");
   await Promise.race([
     once(child, "exit"),
     new Promise((resolvePromise) => setTimeout(resolvePromise, FROZEN_INPUTS.teardown_escalate_ms))
   ]);
-  return { teardown: "escalated", pid };
+  return {
+    teardown: "escalated",
+    pid,
+    process_group_gone: processGroupGone(pid)
+  };
 }
 
 function pidGone(pid) {
@@ -360,6 +609,7 @@ async function startModularArm({ captureId, hubBuild, restty }) {
   const child = spawn(hubBuild.hubBin, ["start", "--data-dir", dataDir, "--session-worker-bin", hubBuild.workerBin], {
     cwd: packageRoot,
     env,
+    detached: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
   const socketPath = join(dataDir, "botster-hub.sock");
@@ -412,11 +662,13 @@ async function startLegacyArm({ captureId, checkout, restty }) {
   const child = spawn("mise", ["r", "run_hub_debug"], {
     cwd: checkout.path,
     env: { ...process.env, BOTSTER_BASELINE_CAPTURE: "1" },
+    detached: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
   const web = spawn("bin/dev", [], {
     cwd: checkout.path,
     env: { ...process.env, BOTSTER_BASELINE_CAPTURE: "1" },
+    detached: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
   const appUrl = process.env.BOTSTER_LEGACY_URL ?? "http://127.0.0.1:3000";
@@ -491,34 +743,174 @@ async function openSession(page, sessionId) {
   await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor({ timeout: 30_000 });
 }
 
-async function remountForPaintFamily(page, arm, options = {}) {
-  const previousHash = page.__baselineOracle.frames.at(-1)?.hash;
-  if (arm.arm_id === "modular" && arm.socketPath) {
-    const previousId = arm.sessionIds.at(-1);
-    if (previousId) {
-      await sendDaemonRequest(arm.socketPath, { type: "shutdown_session", session_id: previousId }).catch(() => null);
-      await sendDaemonRequest(arm.socketPath, { type: "remove_session", session_id: previousId }).catch(() => null);
+async function goHome(page) {
+  await page.getByLabel(HOST_CHROME.workbenchNavLabel).getByRole("button", { name: HOST_CHROME.homeNavButtonName, exact: true }).click().catch(() => null);
+  await page.getByTestId(HOST_CHROME.dashboardTestId).waitFor({ timeout: 30_000 }).catch(() => null);
+}
+
+async function readMountedSessionId(page) {
+  const id = await page.locator(`[${HOST_CHROME.terminalSessionIdAttr}]`).first().getAttribute(HOST_CHROME.terminalSessionIdAttr);
+  if (!id) {
+    throw new Error("mounted terminal has no session id");
+  }
+  return id;
+}
+
+async function completeLegacyNewSession(page) {
+  const button = page.getByTestId("new-session-button");
+  await button.waitFor({ timeout: 30_000 }).catch(() => {
+    throw new Error("legacy remount: new-session-button is not available");
+  });
+  await button.click();
+  const start = page.getByRole("button", { name: HOST_CHROME.newSessionSubmitName, exact: true });
+  if (await start.count() > 0) {
+    await start.first().click();
+  }
+  await page.locator(".terminal-view-container canvas").first().waitFor({ timeout: 30_000 });
+  return readMountedSessionId(page);
+}
+
+export async function remountForPaintFamily(page, arm, options = {}) {
+  const remount = options.remountAction ?? defaultRemountAction;
+  if (typeof remount !== "function") {
+    throw new Error(`${arm.arm_id} remount: remount action is missing`);
+  }
+  const result = await remount(page, arm, options);
+  if (!result?.didRemount) {
+    throw new Error(`${arm.arm_id} remount: action did not remount a session`);
+  }
+  return result;
+}
+
+async function defaultRemountAction(page, arm, options = {}) {
+  if (arm.arm_id === "modular") {
+    return remountModularSession(page, arm, options);
+  }
+  return remountLegacySession(page, arm, options);
+}
+
+async function remountModularSession(page, arm, options = {}) {
+  if (!arm.socketPath) {
+    throw new Error("modular remount: daemon socket is missing");
+  }
+  const previousId = arm.sessionIds.at(-1);
+  if (previousId && previousId !== arm.probeSessionId) {
+    await sendDaemonRequest(arm.socketPath, { type: "shutdown_session", session_id: previousId }).catch(() => null);
+    await sendDaemonRequest(arm.socketPath, { type: "remove_session", session_id: previousId }).catch(() => null);
+  }
+  const sessionId = `${arm.captureId}-modular-${options.seedHistory ? "history" : "attach"}-${Date.now()}`;
+  const command = options.seedHistory
+    ? `sh ${join(fixtureRoot(packageRoot), "history-seed.sh")}`
+    : "sh";
+  const response = await sendDaemonRequest(arm.socketPath, {
+    type: "spawn",
+    session_id: sessionId,
+    command
+  });
+  if (response.error) {
+    throw new Error(`modular remount spawn failed: ${JSON.stringify(response.error)}`);
+  }
+  arm.sessionIds.push(sessionId);
+  const previousHash = page.__baselineOracle?.frames.at(-1)?.hash;
+  const at = Date.now();
+  await goHome(page);
+  await openSession(page, sessionId);
+  await page.locator(".terminal-view-container canvas").first().waitFor({ timeout: 30_000 });
+  return { at, previousHash, didRemount: true, sessionId };
+}
+
+async function remountLegacySession(page, arm, options = {}) {
+  if (options.seedHistory) {
+    const seededId = await completeLegacyNewSession(page);
+    arm.sessionIds.push(seededId);
+    await typeLine(page, `sh ${join(fixtureRoot(packageRoot), "history-seed.sh")}`);
+    await typeEnter(page);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+    await goHome(page);
+    const previousHash = page.__baselineOracle?.frames.at(-1)?.hash;
+    const at = Date.now();
+    await openSession(page, seededId);
+    await page.locator(".terminal-view-container canvas").first().waitFor({ timeout: 30_000 });
+    return { at, previousHash, didRemount: true, sessionId: seededId };
+  }
+  const previousHash = page.__baselineOracle?.frames.at(-1)?.hash;
+  const at = Date.now();
+  const sessionId = await completeLegacyNewSession(page);
+  arm.sessionIds.push(sessionId);
+  return { at, previousHash, didRemount: true, sessionId };
+}
+
+export async function issueControlRequest(arm, name) {
+  if (arm.arm_id === "modular") {
+    const issuedName = name === "list_configs" ? "list_packages" : name;
+    return sendDaemonRequest(arm.socketPath, { type: issuedName });
+  }
+  return arm.page.evaluate(async (requestName) => {
+    const connection = globalThis.__BOTSTER_HUB_CONNECTION__
+      ?? globalThis.hubConnection
+      ?? globalThis.__hubConnection;
+    if (!connection) {
+      throw new Error("legacy hub connection is not exposed");
     }
-    const sessionId = `${arm.captureId}-modular-${options.seedHistory ? "history" : "attach"}-${Date.now()}`;
-    const command = options.seedHistory
-      ? `sh ${join(fixtureRoot(packageRoot), "history-seed.sh")}`
-      : "sh";
+    if (requestName === "list_configs" && typeof connection.requestAgentConfig === "function") {
+      return connection.requestAgentConfig(connection.targetId ?? connection.target_id ?? null);
+    }
+    if (requestName === "list_session_types" && typeof connection.requestSessionTypes === "function") {
+      return connection.requestSessionTypes(connection.agentId ?? connection.agent_id ?? null);
+    }
+    if (typeof connection.sendCommand === "function") {
+      return connection.sendCommand(requestName, {});
+    }
+    throw new Error(`legacy cannot issue ${requestName}`);
+  }, name);
+}
+
+async function startSiblingFlood(page, arm) {
+  const floodScript = join(fixtureRoot(packageRoot), "sibling-flood.sh");
+  const probeSessionId = arm.probeSessionId ?? arm.sessionIds[0];
+  if (!probeSessionId) {
+    throw new Error("sibling_saturation: probe terminal B is missing");
+  }
+  let floodSessionId;
+  if (arm.arm_id === "modular") {
+    floodSessionId = `${arm.captureId}-modular-flood-${Date.now()}`;
     const response = await sendDaemonRequest(arm.socketPath, {
       type: "spawn",
-      session_id: sessionId,
-      command
+      session_id: floodSessionId,
+      command: `sh ${floodScript}`
     });
     if (response.error) {
-      throw new Error(`modular remount spawn failed: ${JSON.stringify(response.error)}`);
+      throw new Error(`sibling flood spawn failed: ${JSON.stringify(response.error)}`);
     }
-    arm.sessionIds.push(sessionId);
-    const at = Date.now();
-    await page.getByLabel(HOST_CHROME.workbenchNavLabel).getByRole("button", { name: HOST_CHROME.homeNavButtonName, exact: true }).click().catch(() => null);
-    await openSession(page, sessionId);
+    arm.sessionIds.push(floodSessionId);
+    await goHome(page);
+    await openSession(page, floodSessionId);
     await page.locator(".terminal-view-container canvas").first().waitFor({ timeout: 30_000 });
-    return { at, previousHash };
+  } else {
+    floodSessionId = await completeLegacyNewSession(page);
+    arm.sessionIds.push(floodSessionId);
+    await typeLine(page, `sh ${floodScript}`);
+    await typeEnter(page);
   }
-  return { at: Date.now(), previousHash };
+  return createSiblingFloodHandle({ floodSessionId, probeSessionId });
+}
+
+export async function emitPackageEventBurst(arm, count = FROZEN_INPUTS.package_event_burst_count) {
+  if (arm.arm_id !== "modular") {
+    throw new Error("package_event_saturation is modular-only");
+  }
+  const response = await sendDaemonRequest(arm.socketPath, {
+    type: "plugin_surface_action",
+    package_name: PACKAGE_EVENT_BURST_ACTION.package_name,
+    request: {
+      ...PACKAGE_EVENT_BURST_ACTION.request,
+      payload: { count }
+    }
+  });
+  if (response.error) {
+    throw new Error(`package-event burst failed: ${JSON.stringify(response.error)}`);
+  }
+  return count;
 }
 
 async function armLocalSemantics(page, armId) {
@@ -578,12 +970,15 @@ function familyStats(samples, name) {
   };
 }
 
-async function captureKeyToPty({ page, arm, ptyClock, logWatcher, family, repetitions }) {
+async function captureKeyToPty({ page, arm, ptyClock, logWatcher, family, repetitions, prove }) {
   const samples = [];
   const ptyToPaint = [];
   const keyToPaint = [];
   const discardedNegative = false;
   for (let index = 0; index < FROZEN_INPUTS.warmup_repetitions + repetitions; index += 1) {
+    if (typeof prove === "function") {
+      prove({ index, family });
+    }
     const marker = uniqueMarker(arm.captureId, arm.arm_id, family, index);
     const previousHash = page.__baselineOracle.frames.at(-1)?.hash;
     const tKey = await sendProbe(page, marker);
@@ -726,41 +1121,75 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
     });
   }
   if (observations.control_response_saturation == null && warmup.pty.ok) {
-    observations.control_response_saturation = await captureKeyToPty({
-      page,
-      arm,
-      ptyClock,
-      logWatcher,
-      family: "control_response_saturation",
-      repetitions: FROZEN_INPUTS.measured_repetitions
+    const burst = createControlResponseBurst({
+      issueRequest: (name) => issueControlRequest(arm, name)
     });
-    observations.control_response_saturation.request_names = FROZEN_INPUTS.control_request_names;
-    observations.control_response_saturation.producer = arm.arm_id === "modular" ? "daemon_request" : "legacy_hub_connection";
+    const started = Date.now();
+    await burst.start();
+    try {
+      observations.control_response_saturation = await captureKeyToPty({
+        page,
+        arm,
+        ptyClock,
+        logWatcher,
+        family: "control_response_saturation",
+        repetitions: FROZEN_INPUTS.measured_repetitions,
+        prove: () => burst.proveActive()
+      });
+      Object.assign(observations.control_response_saturation, burst.metrics(Date.now() - started), {
+        producer: arm.arm_id === "modular" ? "daemon_request" : "legacy_hub_connection",
+        limitation: arm.arm_id === "modular"
+          ? "modular Hub has no list_configs; the harness issues list_packages for that slot"
+          : null
+      });
+    } finally {
+      await burst.stop();
+    }
   }
   if (arm.arm_id === "legacy") {
     observations.package_event_saturation = notApplicableFamily(
       "legacy f598075e has no harness-drivable package-event plane"
     );
   } else if (warmup.pty.ok) {
-    observations.package_event_saturation = await captureKeyToPty({
-      page,
-      arm,
-      ptyClock,
-      logWatcher,
-      family: "package_event_saturation",
-      repetitions: FROZEN_INPUTS.measured_repetitions
+    const burst = createPackageEventBurst({
+      emitBurst: (count) => emitPackageEventBurst(arm, count)
     });
-    observations.package_event_saturation.burst_count = FROZEN_INPUTS.package_event_burst_count;
+    await burst.start();
+    try {
+      observations.package_event_saturation = await captureKeyToPty({
+        page,
+        arm,
+        ptyClock,
+        logWatcher,
+        family: "package_event_saturation",
+        repetitions: FROZEN_INPUTS.measured_repetitions,
+        prove: () => burst.proveActive()
+      });
+      observations.package_event_saturation.burst_count = FROZEN_INPUTS.package_event_burst_count;
+    } finally {
+      await burst.stop();
+    }
   }
   if (warmup.pty.ok && observations.sibling_saturation == null) {
-    observations.sibling_saturation = await captureKeyToPty({
-      page,
-      arm,
-      ptyClock,
-      logWatcher,
-      family: "sibling_saturation",
-      repetitions: FROZEN_INPUTS.measured_repetitions
-    });
+    const flood = await startSiblingFlood(page, arm);
+    try {
+      flood.proveActive();
+      await openSession(page, arm.probeSessionId ?? flood.stats.probeSessionId);
+      observations.sibling_saturation = await captureKeyToPty({
+        page,
+        arm,
+        ptyClock,
+        logWatcher,
+        family: "sibling_saturation",
+        repetitions: FROZEN_INPUTS.measured_repetitions,
+        prove: () => flood.proveActive()
+      });
+      observations.sibling_saturation.flood_bytes = FROZEN_INPUTS.sibling_flood_bytes;
+      observations.sibling_saturation.terminal_a = flood.stats.floodSessionId;
+      observations.sibling_saturation.terminal_b = flood.stats.probeSessionId;
+    } finally {
+      await flood.stop();
+    }
   }
   return { observations, blocked, warmup };
 }
@@ -782,15 +1211,17 @@ async function teardownArm(arm) {
   if (arm.web) {
     results.push(await stopProcess(arm.web));
   }
-  const hubGone = pidGone(arm.child?.pid);
-  const socketGone = arm.socketPath ? existsSync(arm.socketPath) === false : true;
+  const proof = proveOwnedProcessesGone(arm);
   if (arm.dataDir) {
     await rm(arm.dataDir, { recursive: true, force: true });
   }
   return {
     results,
-    hub_pid_gone: hubGone,
-    socket_gone: socketGone,
+    hub_pid_gone: !arm.child?.pid || pidGone(arm.child.pid),
+    web_pid_gone: !arm.web?.pid || pidGone(arm.web.pid),
+    process_groups_gone: proof.live_groups.length === 0,
+    socket_gone: proof.socket_gone,
+    proof,
     teardown: results.some((entry) => entry.teardown === "escalated") ? "escalated" : "stopped"
   };
 }
@@ -840,13 +1271,13 @@ async function main(argv) {
   const hubSource = process.env.BOTSTER_HUB_SOURCE;
   const blocked = [];
   let ptyClock = "host_watcher";
-  const host = hostRecord();
-  if (host.runner_label === "local") {
-    blocked.push({
-      family: "controlled_runner",
-      reason: "botster-ubuntu-24.04-16core is unregistered; repository runner list is empty"
-    });
+  const hostProfile = inspectHostProfile();
+  const runnerAdmission = admitRunner(hostProfile);
+  if (!runnerAdmission.ok) {
+    throw new Error(`runner admission failed: ${runnerAdmission.errors.join(", ")}`);
   }
+  blocked.push(...runnerAdmission.blocked);
+  const host = hostRecord(hostProfile);
 
   if (!legacyCheckout || !hubSource) {
     throw new Error(`two-arm capture requires BOTSTER_LEGACY_CHECKOUT and BOTSTER_HUB_SOURCE\n${usage()}`);
@@ -870,6 +1301,7 @@ async function main(argv) {
   };
   const observations = blockedRecordSkeleton("arm_not_started");
   const correctness = { legacy: {}, modular: {} };
+  let candidate = null;
   try {
     browser = await chromium.launch();
     const browserVersion = browser.version();
@@ -885,12 +1317,11 @@ async function main(argv) {
         const sessionId = `${captureId}-modular-shell`;
         await spawnOrdinaryShell(arm, sessionId);
         await openSession(opened.page, sessionId);
+        arm.probeSessionId = sessionId;
       } else {
-        const newSession = opened.page.getByTestId("new-session-button");
-        await newSession.waitFor({ timeout: 30_000 }).catch(() => {
-          throw new Error("legacy arm did not expose data-testid=new-session-button after page load");
-        });
-        await newSession.click();
+        const sessionId = await completeLegacyNewSession(opened.page);
+        arm.sessionIds.push(sessionId);
+        arm.probeSessionId = sessionId;
       }
       await opened.page.locator(".terminal-view-container canvas").first().waitFor({ timeout: 30_000 });
       arm.terminal_bounding_box = await measureTerminalBox(opened.page);
@@ -1039,16 +1470,13 @@ async function main(argv) {
       correctness,
       blocked
     };
-    assertValidObservationRecord(record);
-    const outputPath = join(packageRoot, "docs/reports", `terminal-baseline-observation-local-${captureId}.json`);
-    await writeFile(outputPath, `${JSON.stringify(record, null, 2)}\n`);
-    process.stdout.write(`wrote ${outputPath}\n`);
+    candidate = record;
   } finally {
     const teardownFailures = [];
     for (const armId of ARM_IDS) {
       if (arms[armId]) {
         const teardown = await teardownArm(arms[armId]);
-        if (!teardown.hub_pid_gone || !teardown.socket_gone) {
+        if (!teardown.proof?.ok) {
           teardownFailures.push(`${armId} teardown did not prove live stop`);
         }
       }
@@ -1061,9 +1489,15 @@ async function main(argv) {
     assertCheckoutUnchanged(legacyBefore, legacyAfter, "legacy");
     assertCheckoutUnchanged(hubBefore, hubAfter, "hub source");
     await rm(hubBuild.scratch, { recursive: true, force: true }).catch(() => null);
-    if (teardownFailures.length > 0) {
+    const teardownProof = { ok: teardownFailures.length === 0 };
+    if (!teardownProof.ok) {
       process.stderr.write(`${teardownFailures.join("\n")}\n`);
       process.exitCode = 1;
+    } else if (candidate) {
+      assertValidObservationRecord(candidate);
+      const outputPath = join(packageRoot, "docs/reports", `terminal-baseline-observation-local-${captureId}.json`);
+      await writeBaselineRecord(outputPath, candidate, teardownProof);
+      process.stdout.write(`wrote ${outputPath}\n`);
     }
   }
 }
