@@ -4,8 +4,35 @@ Plan for ticket `ticket_1787603669_760394` in project `project_1787600579_585482
 (Botster Isolated Subscription Data Plane), pipeline `botster_stack_delivery`,
 run `run_1787632387_839095`, step `botster_stack_plan`.
 
+**Revision 6**, after Plan Review `review_1787636271_653821` returned
+`changes_required` a fifth time. All three findings were correct, and all three
+were consequences of revision 5 describing a two-clock design without writing it
+out. Changes in this revision:
+
+- `finding_1787636271_189997` (blocker): revision 5 kept only the POSIX
+  marker-only dispatcher, so the `shell_epochrealtime` path it described was not
+  buildable. §6.2 now writes both variants in full: §6.2.1 the exact handshake
+  command with a numeric acceptance band, §6.2.2 variant A started with
+  `exec bash --noprofile --norc`, §6.2.3 variant B started with `exec sh`, §6.2.4
+  both log formats, and §6.2.5 which properties belong to which variant. The
+  "no bash feature" and "no environment dependency" claims are now scoped rather
+  than stated as if they covered the whole design. §10 replaces the single
+  `seed.sh` entry with the two dispatcher files and the shared workloads.
+- `finding_1787636271_455482` (high): revision 5 called `t_pty` the append itself.
+  `"$EPOCHREALTIME"` is a `printf` argument, so the shell evaluates it before the
+  redirection appends. §6.3.1 renames the endpoint to the clock evaluation
+  immediately before the append, and variant A's second append measures the
+  interval to the completed append as `append_cost_calibration_ms`, recorded as a
+  component rather than a subtractable correction.
+- `finding_1787636272_619639` (high): G16 still required the warm-up hash change
+  to fall after `t_pty`, which is the ordering §6.3.1 withdrew, and required
+  calibrations unconditionally including the deleted paint clock offset. G16 and
+  §6.5 now attribute the warm-up paint change by marker with no ordering
+  requirement, and require each calibration only for the clock and oracle the
+  capture actually negotiated.
+
 **Revision 5**, after Plan Review `review_1787635739_699638` returned
-`changes_required` a fourth time. All three findings were correct. Changes in this
+`changes_required` a fourth time. All three findings were correct. Changes in that
 revision:
 
 - `finding_1787635739_874404` (blocker): revision 4 claimed that the dispatcher's
@@ -14,7 +41,7 @@ revision:
   asynchronous host file-watcher callback can run after the compositor has already
   painted, so the gate would have rejected valid repetitions and biased the set
   toward fast callbacks. §6.3.1 replaces it. The harness now prefers a PTY
-  timestamp that is the append itself, accepted only after a handshake proves the
+  timestamp the shell itself produces, accepted only after a handshake proves the
   shell clock advances and tracks the host clock, and recorded as
   `pty_clock: "shell_epochrealtime"`. When that handshake fails, the host-watcher
   fallback is used and the plan states its limits instead of hiding them: no
@@ -310,27 +337,56 @@ runs `sh <path>` (`scripts/live-packaged-protocol-harness.mjs:6024`), and
 left the marker injection and the measured keydown boundary undefined. Revision 3
 replaces the shell timestamp with a host-side watcher and specifies every step.
 
-### 6.2 The frozen probe
+### 6.2 The frozen probe, and the two dispatcher variants
 
-Both arms run one dispatcher, `fixtures/terminal-baseline/seed.sh`, in an
-ordinary shell session. The harness starts it by typing one setup command into
-the session and pressing Enter, so nothing depends on an arm's spawn API
-accepting an arbitrary command. That matters: the legacy browser API's
+Both arms run one dispatcher in an ordinary shell session. The harness starts it
+by typing one setup command and pressing Enter, so nothing depends on an arm's
+spawn API accepting an arbitrary command. That matters: the legacy browser API's
 `add_session` takes a session type name such as `shell`
 (`app/frontend/lib/connections/hub_connection.js:322-325`), not a command line.
 
-The dispatcher is pure POSIX `sh`. It forks nothing per probe:
+Revision 6 writes both dispatcher variants out in full. Revision 5 described a
+negotiated shell clock in §6.3.1 but left only the POSIX marker-only script here,
+so Implement could not have built the `shell_epochrealtime` path at all.
+
+#### 6.2.1 The clock handshake, typed before any dispatcher
+
+The harness types this line into the arm's shell session and reads the resulting
+file on the host. `/ABS/HANDSHAKE/PATH` is substituted as a literal absolute path.
 
 ```sh
+command -v bash >/dev/null 2>&1 && bash -c 'printf "%s %s\n" "$EPOCHREALTIME" "$EPOCHREALTIME"' > /ABS/HANDSHAKE/PATH || : > /ABS/HANDSHAKE/PATH
+```
+
+`bash` re-evaluates `EPOCHREALTIME` at each reference, so a working clock yields
+two different values on one line. The harness accepts `shell_epochrealtime` only
+when **all** of these hold, and records the raw line either way:
+
+| Check | Exact rule |
+|-------|------------|
+| Shape | both fields match `^[0-9]{10}\.[0-9]{6}$` |
+| Advances | the second value is greater than or equal to the first, and the pair is not identical |
+| Tracks the host | `|value * 1000 - hostDateNow| <= 2000` milliseconds for both fields |
+| Empty file | an empty handshake file means no `bash`, so the arm reports `host_watcher` |
+
+§6.3.2 turns the two arms' results into one capture-level `pty_clock`: both arms
+must report `shell_epochrealtime` for the capture to use it.
+
+#### 6.2.2 Variant A, `pty_clock: shell_epochrealtime`
+
+Started by typing `exec bash --noprofile --norc /ABS/SEED/PATH`. The harness
+substitutes `/ABS/LOG/PATH` as a literal.
+
+```bash
 stty -echo 2>/dev/null || true
-cr=$(printf '\r')
-echo botster-baseline-ready
+printf 'botster-baseline-ready\n'
 while IFS= read -r line; do
   case "$line" in
     botster-baseline-probe:*)
       m=${line#botster-baseline-probe:}
-      m=${m%$cr}
-      printf '%s\n' "$m" >> /ABSOLUTE/BASELINE/LOG/PATH
+      m=${m%$'\r'}
+      printf '%s %s\n' "$EPOCHREALTIME" "$m" >> /ABS/LOG/PATH
+      printf '%s %s post\n' "$EPOCHREALTIME" "$m" >> /ABS/LOG/PATH
       printf 'botster-baseline-paint:%s\n' "$m"
       ;;
     botster-baseline-exit) exit 0 ;;
@@ -338,42 +394,73 @@ while IFS= read -r line; do
 done
 ```
 
-**Output order is fixed, and §6.3.1 states exactly what it does and does not
-buy.** The dispatcher appends first and prints the visible marker second. That
-orders the two writes. It does **not** order the two observations, and revision 5
-withdrew the revision 4 claim that it did.
+The second append exists for calibration, not for the endpoint. §6.3.1 explains
+what it measures.
 
-Revision 4 added the second `printf`. Revision 3 wrote the log only, so the
-dispatcher produced no terminal output at all and every paint endpoint had
-nothing to observe. `stty -echo` stays, and it is now a stated advantage: the
-typed probe line does not paint, so the first change in the sampled region after
-the measured Enter is attributable to the dispatcher's own marker and to nothing
-else.
+#### 6.2.3 Variant B, `pty_clock: host_watcher`
 
-Three further properties matter and each answers a review point:
+Started by typing `exec sh /ABS/SEED/PATH`. This is the POSIX variant, and it is
+the only one that runs when either arm lacks a proven `bash` clock.
 
-1. **No bash feature.** `printf` and the append redirect are POSIX. `cr` is set
-   once at start, so carriage-return stripping costs one fork for the whole
-   session rather than one per probe.
-2. **No environment dependency.** The harness substitutes the absolute log path
-   as a literal when it writes the file. The probe reads no shell variable that
-   the session must export.
-3. **No process spawn per probe.** `printf` is a shell builtin in `dash` and
-   `sh`. A per-probe `date` or `node` call would add tens of milliseconds to
-   every measurement and swamp the value being recorded.
+```sh
+stty -echo 2>/dev/null || true
+cr=$(printf '\r')
+printf 'botster-baseline-ready\n'
+while IFS= read -r line; do
+  case "$line" in
+    botster-baseline-probe:*)
+      m=${line#botster-baseline-probe:}
+      m=${m%$cr}
+      printf '%s\n' "$m" >> /ABS/LOG/PATH
+      printf 'botster-baseline-paint:%s\n' "$m"
+      ;;
+    botster-baseline-exit) exit 0 ;;
+  esac
+done
+```
 
-Each repetition types `botster-baseline-probe:<marker>` where `<marker>` is
-unique per capture, arm, and repetition. The harness waits for the sampled region's hash to
-hold stable for the settle window before it sends the final key, so typing
-latency sits outside the measurement. **The measured keydown is the final Enter
-and nothing else.**
+Variant B uses `cr=$(printf '\r')` rather than `${m%$'\r'}` because `$'...'` is a
+bash feature. That single command substitution runs once at session start, not
+once per probe.
+
+#### 6.2.4 Log formats
+
+| Clock | Line format |
+|-------|-------------|
+| `shell_epochrealtime` | `<epoch_seconds.microseconds> <marker>` and a second `<epoch_seconds.microseconds> <marker> post` |
+| `host_watcher` | `<marker>` |
+
+The harness parses by the negotiated clock, and G16 rejects a log line that does
+not match the negotiated format.
+
+#### 6.2.5 Properties, and which variant each applies to
+
+**Both variants.** The probe costs no process spawn: `printf` is a builtin in both
+`bash` and `dash`. Nothing depends on session environment, because the harness
+substitutes absolute log paths as literals rather than reading a variable. The
+measured keydown is the final Enter of the probe line and nothing else; the
+harness waits for the sampled region's hash to hold stable for the settle window
+before sending it, so typing latency sits outside the measurement.
+
+**Output order.** Every variant appends first and prints the visible marker
+second. That orders the two writes. It does **not** order the two observations,
+and §6.3.1 states exactly what that does and does not buy.
+
+**`stty -echo` is deliberate.** The typed probe line does not paint, so the first
+change in the sampled region after the measured Enter is attributable to the
+dispatcher's own marker and to nothing else.
+
+**Variant B only.** Variant B is pure POSIX and uses no bash feature. Revision 5
+stated that property as if it covered the whole design; it covers this variant.
+Variant A requires `bash`, which §6.2.1 proves before the capture selects it.
+
 
 ### 6.3 The three endpoints, and what orders them
 
 | Symbol | Meaning | Source |
 |--------|---------|--------|
 | `t_key` | the browser dispatched the final Enter of the probe line | capture-phase `keydown` listener installed by `addInitScript`, `Date.now()` |
-| `t_pty` | the session shell appended the marker | see §6.3.1 |
+| `t_pty` | the dispatcher evaluated its clock immediately before appending the marker, or the host observed the append | see §6.3.1 |
 | `t_paint` | the dispatcher's visible probe marker reached the rendered terminal | §6.3.2 |
 
 `t_key` causes both other endpoints, so `t_key` precedes both in every valid
@@ -394,7 +481,7 @@ watcher callbacks.
 
 Revision 5 fixes this in two parts.
 
-**Part one: prefer a PTY timestamp that is the append itself.** The dispatcher is
+**Part one: prefer a PTY timestamp the shell itself produces.** The dispatcher is
 started by a typed setup command, so the harness can select the interpreter and
 then *prove* what it got rather than assume it. The setup handshake runs a fixed
 probe that prints two consecutive sub-second timestamps. The harness accepts the
@@ -404,9 +491,23 @@ shell clock only when all of the following hold:
 2. The two values differ, which proves the source is not a frozen constant.
 3. Both sit within a recorded sane band of the host's `Date.now()`.
 
-When the handshake passes, the dispatcher writes its own timestamp beside the
-marker, `t_pty` is the append itself, and the record carries
-`pty_clock: "shell_epochrealtime"`. Revision 2 assumed this source without
+When the handshake of §6.2.1 passes in both arms, the dispatcher writes its own
+timestamp beside the marker and the record carries
+`pty_clock: "shell_epochrealtime"`.
+
+**`t_pty` is not the append.** `"$EPOCHREALTIME"` is a `printf` argument, so the
+shell evaluates it *before* the redirection performs the append. Revision 5 called
+it the append itself, which was wrong. `t_pty` under this clock is exactly *the
+moment the dispatcher evaluated its clock, immediately before appending the
+marker*, and the plan uses that wording everywhere.
+
+The interval between that evaluation and the completed append is measured, not
+assumed. Variant A's second append (§6.2.2) evaluates the clock again *after* the
+first append has returned, so `post - pre` bounds one append plus one `printf`.
+The capture records that distribution as `append_cost_calibration_ms`. It is a
+recorded component of `key_to_pty`, not a subtractable correction, and
+`decomposition_valid: true` under this clock means the endpoint is a real shell
+clock reading with that bound stated, not that the interval is zero. Revision 2 assumed this source without
 proving it and was correctly rejected, because `$EPOCHREALTIME` is a bash feature
 that expands empty under the `sh` the modular session starts
 (`scripts/live-packaged-protocol-harness.mjs:6024`). The difference now is the
@@ -501,8 +602,10 @@ The same one-per-capture rule governs `pty_clock`: both arms use
 
 ### 6.4 What `key_to_pty` includes, stated plainly
 
-`key_to_pty` is `t_pty - t_key`: the final Enter of the probe line, to the moment
-the session shell appended the marker. It includes the browser input path, the
+`key_to_pty` is `t_pty - t_key`: the final Enter of the probe line, to `t_pty` as
+§6.3.1 defines it for the negotiated clock — the dispatcher's clock evaluation
+immediately before the append under `shell_epochrealtime`, or the host's
+observation of the append under `host_watcher`. It includes the browser input path, the
 transport, the PTY write, and the dispatcher's builtin `printf`. Under
 `pty_clock: "host_watcher"` it also includes the host watcher's detection
 latency, which is why that clock records an uncertainty band rather than a floor.
@@ -515,8 +618,13 @@ Each capture records these calibration values per arm:
   `pty_clock: "host_watcher"`. The host appends a marker to the same log itself
   and measures its own detection latency over the same sample count. It is an
   uncertainty band on `t_pty`, not a subtractable floor.
-- `shell_clock_handshake` — the two consecutive timestamps and the host
-  `Date.now()` band from §6.3.1, recorded whichever way the handshake resolved.
+- `append_cost_calibration_ms` — recorded only under
+  `pty_clock: "shell_epochrealtime"`, from variant A's second append (§6.2.2). It
+  bounds the interval between the clock evaluation that produces `t_pty` and the
+  completed append, and it is a recorded component rather than a subtractable
+  correction.
+- `shell_clock_handshake` — the raw handshake line and the acceptance results
+  from §6.2.1, recorded whichever way the handshake resolved.
 
 Echo receipt is never called `key_to_pty`. The `key_to_pty` entry also carries
 `pty_to_paint_ms`, `key_to_paint_ms`, and `decomposition_valid` from §6.3.1.
@@ -533,18 +641,27 @@ G16 fails closed on each of these, per arm, and G18 on the capture as a whole:
 1. The dispatcher printed `botster-baseline-ready`.
 2. The shell-clock handshake of §6.3.1 resolved, and the resolved `pty_clock` is
    the same for both arms.
-3. One warm-up probe added exactly one line to the arm's baseline log, and that
-   line equals the expected marker exactly. An empty or malformed line blocks the
-   arm's PTY families with a typed reason instead of recording a number.
+3. One warm-up probe added exactly the lines the negotiated §6.2.4 format
+   prescribes, with the marker matching exactly: one line under `host_watcher`,
+   two under `shell_epochrealtime`. An empty, malformed, or wrong-format line
+   blocks the arm's PTY families with a typed reason instead of recording a
+   number.
 4. The same warm-up probe changed the cropped region: the paint oracle observed at
    least one hash change attributable to that probe, and the arm's rendered
-   terminal shows `botster-baseline-paint:<marker>`. A warm-up that writes the log
-   but paints nothing blocks the arm's paint families with a typed reason.
+   terminal shows `botster-baseline-paint:<marker>`. Attribution is by marker, not
+   by ordering: the plan does **not** require that change to fall after `t_pty`,
+   because §6.3.1 shows no such ordering exists under `host_watcher`. A warm-up
+   that writes the log but paints nothing blocks the arm's paint families with a
+   typed reason.
 5. The negotiated paint oracle is the same for both arms, and under
    `cdp_screencast` the measured `scale`, `pageScaleFactor`, `scrollOffsetX`, and
    `scrollOffsetY` are stable, and a sustained-frame check received acknowledged
    frames continuously across the warm-up rather than stalling after the first.
-6. Each required calibration produced a non-empty sample set.
+6. Every calibration the negotiated clock and oracle require produced a non-empty
+   sample set. `watcher_detection_calibration_ms` is required only under
+   `host_watcher`; `append_cost_calibration_ms` only under
+   `shell_epochrealtime`; `dispatcher_append_calibration_ms` always. No paint
+   clock-offset calibration is required or permitted.
 
 ### 6.6 What does not change
 
@@ -707,13 +824,13 @@ closed when it cannot prove a value.
 | Browser | one Playwright Chromium build, recorded by revision |
 | Session workload | one seeded shell session started from a fixed script committed under `fixtures/terminal-baseline/` |
 | Probe line | `botster-baseline-probe:<marker>` with a marker unique per capture, arm, and repetition; the measured keydown is the final Enter only |
-| Dispatcher | one frozen POSIX `sh` script, started by typing one setup command into an ordinary shell session in both arms |
+| Dispatcher | one frozen variant for the whole capture, §6.2.2 under `shell_epochrealtime` or §6.2.3 under `host_watcher`, started by typing one setup command into an ordinary shell session in both arms; the two arms never run different variants |
 | Repetitions | 20 measured, 3 warm-up repetitions discarded and recorded as discarded |
 | Scrollback gesture | fixed wheel delta, fixed event count, fixed pacing |
-| History size | one fixed line count and one fixed byte count, produced by the seed script |
+| History size | one fixed line count and one fixed byte count, produced by `fixtures/terminal-baseline/history-seed.sh` |
 | Control-response burst | one fixed schedule of `list_configs` and `list_session_types`, with the server-to-client response rate and bytes equalized across arms within the recorded tolerance |
 | Package-event burst | 200 package events on the modular arm only, matching the existing lane at `scripts/live-packaged-protocol-harness.mjs:1835` |
-| Sibling flood | two mounted terminals, terminal A flooded with a fixed output byte count from the seed script, terminal B probed |
+| Sibling flood | two mounted terminals, terminal A flooded with a fixed output byte count from `fixtures/terminal-baseline/sibling-flood.sh`, terminal B probed |
 | Settle window | one fixed millisecond window for sampled-region hash stability |
 | Paint sampling | one oracle for the whole capture: CDP `Page.startScreencast` with frozen format, quality, and `maxWidth`/`maxHeight` at or above the viewport in device pixels, every frame acknowledged, cropped by the §6.3.2 transform; or `screenshot_poll` for both arms with one shared interval |
 | PTY clock | one clock for the whole capture, `shell_epochrealtime` when the §6.3.1 handshake proves it in both arms, otherwise `host_watcher` in both |
@@ -752,15 +869,26 @@ New files in `botster-web`:
 - `scripts/terminal-baseline-observer.mjs` — the `addInitScript` payload (the
   capture-phase keydown stamp and the timestamped harness arrays), the host-side
   CDP screencast paint oracle with its crop and hash, the host-side baseline-log
-  watcher, and the per-arm capture routine. It contains no wire oracle and no
-  in-page canvas readback; §6.1 and §6.3 record why both were removed.
+  watcher, the §6.2.1 clock handshake and its acceptance band, the parser for both
+  §6.2.4 log formats, and the per-arm capture routine. It contains no wire oracle
+  and no in-page canvas readback; §6.1 and §6.3 record why both were removed.
 - `scripts/terminal-baseline-capture.mjs` — the two-arm orchestrator. Starts each
   arm, starts the dispatcher and proves the §6.5 preconditions, runs all eight
   families of §7 in both arm orders, tears each arm down, validates the record,
   and writes it.
-- `fixtures/terminal-baseline/seed.sh` — the POSIX `sh` dispatcher of §6.2, the
-  history seed, and the sibling flood workload. It writes the marker only. The
-  timestamp comes from the host watcher, not from the shell.
+- `fixtures/terminal-baseline/seed-shell-clock.bash` — dispatcher variant A of
+  §6.2.2, used when the capture negotiates `pty_clock: "shell_epochrealtime"`. It
+  writes its own clock reading beside the marker, plus the second append that
+  feeds `append_cost_calibration_ms`.
+- `fixtures/terminal-baseline/seed-posix.sh` — dispatcher variant B of §6.2.3,
+  used when the capture negotiates `pty_clock: "host_watcher"`. It writes the
+  marker only, and the timestamp then comes from the host watcher.
+- `fixtures/terminal-baseline/history-seed.sh` and
+  `fixtures/terminal-baseline/sibling-flood.sh` — the frozen history and flood
+  workloads, shared by both variants.
+Both dispatcher variants print `botster-baseline-paint:<marker>` after their
+append, and the harness substitutes every absolute path as a literal when it
+writes the file.
 - `docs/terminal-baseline-observation-format.md` — the published contract that
   `ticket_1787600689_646958` and `ticket_1787600679_990088` must reuse.
 - `.github/workflows/terminal-regression-baseline.yml` — `workflow_dispatch`,
