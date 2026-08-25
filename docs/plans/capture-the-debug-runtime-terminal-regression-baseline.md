@@ -4,8 +4,33 @@ Plan for ticket `ticket_1787603669_760394` in project `project_1787600579_585482
 (Botster Isolated Subscription Data Plane), pipeline `botster_stack_delivery`,
 run `run_1787632387_839095`, step `botster_stack_plan`.
 
+**Revision 3**, after Plan Review `review_1787634482_723479` returned
+`changes_required` a second time. Changes in this revision:
+
+- `finding_1787634482_538653` (blocker): the revision 2 probe could not execute.
+  `$EPOCHREALTIME` is a bash feature and the modular production session runs `sh`
+  (`scripts/live-packaged-protocol-harness.mjs:6024`), so both the timestamp and
+  the marker expanded empty. §6.2 replaces it with a frozen POSIX `sh` dispatcher
+  that writes only the marker with a builtin `printf`, and §6.3 moves the
+  timestamp to a host-side watcher. §6.2 also fixes the marker injection and names
+  the final Enter as the only measured keydown. §6.5 and G16 prove the probe is
+  live before any measurement.
+- `finding_1787634483_606028` (high): §7 freezes the full legacy Restty commit
+  `cd1911d0f88606270b1457c6995a3c04cb497edf`, and G14 now requires a full
+  40-character revision and blocks the arm when exact source identity cannot be
+  proved.
+- `finding_1787634483_623553` (high): §10 no longer directs Implement to build the
+  retired wire oracle or seven families. It names the keydown stamp, the paint
+  oracle, the host watcher, and all eight families.
+- `finding_1787634483_166548` (high): G5 no longer mutates the supplied Hub
+  checkout. It clones a scratch checkout under `$TMPDIR`, builds only there, and
+  G17 proves both supplied checkouts are unchanged.
+- `finding_1787634483_772046` (low): §2 now loads and records
+  `[[botster-architecture]]`, `[[cli-patterns]]`, and `[[spa-patterns]]`, and
+  states the one constraint they add.
+
 **Revision 2**, after Plan Review `review_1787633696_367103` returned
-`changes_required`. Changes in this revision:
+`changes_required`. Changes in that revision:
 
 - `finding_1787633696_107977` (blocker): the wire oracle is deleted. Both arms
   encrypt terminal bytes at the DataChannel, so a frame-level marker search finds
@@ -55,6 +80,24 @@ Role playbooks, in load order:
 2. `[[botster-planner-playbook]]`
 3. `[[botster-web-playbook]]`
 4. `[[botster runtime teardown lenses]]` (class applies in harness scope, see §9)
+
+Required `[[botster-planner-playbook]]` context maps, loaded on the second Plan
+Review return per `finding_1787634483_772046`:
+
+- `[[botster-architecture]]` — the domain map and source of architectural truth.
+  Its Repository Ownership section confirms the routing this plan already used:
+  `botster-web` owns the Ionic React client, UiNode rendering, Restty, and browser
+  conformance. It adds no new constraint to this ticket.
+- `[[cli-patterns]]` — Rust CLI, TUI, PTY, and terminal-layer constraints. Its PTY
+  Patterns section adds one constraint the plan now states explicitly:
+  `[[restty is a client renderer not authoritative terminal infrastructure]]`.
+  That is why §6.4 keeps the authoritative arrival endpoint on the PTY oracle and
+  reports the paint endpoints separately, rather than treating a rendered canvas
+  as terminal truth.
+- `[[spa-patterns]]` — React SPA and entity-store frontend constraints. It
+  confirms `[[a page reload is not a reconnect]]`, already loaded, and adds no new
+  constraint here because this ticket runs no reconnect proof. Reconnect proof
+  belongs to `ticket_1787600676_914408` and `ticket_1787600684_892051`.
 
 `[[project-pipelines-playbook]]` was not loaded. This ticket changes no Project
 Pipelines package or plugin path.
@@ -195,66 +238,126 @@ Non-scope:
 
 ## 6. Design: one client-neutral oracle pair for both arms
 
-Plan Review revision 1 replaced the original design. The first plan proposed a
-wire oracle that wrapped `WebSocket` and `RTCDataChannel` message events and
-searched each frame for a plaintext probe marker. That oracle cannot work.
-`src/botster/webrtcDaemonClient.ts:1726-1745` decrypts AES-GCM envelopes after
-the channel event, so the modular arm delivers ciphertext at that point, and
-`app/frontend/lib/connections/terminal_connection.js:5` states the legacy arm is
-end-to-end encrypted over its own DataChannel as well. The wire oracle would find
-no marker on either arm, and its end point was browser echo receipt, which is not
-PTY arrival. The wire oracle is deleted from this plan.
+### 6.1 What two review returns removed
 
-The replacement observes both arms at points where plaintext evidence exists and
-no client instrumentation is required.
+**Revision 2 deleted the wire oracle.** The first plan wrapped `WebSocket` and
+`RTCDataChannel` message events and searched each frame for a plaintext probe
+marker. `src/botster/webrtcDaemonClient.ts:1726-1745` decrypts AES-GCM after the
+channel event, and `app/frontend/lib/connections/terminal_connection.js:5` states
+the legacy path is end-to-end encrypted, so that oracle would find no marker on
+either arm. Its end point was also echo receipt, which is not PTY arrival.
 
-**PTY oracle (host wall clock).** Both arms run a real PTY with a real shell. The
-frozen seed script defines one probe command. Executing that command appends one
-line to a host file named by `BOTSTER_BASELINE_LOG`:
+**Revision 3 deleted `$EPOCHREALTIME`.** Revision 2 asked the session shell to
+write its own timestamp. That does not execute. The modular production session
+runs `sh <path>` (`scripts/live-packaged-protocol-harness.mjs:6024`), and
+`$EPOCHREALTIME` is a bash feature that expands empty under `sh`. Revision 2 also
+left the marker injection and the measured keydown boundary undefined. Revision 3
+replaces the shell timestamp with a host-side watcher and specifies every step.
 
+### 6.2 The frozen probe
+
+Both arms run one dispatcher, `fixtures/terminal-baseline/seed.sh`, in an
+ordinary shell session. The harness starts it by typing one setup command into
+the session and pressing Enter, so nothing depends on an arm's spawn API
+accepting an arbitrary command. That matters: the legacy browser API's
+`add_session` takes a session type name such as `shell`
+(`app/frontend/lib/connections/hub_connection.js:322-325`), not a command line.
+
+The dispatcher is pure POSIX `sh`. It forks nothing per probe:
+
+```sh
+stty -echo 2>/dev/null || true
+cr=$(printf '\r')
+echo botster-baseline-ready
+while IFS= read -r line; do
+  case "$line" in
+    botster-baseline-probe:*)
+      m=${line#botster-baseline-probe:}
+      m=${m%$cr}
+      printf '%s\n' "$m" >> /ABSOLUTE/BASELINE/LOG/PATH
+      ;;
+    botster-baseline-exit) exit 0 ;;
+  esac
+done
 ```
-printf '%s %s\n' "$EPOCHREALTIME" "$marker" >> "$BOTSTER_BASELINE_LOG"
-```
 
-The harness reads that file directly on the host filesystem. The value is
-plaintext, arm-neutral, and produced by the product's own PTY path, not by a
-harness stub.
+Three properties matter and each answers a review point:
 
-**Paint oracle.** An `addInitScript` payload installs a `requestAnimationFrame`
-sampler over the mounted terminal canvas. It hashes the canvas pixel buffer each
-frame and records the timestamp of each hash change. First change after attach is
-the paint-ready endpoint. The first sample of a hash held stable for the frozen
-settle window is the paint-settled endpoint.
+1. **No bash feature.** `printf` and the append redirect are POSIX. `cr` is set
+   once at start, so carriage-return stripping costs one fork for the whole
+   session rather than one per probe.
+2. **No environment dependency.** The harness substitutes the absolute log path
+   as a literal when it writes the file. The probe reads no shell variable that
+   the session must export.
+3. **No process spawn per probe.** `printf` is a shell builtin in `dash` and
+   `sh`. A per-probe `date` or `node` call would add tens of milliseconds to
+   every measurement and swamp the value being recorded.
 
-**Keydown endpoint.** The same `addInitScript` payload installs a capture-phase
-`keydown` listener that stamps `Date.now()` for the probe key. It records a
-timestamp only. It never cancels, rewrites, or delays the event.
+Each repetition types `botster-baseline-probe:<marker>` where `<marker>` is
+unique per capture, arm, and repetition. The harness waits for the canvas hash to
+hold stable for the settle window before it sends the final key, so typing
+latency sits outside the measurement. **The measured keydown is the final Enter
+and nothing else.**
 
-Three endpoints therefore exist per repetition:
+### 6.3 The three endpoints
 
 | Symbol | Meaning | Source |
 |--------|---------|--------|
-| `t_key` | the browser dispatched the probe key | capture-phase keydown, `Date.now()` |
-| `t_pty` | the session shell executed the probe command | `EPOCHREALTIME` in the host log file |
+| `t_key` | the browser dispatched the final Enter of the probe line | capture-phase `keydown` listener installed by `addInitScript`, `Date.now()` |
+| `t_pty` | the host observed the marker line the session shell wrote | host watcher over the arm's baseline log |
 | `t_paint` | the echoed output reached the canvas | paint oracle hash change |
+
+The **paint oracle** installs a `requestAnimationFrame` sampler over the mounted
+terminal canvas through the same `addInitScript` payload. It hashes the canvas
+pixel buffer each frame and records the timestamp of each hash change. First
+change after attach is the paint-ready endpoint. The first sample of a hash held
+stable for the frozen settle window is the paint-settled endpoint.
+
+The **keydown listener** records a timestamp only. It never cancels, rewrites, or
+delays the event.
 
 `t_key` and `t_pty` share one wall clock because the capture requires the browser
 and the PTY to run on one host. G12 asserts that requirement and the record
 carries `same_host: true`. A capture that cannot prove one host emits no
 `key_to_pty` value.
 
-**Naming.** `key_to_pty` is `t_pty - t_key`: browser keydown dispatch to shell
-execution of the probe command. It includes the shell's own execution cost. The
-plan does not hide that cost. Each capture records
-`shell_exec_calibration_ms` per arm, measured by driving the identical probe
-command on a local PTY with no browser in the path, so a reader can see the floor
-that every `key_to_pty` value sits above. Echo receipt is never called
-`key_to_pty`.
+### 6.4 What `key_to_pty` includes, stated plainly
 
-Consequences:
+`key_to_pty` is `t_pty - t_key`: the final Enter of the probe line, to the host
+observing the marker the session shell wrote. It includes the browser input path,
+the transport, the PTY write, the dispatcher's builtin `printf`, the filesystem
+append, and the host watcher's detection latency. The plan does not hide those
+components. Each capture records two calibration values per arm:
+
+- `watcher_detection_calibration_ms` — the host appends a marker to the same log
+  itself and measures its own detection latency over the same sample count. This
+  is the floor that every `key_to_pty` value sits above.
+- `dispatcher_append_calibration_ms` — the same dispatcher line driven directly
+  into the session's PTY on the host, with no browser in the path.
+
+Echo receipt is never called `key_to_pty`. The `key_to_pty` entry also carries
+`pty_to_paint_ms` (`t_paint - t_pty`) and `key_to_paint_ms` (`t_paint - t_key`),
+so the round trip stays decomposable without adding a family.
+
+`[[restty is a client renderer not authoritative terminal infrastructure]]`
+applies here. The paint oracle observes a client renderer, not terminal
+authority, which is exactly why the authoritative arrival endpoint is the PTY
+oracle and the paint endpoints are reported separately.
+
+### 6.5 Preconditions before any measurement
+
+G16 fails closed on each of these, per arm:
+
+1. The dispatcher printed `botster-baseline-ready`.
+2. One warm-up probe added exactly one line to the arm's baseline log, and that
+   line equals the expected marker exactly. An empty or malformed line blocks the
+   arm's PTY families with a typed reason instead of recording a number.
+3. The watcher calibration produced a non-empty sample set.
+
+### 6.6 What does not change
 
 - No production file under `src/botster/`, `src/app/`, or `src/vendor/` changes,
-  and no file in the legacy checkout changes.
+  and no file in either supplied checkout changes.
 - The existing `__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminal` records stay
   available in the modular arm. The harness records them as **arm-local semantic
   context** (`attach`, `ghostsnp_install` READY, `ghostsnp_install` FINISH), never
@@ -265,6 +368,7 @@ The existing harness pushes `{kind, payload}` without a timestamp. The observer
 adds timestamps by replacing the two arrays created in
 `installLiveHarnessPageHooks` with arrays whose `push` stamps `at` and `wall`.
 That is a harness-side change in `scripts/`, not a production change.
+
 
 ## 7. The frozen observation format
 
@@ -299,20 +403,28 @@ exact Restty revision. It carries:
 
 | Field | Content |
 |-------|---------|
-| `declared_revision` | the Restty source commit the arm declares |
+| `declared_revision` | the full 40-character Restty source commit for the arm; a short revision is rejected |
 | `declaration_source` | the exact file or commit that declares it |
 | `artifact_sha256` | the SHA-256 of every vendored Restty distribution file the arm loads |
 | `ghostty_pin` | the Restty-pinned Ghostty commit when the arm declares one, otherwise `null` with a reason |
 
-Known values at plan time. The modular arm declares Restty
-`59c640488f33b10296875471691e43da6890e074` and Ghostty pin
-`eb72ec61304ea256be1d86ed8fa961c84e43ecbd` in `src/vendor/restty/README.md`. The
-legacy arm at `f598075e` vendors `app/frontend/vendor/chunk-02afddvq.js`, declared
-by the commit message of `2b52d0c9` as Restty `cd1911d0f`; that arm declares no
-Ghostty pin. The legacy declaration is a short revision in a commit message, so
-`artifact_sha256` is what makes it verifiable. G14 rejects a record whose
-`declared_revision` or `artifact_sha256` is missing or does not match the loaded
-files.
+Both full revisions are frozen here. The modular arm declares Restty
+`59c640488f33b10296875471691e43da6890e074` with Ghostty pin
+`eb72ec61304ea256be1d86ed8fa961c84e43ecbd`, both stated in
+`src/vendor/restty/README.md`. The legacy arm at `f598075e` vendors
+`app/frontend/vendor/chunk-02afddvq.js`, whose declaring commit `2b52d0c9` names
+the short revision `cd1911d0f`; that short revision resolves in the authoritative
+`trybotster/restty` repository to the full commit
+`cd1911d0f88606270b1457c6995a3c04cb497edf`, which is the value the record must
+carry. The legacy arm declares no Ghostty pin, so `ghostty_pin` is `null` with
+that reason.
+
+G14 rejects a record whose `declared_revision` is absent, is not a full
+40-character commit, or whose `artifact_sha256` does not match the vendored files
+the arm actually loads. `artifact_sha256` proves the bytes; it is not a substitute
+for source identity, and G14 requires both. An arm whose exact source revision
+cannot be proved is marked blocked rather than recorded with a short or inferred
+value.
 
 Each observation family records `endpoint_start`, `endpoint_end`, `oracle`
 (`pty` or `paint`), `unit` (`ms`), `n`, `warmup_discarded`, and the statistic set
@@ -334,8 +446,8 @@ The eight families:
 
 The `key_to_pty` entry also carries the sibling statistic sets `pty_to_paint_ms`
 (`t_paint - t_pty`) and `key_to_paint_ms` (`t_paint - t_key`), so the round trip
-stays decomposable without adding a family, and `shell_exec_calibration_ms` from
-§6.
+stays decomposable without adding a family, and both calibration values from
+§6.4.
 
 `attach_ready` and `history_finish` also record the modular arm's protocol states
 (`ghostsnp_install` READY and FINISH) under `arm_local_semantics`. The legacy arm
@@ -389,7 +501,8 @@ closed when it cannot prove a value.
 | Terminal geometry | fixed rows and columns, asserted equal on both arms before any measurement |
 | Browser | one Playwright Chromium build, recorded by revision |
 | Session workload | one seeded shell session started from a fixed script committed under `fixtures/terminal-baseline/` |
-| Probe command | one fixed command per repetition, appending `$EPOCHREALTIME` and a unique marker to `$BOTSTER_BASELINE_LOG` |
+| Probe line | `botster-baseline-probe:<marker>` with a marker unique per capture, arm, and repetition; the measured keydown is the final Enter only |
+| Dispatcher | one frozen POSIX `sh` script, started by typing one setup command into an ordinary shell session in both arms |
 | Repetitions | 20 measured, 3 warm-up repetitions discarded and recorded as discarded |
 | Scrollback gesture | fixed wheel delta, fixed event count, fixed pacing |
 | History size | one fixed line count and one fixed byte count, produced by the seed script |
@@ -429,14 +542,17 @@ New files in `botster-web`:
 - `scripts/terminal-baseline-observation-format.mjs` — the frozen schema, the
   version token, the statistic helper, and the validator. One source of truth for
   the harness, the validator, and the tests.
-- `scripts/terminal-baseline-observer.mjs` — the `addInitScript` payload and the
-  per-arm capture routine, including the wire and paint oracles.
+- `scripts/terminal-baseline-observer.mjs` — the `addInitScript` payload (the
+  capture-phase keydown stamp, the paint oracle, and the timestamped harness
+  arrays), the host-side baseline-log watcher, and the per-arm capture routine.
+  It contains no wire oracle; §6.1 records why that design was removed.
 - `scripts/terminal-baseline-capture.mjs` — the two-arm orchestrator. Starts each
-  arm, runs the seven families in both arm orders, tears each arm down, validates
-  the record, and writes it.
-- `fixtures/terminal-baseline/seed.sh` — the frozen session workload, the history
-  seed, the probe command that appends `$EPOCHREALTIME` and the marker to
-  `$BOTSTER_BASELINE_LOG`, and the sibling flood workload.
+  arm, starts the dispatcher and proves the §6.5 preconditions, runs all eight
+  families of §7 in both arm orders, tears each arm down, validates the record,
+  and writes it.
+- `fixtures/terminal-baseline/seed.sh` — the POSIX `sh` dispatcher of §6.2, the
+  history seed, and the sibling flood workload. It writes the marker only. The
+  timestamp comes from the host watcher, not from the shell.
 - `docs/terminal-baseline-observation-format.md` — the published contract that
   `ticket_1787600689_646958` and `ticket_1787600679_990088` must reuse.
 - `.github/workflows/terminal-regression-baseline.yml` — `workflow_dispatch`,
@@ -512,15 +628,20 @@ Assumptions:
    `botster-web` repository runner list is empty, org runner listing returns 403
    for this session, and the Hub campaign recorded it unregistered under
    `question_1787447435_428566`.
-5. Both arms run a real PTY with a real shell that can execute the frozen probe
-   command and append to `$BOTSTER_BASELINE_LOG`. Verified in the modular arm
-   through the existing packaged harness terminal lane. Implement must verify it
-   on the legacy arm before recording any `key_to_pty` value, and mark the family
-   `blocked` with a typed reason if it does not hold.
-6. `Date.now()` in the page and `$EPOCHREALTIME` in the session shell read one
-   wall clock, because G12 requires the browser and the PTY to run on one host.
-   The record carries `same_host: true`. A capture that cannot prove one host
-   emits no `key_to_pty` value.
+5. Both arms can start an ordinary shell session into which the harness types one
+   setup command that runs the §6.2 dispatcher. This assumption replaces a weaker
+   one: the legacy browser API's `add_session` takes a session type name, not a
+   command line (`app/frontend/lib/connections/hub_connection.js:322-325`), so the
+   plan does not rely on either arm accepting an arbitrary spawn command. G16
+   proves the dispatcher started and answered a warm-up probe before any
+   measurement, and blocks the arm's PTY families with a typed reason otherwise.
+6. `Date.now()` in the page and the host watcher's `Date.now()` read one wall
+   clock, because G12 requires the browser and the PTY to run on one host. The
+   record carries `same_host: true`. A capture that cannot prove one host emits no
+   `key_to_pty` value. Revision 3 removed the earlier dependency on the shell
+   producing its own timestamp: `$EPOCHREALTIME` is a bash feature and the modular
+   production session runs `sh`
+   (`scripts/live-packaged-protocol-harness.mjs:6024`).
 7. Both arms deliver terminal bytes over an **encrypted** WebRTC DataChannel.
    Verified: `src/botster/webrtcDaemonClient.ts:1726-1745` decrypts AES-GCM after
    the channel event, and
@@ -536,19 +657,18 @@ Unknowns, each with an owner:
 2. The exact canvas settle window that separates history completion from live
    output on both arms. Owned by this ticket's Implement step; it must be
    calibrated once, then frozen into the format and recorded.
-3. Whether the legacy arm exposes a stable mounted-canvas selector. Owned by this
+3. Whether the legacy arm's shell session accepts the typed dispatcher setup
+   command and keeps `stty -echo` in effect. Owned by this ticket's Implement
+   step, gated by G16, which blocks rather than guesses.
+4. Whether the legacy arm exposes a stable mounted-canvas selector. Owned by this
    ticket's Implement step. If not, the paint oracle falls back to the arm's
    terminal container element and records which selector it used.
-4. Whether the two arms' `list_configs` and `list_session_types` response shapes
+5. Whether the two arms' `list_configs` and `list_session_types` response shapes
    are close enough to equalize response frames and bytes within a useful
    tolerance. Owned by this ticket's Implement step, which must record the
    achieved tolerance and, when the shapes differ, record that limitation in the
    record rather than dropping the family.
-5. The full Restty revision the legacy arm vendors. `2b52d0c9` declares the short
-   revision `cd1911d0f` in a commit message only. Owned by this ticket's Implement
-   step, which records the short declaration plus `artifact_sha256` and resolves
-   the full revision from the `trybotster/restty` repository when it is
-   reachable.
+
 
 ## 13. Risks
 
@@ -561,8 +681,10 @@ Unknowns, each with an owner:
 | A timing value becomes a CI assertion | Flaky CI, and the ticket's separation rule breaks | The deterministic gate and the observation writer are separate entry points; the validator rejects a record that carries a threshold field |
 | A leaked session or subscription between repetitions | Silent corruption of every later value in the arm | §9 late-message matrix; a repetition that cannot prove release is discarded and recorded as discarded |
 | The format needs a change after the Restty ticket | Downstream sets become incomparable | The version token is explicit; a change bumps `format_version` and the changing ticket must restate both sets |
-| The shell's own execution cost is read as transport latency | Every `key_to_pty` value is inflated by an unstated floor | §6 records `shell_exec_calibration_ms` per arm from the identical probe command driven on a local PTY with no browser; the metric name states it includes shell execution |
-| Browser and PTY wall clocks diverge | `key_to_pty` becomes meaningless or negative | G12 requires one host and the record carries `same_host: true`; the harness discards and records any repetition whose `t_pty` precedes `t_key` |
+| The watcher and dispatcher costs are read as transport latency | Every `key_to_pty` value is inflated by an unstated floor | §6.4 names every included component and records `watcher_detection_calibration_ms` and `dispatcher_append_calibration_ms` per arm per capture |
+| A per-probe helper process is added later for convenience | Process startup swamps the value being measured | §6.2 fixes the dispatcher as builtin `printf` plus an append redirect, with the one `cr` fork at session start only |
+| Browser and host-watcher wall clocks diverge | `key_to_pty` becomes meaningless or negative | Both stamps are `Date.now()` in one host's clock; G12 requires one host, the record carries `same_host: true`, and G15 discards and records any repetition whose `t_pty` precedes `t_key` |
+| The probe expands empty and records a zero-length marker | A silently wrong number enters the baseline | G16 requires `botster-baseline-ready` plus a warm-up probe whose log line equals the expected marker exactly, and blocks the arm otherwise |
 | The two saturation families get conflated again | A modular-only diagnostic is read as a cross-stack comparison | §7.1 retires the term `event_saturation`; the schema, the report names, and the published document use `control_response_saturation` and `package_event_saturation` |
 | `list_configs` and `list_session_types` response shapes differ between arms | A cross-stack row overstates equivalence | The record stores request rate, response rate, response bytes, producer, and tolerance per arm, and states the shape limitation; no row claims isolated transport causality |
 
@@ -586,8 +708,10 @@ is independent of every wall-clock value.
 | G11 | Arm teardown is proven live: recorded Hub and worker pids are gone and the arm socket path is absent after stop | harness assertion per arm |
 | G12 | Both checkouts are clean and at the recorded revisions before the capture starts | harness precondition, fails closed |
 | G13 | The recorded record validates against `format_version=1` | `npm run observe:terminal-baseline:validate` |
-| G14 | Every arm entry carries a Restty `declared_revision`, a `declaration_source`, and an `artifact_sha256` that matches the vendored files the arm actually loads | validator assertion plus a harness precondition, fails closed |
+| G14 | Every arm entry carries a full 40-character Restty `declared_revision`, a `declaration_source`, and an `artifact_sha256` that matches the vendored files the arm actually loads; a short revision is rejected and the arm is blocked | validator assertion plus a harness precondition, fails closed |
 | G15 | Both arms ran on one host, and no repetition has `t_pty` before `t_key` | harness precondition and per-repetition assertion |
+| G16 | Per arm, the dispatcher printed `botster-baseline-ready`, one warm-up probe added exactly one log line equal to the expected marker, and the watcher calibration produced a non-empty sample set | harness precondition, fails closed and blocks that arm's PTY families |
+| G17 | Neither supplied checkout changed: each `HEAD` and each `git status --porcelain` is identical before and after the capture | harness precondition and post-condition, fails closed |
 
 G5 aborts before it reaches any test when it is written as the bare npm script:
 `npm run smoke:live-packaged-protocol` builds Web and then exits, because
@@ -595,30 +719,55 @@ G5 aborts before it reaches any test when it is written as the bare npm script:
 and lines 9062-9066 require `BOTSTER_SESSION_WORKER_BIN`. Plan Review reproduced
 that pre-execution abort. G5 is therefore the complete pinned sequence:
 
+The sequence must not mutate the supplied checkout. §11 calls both supplied
+stacks read-only, and the available Hub checkout currently sits at `f66d459`, so
+a `checkout` there would change user state before any proof. G5 therefore builds
+in a dedicated scratch checkout and leaves the supplied repository untouched.
+
 ```sh
-# 1. Pin the Hub checkout to the modular arm revision.
-git -C "$HUB_CHECKOUT" fetch --quiet origin
-git -C "$HUB_CHECKOUT" checkout --quiet f6db5c436f72b151fd6dacde61d3f4836a4dc925
-test -z "$(git -C "$HUB_CHECKOUT" status --porcelain)"
+# 0. Record the supplied checkout's state and never write to it.
+HUB_SOURCE_HEAD="$(git -C "$HUB_SOURCE" rev-parse HEAD)"
+test -z "$(git -C "$HUB_SOURCE" status --porcelain)"
 
-# 2. Prove the locked Core revision before building.
-grep -q '7eafa470a18025895995bbedc20d34b58106a03b' "$HUB_CHECKOUT/Cargo.lock"
+# 1. Create a scratch checkout at the modular arm revision.
+HUB_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/botster-baseline-hub.XXXXXX")"
+git clone --quiet --no-checkout --shared "$HUB_SOURCE" "$HUB_SCRATCH"
+git -C "$HUB_SCRATCH" checkout --quiet f6db5c436f72b151fd6dacde61d3f4836a4dc925
+test -z "$(git -C "$HUB_SCRATCH" status --porcelain)"
 
-# 3. Build both debug binaries from that checkout.
-( cd "$HUB_CHECKOUT" && cargo build --locked --bin botster-hub )
-( cd "$HUB_CHECKOUT" && cargo build --locked -p botster-core-daemon --bin botster-session-worker )
+# 2. Prove the locked Core revision in the scratch checkout before building.
+grep -q '7eafa470a18025895995bbedc20d34b58106a03b' "$HUB_SCRATCH/Cargo.lock"
 
-# 4. Run the lane with both binaries supplied.
-BOTSTER_HUB_BIN="$HUB_CHECKOUT/target/debug/botster-hub" \
-BOTSTER_SESSION_WORKER_BIN="$HUB_CHECKOUT/target/debug/botster-session-worker" \
+# 3. Build both debug binaries in the scratch checkout only.
+( cd "$HUB_SCRATCH" && cargo build --locked --bin botster-hub )
+( cd "$HUB_SCRATCH" && cargo build --locked -p botster-core-daemon --bin botster-session-worker )
+
+# 4. Run the lane with both scratch binaries supplied.
+BOTSTER_HUB_BIN="$HUB_SCRATCH/target/debug/botster-hub" \
+BOTSTER_SESSION_WORKER_BIN="$HUB_SCRATCH/target/debug/botster-session-worker" \
   npm run smoke:live-packaged-protocol
+
+# 5. Prove the supplied checkout is unchanged.
+test "$(git -C "$HUB_SOURCE" rev-parse HEAD)" = "$HUB_SOURCE_HEAD"
+test -z "$(git -C "$HUB_SOURCE" status --porcelain)"
 ```
 
-Implement records the resolved `$HUB_CHECKOUT`, both binary real paths, and the
-`Cargo.lock` grep result in the implement report. `candidateBinaryProvenance` in
-`scripts/live-packaged-protocol-helpers.mjs` already requires both real paths to
-sit under the same cargo target directory, so step 3 must build into the Hub
-checkout's own `target/`.
+`git clone --shared` keeps the scratch checkout cheap because it reuses the
+source object store, and it still gives the scratch its own worktree, index, and
+`target/`. The scratch path sits under `$TMPDIR` and therefore contains no colon
+on this host; the harness asserts that before invoking cargo, per
+`[[colon worktree paths break cargo dyld library paths]]`.
+
+`candidateBinaryProvenance` in `scripts/live-packaged-protocol-helpers.mjs`
+requires both binary real paths to sit under one cargo target directory, which
+step 3 satisfies inside the scratch checkout.
+
+Implement records `$HUB_SOURCE`, `$HUB_SOURCE_HEAD`, the resolved `$HUB_SCRATCH`,
+both binary real paths, the `Cargo.lock` grep result, and the step 5 unchanged
+proof in the implement report. The legacy arm follows the same rule: the harness
+reads the supplied legacy checkout and never writes to it, and requires the
+operator to supply a clean checkout at `f598075e` rather than moving the
+developer copy.
 
 Observational output, non-gating:
 
