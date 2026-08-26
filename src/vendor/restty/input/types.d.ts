@@ -105,6 +105,14 @@ export type InputHandlerOptions = {
         y: number;
     };
     /**
+     * Cell height in CSS pixels for wheel accumulation.
+     */
+    getCellHeight?: () => number;
+    /**
+     * Viewport rows for wheel page deltas.
+     */
+    getRows?: () => number;
+    /**
      * Provide default colors for OSC 10/11/12 queries (RGB 0-255).
      */
     getDefaultColors?: () => DefaultColors;

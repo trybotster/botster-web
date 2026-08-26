@@ -23,6 +23,7 @@
     "smoke:package-events": "npm run build && BOTSTER_LIVE_PACKAGE_EVENTS=1 node scripts/live-packaged-protocol-harness.mjs",
     "smoke:package-events:gap": "npm run build && BOTSTER_LIVE_PACKAGE_EVENTS=1 BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX=1 node scripts/live-packaged-protocol-harness.mjs",
     "smoke:mounted-terminal-keyboard": "node scripts/mounted-terminal-keyboard-smoke.mjs",
+    "smoke:mounted-terminal-wheel-scrollback": "BOTSTER_MOUNTED_WHEEL_SCROLLBACK=1 node scripts/mounted-terminal-keyboard-smoke.mjs",
     "smoke:ghostsnp-grid": "node scripts/ghostsnp-grid-browser-smoke.mjs",
     "smoke:incremental-ghostsnp-attach": "node scripts/incremental-ghostsnp-attach-browser-smoke.mjs",
     "observe:terminal-baseline": "node scripts/terminal-baseline-capture.mjs",

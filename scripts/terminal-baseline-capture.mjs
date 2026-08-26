@@ -88,7 +88,7 @@ const PACKAGE_EVENT_BURST_ACTION = Object.freeze({
 });
 const RESTTY_RUNTIME_FILES = Object.freeze([
   "src/vendor/restty/internal.js",
-  "src/vendor/restty/chunk-3mc71e83.js",
+  "src/vendor/restty/chunk-qya1z999.js",
   "src/vendor/restty/restty.js",
   "src/vendor/restty/xterm.js"
 ]);

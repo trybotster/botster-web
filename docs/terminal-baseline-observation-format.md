@@ -7,10 +7,15 @@ Version 3 supersedes version 2 before any baseline becomes authoritative
 (`question_1787702156_949472`). Downstream tickets must reuse this version.
 They must not re-derive the schema. There is no version 2 compatibility path.
 
-- `ticket_1787600689_646958` records the post-Restty transport baseline in
-  `format_version=3`.
-- `ticket_1787600679_990088` compares its post-cut set against that post-Restty
-  baseline (architecture contract §14 row A20).
+- `ticket_1787600689_646958` vendors Restty `cd1911d0f88606270b1457c6995a3c04cb497edf`
+  and updates `PINNED_REVISIONS.modular_restty`. It does not publish a local or
+  controlled observation record. `botster-ubuntu-24.04-16core` is unavailable.
+- The post-Restty controlled set is the required future transport comparison set
+  for `ticket_1787600676_914408` and `ticket_1787600679_990088`. That set does
+  not exist yet. Those tickets reuse this version 3 schema when the runner
+  exists. They must not claim a measured latency improvement from
+  `ticket_1787600689_646958`.
+- Do not describe the missing controlled set as an existing transport baseline.
 
 ## Product baseline only
 

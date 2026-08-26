@@ -1,7 +1,7 @@
 # Vendored Restty
 
 Built from approved `trybotster/restty` commit
-`59c640488f33b10296875471691e43da6890e074` with `bun run build:wasm`
+`cd1911d0f88606270b1457c6995a3c04cb497edf` with `bun run build:wasm`
 and `bun run build`.
 
 The WASM build used the Restty-pinned `trybotster/ghostty` commit
@@ -16,6 +16,12 @@ unchanged at SHA-256
 This build includes GHOSTSNP snapshot import, `appOptions.readOnly`, and
 `suppressQueryReplies` for OSC 10/11/12, DA, and DSR replies. It also includes
 mouse and Kitty mode rehydration and incremental snapshot reader support.
+
+This revision adds stateful wheel batching: pixel accumulation across events,
+live `getCellHeight` and `getRows` conversion, a row-bounded burst, and a
+deferred remainder drain. The three Restty commits are
+`90e411592` (accumulate and batch), `3d0847d60` (remainder and touch nits),
+and `cd1911d0f` (pace bursts across frames).
 
 The fork package points at `dist/` but does not commit that directory or define
 an npm `prepare` script. This repository therefore vendors the complete built

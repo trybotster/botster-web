@@ -106,7 +106,7 @@ export const PINNED_REVISIONS = Object.freeze({
   modular_hub: "f6db5c436f72b151fd6dacde61d3f4836a4dc925",
   modular_web: "bcf89f1102b8adf333cd93edb09274e04dab22eb",
   modular_core: "7eafa470a18025895995bbedc20d34b58106a03b",
-  modular_restty: "59c640488f33b10296875471691e43da6890e074",
+  modular_restty: "cd1911d0f88606270b1457c6995a3c04cb497edf",
   modular_ghostty: "eb72ec61304ea256be1d86ed8fa961c84e43ecbd",
   modular_restty_declaration_source: "src/vendor/restty/README.md",
   legacy_monorepo: "f598075e6c143ef14b34d3a3dffdf2ec6a8d9eb6",

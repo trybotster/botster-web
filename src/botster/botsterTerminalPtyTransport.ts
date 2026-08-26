@@ -82,16 +82,26 @@ export class BotsterTerminalPtyTransport implements PtyTransport {
 
     if (this.dataPlane.writeModeGatedInput) {
       const semantic = this.options.createModeDependentInput(data);
-      void Promise.resolve(this.dataPlane.writeModeGatedInput(semantic)).catch((error: unknown) => {
-        this.options.record("mode_gated_input_error", {
-          message: error instanceof Error ? error.message : String(error),
-          sessionId: this.dataPlane?.sessionId
-        });
-      });
-      return true;
+      return this.writeSemantic(semantic);
     }
 
     void this.dataPlane.writeInput(data);
+    return true;
+  }
+
+  /**
+   * Send a prepared semantic through the mode-gated path only.
+   * Returns false when no data plane or no ModeGatedInput owner exists so a
+   * wheel decision cannot fall through as raw bytes.
+   */
+  writeSemantic(semantic: ModeDependentTerminalInput): boolean {
+    if (!this.dataPlane?.writeModeGatedInput) return false;
+    void Promise.resolve(this.dataPlane.writeModeGatedInput(semantic)).catch((error: unknown) => {
+      this.options.record("mode_gated_input_error", {
+        message: error instanceof Error ? error.message : String(error),
+        sessionId: this.dataPlane?.sessionId
+      });
+    });
     return true;
   }
 

@@ -8,15 +8,15 @@ import {
   isBuiltinThemeName,
   listBuiltinThemeNames,
   parseGhosttyTheme
-} from "./chunk-3mc71e83.js";
+} from "./chunk-qya1z999.js";
 export {
-  parseGhosttyTheme,
-  listBuiltinThemeNames,
-  isBuiltinThemeName,
-  getBuiltinThemeSource,
-  getBuiltinTheme,
-  createRestty,
-  ResttyPaneHandle,
+  RESTTY_PLUGIN_API_VERSION,
   Restty,
-  RESTTY_PLUGIN_API_VERSION
+  ResttyPaneHandle,
+  createRestty,
+  getBuiltinTheme,
+  getBuiltinThemeSource,
+  isBuiltinThemeName,
+  listBuiltinThemeNames,
+  parseGhosttyTheme
 };

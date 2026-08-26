@@ -21,6 +21,12 @@ import {
   coreMouseTrackingEnabled,
   mouseTrackingBitsFromCoreMode
 } from "./mouseMode";
+import {
+  encodeWheelDecision,
+  MountScopedWheelReencoder,
+  unmatchedWheelBytesShouldDrop,
+  type WheelDecision
+} from "./mountScopedWheelReencoder";
 
 export {
   CORE_MOUSE_NORMAL,
@@ -63,6 +69,11 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   private pendingSemantic: PendingSemanticInput | undefined;
   private removeDomListeners?: () => void;
   private uninstallPaletteProbe?: () => void;
+  private wheelAlive = true;
+  private readonly wheelReencoder = new MountScopedWheelReencoder({
+    isCurrent: () => this.wheelAlive,
+    onDrain: (decision) => this.sendWheelDecision(decision)
+  });
   constructor(readonly descriptor: TerminalViewDescriptor) {}
 
   mount(container: HTMLElement): void {
@@ -100,7 +111,14 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       }
     };
     const onWheel = (event: WheelEvent) => {
-      this.pendingSemantic = { kind: "mouse", event, reportKind: "wheel" };
+      const decision = this.wheelReencoder.consumeWheelEvent(event, {
+        cellHeight: this.liveCellHeight(),
+        rows: this.liveRows(),
+        cell: this.positionToCell(event)
+      });
+      if (decision && decision.steps > 0) {
+        this.sendWheelDecision(decision);
+      }
     };
 
     container.addEventListener("keydown", onKeyDown, true);
@@ -191,6 +209,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   attachDataPlane(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription {
+    this.wheelReencoder.reset();
     dataPlane.bindIncrementalSnapshotReader?.(() => this.createIncrementalSnapshotReader());
     const subscription = this.ptyTransport.attach(dataPlane);
     this.terminal?.connectPty();
@@ -267,6 +286,8 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   destroy(): void {
+    this.wheelAlive = false;
+    this.wheelReencoder.reset();
     this.removeDomListeners?.();
     this.removeDomListeners = undefined;
     this.pendingSemantic = undefined;
@@ -279,6 +300,49 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     this.container = undefined;
   }
 
+  private livePaneGrid(): { cols: number; rows: number; cellHeight?: number } {
+    const pane = this.terminal?.activePane?.() as
+      | {
+          cols?: number;
+          rows?: number;
+          cellH?: number;
+          getCols?: () => number;
+          getRows?: () => number;
+          getCellHeight?: () => number;
+        }
+      | null
+      | undefined;
+    const measuredGrid = this.ptyTransport.currentGrid();
+    const cols =
+      (typeof pane?.getCols === "function" ? pane.getCols() : undefined) ??
+      (typeof pane?.cols === "number" ? pane.cols : undefined) ??
+      measuredGrid?.columns ??
+      80;
+    const rows =
+      (typeof pane?.getRows === "function" ? pane.getRows() : undefined) ??
+      (typeof pane?.rows === "number" ? pane.rows : undefined) ??
+      measuredGrid?.rows ??
+      24;
+    const cellHeight =
+      (typeof pane?.getCellHeight === "function" ? pane.getCellHeight() : undefined) ??
+      (typeof pane?.cellH === "number" ? pane.cellH : undefined);
+    return { cols: Math.max(1, cols), rows: Math.max(1, rows), cellHeight };
+  }
+
+  private liveRows(): number {
+    return this.livePaneGrid().rows;
+  }
+
+  private liveCellHeight(): number {
+    const paneHeight = this.livePaneGrid().cellHeight;
+    if (typeof paneHeight === "number" && paneHeight > 0) return paneHeight;
+    const canvas = this.container?.querySelector?.("canvas");
+    const rect = canvas?.getBoundingClientRect?.();
+    const rows = this.liveRows();
+    if (rect && rect.height > 0 && rows > 0) return rect.height / rows;
+    return 20;
+  }
+
   /** Zero-based cell under a pointer/wheel event using the mounted canvas + current grid. */
   private positionToCell(event: MouseEvent | PointerEvent | WheelEvent): { col: number; row: number } {
     const canvas =
@@ -289,24 +353,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     if (!rect || rect.width <= 0 || rect.height <= 0) {
       return { col: 0, row: 0 };
     }
-    // Prefer live Restty pane grid when available; fall back to last resize.
-    const pane = this.terminal?.activePane?.() as
-      | { cols?: number; rows?: number; getCols?: () => number; getRows?: () => number }
-      | null
-      | undefined;
-    const measuredGrid = this.ptyTransport.currentGrid();
-    const liveCols =
-      (typeof pane?.getCols === "function" ? pane.getCols() : undefined) ??
-      (typeof pane?.cols === "number" ? pane.cols : undefined) ??
-      measuredGrid?.columns ??
-      80;
-    const liveRows =
-      (typeof pane?.getRows === "function" ? pane.getRows() : undefined) ??
-      (typeof pane?.rows === "number" ? pane.rows : undefined) ??
-      measuredGrid?.rows ??
-      24;
-    const cols = Math.max(1, liveCols);
-    const rows = Math.max(1, liveRows);
+    const { cols, rows } = this.livePaneGrid();
     // Restty MouseController adds 1 to col/row; supply zero-based grid coords.
     const col = Math.min(cols - 1, Math.max(0, Math.floor(((event.clientX - rect.left) / rect.width) * cols)));
     const row = Math.min(rows - 1, Math.max(0, Math.floor(((event.clientY - rect.top) / rect.height) * rows)));
@@ -355,7 +402,18 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     this.terminal?.resize(grid.columns, grid.rows);
   }
 
+  private sendWheelDecision(decision: WheelDecision): void {
+    if (!this.wheelAlive || decision.steps <= 0) return;
+    this.ptyTransport.writeSemantic({
+      encode: (modes: DaemonModeFlags) => encodeWheelDecision(decision, modes)
+    });
+  }
+
   private createModeDependentInput(initialBytes: string): ModeDependentTerminalInput {
+    // Unmatched mounted Restty wheel drain bytes must not reach raw PTY input.
+    if (unmatchedWheelBytesShouldDrop(initialBytes, this.pendingSemantic?.kind)) {
+      return { encode: () => "" };
+    }
     // Consume one-shot semantic state so a later mouse report cannot reuse a key event.
     let pending = this.takePendingSemantic() ?? { kind: "bytes" as const, data: initialBytes };
     // insertText / IME paths may not fire keydown, while canvas.click leaves a pending mouse

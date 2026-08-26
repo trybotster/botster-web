@@ -2495,10 +2495,10 @@ assert.match(readme, /kind: web_app/);
 assert.match(readme, /launch_mode: background/);
 assert.match(readme, /readiness: local_url/);
 assert.match(readme, /rejects daemon operations other than/);
-assert.match(vendorReadme, /59c640488f33b10296875471691e43da6890e074/);
+assert.match(vendorReadme, /cd1911d0f88606270b1457c6995a3c04cb497edf/);
 assert.match(vendorReadme, /suppressQueryReplies|readOnly/);
 assert.match(vendorReadme, /OSC 10\/11\/12/);
-const vendorResttyChunk = await readFile(new URL("./vendor/restty/chunk-3mc71e83.js", import.meta.url), "utf8");
+const vendorResttyChunk = await readFile(new URL("./vendor/restty/chunk-qya1z999.js", import.meta.url), "utf8");
 assert.match(vendorResttyChunk, /suppressQueryReplies:\s*options\.readOnly\s*===\s*true|suppressQueryReplies/);
 assert.match(vendorResttyChunk, /if \(options\.readOnly\)/);
 assert.match(vendorResttyChunk, /restore browser size failed/);
@@ -11089,6 +11089,11 @@ assert.equal(coreMouseTrackingEnabled(CORE_MOUSE_SGR), false);
 assert.match(resttyRenderer, /ptyTransport\.currentGrid\(\)/);
 assert.match(resttyRenderer, /measuredGrid\?\.columns/);
 assert.match(resttyRenderer, /measuredGrid\?\.rows/);
+assert.match(resttyRenderer, /MountScopedWheelReencoder/);
+assert.match(resttyRenderer, /getCellHeight|liveCellHeight/);
+assert.match(resttyRenderer, /encodeWheelDecision/);
+assert.match(resttyRenderer, /unmatchedWheelBytesShouldDrop/);
+assert.match(botsterTerminalPtyTransport, /writeSemantic/);
 assert.match(hubTerminalDataPlane, /mode_flags_refreshed_for_encode|encode_empty_after_mode_refresh/);
 assert.match(hubTerminalDataPlane, /DaemonTerminalStreamSubscription|abandon\(\)/);
 assert.match(hubTransport, /abandon\(\):\s*void|interface DaemonTerminalStreamSubscription/);
@@ -11245,6 +11250,286 @@ const vite = await createServer({
 });
 
 try {
+  {
+    const {
+      MountScopedWheelReencoder,
+      WHEEL_REPORTS_PER_BURST,
+      countWheelReports,
+      encodeWheelDecision,
+      unmatchedWheelBytesShouldDrop,
+      wheelDeltaPixels
+    } = await vite.ssrLoadModule("/src/botster/mountScopedWheelReencoder.ts");
+    const { createInputHandler } = await vite.ssrLoadModule("/src/vendor/restty/internal.js");
+    const trackingOn = testModeFlags("wheel-pty", { mouse_mode: 9 });
+    const trackingOff = testModeFlags("wheel-local", { mouse_mode: 0 });
+    const metrics = { cellHeight: 20, rows: 24, cell: { col: 2, row: 1 } };
+    const wheelEvent = (deltaY, extra = {}) => ({ deltaY, deltaMode: 0, shiftKey: false, altKey: false, ctrlKey: false, ...extra });
+
+    assert.equal(wheelDeltaPixels({ deltaY: -7.5, deltaMode: 0 }, 18, 30), -7.5);
+    assert.equal(wheelDeltaPixels({ deltaY: 2, deltaMode: 1 }, 18, 30), 36);
+    assert.equal(wheelDeltaPixels({ deltaY: 1, deltaMode: 2 }, 16, 40), 640);
+
+    // W1. Sub-cell pixel deltas accumulate across browser wheel events into one row report.
+    {
+      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
+      assert.equal(encoder.consumeWheelEvent(wheelEvent(-4), metrics)?.steps, 0);
+      assert.equal(encoder.consumeWheelEvent(wheelEvent(-4), metrics)?.steps, 0);
+      assert.equal(encoder.consumeWheelEvent(wheelEvent(-4), metrics)?.steps, 0);
+      assert.equal(encoder.consumeWheelEvent(wheelEvent(-4), metrics)?.steps, 0);
+      const decision = encoder.consumeWheelEvent(wheelEvent(-4), metrics);
+      assert.equal(decision.steps, 1);
+      assert.equal(decision.direction, "up");
+      assert.equal(encoder.accumulatorMutations, 5);
+    }
+
+    // W2/W3. Mounted handler report count and direction agree with PTY bytes when tracking is on.
+    {
+      const mountedReplies = [];
+      const mounted = createInputHandler({
+        sendReply: (data) => mountedReplies.push(data),
+        suppressQueryReplies: true,
+        positionToCell: () => ({ col: 2, row: 1 }),
+        getCellHeight: () => 16,
+        getRows: () => 30
+      });
+      mounted.setMouseMode("auto");
+      mounted.rehydrateMouseFromTrackingBits(mouseTrackingBitsFromCoreMode(9));
+      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
+      const liveMetrics = { cellHeight: 16, rows: 30, cell: { col: 2, row: 1 } };
+      mounted.sendMouseEvent("wheel", wheelEvent(-48));
+      const decision = encoder.consumeWheelEvent(wheelEvent(-48), liveMetrics);
+      const ptyBytes = encodeWheelDecision(decision, trackingOn);
+      assert.equal(decision.steps, 3);
+      assert.equal(decision.direction, "up");
+      assert.equal(countWheelReports(mountedReplies.join("")), countWheelReports(ptyBytes));
+      assert.equal(countWheelReports(ptyBytes), 3);
+      const sgrUp = `${String.fromCharCode(0x1b)}[<64;`;
+      assert.equal(ptyBytes.startsWith(sgrUp), true);
+      assert.equal(mountedReplies.join("").startsWith(sgrUp), true);
+      mountedReplies.length = 0;
+      const downMounted = createInputHandler({
+        sendReply: (data) => mountedReplies.push(data),
+        suppressQueryReplies: true,
+        positionToCell: () => ({ col: 2, row: 1 }),
+        getCellHeight: () => 16,
+        getRows: () => 30
+      });
+      downMounted.setMouseMode("auto");
+      downMounted.rehydrateMouseFromTrackingBits(mouseTrackingBitsFromCoreMode(9));
+      downMounted.sendMouseEvent("wheel", wheelEvent(16));
+      const downDecision = new MountScopedWheelReencoder({ scheduleDrain: () => undefined }).consumeWheelEvent(
+        wheelEvent(16),
+        liveMetrics
+      );
+      const downBytes = encodeWheelDecision(downDecision, trackingOn);
+      assert.equal(downDecision.direction, "down");
+      assert.equal(countWheelReports(mountedReplies.join("")), countWheelReports(downBytes));
+      assert.equal(downBytes.startsWith(`${String.fromCharCode(0x1b)}[<65;`), true);
+    }
+
+    // W4. A large delta produces a burst bounded by the live grid row count.
+    {
+      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
+      const decision = encoder.consumeWheelEvent(wheelEvent(-400), { cellHeight: 20, rows: 2, cell: { col: 0, row: 0 } });
+      assert.equal(decision.steps, 2);
+      assert.equal(decision.steps <= WHEEL_REPORTS_PER_BURST, true);
+    }
+
+    // W5. Pixel-to-cell conversion uses the live cell height, not the 20-pixel fallback.
+    {
+      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
+      const fallback = encoder.consumeWheelEvent(wheelEvent(-20), { cellHeight: 20, rows: 24, cell: { col: 0, row: 0 } });
+      const live = new MountScopedWheelReencoder({ scheduleDrain: () => undefined }).consumeWheelEvent(
+        wheelEvent(-20),
+        { cellHeight: 13, rows: 24, cell: { col: 0, row: 0 } }
+      );
+      assert.equal(fallback.steps, 1);
+      assert.equal(live.steps, 1);
+      const liveMiss = new MountScopedWheelReencoder({ scheduleDrain: () => undefined }).consumeWheelEvent(
+        wheelEvent(-12),
+        { cellHeight: 13, rows: 24, cell: { col: 0, row: 0 } }
+      );
+      assert.equal(liveMiss.steps, 0);
+      const fallbackWouldFire = new MountScopedWheelReencoder({ scheduleDrain: () => undefined }).consumeWheelEvent(
+        wheelEvent(-20),
+        { cellHeight: 20, rows: 24, cell: { col: 0, row: 0 } }
+      );
+      assert.equal(fallbackWouldFire.steps, 1);
+    }
+
+    // W6. Every deferred PTY drain passes through the mode gate.
+    {
+      const drains = [];
+      const gated = [];
+      const encoder = new MountScopedWheelReencoder({
+        scheduleDrain: (callback) => drains.push(callback),
+        onDrain: (decision) => {
+          gated.push(encodeWheelDecision(decision, trackingOn));
+        }
+      });
+      const decision = encoder.consumeWheelEvent(wheelEvent(-80), metrics);
+      assert.equal(decision.steps, WHEEL_REPORTS_PER_BURST);
+      assert.equal(drains.length, 1);
+      drains[0]();
+      assert.equal(gated.length, 1);
+      assert.equal(countWheelReports(gated[0]) > 0, true);
+    }
+
+    // W7. No unmatched mounted drain reaches raw PTY input.
+    {
+      assert.equal(unmatchedWheelBytesShouldDrop("\u001b[<64;1;1M"), true);
+      assert.equal(unmatchedWheelBytesShouldDrop("\u001b[<64;1;1M", "mouse"), false);
+      assert.equal(unmatchedWheelBytesShouldDrop("hello"), false);
+    }
+
+    // W8. A mouse mode change before a drain changes the drain decision.
+    {
+      const drains = [];
+      const drained = [];
+      const encoder = new MountScopedWheelReencoder({
+        scheduleDrain: (callback) => drains.push(callback),
+        onDrain: (decision) => drained.push(decision)
+      });
+      const immediate = encoder.consumeWheelEvent(wheelEvent(-80), metrics);
+      assert.equal(countWheelReports(encodeWheelDecision(immediate, trackingOn)) > 0, true);
+      drains[0]();
+      assert.equal(drained.length, 1);
+      assert.equal(encodeWheelDecision(drained[0], trackingOff), "");
+      assert.equal(countWheelReports(encodeWheelDecision(drained[0], trackingOn)) > 0, true);
+    }
+
+    // W9. A stale mount and a stale generation emit no bytes, and teardown cancels a drain.
+    {
+      let current = true;
+      const drains = [];
+      const drained = [];
+      const encoder = new MountScopedWheelReencoder({
+        scheduleDrain: (callback) => drains.push(callback),
+        onDrain: (decision) => drained.push(decision),
+        isCurrent: () => current
+      });
+      encoder.consumeWheelEvent(wheelEvent(-80), metrics);
+      current = false;
+      drains[0]();
+      assert.equal(drained.length, 0);
+      const encoder2 = new MountScopedWheelReencoder({
+        scheduleDrain: (callback) => drains.push(callback),
+        onDrain: (decision) => drained.push(decision)
+      });
+      encoder2.consumeWheelEvent(wheelEvent(-80), metrics);
+      encoder2.reset();
+      drains.at(-1)();
+      assert.equal(drained.length, 0);
+    }
+
+    // W10. One wheel event cannot produce duplicate PTY bytes.
+    {
+      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
+      const decision = encoder.consumeWheelEvent(wheelEvent(-20), metrics);
+      const first = encodeWheelDecision(decision, trackingOn);
+      const second = encodeWheelDecision(decision, trackingOn);
+      assert.equal(encoder.accumulatorMutations, 1);
+      assert.equal(first, second);
+      assert.equal(countWheelReports(first), 1);
+    }
+
+    // W11. One forced stale ModeGatedInput reject calls encode twice for one wheel event.
+    {
+      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
+      const decision = encoder.consumeWheelEvent(wheelEvent(-20), metrics);
+      const requests = [];
+      let encodeCalls = 0;
+      const plane = createHubTerminalDataPlane({
+        sessionId: "wheel-stale-retry",
+        subscriptionId: "wheel-stale-sub",
+        bridge: {
+          async request(request) {
+            requests.push({ ...request });
+            if (request.type === "read_mode_flags") {
+              return {
+                kind: "read_mode_flags",
+                mode_flags: { ...testModeFlags("wheel-stale-retry", { mouse_mode: 9 }), mode_generation: 1, mode_revision: 1 },
+                events: []
+              };
+            }
+            if (request.type === "mode_gated_input") {
+              if (requests.filter((item) => item.type === "mode_gated_input").length === 1) {
+                return {
+                  kind: "mode_gated_input",
+                  mode_gated_input: {
+                    session_id: "wheel-stale-retry",
+                    admitted: false,
+                    error_kind: "stale_mode",
+                    bytes_written: 0,
+                    kitty_enabled: false,
+                    cursor_visible: true,
+                    bracketed_paste: false,
+                    mouse_mode: 9,
+                    alt_screen: false,
+                    focus_reporting: false,
+                    application_cursor: false,
+                    mode_generation: 2,
+                    mode_revision: 2
+                  },
+                  events: []
+                };
+              }
+              return {
+                kind: "mode_gated_input",
+                mode_gated_input: {
+                  session_id: "wheel-stale-retry",
+                  admitted: true,
+                  bytes_written: request.data.length,
+                  kitty_enabled: false,
+                  cursor_visible: true,
+                  bracketed_paste: false,
+                  mouse_mode: 9,
+                  alt_screen: false,
+                  focus_reporting: false,
+                  application_cursor: false,
+                  mode_generation: 2,
+                  mode_revision: 2
+                },
+                events: []
+              };
+            }
+            return { kind: "events", events: [] };
+          },
+          streamTerminal(sessionId, subscriptionId, onEvent) {
+            onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
+            onEvent({
+              type: "snapshot",
+              session_id: sessionId,
+              subscription_id: subscriptionId,
+              payload_base64: ghostsnpFixturePayloadBase64,
+              payload_encoding: "base64",
+              bytes: ghostsnpFixtureBytes
+            });
+            onEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
+            onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
+            return { unsubscribe() {}, abandon() {} };
+          }
+        }
+      });
+      bindGhostsnpInstaller(plane);
+      plane.subscribeOutput(() => undefined);
+      for (let i = 0; i < 8; i += 1) await flushMicrotasks();
+      await plane.writeModeGatedInput({
+        encode(modes) {
+          encodeCalls += 1;
+          return encodeWheelDecision(decision, modes);
+        }
+      });
+      const gated = requests.filter((request) => request.type === "mode_gated_input");
+      assert.equal(encoder.accumulatorMutations, 1);
+      assert.equal(encodeCalls, 2);
+      assert.equal(gated.length, 2);
+      assert.equal(gated[0].data, gated[1].data);
+      assert.equal(countWheelReports(gated[0].data), 1);
+      await plane.detach();
+    }
+  }
+
   const [
     { ionicUiNodeRendererRegistry },
     { uiNodeConformanceSnapshot, fixtureEntityFrames, fixtureProvenance },
