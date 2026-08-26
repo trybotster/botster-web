@@ -81,7 +81,7 @@ Did not edit `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.
 
 `botster-web` owns Restty mounting, input callbacks, resize, and teardown as a renderer integration. This run changed only that repository.
 
-`trybotster/restty` was a build input. The build used a clean detached checkout at `/tmp/restty-vendor-cd1911d0f`, not the dirty local Restty working tree. No Restty upstream file was edited.
+`trybotster/restty` was a build input. The build used a throwaway clean detached checkout, not the dirty local Restty working tree. No Restty upstream file was edited.
 
 Core stays terminal authority. Hub stays content-blind. No new message kind was added.
 
@@ -104,7 +104,7 @@ None of the product scope changed. These are G8-lane details:
 
 | Check | Result |
 | --- | --- |
-| P1 clean checkout | `cd1911d0f88606270b1457c6995a3c04cb497edf` at `/tmp/restty-vendor-cd1911d0f` |
+| P1 clean checkout | `cd1911d0f88606270b1457c6995a3c04cb497edf` in a throwaway clean checkout |
 | P1 Ghostty pin | `eb72ec61304ea256be1d86ed8fa961c84e43ecbd` |
 | P2 tools | bun `1.4.0`, zig `0.16.0`, `ReleaseSafe` |
 | P3 WASM SHA-256 | `e84ec527a0d47d8cb869c15c965280f838e86578a52e9061a69dceac641cb527` (680783 bytes). Same as the previous vendor. |
@@ -157,3 +157,11 @@ No new product identity or convention conflict appeared. Durable capture is ther
 - `cd1911d0f88606270b1457c6995a3c04cb497edf` is the approved Restty revision.
 - Runtime-teardown lenses do not apply.
 - Direct merge policy means this step must commit on the ticket branch and does not need a pull-request link.
+
+## Review return
+
+Review `review_1787766638_259701` sent two findings back.
+
+`finding_1787766638_724111`: `consumeWheelEvent` now requires `applicationMouseActive`. Inactive events reset the accumulator and return no PTY decision. `syncApplicationMouseActive` clears leftover pixels on an off-to-on or on-to-off change, including after `write()` when Restty may have changed mouse modes. W12 proves four inactive `-4` px events leave `0` pending pixels, and the next active `-4` px event does not emit a report. W13 drives `ResttyTerminalRenderer` wheel listeners through `writeSemantic`, a double `encode` stale-retry, a large-delta burst, and unmatched-byte suppression.
+
+`finding_1787766638_589538`: The plan no longer names a user-specific spawn-target path or Restty checkout path. This report no longer names a host checkout directory. A raw `git diff main...HEAD` scan of committed markdown after this commit must not match `/Users/<name>` or `/home/<name>`.

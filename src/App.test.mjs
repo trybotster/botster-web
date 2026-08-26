@@ -11093,6 +11093,9 @@ assert.match(resttyRenderer, /MountScopedWheelReencoder/);
 assert.match(resttyRenderer, /getCellHeight|liveCellHeight/);
 assert.match(resttyRenderer, /encodeWheelDecision/);
 assert.match(resttyRenderer, /unmatchedWheelBytesShouldDrop/);
+assert.match(resttyRenderer, /getMouseStatus/);
+assert.match(resttyRenderer, /applicationMouseTrackingActive|applicationMouseActive/);
+assert.match(resttyRenderer, /syncApplicationMouseActive/);
 assert.match(botsterTerminalPtyTransport, /writeSemantic/);
 assert.match(hubTerminalDataPlane, /mode_flags_refreshed_for_encode|encode_empty_after_mode_refresh/);
 assert.match(hubTerminalDataPlane, /DaemonTerminalStreamSubscription|abandon\(\)/);
@@ -11262,7 +11265,7 @@ try {
     const { createInputHandler } = await vite.ssrLoadModule("/src/vendor/restty/internal.js");
     const trackingOn = testModeFlags("wheel-pty", { mouse_mode: 9 });
     const trackingOff = testModeFlags("wheel-local", { mouse_mode: 0 });
-    const metrics = { cellHeight: 20, rows: 24, cell: { col: 2, row: 1 } };
+    const metrics = { cellHeight: 20, rows: 24, cell: { col: 2, row: 1 }, applicationMouseActive: true };
     const wheelEvent = (deltaY, extra = {}) => ({ deltaY, deltaMode: 0, shiftKey: false, altKey: false, ctrlKey: false, ...extra });
 
     assert.equal(wheelDeltaPixels({ deltaY: -7.5, deltaMode: 0 }, 18, 30), -7.5);
@@ -11295,7 +11298,7 @@ try {
       mounted.setMouseMode("auto");
       mounted.rehydrateMouseFromTrackingBits(mouseTrackingBitsFromCoreMode(9));
       const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
-      const liveMetrics = { cellHeight: 16, rows: 30, cell: { col: 2, row: 1 } };
+      const liveMetrics = { cellHeight: 16, rows: 30, cell: { col: 2, row: 1 }, applicationMouseActive: true };
       mounted.sendMouseEvent("wheel", wheelEvent(-48));
       const decision = encoder.consumeWheelEvent(wheelEvent(-48), liveMetrics);
       const ptyBytes = encodeWheelDecision(decision, trackingOn);
@@ -11330,7 +11333,7 @@ try {
     // W4. A large delta produces a burst bounded by the live grid row count.
     {
       const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
-      const decision = encoder.consumeWheelEvent(wheelEvent(-400), { cellHeight: 20, rows: 2, cell: { col: 0, row: 0 } });
+      const decision = encoder.consumeWheelEvent(wheelEvent(-400), { cellHeight: 20, rows: 2, cell: { col: 0, row: 0 }, applicationMouseActive: true });
       assert.equal(decision.steps, 2);
       assert.equal(decision.steps <= WHEEL_REPORTS_PER_BURST, true);
     }
@@ -11338,21 +11341,21 @@ try {
     // W5. Pixel-to-cell conversion uses the live cell height, not the 20-pixel fallback.
     {
       const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
-      const fallback = encoder.consumeWheelEvent(wheelEvent(-20), { cellHeight: 20, rows: 24, cell: { col: 0, row: 0 } });
+      const fallback = encoder.consumeWheelEvent(wheelEvent(-20), { cellHeight: 20, rows: 24, cell: { col: 0, row: 0 }, applicationMouseActive: true });
       const live = new MountScopedWheelReencoder({ scheduleDrain: () => undefined }).consumeWheelEvent(
         wheelEvent(-20),
-        { cellHeight: 13, rows: 24, cell: { col: 0, row: 0 } }
+        { cellHeight: 13, rows: 24, cell: { col: 0, row: 0 }, applicationMouseActive: true }
       );
       assert.equal(fallback.steps, 1);
       assert.equal(live.steps, 1);
       const liveMiss = new MountScopedWheelReencoder({ scheduleDrain: () => undefined }).consumeWheelEvent(
         wheelEvent(-12),
-        { cellHeight: 13, rows: 24, cell: { col: 0, row: 0 } }
+        { cellHeight: 13, rows: 24, cell: { col: 0, row: 0 }, applicationMouseActive: true }
       );
       assert.equal(liveMiss.steps, 0);
       const fallbackWouldFire = new MountScopedWheelReencoder({ scheduleDrain: () => undefined }).consumeWheelEvent(
         wheelEvent(-20),
-        { cellHeight: 20, rows: 24, cell: { col: 0, row: 0 } }
+        { cellHeight: 20, rows: 24, cell: { col: 0, row: 0 }, applicationMouseActive: true }
       );
       assert.equal(fallbackWouldFire.steps, 1);
     }
@@ -11527,6 +11530,108 @@ try {
       assert.equal(gated[0].data, gated[1].data);
       assert.equal(countWheelReports(gated[0].data), 1);
       await plane.detach();
+    }
+
+    // W12. Inactive local-scroll pixels must not enter a later PTY report.
+    {
+      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
+      const offMetrics = { ...metrics, applicationMouseActive: false };
+      for (let index = 0; index < 4; index += 1) {
+        assert.equal(encoder.consumeWheelEvent(wheelEvent(-4), offMetrics), undefined);
+      }
+      assert.equal(encoder.pendingPixels(), 0);
+      const firstOn = encoder.consumeWheelEvent(wheelEvent(-4), metrics);
+      assert.equal(firstOn?.steps, 0);
+      assert.equal(encoder.pendingPixels(), -4);
+      assert.equal(encodeWheelDecision(firstOn, trackingOn), "");
+      const earned = encoder.consumeWheelEvent(wheelEvent(-16), metrics);
+      assert.equal(earned.steps, 1);
+      assert.equal(countWheelReports(encodeWheelDecision(earned, trackingOn)), 1);
+    }
+
+    // W13. Mounted renderer uses Restty mouse status, writeSemantic, stale retry,
+    // deferred drains, and unmatched raw-byte suppression.
+    {
+      const { createResttyTerminalRenderer } = await vite.ssrLoadModule("/src/botster/resttyRenderer.ts");
+      let mouseActive = false;
+      const writes = [];
+      const root = globalThis.document.createElement("div");
+      root.style.width = "640px";
+      root.style.height = "360px";
+      globalThis.document.body.appendChild(root);
+      const renderer = createResttyTerminalRenderer({
+        sessionId: "wheel-mounted-app-mouse",
+        renderer: "restty"
+      });
+      renderer.applicationMouseTrackingActive = () => mouseActive;
+      const fireWheel = (deltaY) => {
+        const event = {
+          deltaY,
+          deltaMode: 0,
+          shiftKey: false,
+          altKey: false,
+          ctrlKey: false,
+          clientX: 10,
+          clientY: 10,
+          target: root,
+          preventDefault() {},
+          buttons: 0
+        };
+        for (const listener of root._listeners?.get("wheel") ?? []) {
+          listener(event);
+        }
+      };
+      try {
+        try {
+          renderer.mount(root);
+        } catch {
+          // Minimal DOM lacks classList. Listeners are installed before Restty construction.
+        }
+        assert.equal((root._listeners?.get("wheel") ?? new Set()).size > 0, true);
+        const plane = {
+          sessionId: "wheel-mounted-app-mouse",
+          writeInput(data) {
+            writes.push({ kind: "raw", data });
+          },
+          writeModeGatedInput(semantic) {
+            writes.push({
+              kind: "semantic",
+              first: semantic.encode(trackingOn),
+              retry: semantic.encode(trackingOn)
+            });
+            return Promise.resolve();
+          },
+          subscribeOutput() {
+            return { unsubscribe() {} };
+          },
+          subscribeStatus() {
+            return { unsubscribe() {} };
+          },
+          resize() {},
+          detach() {}
+        };
+        renderer.attachDataPlane(plane);
+        for (let index = 0; index < 4; index += 1) {
+          fireWheel(-4);
+        }
+        assert.equal(writes.length, 0);
+        mouseActive = true;
+        renderer.write(new TextEncoder().encode(""));
+        fireWheel(-4);
+        assert.equal(writes.length, 0, "one sub-cell on-event must not inherit inactive pixels");
+        fireWheel(-20);
+        assert.equal(writes.length, 1);
+        assert.equal(writes[0].kind, "semantic");
+        assert.equal(writes[0].first, writes[0].retry);
+        assert.equal(countWheelReports(writes[0].first), 1);
+        fireWheel(-80);
+        assert.equal(writes.length >= 2, true, "a large delta must send an immediate burst through writeSemantic");
+        assert.equal(unmatchedWheelBytesShouldDrop("\u001b[<64;1;1M"), true);
+        assert.equal(unmatchedWheelBytesShouldDrop("\u001b[<64;1;1M", "mouse"), false);
+      } finally {
+        renderer.destroy();
+        root.remove();
+      }
     }
   }
 

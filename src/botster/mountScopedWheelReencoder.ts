@@ -35,6 +35,8 @@ export type WheelMetrics = {
   cellHeight: number;
   rows: number;
   cell: WheelCell;
+  /** When false, this event is local scrollback and must not enter PTY accumulation. */
+  applicationMouseActive: boolean;
 };
 
 type WheelBurstTarget = {
@@ -170,6 +172,7 @@ export class MountScopedWheelReencoder {
   private pendingWheelPx = 0;
   private drainEpoch = 0;
   private burstTarget: WheelBurstTarget | null = null;
+  private lastApplicationMouseActive = false;
   private readonly scheduleDrain: (callback: () => void) => void;
   private readonly onDrain?: (decision: WheelDecision) => void;
   private readonly isCurrent: () => boolean;
@@ -185,6 +188,20 @@ export class MountScopedWheelReencoder {
     this.drainEpoch += 1;
     this.pendingWheelPx = 0;
     this.burstTarget = null;
+    this.lastApplicationMouseActive = false;
+  }
+
+  /**
+   * Follow Restty: mode disable and rehydrate clear the wheel accumulator.
+   * Call this when application-mouse tracking changes, including after output
+   * that may have enabled or disabled mouse modes.
+   */
+  syncApplicationMouseActive(active: boolean): void {
+    if (active === this.lastApplicationMouseActive) return;
+    this.drainEpoch += 1;
+    this.pendingWheelPx = 0;
+    this.burstTarget = null;
+    this.lastApplicationMouseActive = active;
   }
 
   pendingPixels(): number {
@@ -197,6 +214,11 @@ export class MountScopedWheelReencoder {
    */
   consumeWheelEvent(event: WheelLikeEvent, metrics: WheelMetrics): WheelDecision | undefined {
     this.accumulatorMutations += 1;
+    if (!metrics.applicationMouseActive) {
+      this.syncApplicationMouseActive(false);
+      return undefined;
+    }
+    this.syncApplicationMouseActive(true);
     this.drainEpoch += 1;
     this.burstTarget = null;
     const cellHeight = Math.max(1, metrics.cellHeight || 20);

@@ -10,7 +10,7 @@ Pipeline: `botster_stack_delivery`
 |-------|-------|
 | `target_id` | `tgt_40abcf71ccf049f4ac0c99953a799869` |
 | Target repository | `botster-web` (`trybotster/botster-web`) |
-| Spawn target path | `/Users/jasonconigliari/Projects/botster-web` |
+| Spawn target path | configured botster-web target checkout |
 | Repository playbook | `[[botster-web-playbook]]` |
 
 The spawn target row for `tgt_40abcf71ccf049f4ac0c99953a799869` carries the display
@@ -276,9 +276,9 @@ must re-verify.
 A4. `bun 1.4.0` and `zig 0.16.0` are installed and are the versions the build
 uses. Both resolve on this host through mise.
 
-A5. The local Restty checkout at `/Users/jasonconigliari/Projects/restty` has a
-dirty submodule and untracked files. Implement must build from a clean checkout
-of `cd1911d0f`, not from that working tree.
+A5. A local Restty checkout has a dirty submodule and untracked files.
+Implement must build from a clean checkout of `cd1911d0f`, not from that
+working tree.
 
 Unknowns for Implement to resolve:
 

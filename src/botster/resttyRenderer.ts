@@ -114,7 +114,8 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       const decision = this.wheelReencoder.consumeWheelEvent(event, {
         cellHeight: this.liveCellHeight(),
         rows: this.liveRows(),
-        cell: this.positionToCell(event)
+        cell: this.positionToCell(event),
+        applicationMouseActive: this.applicationMouseTrackingActive()
       });
       if (decision && decision.steps > 0) {
         this.sendWheelDecision(decision);
@@ -271,6 +272,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
 
   write(data: TerminalOutput): void {
     this.ptyTransport.deliverOutput(data);
+    this.wheelReencoder.syncApplicationMouseActive(this.applicationMouseTrackingActive());
   }
 
   resize(rows: number, columns: number): void {
@@ -331,6 +333,15 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
 
   private liveRows(): number {
     return this.livePaneGrid().rows;
+  }
+
+  /**
+   * Restty `isMouseActive` / `getMouseStatus().active` is the same gate
+   * `shouldRoutePointerToAppMouse` uses. Inactive means local scrollback.
+   */
+  private applicationMouseTrackingActive(): boolean {
+    const status = this.terminal?.getMouseStatus?.() as { active?: boolean } | undefined;
+    return status?.active === true;
   }
 
   private liveCellHeight(): number {
