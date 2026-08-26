@@ -11385,7 +11385,6 @@ try {
     // W7. No unmatched mounted drain reaches raw PTY input.
     {
       assert.equal(unmatchedWheelBytesShouldDrop("\u001b[<64;1;1M"), true);
-      assert.equal(unmatchedWheelBytesShouldDrop("\u001b[<64;1;1M", "mouse"), false);
       assert.equal(unmatchedWheelBytesShouldDrop("hello"), false);
     }
 
@@ -11571,6 +11570,7 @@ try {
 
     // W13. Mounted renderer listener: off-to-on, active Shift+wheel, deferred
     // writeSemantic drain, and unmatched sendInput bytes with zero raw write.
+    // A pending mouse move must not match a later unmatched Restty wheel report.
     // Restty construction still fails in this minimal DOM after listeners install.
     {
       const { createResttyTerminalRenderer } = await vite.ssrLoadModule("/src/botster/resttyRenderer.ts");
@@ -11672,6 +11672,26 @@ try {
         const sent = renderer.ptyTransport.sendInput("\u001b[<64;1;1M");
         assert.equal(sent, true);
         assert.equal(writes.filter((write) => write.kind === "raw").length, rawBefore);
+        assert.equal(writes.at(-1).kind, "semantic");
+        assert.equal(writes.at(-1).first, "");
+        assert.equal(writes.at(-1).retry, "");
+        assert.equal((root._listeners?.get("pointermove") ?? new Set()).size > 0, true);
+        const pointerMove = {
+          buttons: 1,
+          clientX: 10,
+          clientY: 10,
+          target: root,
+          preventDefault() {}
+        };
+        for (const listener of root._listeners?.get("pointermove") ?? []) {
+          listener(pointerMove);
+        }
+        const writesBeforeStale = writes.length;
+        const rawBeforeStale = writes.filter((write) => write.kind === "raw").length;
+        const staleSent = renderer.ptyTransport.sendInput("\u001b[<64;1;1M");
+        assert.equal(staleSent, true);
+        assert.equal(writes.filter((write) => write.kind === "raw").length, rawBeforeStale);
+        assert.equal(writes.length, writesBeforeStale + 1);
         assert.equal(writes.at(-1).kind, "semantic");
         assert.equal(writes.at(-1).first, "");
         assert.equal(writes.at(-1).retry, "");

@@ -71,8 +71,13 @@ export function wheelDeltaPixels(event: WheelLikeEvent, cellHeight: number, rows
   return dy;
 }
 
-export function unmatchedWheelBytesShouldDrop(initialBytes: string, pendingKind?: string): boolean {
-  return looksLikeWheelReport(initialBytes) && pendingKind !== "mouse";
+/**
+ * Mounted Restty sendInput wheel bytes are unmatched. A pending pointer
+ * mouse or key semantic is not a match. The mount-scoped re-encoder is
+ * the only PTY wheel byte authority.
+ */
+export function unmatchedWheelBytesShouldDrop(initialBytes: string): boolean {
+  return looksLikeWheelReport(initialBytes);
 }
 
 /**

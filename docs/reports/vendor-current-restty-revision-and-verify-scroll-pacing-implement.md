@@ -80,6 +80,8 @@ Changed:
 
 Did not edit `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md`.
 
+This merge-blocker visit edits only `src/botster/mountScopedWheelReencoder.ts`, `src/botster/resttyRenderer.ts`, `src/App.test.mjs`, and this report.
+
 ## Ownership boundaries preserved
 
 `botster-web` owns Restty mounting, input callbacks, resize, and teardown as a renderer integration. This run changed only that repository.
@@ -145,7 +147,8 @@ This report publishes no performance number, no local record, and no controlled 
 - G8 proves local scrollback only. PTY report count and direction stay with W2 and W3.
 - G8 host CSS is smoke-only. Production `.terminal-view-container` already uses `height: 100%` and `overflow: hidden`.
 - `page.mouse.wheel` is unused. G8 uses a cancelable bubbling `WheelEvent` on the canvas.
-- W13 still cannot construct a Restty instance in the App.test minimal DOM. It drives the wheel listener installed before that constructor and calls `ptyTransport.sendInput`, which is the same callback Restty uses.
+- W13 still cannot construct a Restty instance in the App.test minimal DOM. It drives the wheel and pointermove listeners installed before that constructor and calls `ptyTransport.sendInput`, which is the same callback Restty uses.
+- `unmatchedWheelBytesShouldDrop` still discards the whole input when the bytes contain a wheel-report CSI, so pasted text that carries such a sequence would drop. Practical exposure is very low.
 
 ## Missing vault guidance discovered
 
@@ -180,3 +183,32 @@ Review `review_1787767220_860172` sent two findings back.
 Review `review_1787768820_218673` returned `changes_required`. The MCP bridge rejected the structured findings array, so no finding row exists. This visit treats the review summary's FINDING 1 as the blocking defect.
 
 FINDING 1: The previous vendor bundled a stale `text-shaper` and dropped `hintTarget`. This visit rebuilt from a clean checkout with `bun install --frozen-lockfile`, confirmed `text-shaper@0.1.18`, ran `bun run build`, and replaced `src/vendor/restty` with that `dist`. The rebuild oracle is identical after chunk-name normalization. `App.test.mjs` now asserts two `hintTarget ?? "auto"` matches in the vendored chunk. The wheel encoder did not change.
+
+## Merge blocker return
+
+Merge was blocked at `bc6ae4bb507e328c56a25eedf704cbc1119de233` by `artifact_1787770088_998399`.
+
+`onPointerMove` can leave `pendingSemantic` as a mouse move when a button is held. `unmatchedWheelBytesShouldDrop` then treated any wheel-report bytes as matched when `pendingSemantic.kind` was `mouse`. A later unmatched mounted Restty deferred wheel report passed the drop and `encodeSemanticInput` emitted the stale mouse move.
+
+This visit changes only that race:
+
+- `unmatchedWheelBytesShouldDrop` now drops every wheel-report byte string. It no longer reads a pending kind.
+- `createModeDependentInput` calls that helper with the incoming bytes only.
+- W13 fires a `pointermove` with `buttons: 1` before a second unmatched `\u001b[<64;1;1M` `sendInput`. The production callback still writes no raw input and encodes empty gated bytes.
+
+The mount-scoped re-encoder remains the only PTY wheel byte authority. `sendWheelDecision` still uses `ptyTransport.writeSemantic`. Restty `sendInput` wheel bytes still drop.
+
+This visit did not change the vendor, `botsterTerminalPtyTransport.ts`, or the approved plan.
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| G1 | `npm run typecheck` | pass |
+| G2 | `npm run lint` | pass (5 pre-existing `react-refresh` warnings only) |
+| G3 | `npm test` | pass |
+| G4 | `npm run build` | pass |
+| G5 | `npm run smoke:mounted-terminal-keyboard` | pass |
+| G6 | `npm run smoke:ghostsnp-grid` | pass (`90x24`) |
+| G7 | `npm run smoke:incremental-ghostsnp-attach` | pass |
+| G8 | `npm run smoke:mounted-terminal-wheel-scrollback` | pass |
+
+No merge was requested.

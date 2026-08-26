@@ -424,7 +424,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
 
   private createModeDependentInput(initialBytes: string): ModeDependentTerminalInput {
     // Unmatched mounted Restty wheel drain bytes must not reach raw PTY input.
-    if (unmatchedWheelBytesShouldDrop(initialBytes, this.pendingSemantic?.kind)) {
+    if (unmatchedWheelBytesShouldDrop(initialBytes)) {
       return { encode: () => "" };
     }
     // Consume one-shot semantic state so a later mouse report cannot reuse a key event.
