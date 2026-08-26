@@ -403,14 +403,29 @@ function requireKeys(object, keys, label, errors) {
   }
 }
 
+function requireFullRevision(value, label, errors) {
+  if (typeof value !== "string" || !FULL_REVISION.test(value)) {
+    errors.push(`${label} must be a full 40-character commit`);
+  }
+}
+
+function validateArmRevisions(revisions, armId, errors) {
+  if (!isObject(revisions)) {
+    return;
+  }
+  requireFullRevision(revisions.commit, `arms.${armId}.revisions.commit`, errors);
+  if (armId === "modular") {
+    requireFullRevision(revisions.locked_core, "arms.modular.revisions.locked_core", errors);
+    requireFullRevision(revisions.web, "arms.modular.revisions.web", errors);
+  }
+}
+
 function validateRestty(restty, armId, errors) {
   requireKeys(restty, REQUIRED_RESTTY, `arms.${armId}.restty`, errors);
   if (!isObject(restty)) {
     return;
   }
-  if (typeof restty.declared_revision !== "string" || !FULL_REVISION.test(restty.declared_revision)) {
-    errors.push(`arms.${armId}.restty.declared_revision must be a full 40-character commit`);
-  }
+  requireFullRevision(restty.declared_revision, `arms.${armId}.restty.declared_revision`, errors);
   if (typeof restty.declaration_source !== "string" || restty.declaration_source.length === 0) {
     errors.push(`arms.${armId}.restty.declaration_source is required`);
   }
@@ -712,6 +727,7 @@ export function validateObservationRecord(record) {
       if (arm?.arm_id !== armId) {
         errors.push(`arms.${armId}.arm_id must equal ${armId}`);
       }
+      validateArmRevisions(arm?.revisions, armId, errors);
       validateRestty(arm?.restty, armId, errors);
       if (arm?.implied_pty_clock && arm.implied_pty_clock !== record.pty_clock) {
         errors.push(`arms.${armId} implies a different pty_clock than the capture`);
@@ -811,7 +827,9 @@ export function exampleValidRecord(overrides = {}) {
   });
   const arm = (armId) => ({
     arm_id: armId,
-    revisions: { commit: "b".repeat(40) },
+    revisions: armId === "modular"
+      ? { commit: "b".repeat(40), locked_core: "c".repeat(40), web: "d".repeat(40) }
+      : { commit: "b".repeat(40) },
     build_commands: ["cargo build"],
     launch_command: "hub start",
     binary_real_paths: {},

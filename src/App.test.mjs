@@ -18499,6 +18499,32 @@ function removeCssAtRules(source) {
   const shortRestty = exampleValidRecord();
   shortRestty.arms.legacy.restty.declared_revision = "cd1911d0f";
   assert.match(validateObservationRecord(shortRestty).errors.join("\n"), /full 40-character commit/);
+  const shortArmCommit = exampleValidRecord();
+  shortArmCommit.arms.legacy.revisions.commit = "short";
+  assert.match(
+    validateObservationRecord(shortArmCommit).errors.join("\n"),
+    /arms\.legacy\.revisions\.commit must be a full 40-character commit/
+  );
+  const badModularCommit = exampleValidRecord();
+  badModularCommit.arms.modular.revisions.commit = "not-a-commit";
+  assert.match(
+    validateObservationRecord(badModularCommit).errors.join("\n"),
+    /arms\.modular\.revisions\.commit must be a full 40-character commit/
+  );
+  const shortLockedCore = exampleValidRecord();
+  shortLockedCore.arms.modular.revisions.locked_core = "short";
+  assert.match(
+    validateObservationRecord(shortLockedCore).errors.join("\n"),
+    /arms\.modular\.revisions\.locked_core must be a full 40-character commit/
+  );
+  const shortWebRevision = exampleValidRecord();
+  shortWebRevision.arms.modular.revisions.web = "short";
+  assert.match(
+    validateObservationRecord(shortWebRevision).errors.join("\n"),
+    /arms\.modular\.revisions\.web must be a full 40-character commit/
+  );
+  assert.match(readme, /terminal_baseline_observation_format=3/);
+  assert.doesNotMatch(readme, /terminal_baseline_observation_format=2/);
 
   const hostSplit = exampleValidRecord();
   hostSplit.same_host = false;

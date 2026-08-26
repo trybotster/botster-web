@@ -2,8 +2,8 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787720828_217032`
-Returned from Review: `review_1787720810_475138`
+Step: `botster_stack_implement` / `run_step_1787723917_210545`
+Returned from Verify: `review_1787723908_218714` (authoritative; supersedes duplicate Verify rows). Also open: `finding_1787722916_300810` from `review_1787722916_226312`.
 Human decision: `question_1787702156_949472` requires `format_version=3`; earlier `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 10, resynced to format version 3
 Approved review: `review_1787638112_854617`
@@ -84,8 +84,8 @@ New:
 Changed:
 
 - `package.json` — `observe:terminal-baseline` and `observe:terminal-baseline:validate`
-- `src/App.test.mjs` — format version 3, attach+snapshot control operations, subscribe-attempt generation, page-isolation teardown, message-first and close-first late confirmations, send-only reject, remount-restore, concurrent-workload, one-armed publication, and runner-admission assertions
-- `README.md` — pointer to the observation format
+- `src/App.test.mjs` — format version 3, attach+snapshot control operations, subscribe-attempt generation, page-isolation teardown, message-first and close-first late confirmations, 40-character arm revision rejects, README version-token pin, send-only reject, remount-restore, concurrent-workload, one-armed publication, and runner-admission assertions
+- `README.md` — `terminal_baseline_observation_format=3`; downstream tickets must reuse version 3
 - `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` — resynced to format version 3 and attach+snapshot operations
 
 Unchanged production paths: everything under `src/botster/`, `src/app/`, and `src/vendor/restty/`. No file in the supplied Hub checkout or `~/Rails/trybotster` was written.
@@ -125,7 +125,15 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787720810_475138` returned three open findings. This visit keeps `format_version=3` and isolates each legacy attach attempt.
+`review_1787723908_218714` is the authoritative Verify return. `project_pipelines_submit_review` could not attach findings, so that review wrote them inline. This visit keeps `format_version=3` and repairs the entry-point docs plus revision-shape checks.
+
+| Finding | Fix |
+| --- | --- |
+| Verify Finding 1 README still publishes version 2 | `README.md` now publishes `terminal_baseline_observation_format=3`. Downstream tickets must reuse version 3. Version 3 supersedes version 2. A test rejects a leftover `=2` token. |
+| Verify Finding 2 short arm revisions validate | The validator now requires a 40-character commit for `arms.<arm>.revisions.commit`, `arms.modular.revisions.locked_core`, and `arms.modular.revisions.web`. It does not pin those values. Red tests cover `short` and `not-a-commit`. |
+| `finding_1787722916_300810` stale resize outbound row | The historical send-oracle row now says version 3 superseded the resize send path. Legacy outbound counts `subscribe` or `request_snapshot`. |
+
+`review_1787720810_475138` findings from the prior visit remain resolved. Each legacy attach still uses a new production page and subscribe-attempt generation.
 
 | Finding | Fix |
 | --- | --- |
@@ -164,7 +172,7 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787701046_872600` unrelated send | `observeOutbound` still receives the selected semantic name. Modular counts `daemon_request` rows for that arm's wire type only. Legacy counts ledger rows for `resize` or `request_snapshot` only. |
+| `finding_1787701046_872600` unrelated send | Superseded by format version 3. `observeOutbound` still receives the selected semantic name. Modular counts `daemon_request` rows for that arm's wire type only. Legacy outbound now counts `subscribe` or `request_snapshot`. Version 3 has no `terminal_resize` send path. |
 
 `review_1787699804_592583` findings from the prior visit remain resolved:
 
