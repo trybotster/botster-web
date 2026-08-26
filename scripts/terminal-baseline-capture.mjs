@@ -42,6 +42,8 @@ import {
   appendCostSamples,
   baselineObserverInitScript,
   calibrateWatcherDetection,
+  installLegacyProductionSubscribeObserver,
+  sessionIdFromTerminalSubscription,
   createLogWatcher,
   dispatcherStartCommand,
   fileExists,
@@ -1149,25 +1151,32 @@ async function remountLegacySession(page, arm, options = {}) {
   return { at, previousHash, didRemount: true, sessionId };
 }
 
-export async function waitForBrowserControl(page, armId) {
-  await page.waitForFunction((id) => {
-    if (id === "modular") {
+export async function waitForBrowserControl(page, armId, semanticName = null) {
+  if (armId === "modular") {
+    await page.waitForFunction(() => {
       return typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.request === "function";
-    }
-    return Object.keys(globalThis._botsterTestTerminal ?? {}).length > 0;
-  }, armId, { timeout: 30_000 });
-  if (armId === "legacy") {
-    await installLegacyInboundObserver(page);
+    }, null, { timeout: 30_000 });
+    await page.evaluate((source) => {
+      const wrapModularControlTransport = new Function(`return (${source});`)();
+      const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
+      if (!control) {
+        return;
+      }
+      wrapModularControlTransport(control, globalThis);
+    }, wrapModularControlTransport.toString());
     return;
   }
   await page.evaluate((source) => {
-    const wrapModularControlTransport = new Function(`return (${source});`)();
-    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
-    if (!control) {
-      return;
-    }
-    wrapModularControlTransport(control, globalThis);
-  }, wrapModularControlTransport.toString());
+    const installLegacyProductionSubscribeObserver = new Function(`return (${source});`)();
+    installLegacyProductionSubscribeObserver(globalThis);
+  }, installLegacyProductionSubscribeObserver.toString());
+  if (semanticName === "terminal_attach") {
+    return;
+  }
+  await page.waitForFunction(() => {
+    return Object.keys(globalThis._botsterTestTerminal ?? {}).length > 0;
+  }, null, { timeout: 30_000 });
+  await installLegacyInboundObserver(page);
 }
 
 export function isSendOnlyCompletion(entry) {
@@ -1184,10 +1193,33 @@ export function assertDecodedInboundEntry(entry, wireType) {
   return entry;
 }
 
+export function attachAdmissionFromReply(reply) {
+  const events = Array.isArray(reply?.events) ? reply.events : [];
+  return events.find((event) =>
+    event?.type === "attach_state"
+    && typeof event.session_id === "string"
+    && event.session_id.length > 0
+    && typeof event.subscription_id === "string"
+    && event.subscription_id.length > 0
+  ) ?? null;
+}
+
+export function decoderAssemblyGeneration(assembly) {
+  const generation = assembly?.payload?.generation;
+  return Number.isInteger(generation) ? generation : null;
+}
+
 export function assertAttachIdentity(entry, expected) {
-  const sessionId = entry?.session_id ?? entry?.payload?.session_id ?? entry?.payload?.session_uuid;
+  const sessionId = entry?.session_id ?? entry?.payload?.session_id ?? entry?.payload?.session_uuid
+    ?? sessionIdFromTerminalSubscription(entry?.subscription_id ?? entry?.payload?.subscription_id ?? entry?.payload?.subscriptionId);
   const subscriptionId = entry?.subscription_id ?? entry?.payload?.subscription_id ?? entry?.payload?.subscriptionId;
   const generation = entry?.generation ?? entry?.payload?.generation;
+  if (!sessionId) {
+    throw new Error("control_response_saturation: attach session identity is missing from the decoder response");
+  }
+  if (!subscriptionId) {
+    throw new Error("control_response_saturation: attach subscription is missing from the decoder response");
+  }
   if (expected.session_id && sessionId !== expected.session_id) {
     throw new Error(`control_response_saturation: attach session identity ${sessionId} is not ${expected.session_id}`);
   }
@@ -1200,6 +1232,22 @@ export function assertAttachIdentity(entry, expected) {
   return entry;
 }
 
+export function assertModularAttachAdmission(entry) {
+  if (entry?.source !== "decoder_assembly") {
+    throw new Error("control_response_saturation: modular attach admission is not decoder assembly");
+  }
+  if (entry?.payload?.type !== "attach_state") {
+    throw new Error("control_response_saturation: modular attach admission is missing decoder attach_state");
+  }
+  if (!entry.session_id || !entry.subscription_id) {
+    throw new Error("control_response_saturation: modular attach identity is missing from decoder attach_state");
+  }
+  if (!Number.isInteger(entry.generation)) {
+    throw new Error("control_response_saturation: modular attach generation is missing from decoder assembly");
+  }
+  return entry;
+}
+
 export function assertAttachTornDown(state) {
   if (state?.live) {
     throw new Error("control_response_saturation: previous attach was not torn down");
@@ -1208,6 +1256,10 @@ export function assertAttachTornDown(state) {
 }
 
 export function wrapLegacyControlTransport(transport, store = globalThis) {
+  const sessionFromSubscription = (subscriptionId) => {
+    const match = /^terminal_(.+)$/.exec(String(subscriptionId ?? ""));
+    return match?.[1] ?? null;
+  };
   if (!transport || transport.__baselineInboundWrapped) {
     return store;
   }
@@ -1254,7 +1306,6 @@ export function wrapLegacyControlTransport(transport, store = globalThis) {
     throw new Error("legacy transport handleMessage is not available");
   }
   transport.handleMessage = (message) => {
-    const currentGeneration = store.__BOTSTER_BASELINE_ATTACH__.generation;
     if (message?.type === "subscribed") {
       if (!store.__BOTSTER_BASELINE_ATTACH__.accepting) {
         return original(message);
@@ -1264,9 +1315,10 @@ export function wrapLegacyControlTransport(transport, store = globalThis) {
         wire: "subscribe",
         source: "decoder",
         payload: message,
-        session_id: message.session_uuid ?? message.session_id,
+        session_id: message.session_uuid ?? message.session_id
+          ?? sessionFromSubscription(message.subscriptionId ?? message.subscription_id),
         subscription_id: message.subscriptionId ?? message.subscription_id,
-        generation: message.generation ?? currentGeneration,
+        generation: Object.hasOwn(message, "generation") ? message.generation : undefined,
         at: Date.now()
       });
       store.__BOTSTER_BASELINE_ATTACH__.live = true;
@@ -1301,11 +1353,25 @@ export function wrapModularControlTransport(control, store = globalThis) {
   store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ = store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? [];
   store.__BOTSTER_BASELINE_ATTACH__ = store.__BOTSTER_BASELINE_ATTACH__ ?? { live: false, generation: 0 };
   const original = control.request.bind(control);
-  const assemblyCount = (requestType) => {
+  const matchingAssemblies = (requestType) => {
     const events = store.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
     return events.filter((entry) =>
       entry.kind === "webrtc_response_assembly" && entry.payload?.request_type === requestType
-    ).length;
+    );
+  };
+  const admissionFromReply = (reply) => {
+    const events = Array.isArray(reply?.events) ? reply.events : [];
+    return events.find((event) =>
+      event?.type === "attach_state"
+      && typeof event.session_id === "string"
+      && event.session_id.length > 0
+      && typeof event.subscription_id === "string"
+      && event.subscription_id.length > 0
+    ) ?? null;
+  };
+  const assemblyGeneration = (assembly) => {
+    const generation = assembly?.payload?.generation;
+    return Number.isInteger(generation) ? generation : null;
   };
   control.request = async (payload) => {
     const wireType = payload?.type;
@@ -1314,22 +1380,34 @@ export function wrapModularControlTransport(control, store = globalThis) {
       wire: wireType,
       at: Date.now()
     });
-    const before = assemblyCount(wireType);
+    const before = matchingAssemblies(wireType).length;
     const reply = await original(payload);
-    const after = assemblyCount(wireType);
-    if (after > before && reply != null && wireType !== "resize" && wireType !== "detach") {
-      store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
-        type: wireType,
-        wire: wireType,
-        source: "decoder_assembly",
-        payload: reply,
-        session_id: reply.session_id ?? payload.session_id,
-        subscription_id: reply.subscription_id ?? payload.subscription_id,
-        generation: store.__BOTSTER_BASELINE_ATTACH__.generation,
-        at: Date.now()
-      });
+    const assemblies = matchingAssemblies(wireType);
+    if (assemblies.length > before && reply != null && wireType !== "resize" && wireType !== "detach") {
       if (wireType === "attach") {
-        store.__BOTSTER_BASELINE_ATTACH__.live = true;
+        const admission = admissionFromReply(reply);
+        const generation = assemblyGeneration(assemblies.at(-1));
+        if (admission && generation != null) {
+          store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
+            type: wireType,
+            wire: wireType,
+            source: "decoder_assembly",
+            payload: admission,
+            session_id: admission.session_id,
+            subscription_id: admission.subscription_id,
+            generation,
+            at: Date.now()
+          });
+          store.__BOTSTER_BASELINE_ATTACH__.live = true;
+        }
+      } else {
+        store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
+          type: wireType,
+          wire: wireType,
+          source: "decoder_assembly",
+          payload: reply,
+          at: Date.now()
+        });
       }
     }
     if (wireType === "detach") {
@@ -1438,13 +1516,46 @@ export async function observeSiblingDelivery(page, armId) {
 }
 
 function nextAttachAttempt(arm) {
+  arm.attachGeneration = (arm.attachGeneration ?? 0) + 1;
   arm.attachAttempt = {
     session_id: arm.attachSessionId ?? arm.probeSessionId,
-    subscription_id: `${arm.captureId ?? "baseline"}-attach-${(arm.attachGeneration = (arm.attachGeneration ?? 0) + 1)}`,
-    generation: arm.attachGeneration,
+    subscription_id: arm.arm_id === "modular"
+      ? `${arm.captureId ?? "baseline"}-attach-${arm.attachGeneration}`
+      : null,
     live: true
   };
   return arm.attachAttempt;
+}
+
+function controlObservationPage(arm, semanticName) {
+  if (semanticName === "terminal_attach" && arm.attachPage) {
+    return arm.attachPage;
+  }
+  return arm.page;
+}
+
+async function issueLegacyProductionAttach(arm) {
+  if (!arm.context) {
+    throw new Error("legacy production attach requires a second browser page");
+  }
+  if (!arm.appUrl) {
+    throw new Error("legacy production attach requires the legacy app URL");
+  }
+  const attempt = nextAttachAttempt(arm);
+  const attachPage = await arm.context.newPage();
+  await attachPage.addInitScript(baselineObserverInitScript());
+  arm.attachPage = attachPage;
+  await attachPage.goto(arm.appUrl, { waitUntil: "domcontentloaded" });
+  await waitForBrowserControl(attachPage, "legacy", "terminal_attach");
+  const sessionId = await completeLegacyNewSession(attachPage);
+  attempt.session_id = sessionId;
+  attempt.subscription_id = `terminal_${sessionId}`;
+  return {
+    semantic: "terminal_attach",
+    wire_type: "subscribe",
+    reply: { session_id: sessionId },
+    attach: attempt
+  };
 }
 
 export async function teardownControlAttach(arm) {
@@ -1453,6 +1564,13 @@ export async function teardownControlAttach(arm) {
   }
   const attempt = arm.attachAttempt;
   if (!attempt) {
+    return { torn_down: true };
+  }
+  if (arm.arm_id === "legacy" && arm.attachPage) {
+    await goHome(arm.attachPage);
+    await arm.attachPage.close().catch(() => null);
+    arm.attachPage = null;
+    attempt.live = false;
     return { torn_down: true };
   }
   await arm.page.evaluate(async ({ armId, sessionId, subscriptionId }) => {
@@ -1464,15 +1582,7 @@ export async function teardownControlAttach(arm) {
       await request({ type: "detach", session_id: sessionId, subscription_id: subscriptionId });
       return;
     }
-    const entry = Object.values(globalThis._botsterTestTerminal ?? {})[0];
-    const transport = entry?.transport;
-    if (typeof transport?.unsubscribe === "function") {
-      await transport.unsubscribe(subscriptionId);
-      return;
-    }
-    if (typeof transport?.disconnect === "function") {
-      await transport.disconnect();
-    }
+    throw new Error("legacy attach teardown requires the production attach page");
   }, {
     armId: arm.arm_id,
     sessionId: attempt.session_id,
@@ -1491,7 +1601,10 @@ export async function issueControlRequest(arm, semanticName) {
     throw new Error("browser page is required for control requests");
   }
   const wireType = arm.arm_id === "modular" ? spec.modular_wire : spec.legacy_wire;
-  await waitForBrowserControl(arm.page, arm.arm_id);
+  if (arm.arm_id === "legacy" && semanticName === "terminal_attach") {
+    return issueLegacyProductionAttach(arm);
+  }
+  await waitForBrowserControl(arm.page, arm.arm_id, semanticName);
   const attempt = semanticName === "terminal_attach" ? nextAttachAttempt(arm) : null;
   const reply = await arm.page.evaluate(async ({ armId, wireType: nextType, sessionId, subscriptionId, rows, cols }) => {
     if (armId === "modular") {
@@ -1513,20 +1626,7 @@ export async function issueControlRequest(arm, semanticName) {
       throw new Error("legacy browser terminal connection is not available");
     }
     if (nextType === "subscribe") {
-      if (typeof transport.subscribe === "function") {
-        return transport.subscribe({
-          session_uuid: sessionId,
-          subscriptionId
-        });
-      }
-      if (typeof transport.connect === "function") {
-        return transport.connect({
-          rows,
-          cols,
-          callbacks: {}
-        });
-      }
-      throw new Error("legacy cannot issue subscribe");
+      throw new Error("legacy subscribe is issued by the production remount path");
     }
     if (nextType === "request_snapshot" && typeof transport.requestSnapshot === "function") {
       return transport.requestSnapshot({ rows, cols });
@@ -1850,12 +1950,19 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
     }
     const burst = createControlResponseBurst({
       issueRequest: (name) => issueControlRequest(arm, name),
-      observeInbound: (name) => observeControlInbound(arm.page, arm, name),
-      observeOutbound: (name) => observeControlOutbound(arm.page, arm, name),
+      observeInbound: (name) => observeControlInbound(controlObservationPage(arm, name), arm, name),
+      observeOutbound: (name) => observeControlOutbound(controlObservationPage(arm, name), arm, name),
       teardownAttach: () => teardownControlAttach(arm),
       verifyAttach: async (after) => {
-        assertDecodedInboundEntry(after.last, expectedOutboundWire(arm.arm_id, "terminal_attach"));
-        assertAttachIdentity(after.last, arm.attachAttempt);
+        const wireType = expectedOutboundWire(arm.arm_id, "terminal_attach");
+        assertDecodedInboundEntry(after.last, wireType);
+        if (arm.arm_id === "modular") {
+          assertModularAttachAdmission(after.last);
+        }
+        assertAttachIdentity(after.last, {
+          session_id: arm.attachAttempt.session_id,
+          subscription_id: arm.attachAttempt.subscription_id
+        });
       },
       assertAttachTornDown: () => assertAttachTornDown(arm.attachAttempt)
     });

@@ -135,10 +135,17 @@ import {
   assertAttachIdentity,
   assertAttachTornDown,
   assertDecodedInboundEntry,
+  assertModularAttachAdmission,
+  attachAdmissionFromReply,
+  issueControlRequest,
   wrapLegacyControlTransport,
   wrapModularControlTransport,
   writeBaselineRecord
 } from "../scripts/terminal-baseline-capture.mjs";
+import {
+  installLegacyProductionSubscribeObserver,
+  sessionIdFromTerminalSubscription
+} from "../scripts/terminal-baseline-observer.mjs";
 
 const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
@@ -19055,6 +19062,68 @@ function removeCssAtRules(source) {
     generation: 0
   });
   assert.equal(legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, inboundAfterTeardown);
+  legacyStore.__BOTSTER_BASELINE_ATTACH__.accepting = true;
+  legacyStore.__BOTSTER_BASELINE_ATTACH__.generation = 9;
+  legacyTransport.handleMessage({
+    type: "subscribed",
+    subscriptionId: "terminal_sess-2",
+    session_uuid: "sess-2"
+  });
+  const subscribedWithoutGeneration = legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.at(-1);
+  assert.equal(subscribedWithoutGeneration.session_id, "sess-2");
+  assert.equal(subscribedWithoutGeneration.generation, undefined);
+  assert.notEqual(subscribedWithoutGeneration.generation, 9);
+
+  const productionStore = {
+    JSON: {
+      stringify: JSON.stringify.bind(JSON),
+      parse: JSON.parse.bind(JSON)
+    },
+    __BOTSTER_BASELINE_CONTROL_INBOUND__: [],
+    __BOTSTER_BASELINE_CONTROL_OUTBOUND__: [],
+    __BOTSTER_BASELINE_ATTACH__: { live: false, accepting: false }
+  };
+  installLegacyProductionSubscribeObserver(productionStore);
+  productionStore.JSON.stringify({
+    type: "subscribe",
+    channel: "terminal",
+    subscriptionId: "terminal_prod-1",
+    params: { session_uuid: "prod-1" }
+  });
+  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.filter((entry) => entry.wire === "subscribe").length, 1);
+  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
+  productionStore.JSON.parse(JSON.stringify({
+    type: "subscribed",
+    subscriptionId: "terminal_prod-1"
+  }));
+  assert.equal(sessionIdFromTerminalSubscription("terminal_prod-1"), "prod-1");
+  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 1);
+  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].source, "decoder");
+  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].session_id, "prod-1");
+  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].subscription_id, "terminal_prod-1");
+  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].generation, undefined);
+  productionStore.JSON.stringify({ type: "unsubscribe", subscriptionId: "terminal_prod-1" });
+  assertAttachTornDown(productionStore.__BOTSTER_BASELINE_ATTACH__);
+  const inboundAfterProductionTeardown = productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length;
+  productionStore.JSON.parse(JSON.stringify({
+    type: "subscribed",
+    subscriptionId: "terminal_prod-1"
+  }));
+  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, inboundAfterProductionTeardown);
+  await assert.rejects(
+    issueControlRequest({
+      arm_id: "legacy",
+      page: {
+        evaluate: async () => {
+          throw new Error("legacy attach must not use the test-only terminal hook");
+        },
+        waitForFunction: async () => {
+          throw new Error("legacy attach must not wait for _botsterTestTerminal");
+        }
+      }
+    }, "terminal_attach"),
+    /second browser page/
+  );
 
   const modularStore = {
     __BOTSTER_LIVE_PROTOCOL_HARNESS__: { events: [] },
@@ -19078,14 +19147,59 @@ function removeCssAtRules(source) {
   assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.filter((entry) => entry.wire === "attach").length, 1);
   assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
   emitAttachAssembly = true;
-  const decodedAttach = await modularControl.request({ type: "attach", session_id: "mod-1", subscription_id: "gen-1" });
-  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 1);
-  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].source, "decoder_assembly");
-  assertAttachIdentity(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0], {
+  const sendOnlyAttach = await modularControl.request({ type: "attach", session_id: "mod-1", subscription_id: "gen-1" });
+  assert.equal(sendOnlyAttach.session_id, "mod-1");
+  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
+  assert.equal(attachAdmissionFromReply(sendOnlyAttach), null);
+  modularStore.__BOTSTER_BASELINE_ATTACH__.generation += 1;
+  const decodedAttach = await modularControl.request({
+    type: "attach",
     session_id: "mod-1",
     subscription_id: "gen-1"
   });
-  assert.equal(decodedAttach.session_id, "mod-1");
+  assert.equal(decodedAttach.ok, true);
+  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
+  const modularControlWithAdmission = {
+    request: async () => {
+      modularStore.__BOTSTER_LIVE_PROTOCOL_HARNESS__.events.push({
+        kind: "webrtc_response_assembly",
+        payload: { request_type: "attach", generation: 4 }
+      });
+      return {
+        ok: true,
+        events: [{
+          type: "attach_state",
+          session_id: "mod-decoder",
+          subscription_id: "sub-decoder",
+          state: "attaching"
+        }]
+      };
+    }
+  };
+  wrapModularControlTransport(modularControlWithAdmission, modularStore);
+  await modularControlWithAdmission.request({ type: "attach", session_id: "mod-1", subscription_id: "gen-1" });
+  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 1);
+  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].source, "decoder_assembly");
+  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].session_id, "mod-decoder");
+  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].subscription_id, "sub-decoder");
+  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].generation, 4);
+  assert.notEqual(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].generation, modularStore.__BOTSTER_BASELINE_ATTACH__.generation);
+  assertModularAttachAdmission(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0]);
+  assertAttachIdentity(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0], {
+    session_id: "mod-decoder",
+    subscription_id: "sub-decoder",
+    generation: 4
+  });
+  assert.throws(
+    () => assertModularAttachAdmission({
+      source: "decoder_assembly",
+      payload: { ok: true, session_id: "mod-1", subscription_id: "gen-1" },
+      session_id: "mod-1",
+      subscription_id: "gen-1",
+      generation: 1
+    }),
+    /missing decoder attach_state/
+  );
   assert.throws(
     () => assertDecodedInboundEntry({ source: "send_completion", wire: "subscribe" }, "subscribe"),
     /send-only completion/

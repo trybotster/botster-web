@@ -40,8 +40,131 @@ export function uniqueMarker(captureId, armId, family, repetition) {
   return `${captureId}-${armId}-${family}-${String(repetition).padStart(2, "0")}`;
 }
 
+export function sessionIdFromTerminalSubscription(subscriptionId) {
+  const match = /^terminal_(.+)$/.exec(String(subscriptionId ?? ""));
+  return match?.[1] ?? null;
+}
+
+export function installLegacyProductionSubscribeObserver(store = globalThis) {
+  const sessionFromSubscription = (subscriptionId) => {
+    const match = /^terminal_(.+)$/.exec(String(subscriptionId ?? ""));
+    return match?.[1] ?? null;
+  };
+  if (store.__BOTSTER_BASELINE_JSON_OBSERVER__) {
+    return store;
+  }
+  store.__BOTSTER_BASELINE_JSON_OBSERVER__ = true;
+  store.__BOTSTER_BASELINE_CONTROL_INBOUND__ = store.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? [];
+  store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ = store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? [];
+  store.__BOTSTER_BASELINE_ATTACH__ = store.__BOTSTER_BASELINE_ATTACH__ ?? {
+    live: false,
+    accepting: false
+  };
+  const json = store.JSON ?? JSON;
+  const originalStringify = json.stringify.bind(json);
+  const originalParse = json.parse.bind(json);
+  json.stringify = function stringifyLegacySubscribe(value, ...rest) {
+    if (value && value.type === "subscribe" && value.channel === "terminal") {
+      store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.push({
+        type: "subscribe",
+        wire: "subscribe",
+        source: "production_encoder",
+        payload: value,
+        subscription_id: value.subscriptionId,
+        session_id: value.params?.session_uuid ?? value.params?.session_id
+          ?? sessionFromSubscription(value.subscriptionId),
+        at: Date.now()
+      });
+      store.__BOTSTER_BASELINE_ATTACH__.accepting = true;
+    }
+    if (value && value.type === "unsubscribe") {
+      store.__BOTSTER_BASELINE_ATTACH__.live = false;
+      store.__BOTSTER_BASELINE_ATTACH__.accepting = false;
+    }
+    return originalStringify(value, ...rest);
+  };
+  json.parse = function parseLegacySubscribed(text, reviver) {
+    const value = originalParse(text, reviver);
+    if (value && value.type === "subscribed" && value.subscriptionId) {
+      if (store.__BOTSTER_BASELINE_ATTACH__.accepting) {
+        store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
+          type: "subscribed",
+          wire: "subscribe",
+          source: "decoder",
+          payload: value,
+          session_id: value.session_uuid ?? value.session_id
+            ?? sessionFromSubscription(value.subscriptionId),
+          subscription_id: value.subscriptionId,
+          generation: Object.hasOwn(value, "generation") ? value.generation : undefined,
+          at: Date.now()
+        });
+        store.__BOTSTER_BASELINE_ATTACH__.live = true;
+        store.__BOTSTER_BASELINE_ATTACH__.accepting = false;
+      }
+    }
+    return value;
+  };
+  return store;
+}
+
 export function baselineObserverInitScript() {
   return () => {
+    const sessionIdFromTerminalSubscription = (subscriptionId) => {
+      const match = /^terminal_(.+)$/.exec(String(subscriptionId ?? ""));
+      return match?.[1] ?? null;
+    };
+    if (!globalThis.__BOTSTER_BASELINE_JSON_OBSERVER__) {
+      globalThis.__BOTSTER_BASELINE_JSON_OBSERVER__ = true;
+      globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ = globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? [];
+      globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ = globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? [];
+      globalThis.__BOTSTER_BASELINE_ATTACH__ = globalThis.__BOTSTER_BASELINE_ATTACH__ ?? {
+        live: false,
+        accepting: false
+      };
+      const originalStringify = JSON.stringify.bind(JSON);
+      const originalParse = JSON.parse.bind(JSON);
+      JSON.stringify = function stringifyLegacySubscribe(value, ...rest) {
+        if (value && value.type === "subscribe" && value.channel === "terminal") {
+          globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.push({
+            type: "subscribe",
+            wire: "subscribe",
+            source: "production_encoder",
+            payload: value,
+            subscription_id: value.subscriptionId,
+            session_id: value.params?.session_uuid ?? value.params?.session_id
+              ?? sessionIdFromTerminalSubscription(value.subscriptionId),
+            at: Date.now()
+          });
+          globalThis.__BOTSTER_BASELINE_ATTACH__.accepting = true;
+        }
+        if (value && value.type === "unsubscribe") {
+          globalThis.__BOTSTER_BASELINE_ATTACH__.live = false;
+          globalThis.__BOTSTER_BASELINE_ATTACH__.accepting = false;
+        }
+        return originalStringify(value, ...rest);
+      };
+      JSON.parse = function parseLegacySubscribed(text, reviver) {
+        const value = originalParse(text, reviver);
+        if (value && value.type === "subscribed" && value.subscriptionId) {
+          if (globalThis.__BOTSTER_BASELINE_ATTACH__.accepting) {
+            globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
+              type: "subscribed",
+              wire: "subscribe",
+              source: "decoder",
+              payload: value,
+              session_id: value.session_uuid ?? value.session_id
+                ?? sessionIdFromTerminalSubscription(value.subscriptionId),
+              subscription_id: value.subscriptionId,
+              generation: Object.hasOwn(value, "generation") ? value.generation : undefined,
+              at: Date.now()
+            });
+            globalThis.__BOTSTER_BASELINE_ATTACH__.live = true;
+            globalThis.__BOTSTER_BASELINE_ATTACH__.accepting = false;
+          }
+        }
+        return value;
+      };
+    }
     const stamp = (item) => {
       if (item && typeof item === "object" && item.at == null) {
         item.at = Date.now();

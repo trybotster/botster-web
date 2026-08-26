@@ -2,8 +2,8 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787702496_943322`
-Returned from Review: `review_1787702471_847790` and `review_1787702323_569873`
+Step: `botster_stack_implement` / `run_step_1787708587_364276`
+Returned from Review: `review_1787708542_834767`
 Human decision: `question_1787702156_949472` requires `format_version=3`; earlier `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 10, resynced to format version 3
 Approved review: `review_1787638112_854617`
@@ -125,7 +125,14 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787702471_847790` and `review_1787702323_569873` returned four open findings. This visit cold-cuts the contract to `format_version=3`.
+`review_1787708542_834767` returned two open findings. This visit keeps `format_version=3` and repairs the attach adapters.
+
+| Finding | Fix |
+| --- | --- |
+| `finding_1787708542_278974` legacy attach not production-reachable | Legacy `terminal_attach` no longer waits for `_botsterTestTerminal` and no longer calls a test-only `subscribe`. It opens a second page, remounts a new session through the production UI, and records the production `subscribe` encode plus the decoded `subscribed` confirmation. Teardown is production home-navigation unsubscribe, not a local flag. |
+| `finding_1787708542_477295` modular identity copied from the request | Modular attach inbound records only decoder `attach_state.session_id` and `attach_state.subscription_id` plus `webrtc_response_assembly.generation`. Assembly plus `{ok:true}` without `attach_state` leaves inbound at 0 even when the request carried ids. A local generation counter cannot satisfy the identity check. |
+
+`review_1787702471_847790` and `review_1787702323_569873` findings from the prior visit remain resolved after the version 3 cold-cut:
 
 | Finding | Fix |
 | --- | --- |
@@ -245,7 +252,7 @@ Later tickets must not use this ticket as evidence for a measured latency improv
 - Exact canvas settle-window calibration is frozen at 250 ms and may need a later `format_version` bump if both arms prove a different stable window.
 - Control-response equalization records a 0.25 tolerance. Achieved live values still require a completed two-arm set.
 - Live `issueControlRequest` is one browser RPC. The harness requires the production send before Enter and the one response after `t_key`. A reply that arrives before Enter fails closed. Package-event and sibling families still require inbound growth on both sides of Enter.
-- Legacy attach inbound is the decoded `subscribed` confirmation. Modular attach inbound requires a decoder assembly event. Send-only completion is not inbound data. Snapshot replies remain the producer `0x02` / `read_screen` decoder payload.
+- Legacy attach inbound is the decoded `subscribed` confirmation from the production remount path. Modular attach inbound requires decoder `attach_state` plus assembly generation. Request fields and local generation counters are not inbound data. Snapshot replies remain the producer `0x02` / `read_screen` decoder payload.
 
 ## Missing vault guidance discovered
 

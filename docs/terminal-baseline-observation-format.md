@@ -88,14 +88,18 @@ control connection. The harness must not use a direct daemon Unix socket.
 | `terminal_attach` | `subscribe` | `attach` |
 | `terminal_snapshot` | `request_snapshot` | `read_screen` |
 
-Legacy attach inbound is the decoded `subscribed` confirmation. Modular attach
-inbound is the decoded attach admission after `webrtc_response_assembly`.
-Attach attempts run sequentially. Each attempt tears down before the next
-starts. The harness verifies session identity and subscription generation.
-It rejects send-only completion, local callbacks, request bytes, synthetic
-byte estimates, wrong identity, wrong generation, late messages after
-teardown, and incomplete teardown. `resize` is not a version 3 control
-operation.
+Legacy attach issues the production terminal `subscribe` through a new
+session remount. It does not use the test-only `_botsterTestTerminal` hook.
+Inbound is the decoded `subscribed` confirmation that the production browser
+decoder parses. Modular attach inbound is the decoded `attach_state`
+admission after `webrtc_response_assembly`. Identity and generation come
+only from that decoder output. The harness does not copy request fields or
+invent a local generation. Attach attempts run sequentially. Each attempt
+tears down before the next starts. The harness verifies session identity
+and subscription generation. It rejects send-only completion, local
+callbacks, request bytes, synthetic byte estimates, missing decoder
+identity, wrong identity, wrong generation, late messages after teardown,
+and incomplete teardown. `resize` is not a version 3 control operation.
 
 The record stores the semantic name and the arm-specific wire type. Each arm
 records `request_rate`, `response_rate`, `response_bytes`, `inbound_byte_unit`,
