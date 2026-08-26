@@ -132,7 +132,11 @@ import {
   publicationDecision,
   remountForPaintFamily,
   restoreProbeSession,
+  assertAttachIdentity,
+  assertAttachTornDown,
+  assertDecodedInboundEntry,
   wrapLegacyControlTransport,
+  wrapModularControlTransport,
   writeBaselineRecord
 } from "../scripts/terminal-baseline-capture.mjs";
 
@@ -18386,15 +18390,23 @@ function removeCssAtRules(source) {
   const valid = exampleValidRecord();
   assert.equal(validateObservationRecord(valid).ok, true);
   assert.equal(valid.format_version, FORMAT_VERSION);
-  assert.equal(valid.format_version, 2);
+  assert.equal(valid.format_version, 3);
   assert.equal(valid.paint_oracle, PAINT_ORACLE);
-  assert.deepEqual([...FROZEN_INPUTS.control_request_names], ["terminal_resize", "terminal_snapshot"]);
-  assert.equal(CONTROL_OPERATIONS.terminal_resize.modular_wire, "resize");
+  assert.deepEqual([...FROZEN_INPUTS.control_request_names], ["terminal_attach", "terminal_snapshot"]);
+  assert.equal(CONTROL_OPERATIONS.terminal_attach.legacy_wire, "subscribe");
+  assert.equal(CONTROL_OPERATIONS.terminal_attach.modular_wire, "attach");
   assert.equal(CONTROL_OPERATIONS.terminal_snapshot.legacy_wire, "request_snapshot");
   assert.equal(CONTROL_OPERATIONS.terminal_snapshot.modular_wire, "read_screen");
   const versionOne = exampleValidRecord();
   versionOne.format_version = 1;
-  assert.match(validateObservationRecord(versionOne).errors.join("\n"), /format_version must be 2/);
+  assert.match(validateObservationRecord(versionOne).errors.join("\n"), /format_version must be 3/);
+  const versionTwo = exampleValidRecord();
+  versionTwo.format_version = 2;
+  assert.match(validateObservationRecord(versionTwo).errors.join("\n"), /format_version must be 3/);
+  const retiredResize = exampleValidRecord();
+  retiredResize.observations.legacy.control_response_saturation.request_names = ["terminal_resize", "terminal_snapshot"];
+  retiredResize.observations.legacy.control_response_saturation.wire_request_types = { terminal_resize: "resize", terminal_snapshot: "request_snapshot" };
+  assert.match(validateObservationRecord(retiredResize).errors.join("\n"), /version-3 semantic operations|removed version-1 or version-2/);
   assert.deepEqual(valid.observations.legacy.control_response_saturation.tolerance, CONTROL_RESPONSE_TOLERANCE);
   assert.equal(valid.observations.modular.control_response_saturation.producer, "browser_control_connection");
   const daemonProducer = exampleValidRecord();
@@ -18402,7 +18414,7 @@ function removeCssAtRules(source) {
   assert.match(validateObservationRecord(daemonProducer).errors.join("\n"), /producer must be browser_control_connection/);
   const retiredNames = exampleValidRecord();
   retiredNames.observations.legacy.control_response_saturation.request_names = ["list_configs", "list_session_types"];
-  assert.match(validateObservationRecord(retiredNames).errors.join("\n"), /version-2 semantic operations|removed version-1 request names/);
+  assert.match(validateObservationRecord(retiredNames).errors.join("\n"), /version-3 semantic operations|removed version-1 or version-2/);
   const equalized = equalizeControlResponses(
     valid.observations.legacy.control_response_saturation,
     valid.observations.modular.control_response_saturation
@@ -18930,7 +18942,9 @@ function removeCssAtRules(source) {
 
   assert.equal(expectedOutboundWire("modular", "terminal_snapshot"), "read_screen");
   assert.equal(expectedOutboundWire("legacy", "terminal_snapshot"), "request_snapshot");
-  assert.equal(expectedOutboundWire("modular", "terminal_resize"), "resize");
+  assert.equal(expectedOutboundWire("modular", "terminal_attach"), "attach");
+  assert.equal(expectedOutboundWire("legacy", "terminal_attach"), "subscribe");
+  assert.throws(() => expectedOutboundWire("modular", "terminal_resize"), /unknown control operation/);
   assert.throws(() => expectedOutboundWire("modular", "unknown_op"), /unknown control operation/);
 
   let snapshotSent = 0;
@@ -19007,21 +19021,135 @@ function removeCssAtRules(source) {
     __BOTSTER_BASELINE_TERMINAL_INBOUND__: []
   };
   const legacyTransport = {
-    sendResize: async () => ({ ok: true }),
+    subscribe: async () => ({ subscriptionId: "sub-1" }),
+    unsubscribe: async () => ({ unsubscribed: true }),
     requestSnapshot: async () => ({ ok: true }),
+    sendResize: async () => ({ ok: true }),
     handleMessage: () => {}
   };
   wrapLegacyControlTransport(legacyTransport, legacyStore);
+  await legacyTransport.subscribe({ session_uuid: "sess-1" });
+  assert.equal(legacyStore.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.filter((entry) => entry.wire === "subscribe").length, 1);
+  assert.equal(legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
   await legacyTransport.sendResize(120, 32);
-  const resizeBeforeUnrelated = legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.filter((entry) => entry.wire === "resize");
   legacyTransport.handleMessage({ type: "unrelated_status" });
-  const resizeAfterUnrelated = legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.filter((entry) => entry.wire === "resize");
-  assert.equal(resizeAfterUnrelated.length, resizeBeforeUnrelated.length);
-  assert.equal(resizeAfterUnrelated.length, 1);
-  assert.equal(resizeAfterUnrelated[0].source, "send_completion");
-  assert.equal(
-    legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.some((entry) => entry.type === "unrelated_status"),
-    false
+  assert.equal(legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
+  legacyTransport.handleMessage({
+    type: "subscribed",
+    subscriptionId: "sub-1",
+    session_uuid: "sess-1",
+    generation: 0
+  });
+  const subscribed = legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.filter((entry) => entry.wire === "subscribe");
+  assert.equal(subscribed.length, 1);
+  assert.equal(subscribed[0].source, "decoder");
+  assertDecodedInboundEntry(subscribed[0], "subscribe");
+  assertAttachIdentity(subscribed[0], { session_id: "sess-1", subscription_id: "sub-1", generation: 0 });
+  await legacyTransport.unsubscribe("sub-1");
+  assertAttachTornDown(legacyStore.__BOTSTER_BASELINE_ATTACH__);
+  const inboundAfterTeardown = legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length;
+  legacyTransport.handleMessage({
+    type: "subscribed",
+    subscriptionId: "sub-1",
+    session_uuid: "sess-1",
+    generation: 0
+  });
+  assert.equal(legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, inboundAfterTeardown);
+
+  const modularStore = {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__: { events: [] },
+    __BOTSTER_BASELINE_CONTROL_INBOUND__: [],
+    __BOTSTER_BASELINE_CONTROL_OUTBOUND__: []
+  };
+  let emitAttachAssembly = false;
+  const modularControl = {
+    request: async (payload) => {
+      if (emitAttachAssembly && payload.type === "attach") {
+        modularStore.__BOTSTER_LIVE_PROTOCOL_HARNESS__.events.push({
+          kind: "webrtc_response_assembly",
+          payload: { request_type: "attach" }
+        });
+      }
+      return { ok: true, session_id: payload.session_id, subscription_id: payload.subscription_id };
+    }
+  };
+  wrapModularControlTransport(modularControl, modularStore);
+  await modularControl.request({ type: "attach", session_id: "mod-1", subscription_id: "gen-1" });
+  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.filter((entry) => entry.wire === "attach").length, 1);
+  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
+  emitAttachAssembly = true;
+  const decodedAttach = await modularControl.request({ type: "attach", session_id: "mod-1", subscription_id: "gen-1" });
+  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 1);
+  assert.equal(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].source, "decoder_assembly");
+  assertAttachIdentity(modularStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0], {
+    session_id: "mod-1",
+    subscription_id: "gen-1"
+  });
+  assert.equal(decodedAttach.session_id, "mod-1");
+  assert.throws(
+    () => assertDecodedInboundEntry({ source: "send_completion", wire: "subscribe" }, "subscribe"),
+    /send-only completion/
+  );
+  assert.throws(
+    () => assertAttachIdentity({ session_id: "other", subscription_id: "gen-1" }, { session_id: "mod-1", subscription_id: "gen-1" }),
+    /attach session identity/
+  );
+  assert.throws(
+    () => assertAttachTornDown({ live: true }),
+    /previous attach was not torn down/
+  );
+
+  let attachTornDown = true;
+  let attachAttempts = 0;
+  let attachInbound = 0;
+  const sequentialAttach = createControlResponseBurst({
+    names: ["terminal_attach"],
+    requestCount: 2,
+    issueRequest: async () => {
+      if (!attachTornDown) {
+        throw new Error("previous attach was not torn down");
+      }
+      attachTornDown = false;
+      attachAttempts += 1;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 15));
+      attachInbound += 1;
+      return { ok: true };
+    },
+    observeOutbound: async () => ({ sent: attachAttempts }),
+    observeInbound: async () => ({
+      frames: attachInbound,
+      bytes: attachInbound * 8,
+      last: { source: "decoder", wire: "subscribe", session_id: "sess-1", subscription_id: `sub-${attachAttempts}`, generation: attachAttempts }
+    }),
+    teardownAttach: async () => {
+      attachTornDown = true;
+    },
+    verifyAttach: async (after) => {
+      assertDecodedInboundEntry(after.last, "subscribe");
+      assertAttachIdentity(after.last, { session_id: "sess-1" });
+    },
+    assertAttachTornDown: () => assertAttachTornDown({ live: !attachTornDown })
+  });
+  await sequentialAttach.start();
+  await completeProductionAroundProbe(sequentialAttach, async () => ({ at: Date.now() }), { delayMs: 40 });
+  await completeProductionAroundProbe(sequentialAttach, async () => ({ at: Date.now() }), { delayMs: 40 });
+  assert.equal(attachAttempts, 2);
+  assert.equal(attachTornDown, true);
+
+  let blockedAttachLive = true;
+  const incompleteTeardown = createControlResponseBurst({
+    names: ["terminal_attach"],
+    requestCount: 2,
+    issueRequest: async () => ({ ok: true }),
+    observeOutbound: async () => ({ sent: 1 }),
+    observeInbound: async () => ({ frames: 1, bytes: 8, last: { source: "decoder", wire: "subscribe", session_id: "sess-1" } }),
+    teardownAttach: async () => {},
+    assertAttachTornDown: () => assertAttachTornDown({ live: blockedAttachLive })
+  });
+  await incompleteTeardown.start();
+  await assert.rejects(
+    completeAroundProbe(incompleteTeardown, async () => ({ at: Date.now() })),
+    /previous attach was not torn down/
   );
 
   let oneShotPackageCount = 0;

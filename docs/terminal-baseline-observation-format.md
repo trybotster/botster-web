@@ -1,14 +1,14 @@
 # Terminal baseline observation format
 
-Version token: `terminal_baseline_observation_format=2`
+Version token: `terminal_baseline_observation_format=3`
 
 This is the published observation format for ticket `ticket_1787603669_760394`.
-Version 2 supersedes version 1 before any baseline becomes authoritative
-(`question_1787678013_829162`). Downstream tickets must reuse this version.
-They must not re-derive the schema.
+Version 3 supersedes version 2 before any baseline becomes authoritative
+(`question_1787702156_949472`). Downstream tickets must reuse this version.
+They must not re-derive the schema. There is no version 2 compatibility path.
 
 - `ticket_1787600689_646958` records the post-Restty transport baseline in
-  `format_version=2`.
+  `format_version=3`.
 - `ticket_1787600679_990088` compares its post-cut set against that post-Restty
   baseline (architecture contract §14 row A20).
 
@@ -16,7 +16,7 @@ They must not re-derive the schema.
 
 This format records a **product baseline**, not a transport-causality experiment.
 The two arms differ in Hub, Core, client, and Lua runtime at once. No row of a
-`format_version=2` record may be read as evidence that any single component
+`format_version=3` record may be read as evidence that any single component
 caused a difference. Every record carries `product_baseline_only: true` and the
 same inline statement.
 
@@ -85,8 +85,17 @@ control connection. The harness must not use a direct daemon Unix socket.
 
 | Semantic name | Legacy wire type | Modular wire type |
 |---------------|------------------|-------------------|
-| `terminal_resize` | `resize` | `resize` |
+| `terminal_attach` | `subscribe` | `attach` |
 | `terminal_snapshot` | `request_snapshot` | `read_screen` |
+
+Legacy attach inbound is the decoded `subscribed` confirmation. Modular attach
+inbound is the decoded attach admission after `webrtc_response_assembly`.
+Attach attempts run sequentially. Each attempt tears down before the next
+starts. The harness verifies session identity and subscription generation.
+It rejects send-only completion, local callbacks, request bytes, synthetic
+byte estimates, wrong identity, wrong generation, late messages after
+teardown, and incomplete teardown. `resize` is not a version 3 control
+operation.
 
 The record stores the semantic name and the arm-specific wire type. Each arm
 records `request_rate`, `response_rate`, `response_bytes`, `inbound_byte_unit`,
@@ -98,8 +107,8 @@ unit. The validator recomputes rate and byte equality from the recorded family
 values and the frozen tolerance. Stored equalization booleans are derived
 output only.
 
-The retired names `list_configs` and `list_session_types` must not reappear.
-Do not add unsupported aliases to either product.
+The retired names `list_configs`, `list_session_types`, and `terminal_resize`
+must not reappear. Do not add unsupported aliases to either product.
 
 ## Frozen inputs
 
@@ -146,7 +155,7 @@ to produce the controlled set.
    Rails toolchain.
 3. Dispatch the workflow with a clean legacy checkout at `f598075e` and a Hub
    source that can clone `f6db5c4`.
-4. Keep `format_version=2`. Do not add a threshold field.
+4. Keep `format_version=3`. Do not add a threshold field.
 
 Until that runner exists, the controlled set stays deferred. A one-armed
 workflow result is not a baseline. This ticket waives both the local record

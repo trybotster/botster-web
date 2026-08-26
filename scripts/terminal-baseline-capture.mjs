@@ -416,7 +416,10 @@ export function createControlResponseBurst({
   observeInbound,
   observeOutbound,
   names = FROZEN_INPUTS.control_request_names,
-  requestCount = FROZEN_INPUTS.control_request_count
+  requestCount = FROZEN_INPUTS.control_request_count,
+  teardownAttach,
+  verifyAttach,
+  assertAttachTornDown
 }) {
   const sequence = [];
   while (sequence.length < requestCount) {
@@ -440,6 +443,7 @@ export function createControlResponseBurst({
   if (typeof observeOutbound !== "function") {
     throw new Error("control_response_saturation: observeOutbound is required");
   }
+  let attachLive = false;
   return {
     stats,
     names,
@@ -468,6 +472,14 @@ export function createControlResponseBurst({
         let pending;
         const tKey = await sendProbe({
           beforeEnter: async () => {
+            if (name === "terminal_attach" && typeof teardownAttach === "function") {
+              if (attachLive) {
+                throw new Error("control_response_saturation: previous attach was not torn down");
+              }
+              if (typeof assertAttachTornDown === "function") {
+                await assertAttachTornDown();
+              }
+            }
             const beforeSent = await observeSelectedOutbound();
             pending = Promise.resolve(issueRequest(name));
             await waitForSent(
@@ -482,7 +494,7 @@ export function createControlResponseBurst({
         const progress = Promise.all([
           waitForProgress(observeSelectedInbound, atKey, "control_response_saturation", progressTimeoutMs),
           pending
-        ]).then(([after]) => {
+        ]).then(async ([after]) => {
           const frameDelta = after.frames - atKey.frames;
           const byteDelta = after.bytes - atKey.bytes;
           stats.issued += 1;
@@ -493,6 +505,14 @@ export function createControlResponseBurst({
           stats.inbound_frame_count += frameDelta;
           stats.inbound_bytes += byteDelta;
           stats.last_at = Date.now();
+          if (name === "terminal_attach" && typeof teardownAttach === "function") {
+            attachLive = true;
+            if (typeof verifyAttach === "function") {
+              await verifyAttach(after);
+            }
+            await teardownAttach();
+            attachLive = false;
+          }
           return after;
         }).finally(() => {
           stats.in_flight = false;
@@ -1138,7 +1158,53 @@ export async function waitForBrowserControl(page, armId) {
   }, armId, { timeout: 30_000 });
   if (armId === "legacy") {
     await installLegacyInboundObserver(page);
+    return;
   }
+  await page.evaluate((source) => {
+    const wrapModularControlTransport = new Function(`return (${source});`)();
+    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
+    if (!control) {
+      return;
+    }
+    wrapModularControlTransport(control, globalThis);
+  }, wrapModularControlTransport.toString());
+}
+
+export function isSendOnlyCompletion(entry) {
+  return entry?.source === "send_completion" || entry?.source === "local_callback";
+}
+
+export function assertDecodedInboundEntry(entry, wireType) {
+  if (!entry || isSendOnlyCompletion(entry) || entry.source === "promise_resolution") {
+    throw new Error(`control_response_saturation: send-only completion is not inbound data for ${wireType}`);
+  }
+  if (entry.wire !== wireType) {
+    throw new Error(`control_response_saturation: inbound wire ${entry.wire} is not ${wireType}`);
+  }
+  return entry;
+}
+
+export function assertAttachIdentity(entry, expected) {
+  const sessionId = entry?.session_id ?? entry?.payload?.session_id ?? entry?.payload?.session_uuid;
+  const subscriptionId = entry?.subscription_id ?? entry?.payload?.subscription_id ?? entry?.payload?.subscriptionId;
+  const generation = entry?.generation ?? entry?.payload?.generation;
+  if (expected.session_id && sessionId !== expected.session_id) {
+    throw new Error(`control_response_saturation: attach session identity ${sessionId} is not ${expected.session_id}`);
+  }
+  if (expected.subscription_id && subscriptionId !== expected.subscription_id) {
+    throw new Error(`control_response_saturation: attach subscription ${subscriptionId} is not ${expected.subscription_id}`);
+  }
+  if (expected.generation != null && generation !== expected.generation) {
+    throw new Error(`control_response_saturation: attach generation ${generation} is not ${expected.generation}`);
+  }
+  return entry;
+}
+
+export function assertAttachTornDown(state) {
+  if (state?.live) {
+    throw new Error("control_response_saturation: previous attach was not torn down");
+  }
+  return true;
 }
 
 export function wrapLegacyControlTransport(transport, store = globalThis) {
@@ -1148,7 +1214,12 @@ export function wrapLegacyControlTransport(transport, store = globalThis) {
   store.__BOTSTER_BASELINE_CONTROL_INBOUND__ = store.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? [];
   store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ = store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? [];
   store.__BOTSTER_BASELINE_TERMINAL_INBOUND__ = store.__BOTSTER_BASELINE_TERMINAL_INBOUND__ ?? [];
-  const wrapOutbound = (methodName, wireType, recordCompletion) => {
+  store.__BOTSTER_BASELINE_ATTACH__ = store.__BOTSTER_BASELINE_ATTACH__ ?? {
+    live: false,
+    accepting: false,
+    generation: 0
+  };
+  const wrapOutbound = (methodName, wireType) => {
     const originalSend = transport[methodName]?.bind(transport);
     if (typeof originalSend !== "function" || transport[`__baselineOutboundWrapped_${methodName}`]) {
       return;
@@ -1159,37 +1230,55 @@ export function wrapLegacyControlTransport(transport, store = globalThis) {
         wire: wireType,
         at: Date.now()
       });
-      const result = originalSend(...args);
-      if (!recordCompletion) {
-        return result;
+      if (wireType === "subscribe") {
+        store.__BOTSTER_BASELINE_ATTACH__.accepting = true;
       }
-      return Promise.resolve(result).then((reply) => {
-        store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
-          type: "resize",
-          wire: "resize",
-          source: "send_completion",
-          payload: reply ?? { type: "resize", source: "send_completion" },
-          at: Date.now()
-        });
-        return reply;
-      });
+      return originalSend(...args);
     };
     transport[`__baselineOutboundWrapped_${methodName}`] = true;
   };
-  wrapOutbound("sendResize", "resize", true);
-  wrapOutbound("requestSnapshot", "request_snapshot", false);
+  wrapOutbound("subscribe", "subscribe");
+  wrapOutbound("requestSnapshot", "request_snapshot");
+  const originalUnsubscribe = transport.unsubscribe?.bind(transport);
+  if (typeof originalUnsubscribe === "function" && !transport.__baselineOutboundWrapped_unsubscribe) {
+    transport.unsubscribe = (...args) => {
+      store.__BOTSTER_BASELINE_ATTACH__.live = false;
+      store.__BOTSTER_BASELINE_ATTACH__.accepting = false;
+      store.__BOTSTER_BASELINE_ATTACH__.generation += 1;
+      return originalUnsubscribe(...args);
+    };
+    transport.__baselineOutboundWrapped_unsubscribe = true;
+  }
   const original = transport.handleMessage?.bind(transport);
   if (typeof original !== "function") {
     throw new Error("legacy transport handleMessage is not available");
   }
   transport.handleMessage = (message) => {
-    if (message?.type === "raw_output" && message.data?.length > 0) {
+    const currentGeneration = store.__BOTSTER_BASELINE_ATTACH__.generation;
+    if (message?.type === "subscribed") {
+      if (!store.__BOTSTER_BASELINE_ATTACH__.accepting) {
+        return original(message);
+      }
+      store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
+        type: "subscribed",
+        wire: "subscribe",
+        source: "decoder",
+        payload: message,
+        session_id: message.session_uuid ?? message.session_id,
+        subscription_id: message.subscriptionId ?? message.subscription_id,
+        generation: message.generation ?? currentGeneration,
+        at: Date.now()
+      });
+      store.__BOTSTER_BASELINE_ATTACH__.live = true;
+      store.__BOTSTER_BASELINE_ATTACH__.accepting = false;
+    } else if (message?.type === "raw_output" && message.data?.length > 0) {
       const prefix = message.data[0];
       const payload = Array.from(message.data);
       if (prefix === 0x02) {
         store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
           type: "snapshot",
           wire: "request_snapshot",
+          source: "decoder",
           payload,
           at: Date.now()
         });
@@ -1200,6 +1289,57 @@ export function wrapLegacyControlTransport(transport, store = globalThis) {
     return original(message);
   };
   transport.__baselineInboundWrapped = true;
+  return store;
+}
+
+export function wrapModularControlTransport(control, store = globalThis) {
+  if (!control || typeof control.request !== "function" || control.__baselineControlWrapped) {
+    return store;
+  }
+  store.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = store.__BOTSTER_LIVE_PROTOCOL_HARNESS__ ?? { events: [] };
+  store.__BOTSTER_BASELINE_CONTROL_INBOUND__ = store.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? [];
+  store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ = store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? [];
+  store.__BOTSTER_BASELINE_ATTACH__ = store.__BOTSTER_BASELINE_ATTACH__ ?? { live: false, generation: 0 };
+  const original = control.request.bind(control);
+  const assemblyCount = (requestType) => {
+    const events = store.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    return events.filter((entry) =>
+      entry.kind === "webrtc_response_assembly" && entry.payload?.request_type === requestType
+    ).length;
+  };
+  control.request = async (payload) => {
+    const wireType = payload?.type;
+    store.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.push({
+      type: wireType,
+      wire: wireType,
+      at: Date.now()
+    });
+    const before = assemblyCount(wireType);
+    const reply = await original(payload);
+    const after = assemblyCount(wireType);
+    if (after > before && reply != null && wireType !== "resize" && wireType !== "detach") {
+      store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
+        type: wireType,
+        wire: wireType,
+        source: "decoder_assembly",
+        payload: reply,
+        session_id: reply.session_id ?? payload.session_id,
+        subscription_id: reply.subscription_id ?? payload.subscription_id,
+        generation: store.__BOTSTER_BASELINE_ATTACH__.generation,
+        at: Date.now()
+      });
+      if (wireType === "attach") {
+        store.__BOTSTER_BASELINE_ATTACH__.live = true;
+      }
+    }
+    if (wireType === "detach") {
+      store.__BOTSTER_BASELINE_ATTACH__.live = false;
+      store.__BOTSTER_BASELINE_ATTACH__.generation += 1;
+      store.__BOTSTER_BASELINE_ATTACH__.closed_generation = store.__BOTSTER_BASELINE_ATTACH__.generation - 1;
+    }
+    return reply;
+  };
+  control.__baselineControlWrapped = true;
   return store;
 }
 
@@ -1227,6 +1367,11 @@ export async function observeControlOutbound(page, arm, semanticName) {
   const wireType = expectedOutboundWire(arm.arm_id, semanticName);
   if (arm.arm_id === "modular") {
     const sent = await page.evaluate((expected) => {
+      const ledger = globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? [];
+      const fromLedger = ledger.filter((entry) => entry.wire === expected).length;
+      if (fromLedger > 0) {
+        return fromLedger;
+      }
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events.filter((entry) =>
         entry.kind === "daemon_request" && entry.payload?.type === expected
@@ -1243,30 +1388,21 @@ export async function observeControlOutbound(page, arm, semanticName) {
 
 export async function observeControlInbound(page, arm, semanticName) {
   const wireType = expectedOutboundWire(arm.arm_id, semanticName);
-  if (arm.arm_id === "modular") {
-    const frames = await page.evaluate((expected) => {
-      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      return events.filter((entry) =>
-        entry.kind === "webrtc_response_assembly" && entry.payload?.request_type === expected
-      ).length;
-    }, wireType);
-    const bytes = (arm.inboundDecodedPayloads ?? []).reduce((sum, entry) => {
-      if (entry?.wire !== wireType) {
-        return sum;
-      }
-      return sum + countInboundControlBytes(entry.payload);
-    }, 0);
-    return { frames, bytes, unit: INBOUND_BYTE_UNIT, wire_type: wireType, semantic: semanticName };
-  }
   const raw = await page.evaluate((expected) => {
-    return (globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? []).filter((entry) => entry.wire === expected);
+    return (globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__ ?? []).filter((entry) =>
+      entry.wire === expected
+      && entry.source !== "send_completion"
+      && entry.source !== "promise_resolution"
+      && entry.source !== "local_callback"
+    );
   }, wireType);
   return {
     frames: raw.length,
     bytes: raw.reduce((sum, entry) => sum + countInboundControlBytes(entry.payload), 0),
     unit: INBOUND_BYTE_UNIT,
     wire_type: wireType,
-    semantic: semanticName
+    semantic: semanticName,
+    last: raw.at(-1) ?? null
   };
 }
 
@@ -1301,6 +1437,51 @@ export async function observeSiblingDelivery(page, armId) {
   return { delivered_bytes: bytes, bytes, frames: raw.length };
 }
 
+function nextAttachAttempt(arm) {
+  arm.attachAttempt = {
+    session_id: arm.attachSessionId ?? arm.probeSessionId,
+    subscription_id: `${arm.captureId ?? "baseline"}-attach-${(arm.attachGeneration = (arm.attachGeneration ?? 0) + 1)}`,
+    generation: arm.attachGeneration,
+    live: true
+  };
+  return arm.attachAttempt;
+}
+
+export async function teardownControlAttach(arm) {
+  if (!arm?.page) {
+    throw new Error("browser page is required for attach teardown");
+  }
+  const attempt = arm.attachAttempt;
+  if (!attempt) {
+    return { torn_down: true };
+  }
+  await arm.page.evaluate(async ({ armId, sessionId, subscriptionId }) => {
+    if (armId === "modular") {
+      const request = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.request;
+      if (typeof request !== "function") {
+        throw new Error("modular browser control connection is not available");
+      }
+      await request({ type: "detach", session_id: sessionId, subscription_id: subscriptionId });
+      return;
+    }
+    const entry = Object.values(globalThis._botsterTestTerminal ?? {})[0];
+    const transport = entry?.transport;
+    if (typeof transport?.unsubscribe === "function") {
+      await transport.unsubscribe(subscriptionId);
+      return;
+    }
+    if (typeof transport?.disconnect === "function") {
+      await transport.disconnect();
+    }
+  }, {
+    armId: arm.arm_id,
+    sessionId: attempt.session_id,
+    subscriptionId: attempt.subscription_id
+  });
+  attempt.live = false;
+  return { torn_down: true };
+}
+
 export async function issueControlRequest(arm, semanticName) {
   const spec = CONTROL_OPERATIONS[semanticName];
   if (!spec) {
@@ -1311,24 +1492,41 @@ export async function issueControlRequest(arm, semanticName) {
   }
   const wireType = arm.arm_id === "modular" ? spec.modular_wire : spec.legacy_wire;
   await waitForBrowserControl(arm.page, arm.arm_id);
-  const reply = await arm.page.evaluate(async ({ armId, wireType: nextType, sessionId, rows, cols }) => {
+  const attempt = semanticName === "terminal_attach" ? nextAttachAttempt(arm) : null;
+  const reply = await arm.page.evaluate(async ({ armId, wireType: nextType, sessionId, subscriptionId, rows, cols }) => {
     if (armId === "modular") {
       const request = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.request;
       if (typeof request !== "function") {
         throw new Error("modular browser control connection is not available");
       }
-      const payload = nextType === "resize"
-        ? { type: "resize", session_id: sessionId, rows, cols }
-        : { type: "read_screen", session_id: sessionId };
-      return request(payload);
+      if (nextType === "attach") {
+        return request({ type: "attach", session_id: sessionId, subscription_id: subscriptionId });
+      }
+      if (nextType === "read_screen") {
+        return request({ type: "read_screen", session_id: sessionId });
+      }
+      throw new Error(`modular cannot issue ${nextType}`);
     }
     const entry = Object.values(globalThis._botsterTestTerminal ?? {})[0];
     const transport = entry?.transport;
     if (!transport) {
       throw new Error("legacy browser terminal connection is not available");
     }
-    if (nextType === "resize" && typeof transport.sendResize === "function") {
-      return transport.sendResize(cols, rows);
+    if (nextType === "subscribe") {
+      if (typeof transport.subscribe === "function") {
+        return transport.subscribe({
+          session_uuid: sessionId,
+          subscriptionId
+        });
+      }
+      if (typeof transport.connect === "function") {
+        return transport.connect({
+          rows,
+          cols,
+          callbacks: {}
+        });
+      }
+      throw new Error("legacy cannot issue subscribe");
     }
     if (nextType === "request_snapshot" && typeof transport.requestSnapshot === "function") {
       return transport.requestSnapshot({ rows, cols });
@@ -1337,18 +1535,16 @@ export async function issueControlRequest(arm, semanticName) {
   }, {
     armId: arm.arm_id,
     wireType,
-    sessionId: arm.probeSessionId,
+    sessionId: attempt?.session_id ?? arm.probeSessionId,
+    subscriptionId: attempt?.subscription_id,
     rows: FROZEN_INPUTS.terminal_geometry.rows,
     cols: FROZEN_INPUTS.terminal_geometry.cols
   });
-  arm.inboundDecodedPayloads = arm.inboundDecodedPayloads ?? [];
-  if (reply != null) {
-    arm.inboundDecodedPayloads.push({ payload: reply, wire: wireType });
-  }
   return {
     semantic: semanticName,
     wire_type: wireType,
-    reply
+    reply,
+    attach: attempt
   };
 }
 
@@ -1655,7 +1851,13 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
     const burst = createControlResponseBurst({
       issueRequest: (name) => issueControlRequest(arm, name),
       observeInbound: (name) => observeControlInbound(arm.page, arm, name),
-      observeOutbound: (name) => observeControlOutbound(arm.page, arm, name)
+      observeOutbound: (name) => observeControlOutbound(arm.page, arm, name),
+      teardownAttach: () => teardownControlAttach(arm),
+      verifyAttach: async (after) => {
+        assertDecodedInboundEntry(after.last, expectedOutboundWire(arm.arm_id, "terminal_attach"));
+        assertAttachIdentity(after.last, arm.attachAttempt);
+      },
+      assertAttachTornDown: () => assertAttachTornDown(arm.attachAttempt)
     });
     const started = Date.now();
     await burst.start();

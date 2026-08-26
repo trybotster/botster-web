@@ -1,5 +1,5 @@
-export const FORMAT_VERSION = 2;
-export const VERSION_TOKEN = "terminal_baseline_observation_format=2";
+export const FORMAT_VERSION = 3;
+export const VERSION_TOKEN = "terminal_baseline_observation_format=3";
 export const PAINT_ORACLE = "cdp_screencast";
 export const PTY_CLOCKS = Object.freeze(["shell_epochrealtime", "host_watcher"]);
 export const ARM_IDS = Object.freeze(["legacy", "modular"]);
@@ -23,7 +23,7 @@ export const FROZEN_INPUTS = Object.freeze({
   scroll_event_count: 8,
   scroll_pacing_ms: 16,
   package_event_burst_count: 200,
-  control_request_names: Object.freeze(["terminal_resize", "terminal_snapshot"]),
+  control_request_names: Object.freeze(["terminal_attach", "terminal_snapshot"]),
   control_request_count: 20,
   screencast: Object.freeze({
     format: "png",
@@ -82,10 +82,10 @@ export function equalizeControlResponses(legacyFamily, modularFamily, tolerance 
 }
 
 export const CONTROL_OPERATIONS = Object.freeze({
-  terminal_resize: Object.freeze({
-    semantic: "terminal_resize",
-    legacy_wire: "resize",
-    modular_wire: "resize"
+  terminal_attach: Object.freeze({
+    semantic: "terminal_attach",
+    legacy_wire: "subscribe",
+    modular_wire: "attach"
   }),
   terminal_snapshot: Object.freeze({
     semantic: "terminal_snapshot",
@@ -97,7 +97,7 @@ export const CONTROL_OPERATIONS = Object.freeze({
 export function wireRequestTypesForArm(armId) {
   const field = armId === "modular" ? "modular_wire" : "legacy_wire";
   return Object.freeze({
-    terminal_resize: CONTROL_OPERATIONS.terminal_resize[field],
+    terminal_attach: CONTROL_OPERATIONS.terminal_attach[field],
     terminal_snapshot: CONTROL_OPERATIONS.terminal_snapshot[field]
   });
 }
@@ -627,13 +627,20 @@ function validateFamily(family, name, armId, ptyClock, errors) {
       errors.push(`${label}.inbound_byte_unit must be ${INBOUND_BYTE_UNIT}`);
     }
     if (JSON.stringify(family.request_names) !== JSON.stringify(FROZEN_INPUTS.control_request_names)) {
-      errors.push(`${label}.request_names must be the version-2 semantic operations`);
+      errors.push(`${label}.request_names must be the version-3 semantic operations`);
     }
     if (JSON.stringify(family.wire_request_types) !== JSON.stringify(wireRequestTypesForArm(armId))) {
-      errors.push(`${label}.wire_request_types must match the version-2 arm mapping`);
+      errors.push(`${label}.wire_request_types must match the version-3 arm mapping`);
     }
-    if (JSON.stringify(family.request_names ?? []).includes("list_configs") || JSON.stringify(family.request_names ?? []).includes("list_session_types")) {
-      errors.push(`${label} must not carry removed version-1 request names`);
+    const requestNames = JSON.stringify(family.request_names ?? []);
+    const wireTypes = JSON.stringify(family.wire_request_types ?? {});
+    if (
+      requestNames.includes("list_configs")
+      || requestNames.includes("list_session_types")
+      || requestNames.includes("terminal_resize")
+      || wireTypes.includes("resize")
+    ) {
+      errors.push(`${label} must not carry removed version-1 or version-2 request names`);
     }
   }
   if (name === "package_event_saturation" && !Object.hasOwn(family, "burst_count")) {
@@ -667,7 +674,7 @@ export function validateObservationRecord(record) {
   }
   requireKeys(record, REQUIRED_TOP_LEVEL, "record", errors);
   if (record.format_version !== FORMAT_VERSION) {
-    errors.push("format_version must be 2");
+    errors.push("format_version must be 3");
   }
   if (typeof record.capture_id !== "string" || record.capture_id.length === 0) {
     errors.push("capture_id is required");

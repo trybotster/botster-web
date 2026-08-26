@@ -2,10 +2,10 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787701823_324641`
-Returned from Review: `review_1787701804_526198`
-Human decision: `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
-Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 9, resynced to format version 2
+Step: `botster_stack_implement` / `run_step_1787702496_943322`
+Returned from Review: `review_1787702471_847790` and `review_1787702323_569873`
+Human decision: `question_1787702156_949472` requires `format_version=3`; earlier `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
+Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 10, resynced to format version 3
 Approved review: `review_1787638112_854617`
 
 ## Target repository and target_id
@@ -84,9 +84,9 @@ New:
 Changed:
 
 - `package.json` — `observe:terminal-baseline` and `observe:terminal-baseline:validate`
-- `src/App.test.mjs` — format version 2, control-operation, remount-restore, concurrent-workload, one-armed publication, and runner-admission assertions
-- `README.md` — pointer to format version 2
-- `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` — resynced to format version 2 and the B+D control operations
+- `src/App.test.mjs` — format version 3, attach+snapshot control operations, send-only reject, remount-restore, concurrent-workload, one-armed publication, and runner-admission assertions
+- `README.md` — pointer to the observation format
+- `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` — resynced to format version 3 and attach+snapshot operations
 
 Unchanged production paths: everything under `src/botster/`, `src/app/`, and `src/vendor/restty/`. No file in the supplied Hub checkout or `~/Rails/trybotster` was written.
 
@@ -99,7 +99,7 @@ Unchanged production paths: everything under `src/botster/`, `src/app/`, and `sr
 - `ticket_1787600670_129312` (`botster-hub`, closed) remains the registered parent.
 - No new dependency ticket was opened.
 - Modular binaries were built from Hub `f6db5c436f72b151fd6dacde61d3f4836a4dc925` as a build input, not as a published release.
-- Downstream consumers remain `ticket_1787600689_646958` and `ticket_1787600679_990088`. Both now require `format_version=2`.
+- Downstream consumers remain `ticket_1787600689_646958` and `ticket_1787600679_990088`. Both now require `format_version=3`.
 
 ## Runtime-teardown lenses
 
@@ -118,18 +118,19 @@ Implemented in harness scope. No lens was dropped to informal follow-up.
 
 1. `dispatcher_append_calibration_ms` measures the same builtin `printf` plus append on the host, without the browser. It does not yet open the session PTY device node directly.
 2. Family collection runs after both arms have started. The frozen `n=20` is one pass per family per arm. The capture does not yet repeat the full 20-rep set in the opposite arm order as a second isolated campaign.
-3. Format version 2 is now the committed contract (`question_1787678013_829162`). The plan, format document, README, and downstream citations were resynced in this visit. Version 1 is retired before any baseline is authoritative.
+3. Format version 3 is now the committed contract (`question_1787702156_949472`). The plan, format document, and downstream citations were resynced in this visit. Version 2 is retired before any baseline is authoritative. There is no version 2 compatibility path.
 4. Vault checklist creation timed out at the plugin worker on the first Implement visit. This visit reuses the existing run checklist when list/create is available.
 
 These deviations do not change the two dispatcher variants, the single paint oracle, or the prohibition on transport and Restty edits.
 
 ## Review findings addressed
 
-`review_1787701804_526198` returned one open finding. This visit stops labeling later legacy messages as the last send.
+`review_1787702471_847790` and `review_1787702323_569873` returned four open findings. This visit cold-cuts the contract to `format_version=3`.
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787701804_845506` sticky last-send | The legacy observer no longer copies a last-send wire onto later messages. Snapshot replies remain the producer `0x02` snapshot payload. Legacy resize has no typed reply, so its response oracle is `sendResize` completion. An unrelated `{type:'unrelated_status'}` after `sendResize` does not change the resize inbound counter. |
+| `finding_1787702471_881933` / `finding_1787702323_104056` synthetic inbound | Version 3 removes `terminal_resize` and every send-completion inbound path. Inbound frames and bytes come only from decoded `subscribed` / attach-admission and snapshot decoder events. A send-only `subscribe` or `attach` promise does not change the inbound counter. |
+| `finding_1787702471_962836` / `finding_1787702323_920784` missing attach | Control saturation now uses `terminal_attach` and `terminal_snapshot`. Legacy issues production `subscribe` and counts decoded `subscribed`. Modular issues production `attach` and counts decoder assembly plus matching session and subscription identity. Each attach tears down before the next starts. Wrong identity, wrong generation, late messages, and incomplete teardown reject. |
 
 `review_1787701425_278522` findings from the prior visit remain resolved:
 
@@ -184,7 +185,7 @@ These deviations do not change the two dispatcher variants, the single paint ora
 | --- | --- |
 | `finding_1787677878_907488` remount identity | Paint remounts restore the saturation probe session. The harness asserts the mounted session id before each saturation probe. A remount that leaves the probe on the history session fails closed. |
 | `finding_1787677878_840670` live producer proof | Control burst issues exactly 20 sequential browser requests. Package burst emits 20 slices of 10. Sibling flood keeps terminal A mounted and requires subscription plus counter growth on every measured sample. |
-| `finding_1787677878_764546` equal browser control | Version 2 uses `terminal_resize` and `terminal_snapshot` through each arm's production browser control connection. The record stores semantic names, wire types, rates, bytes, and tolerance. Direct daemon Unix sockets are not used for this family. |
+| `finding_1787677878_764546` equal browser control | Version 3 uses `terminal_attach` and `terminal_snapshot` through each arm's production browser control connection. The record stores semantic names, wire types, rates, bytes, and tolerance. Direct daemon Unix sockets are not used for this family. |
 | `finding_1787677878_148374` one-armed publication | The validator requires every required family measured on both arms, except legacy `package_event_saturation` as `not_applicable`. A blocked publication family is not a publishable baseline. |
 | `finding_1787677878_719710` controlled runner | Waived for this ticket only (`question_1787678013_829162` choice B). The workflow, schema validation, teardown proof, and rerun instructions remain. The controlled record is deferred because the runner is unregistered. This report does not claim a controlled baseline exists. |
 
@@ -198,7 +199,7 @@ Deterministic gates:
 | G2 | `npm run lint` | passed, five known warnings in untouched files |
 | G3 | `npm test` | passed, two known `act(...)` warnings |
 | G4 | `npm run build` | passed |
-| G6 | validator assertions in `src/App.test.mjs` | format version 2, producer starts after settle and marker typing, control send and reply required for the selected wire operation, unrelated resize send or reply cannot satisfy a snapshot sample, package and sibling inbound required before Enter and after t_key, production sendProbe delay on the positive path, one-shot-before-Enter reject for sustained families, one physical control request per sample, invalid-number reject, and one-armed reject |
+| G6 | validator assertions in `src/App.test.mjs` | format version 3, attach+snapshot operations, send-only completion rejected as inbound, sequential attach teardown, identity and generation checks, producer starts after settle and marker typing, control send and reply required for the selected wire operation, unrelated send or reply cannot satisfy a snapshot sample, package and sibling inbound required before Enter and after t_key, production sendProbe delay on the positive path, one-shot-before-Enter reject for sustained families, one physical control request per sample, invalid-number reject, and one-armed reject |
 | G13 | `observe:terminal-baseline:validate` | available; used after a written record |
 
 G5 pinned sequence from the prior Implement visit remains the last completed live-packaged proof:
@@ -214,7 +215,7 @@ G5 pinned sequence from the prior Implement visit remains the last completed liv
 | Smoke | `npm run smoke:live-packaged-protocol` passed |
 | Source after smoke | HEAD and porcelain unchanged |
 
-Downstream proof: `docs/terminal-baseline-observation-format.md` states that `ticket_1787600689_646958` records the post-Restty set in `format_version=2` and that `ticket_1787600679_990088` compares against that baseline.
+Downstream proof: `docs/terminal-baseline-observation-format.md` states that `ticket_1787600689_646958` records the post-Restty set in `format_version=3` and that `ticket_1787600679_990088` compares against that baseline.
 
 ## Observational output
 
@@ -224,7 +225,7 @@ Downstream proof: `docs/terminal-baseline-observation-format.md` states that `ti
 
 ### O3. Rerun procedure
 
-See `docs/terminal-baseline-observation-format.md`. Register the runner, provision both product arms, dispatch the workflow, keep `format_version=2`.
+See `docs/terminal-baseline-observation-format.md`. Register the runner, provision both product arms, dispatch the workflow, keep `format_version=3`.
 
 ### O1. Local two-arm set
 
@@ -232,7 +233,7 @@ Human choice B in `question_1787689401_836936` waives the local two-arm JSON for
 
 A clean scratch clone at `f598075e` reached a reachable legacy URL and then failed closed at `Sign in with GitHub`. No observation JSON was written. This ticket did not capture a performance baseline. A one-arm or incomplete record is not a two-arm record and is not publishable.
 
-Later tickets must not use this ticket as evidence for a measured latency improvement or regression. When an authenticated browser session or the controlled runner exists, run the complete two-arm `format_version=2` capture before any performance claim.
+Later tickets must not use this ticket as evidence for a measured latency improvement or regression. When an authenticated browser session or the controlled runner exists, run the complete two-arm `format_version=3` capture before any performance claim.
 
 ## Unverified behavior or residual risk
 
@@ -244,7 +245,7 @@ Later tickets must not use this ticket as evidence for a measured latency improv
 - Exact canvas settle-window calibration is frozen at 250 ms and may need a later `format_version` bump if both arms prove a different stable window.
 - Control-response equalization records a 0.25 tolerance. Achieved live values still require a completed two-arm set.
 - Live `issueControlRequest` is one browser RPC. The harness requires the production send before Enter and the one response after `t_key`. A reply that arrives before Enter fails closed. Package-event and sibling families still require inbound growth on both sides of Enter.
-- Legacy resize has no typed reply in this client. The resize response oracle is `sendResize` completion, not a later `handleMessage` type. Snapshot replies remain the producer `0x02` payload.
+- Legacy attach inbound is the decoded `subscribed` confirmation. Modular attach inbound requires a decoder assembly event. Send-only completion is not inbound data. Snapshot replies remain the producer `0x02` / `read_screen` decoder payload.
 
 ## Missing vault guidance discovered
 

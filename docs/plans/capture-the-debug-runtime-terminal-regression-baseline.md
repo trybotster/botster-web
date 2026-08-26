@@ -4,6 +4,15 @@ Plan for ticket `ticket_1787603669_760394` in project `project_1787600579_585482
 (Botster Isolated Subscription Data Plane), pipeline `botster_stack_delivery`,
 run `run_1787632387_839095`, step `botster_stack_plan`.
 
+**Revision 10**, after human answer `question_1787702156_949472` rejected
+commit `d70738d` and required a cold-cut to `format_version=3`. Version 3
+uses `terminal_attach` and `terminal_snapshot` only. It excludes `resize`,
+send completion, local callbacks, request bytes, and synthetic inbound
+estimates. Attach attempts run sequentially with complete teardown, session
+identity checks, and subscription-generation checks. Version 3 supersedes
+version 2 before any record becomes authoritative. There is no version 2
+compatibility path. Downstream consumers require version 3.
+
 **Revision 9**, after Plan Review `review_1787637601_156332` returned
 `changes_required` an eighth time, with one low finding:
 
@@ -736,15 +745,15 @@ That is a harness-side change in `scripts/`, not a production change.
 
 ## 7. The frozen observation format
 
-Version token: `terminal_baseline_observation_format=2`. Downstream tickets cite
-the version, not the file layout. Version 2 supersedes version 1 before any
-baseline becomes authoritative (`question_1787678013_829162`).
+Version token: `terminal_baseline_observation_format=3`. Downstream tickets cite
+the version, not the file layout. Version 3 supersedes version 2 before any
+baseline becomes authoritative (`question_1787702156_949472`).
 
 Each capture writes one JSON record with these top-level members.
 
 | Member | Content |
 |--------|---------|
-| `format_version` | `2` |
+| `format_version` | `3` |
 | `capture_id` | stable id for one two-arm capture |
 | `product_baseline_only` | always `true`, with the §4 causality statement inline |
 | `same_host` | always `true`; the capture refuses to emit a record whose browser and PTY ran on different hosts |
@@ -847,14 +856,18 @@ retired to keep the vocabulary unambiguous.
 **`control_response_saturation` — cross-stack comparison.** Both arms issue the
 same two browser-issued semantic operations through each stack's production
 browser control connection, never a direct daemon Unix socket
-(`question_1787678013_829162`):
+(`question_1787702156_949472`):
 
-1. `terminal_resize` — wire type `resize` on both arms
+1. `terminal_attach` — legacy wire type `subscribe`, modular wire type `attach`
 2. `terminal_snapshot` — legacy wire type `request_snapshot`, modular wire type
    `read_screen`
 
 The record stores the semantic name and the arm-specific wire type. The harness
-measures ingress and egress separately and equalizes the server-to-browser
+counts only decoded server-to-browser frames and bytes. It excludes send
+completion, local callbacks, request bytes, synthetic estimates, and `resize`.
+Attach attempts run sequentially with complete teardown and checks for session
+identity and subscription generation. The harness measures ingress and egress
+separately and equalizes the server-to-browser
 response frames per second and bytes per second within a recorded tolerance.
 Each arm records `request_rate`, `response_rate`, `response_bytes`, `producer`,
 `wire_request_types`, and `tolerance`. Terminal input and output are probed
@@ -892,7 +905,7 @@ closed when it cannot prove a value.
 | Repetitions | 20 measured, 3 warm-up repetitions discarded and recorded as discarded |
 | Scrollback gesture | fixed wheel delta, fixed event count, fixed pacing |
 | History size | one fixed line count and one fixed byte count, produced by `fixtures/terminal-baseline/history-seed.sh` |
-| Control-response burst | one fixed schedule of `terminal_resize` and `terminal_snapshot` through each arm's browser control connection, with the server-to-browser response rate and bytes equalized across arms within the recorded tolerance |
+| Control-response burst | one fixed schedule of `terminal_attach` and `terminal_snapshot` through each arm's browser control connection, with decoded server responses only, sequential attach teardown, and the server-to-browser response rate and bytes equalized across arms within the recorded tolerance |
 | Package-event burst | 200 package events on the modular arm only, matching the existing lane at `scripts/live-packaged-protocol-harness.mjs:1835` |
 | Sibling flood | two mounted terminals, terminal A flooded with a fixed output byte count from `fixtures/terminal-baseline/sibling-flood.sh`, terminal B probed |
 | Settle window | one fixed millisecond window for sampled-region hash stability |
@@ -1005,7 +1018,7 @@ Cross-repository dependencies:
 Downstream consumers of this ticket's output:
 
 - `ticket_1787600689_646958` must record its post-Restty set in
-  `format_version=2`.
+  `format_version=3`.
 - `ticket_1787600679_990088` must record its post-cut set in the same format and
   compare against the post-Restty transport baseline, per architecture contract
   §14 row A20.
@@ -1073,7 +1086,7 @@ Unknowns, each with an owner:
    downgrade path at all: an arm without `Page.startScreencast` blocks the
    cross-arm paint families. G16 and G18 enforce both rules rather than allowing a
    mixed comparison.
-5. Whether the two arms' `terminal_resize` and `terminal_snapshot` response
+5. Whether the two arms' `terminal_attach` and `terminal_snapshot` response
    shapes are close enough to equalize server-to-browser frames and bytes within
    a useful tolerance. Owned by this ticket's Implement step, which must record
    the achieved values and tolerance and, when the shapes differ, record that
@@ -1102,7 +1115,7 @@ Unknowns, each with an owner:
 | Browser, shell, and host-watcher wall clocks diverge | `key_to_pty` becomes meaningless or negative | All endpoints read one host's wall clock: `t_key` and `t_paint` from the browser, `t_pty` from the host watcher's `Date.now()` under `host_watcher` or from Bash `$EPOCHREALTIME` under `shell_epochrealtime`, where §6.2.1 accepts that clock only after it parses, advances, and sits within 2000 ms of the host clock. G12 requires one host, the record carries `same_host: true`, and G15 discards and records any repetition whose `t_pty` precedes `t_key` |
 | The probe expands empty and records a zero-length marker | A silently wrong number enters the baseline | G16 requires `botster-baseline-ready` plus a warm-up probe whose log line equals the expected marker exactly, and blocks the arm otherwise |
 | The two saturation families get conflated again | A modular-only diagnostic is read as a cross-stack comparison | §7.1 retires the term `event_saturation`; the schema, the report names, and the published document use `control_response_saturation` and `package_event_saturation` |
-| `terminal_resize` and `terminal_snapshot` response shapes differ between arms | A cross-stack row overstates equivalence | The record stores request rate, response rate, response bytes, producer, wire request types, and tolerance per arm, and states the shape limitation; no row claims isolated transport causality |
+| `terminal_attach` and `terminal_snapshot` response shapes differ between arms | A cross-stack row overstates equivalence | The record stores request rate, response rate, response bytes, producer, wire request types, and tolerance per arm, and states the shape limitation; no row claims isolated transport causality |
 
 ## 14. Acceptance checks and tests
 
@@ -1123,7 +1136,7 @@ is independent of every wall-clock value.
 | G10 | Package events never enter the terminal adapter path in the modular arm | reuse the existing check at `scripts/live-packaged-protocol-harness.mjs:1923` |
 | G11 | Arm teardown is proven live: recorded Hub and worker pids are gone and the arm socket path is absent after stop | harness assertion per arm |
 | G12 | Both checkouts are clean and at the recorded revisions before the capture starts | harness precondition, fails closed |
-| G13 | The recorded record validates against `format_version=2` | `npm run observe:terminal-baseline:validate` |
+| G13 | The recorded record validates against `format_version=3` | `npm run observe:terminal-baseline:validate` |
 | G14 | Every arm entry carries a full 40-character Restty `declared_revision`, a `declaration_source`, and an `artifact_sha256` that matches the vendored files the arm actually loads; a short revision is rejected and the arm is blocked | validator assertion plus a harness precondition, fails closed |
 | G15 | Both arms ran on one host, and no repetition has `t_pty` or the probe's paint change before `t_key` | harness precondition and per-repetition assertion |
 | G16 | Per arm, matching §6.5 exactly: the dispatcher printed `botster-baseline-ready`; the §6.2.1 handshake resolved and both arms report the same `pty_clock`; one warm-up probe added exactly the lines the negotiated §6.2.4 format prescribes, one line under `host_watcher` and two under `shell_epochrealtime`, with the marker matching exactly and a wrong-format line blocking the arm; the same warm-up produced a sampled-region hash change **attributed by marker, with no ordering required against `t_pty`**, and the rendered terminal shows `botster-baseline-paint:<marker>`; `Page.startScreencast` works in both arms; and every calibration the negotiated clock requires produced a non-empty sample set, meaning `watcher_detection_calibration_ms` only under `host_watcher`, `append_cost_calibration_ms` only under `shell_epochrealtime`, `dispatcher_append_calibration_ms` always, and no paint calibration of any kind | harness precondition, fails closed; a log failure blocks that arm's PTY families and a paint failure blocks that arm's paint families |
@@ -1198,7 +1211,7 @@ Observational output, non-gating:
 Downstream proof required by the charter and the architecture contract:
 
 - The published document must state that `ticket_1787600689_646958` records the
-  post-Restty transport baseline in `format_version=2`, and that
+  post-Restty transport baseline in `format_version=3`, and that
   `ticket_1787600679_990088` compares its post-cut set against that baseline
   (architecture contract §14 row A20).
 - No downstream ticket may re-derive the format. It cites the version.
