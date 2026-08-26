@@ -75,6 +75,18 @@ export function unmatchedWheelBytesShouldDrop(initialBytes: string, pendingKind?
   return looksLikeWheelReport(initialBytes) && pendingKind !== "mouse";
 }
 
+/**
+ * Restty `shouldRoutePointerToAppMouse`: Shift always means local scrollback,
+ * even when application mouse tracking is active.
+ */
+export function shouldRouteWheelToAppMouse(
+  event: WheelLikeEvent,
+  applicationMouseActive: boolean
+): boolean {
+  if (event.shiftKey) return false;
+  return applicationMouseActive;
+}
+
 const ESC = String.fromCharCode(0x1b);
 const SGR_WHEEL_BUTTONS = new Set([64, 65, 68, 69, 72, 73, 80, 81]);
 const URXVT_WHEEL_BUTTONS = new Set([96, 97, 100, 101, 104, 105, 112, 113]);
@@ -214,7 +226,7 @@ export class MountScopedWheelReencoder {
    */
   consumeWheelEvent(event: WheelLikeEvent, metrics: WheelMetrics): WheelDecision | undefined {
     this.accumulatorMutations += 1;
-    if (!metrics.applicationMouseActive) {
+    if (!shouldRouteWheelToAppMouse(event, metrics.applicationMouseActive)) {
       this.syncApplicationMouseActive(false);
       return undefined;
     }

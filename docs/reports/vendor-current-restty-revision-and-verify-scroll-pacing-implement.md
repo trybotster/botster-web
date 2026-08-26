@@ -2,7 +2,7 @@
 
 Ticket: `ticket_1787600689_646958`
 Run: `run_1787761714_735678`
-Step: `botster_stack_implement` / `run_step_1787764454_901470`
+Step: `botster_stack_implement` / `run_step_1787767226_761393`
 Plan: `docs/plans/vendor-current-restty-revision-and-verify-scroll-pacing.md` revision 4, commit `3259ab86df8345212f283dd78f9b877461560983`, artifact `artifact_1787764083_977190`
 Human decisions: `question_1787761913_284316` selected Q1 option B and Q2 option A. `question_1787761969_117759` keeps option B and requires one PTY wheel byte authority.
 
@@ -64,14 +64,15 @@ Removed:
 Changed:
 
 - `src/vendor/restty/**` — complete vendor replace from `cd1911d0f`. README, `internal.js`, `restty.js`, `xterm.js`, and input type declarations updated. Relative chunk imports remain.
-- `src/botster/resttyRenderer.ts` — mount-scoped wheel consume, live cell height and rows, mode-gated send, unmatched drain drop, teardown reset.
+- `src/botster/resttyRenderer.ts` — mount-scoped wheel consume, Restty Shift route, live cell height and rows, mode-gated send, unmatched drain drop, teardown reset.
 - `src/botster/botsterTerminalPtyTransport.ts` — **changed**. Added `writeSemantic()` so a prepared wheel decision cannot fall through as raw bytes when no mode-gated owner exists. `sendInput` uses that helper when a mode-gated path exists.
 - `src/botster/mountedKeyboardSmoke.tsx` — G8 viewport oracle, history reader, render flush, scroll-to-bottom.
 - `scripts/mounted-terminal-keyboard-smoke.mjs` — G8 lane behind `BOTSTER_MOUNTED_WHEEL_SCROLLBACK=1`.
 - `mounted-terminal-keyboard-smoke.html` — bounded host so Restty keeps a viewport smaller than the 400-line history.
-- `src/App.test.mjs` — revision and chunk asserts, W1 through W11.
+- `src/App.test.mjs` — revision and chunk asserts, W1 through W14.
 - `scripts/terminal-baseline-capture.mjs` — `RESTTY_RUNTIME_FILES` uses `chunk-qya1z999.js`.
 - `scripts/terminal-baseline-observation-format.mjs` — `PINNED_REVISIONS.modular_restty` is `cd1911d0f88606270b1457c6995a3c04cb497edf`. `format_version` stays 3.
+- `docs/plans/vendor-current-restty-revision-and-verify-scroll-pacing.md` — S5, G8, and W12 through W14 now name Restty's Shift route and the deferred-drain plus unmatched-sendInput proofs.
 - `docs/terminal-baseline-observation-format.md` — post-Restty controlled set is the future comparison set and does not exist yet.
 - `package.json` — `smoke:mounted-terminal-wheel-scrollback`.
 
@@ -114,7 +115,7 @@ None of the product scope changed. These are G8-lane details:
 
 ## Tests and downstream proof
 
-Production entry: `src/botster/resttyRenderer.ts` mounts `Restty` and sends wheel bytes through `ptyTransport.writeSemantic`. W1 through W11 load `mountScopedWheelReencoder.ts` and the vendored `createInputHandler`. G5 through G8 render the mounted production path in Chromium.
+Production entry: `src/botster/resttyRenderer.ts` mounts `Restty` and sends wheel bytes through `ptyTransport.writeSemantic`. W1 through W14 load `mountScopedWheelReencoder.ts` and the vendored `createInputHandler`. G5 through G8 render the mounted production path in Chromium.
 
 | Gate | Command | Result |
 | --- | --- | --- |
@@ -127,7 +128,7 @@ Production entry: `src/botster/resttyRenderer.ts` mounts `Restty` and sends whee
 | G7 | `npm run smoke:incremental-ghostsnp-attach` | pass |
 | G8 | `npm run smoke:mounted-terminal-wheel-scrollback` | pass |
 
-W1 through W11 ran inside G3. G8 settled on painted line 400, moved 3 lines to painted line 397, kept 80-byte numbered rows, and recorded zero PTY wheel bytes with mouse tracking off.
+W1 through W14 ran inside G3. G8 settled on painted line 400, moved 3 lines to painted line 397, kept 80-byte numbered rows, and recorded zero PTY wheel bytes with mouse tracking off.
 
 ## Recorded, not claimed
 
@@ -141,6 +142,7 @@ This report publishes no performance number, no local record, and no controlled 
 - G8 proves local scrollback only. PTY report count and direction stay with W2 and W3.
 - G8 host CSS is smoke-only. Production `.terminal-view-container` already uses `height: 100%` and `overflow: hidden`.
 - `page.mouse.wheel` is unused. G8 uses a cancelable bubbling `WheelEvent` on the canvas.
+- W13 still cannot construct a Restty instance in the App.test minimal DOM. It drives the wheel listener installed before that constructor and calls `ptyTransport.sendInput`, which is the same callback Restty uses.
 
 ## Missing vault guidance discovered
 
@@ -162,6 +164,12 @@ No new product identity or convention conflict appeared. Durable capture is ther
 
 Review `review_1787766638_259701` sent two findings back.
 
-`finding_1787766638_724111`: `consumeWheelEvent` now requires `applicationMouseActive`. Inactive events reset the accumulator and return no PTY decision. `syncApplicationMouseActive` clears leftover pixels on an off-to-on or on-to-off change, including after `write()` when Restty may have changed mouse modes. W12 proves four inactive `-4` px events leave `0` pending pixels, and the next active `-4` px event does not emit a report. W13 drives `ResttyTerminalRenderer` wheel listeners through `writeSemantic`, a double `encode` stale-retry, a large-delta burst, and unmatched-byte suppression.
+`finding_1787766638_724111`: `consumeWheelEvent` now requires `applicationMouseActive`. Inactive events reset the accumulator and return no PTY decision. `syncApplicationMouseActive` clears leftover pixels on an off-to-on or on-to-off change, including after `write()` when Restty may have changed mouse modes. W12 proves four inactive `-4` px events leave `0` pending pixels, and the next active `-4` px event does not emit a report.
 
 `finding_1787766638_589538`: The plan no longer names a user-specific spawn-target path or Restty checkout path. This report no longer names a host checkout directory. A raw `git diff main...HEAD` scan of committed markdown after this commit must not match a user home directory path.
+
+Review `review_1787767220_860172` sent two findings back.
+
+`finding_1787767220_644277`: Web now uses Restty's complete pointer route. `shouldRouteWheelToAppMouse` returns false when `event.shiftKey` is true, then `consumeWheelEvent` takes the inactive branch, clears leftover pixels, and emits no PTY decision. The renderer passes that predicate, not only `getMouseStatus().active`. W14 proves encoder leftover clear. W13 fires Shift+wheel through the installed renderer listener while tracking is active and asserts no PTY write.
+
+`finding_1787767220_388959`: W13 now waits for the drain frame after a `-80` px event and asserts one extra `writeSemantic` for the remainder. It then drives `\u001b[<64;1;1M` through `ptyTransport.sendInput` and asserts zero raw `writeInput` plus an empty gated encode. The test no longer treats the helper `unmatchedWheelBytesShouldDrop` as production-path proof.

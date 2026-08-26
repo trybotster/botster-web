@@ -164,6 +164,11 @@ S5. Give the Web wheel path the mount-scoped integration the human approved in
 
 - Keep one mount-scoped wheel re-encoder. That re-encoder is the only PTY wheel
   byte authority. Do not create a second PTY wheel producer.
+- Use Restty's complete pointer route. `shouldRoutePointerToAppMouse` returns
+  false when `event.shiftKey` is true, then `onWheel` calls
+  `scrollViewportByWheel`. Shift+wheel is local scrollback even when
+  `getMouseStatus().active` is true. Web must take the inactive branch, clear
+  leftover PTY accumulator pixels, and emit no PTY decision.
 - Give the re-encoder the same live cell height and row count the mounted Restty
   handler uses, through `getCellHeight` and `getRows`.
 - Refresh the current mouse mode bits before each immediate send and before each
@@ -383,6 +388,13 @@ W10. One wheel event cannot produce duplicate PTY bytes.
 W11. One forced stale `ModeGatedInput` reject calls `encode` twice for one wheel
 event, and the result is one accumulator mutation, correct fresh-mode bytes on
 the retry, and no duplicate immediate or deferred PTY bytes.
+W12. Inactive local-scroll pixels do not enter a later PTY report.
+W13. The mounted renderer listener proves off-to-on isolation, active
+Shift+wheel with no PTY report, an immediate burst plus a later deferred
+`writeSemantic` after the drain frame, and unmatched `sendInput` wheel bytes
+with zero raw `writeInput`.
+W14. Shift+wheel is local scrollback even when application mouse tracking is
+active. The encoder clears leftover pixels and emits no PTY decision.
 
 ### Repository gates
 
@@ -410,11 +422,14 @@ one PAGE frame and does not prove a large history. G8 closes that gap.
 
 G8 proves the local-scrollback wheel path only. Restty routes one wheel event to
 exactly one destination. In `createPointerAuxHandlers.onWheel` at `cd1911d0f`,
-active application mouse reporting calls `sendMouseEvent`, prevents the default,
-and returns before `scrollViewportByWheel`. With application mouse reporting
-inactive, Restty scrolls local history and sends no PTY report. One wheel action
-therefore cannot both move local-history rows and produce PTY wheel reports. G8
-takes the local half. W2 and W3 take the PTY half.
+`shouldRoutePointerToAppMouse` is false when `event.shiftKey` is true, and it
+otherwise follows `isMouseActive()`. Active application mouse reporting, with
+Shift up, calls `sendMouseEvent`, prevents the default, and returns before
+`scrollViewportByWheel`. With application mouse reporting inactive, or with
+Shift held, Restty scrolls local history and sends no PTY report. One wheel
+action therefore cannot both move local-history rows and produce PTY wheel
+reports. G8 takes the local half. W2 and W3 take the PTY half. W14 and W13
+prove the Shift override.
 
 G8 is deterministic. It records no wall-clock value and belongs to neither
 observation set.

@@ -24,6 +24,7 @@ import {
 import {
   encodeWheelDecision,
   MountScopedWheelReencoder,
+  shouldRouteWheelToAppMouse,
   unmatchedWheelBytesShouldDrop,
   type WheelDecision
 } from "./mountScopedWheelReencoder";
@@ -115,7 +116,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
         cellHeight: this.liveCellHeight(),
         rows: this.liveRows(),
         cell: this.positionToCell(event),
-        applicationMouseActive: this.applicationMouseTrackingActive()
+        applicationMouseActive: shouldRouteWheelToAppMouse(event, this.applicationMouseTrackingActive())
       });
       if (decision && decision.steps > 0) {
         this.sendWheelDecision(decision);
@@ -336,8 +337,9 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   /**
-   * Restty `isMouseActive` / `getMouseStatus().active` is the same gate
-   * `shouldRoutePointerToAppMouse` uses. Inactive means local scrollback.
+   * Restty `isMouseActive` / `getMouseStatus().active` only. Shift is a separate
+   * override in `shouldRouteWheelToAppMouse`, matching
+   * `shouldRoutePointerToAppMouse`.
    */
   private applicationMouseTrackingActive(): boolean {
     const status = this.terminal?.getMouseStatus?.() as { active?: boolean } | undefined;

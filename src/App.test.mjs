@@ -11093,6 +11093,7 @@ assert.match(resttyRenderer, /MountScopedWheelReencoder/);
 assert.match(resttyRenderer, /getCellHeight|liveCellHeight/);
 assert.match(resttyRenderer, /encodeWheelDecision/);
 assert.match(resttyRenderer, /unmatchedWheelBytesShouldDrop/);
+assert.match(resttyRenderer, /shouldRouteWheelToAppMouse\(event/);
 assert.match(resttyRenderer, /getMouseStatus/);
 assert.match(resttyRenderer, /applicationMouseTrackingActive|applicationMouseActive/);
 assert.match(resttyRenderer, /syncApplicationMouseActive/);
@@ -11259,6 +11260,7 @@ try {
       WHEEL_REPORTS_PER_BURST,
       countWheelReports,
       encodeWheelDecision,
+      shouldRouteWheelToAppMouse,
       unmatchedWheelBytesShouldDrop,
       wheelDeltaPixels
     } = await vite.ssrLoadModule("/src/botster/mountScopedWheelReencoder.ts");
@@ -11549,8 +11551,25 @@ try {
       assert.equal(countWheelReports(encodeWheelDecision(earned, trackingOn)), 1);
     }
 
-    // W13. Mounted renderer uses Restty mouse status, writeSemantic, stale retry,
-    // deferred drains, and unmatched raw-byte suppression.
+    // W14. Shift+wheel is local scrollback even when application mouse tracking is on.
+    {
+      assert.equal(shouldRouteWheelToAppMouse(wheelEvent(-20), true), true);
+      assert.equal(shouldRouteWheelToAppMouse(wheelEvent(-20, { shiftKey: true }), true), false);
+      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
+      const leftover = encoder.consumeWheelEvent(wheelEvent(-16), metrics);
+      assert.equal(leftover?.steps, 0);
+      assert.equal(encoder.pendingPixels(), -16);
+      assert.equal(encoder.consumeWheelEvent(wheelEvent(-20, { shiftKey: true }), metrics), undefined);
+      assert.equal(encoder.pendingPixels(), 0);
+      const firstAfterShift = encoder.consumeWheelEvent(wheelEvent(-4), metrics);
+      assert.equal(firstAfterShift?.steps, 0);
+      assert.equal(encoder.pendingPixels(), -4);
+      assert.equal(encodeWheelDecision(firstAfterShift, trackingOn), "");
+    }
+
+    // W13. Mounted renderer listener: off-to-on, active Shift+wheel, deferred
+    // writeSemantic drain, and unmatched sendInput bytes with zero raw write.
+    // Restty construction still fails in this minimal DOM after listeners install.
     {
       const { createResttyTerminalRenderer } = await vite.ssrLoadModule("/src/botster/resttyRenderer.ts");
       let mouseActive = false;
@@ -11564,7 +11583,7 @@ try {
         renderer: "restty"
       });
       renderer.applicationMouseTrackingActive = () => mouseActive;
-      const fireWheel = (deltaY) => {
+      const fireWheel = (deltaY, extra = {}) => {
         const event = {
           deltaY,
           deltaMode: 0,
@@ -11575,12 +11594,20 @@ try {
           clientY: 10,
           target: root,
           preventDefault() {},
-          buttons: 0
+          buttons: 0,
+          ...extra
         };
         for (const listener of root._listeners?.get("wheel") ?? []) {
           listener(event);
         }
       };
+      const waitForDrain = () => new Promise((resolve) => {
+        if (typeof globalThis.requestAnimationFrame === "function") {
+          globalThis.requestAnimationFrame(() => resolve());
+          return;
+        }
+        setTimeout(resolve, 16);
+      });
       try {
         try {
           renderer.mount(root);
@@ -11624,10 +11651,28 @@ try {
         assert.equal(writes[0].kind, "semantic");
         assert.equal(writes[0].first, writes[0].retry);
         assert.equal(countWheelReports(writes[0].first), 1);
+        const writesBeforeShift = writes.length;
+        fireWheel(-20, { shiftKey: true });
+        assert.equal(writes.length, writesBeforeShift, "Shift+wheel must not emit a PTY report");
+        fireWheel(-4);
+        assert.equal(writes.length, writesBeforeShift, "Shift+wheel leftover must not combine with the next active event");
+        const beforeLarge = writes.length;
         fireWheel(-80);
-        assert.equal(writes.length >= 2, true, "a large delta must send an immediate burst through writeSemantic");
-        assert.equal(unmatchedWheelBytesShouldDrop("\u001b[<64;1;1M"), true);
-        assert.equal(unmatchedWheelBytesShouldDrop("\u001b[<64;1;1M", "mouse"), false);
+        assert.equal(writes.length, beforeLarge + 1, "a large delta must send only the immediate burst before the drain frame");
+        assert.equal(writes.at(-1).kind, "semantic");
+        assert.equal(countWheelReports(writes.at(-1).first), WHEEL_REPORTS_PER_BURST);
+        await waitForDrain();
+        assert.equal(writes.length, beforeLarge + 2, "the deferred remainder must send a later writeSemantic");
+        assert.equal(writes.at(-1).kind, "semantic");
+        assert.equal(writes.at(-1).first, writes.at(-1).retry);
+        assert.equal(countWheelReports(writes.at(-1).first), 1);
+        const rawBefore = writes.filter((write) => write.kind === "raw").length;
+        const sent = renderer.ptyTransport.sendInput("\u001b[<64;1;1M");
+        assert.equal(sent, true);
+        assert.equal(writes.filter((write) => write.kind === "raw").length, rawBefore);
+        assert.equal(writes.at(-1).kind, "semantic");
+        assert.equal(writes.at(-1).first, "");
+        assert.equal(writes.at(-1).retry, "");
       } finally {
         renderer.destroy();
         root.remove();
