@@ -1171,12 +1171,57 @@ export async function waitForBrowserControl(page, armId, semanticName = null) {
     installLegacyProductionSubscribeObserver(globalThis);
   }, installLegacyProductionSubscribeObserver.toString());
   if (semanticName === "terminal_attach") {
+    await installLegacyDecoderGenerationHook(page);
     return;
   }
   await page.waitForFunction(() => {
     return Object.keys(globalThis._botsterTestTerminal ?? {}).length > 0;
   }, null, { timeout: 30_000 });
   await installLegacyInboundObserver(page);
+}
+
+export async function installLegacyDecoderGenerationHook(page) {
+  const wrapped = await page.evaluate(async () => {
+    if (globalThis.__BOTSTER_BASELINE_DECODER_HOOK__) {
+      return true;
+    }
+    const wrapProto = (proto) => {
+      if (!proto || typeof proto.handleDataChannelMessage !== "function" || proto.__baselineDecoderWrapped) {
+        return false;
+      }
+      const original = proto.handleDataChannelMessage;
+      proto.handleDataChannelMessage = async function handleDataChannelMessageWithGeneration(hubId, data, generation) {
+        const previous = globalThis.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__;
+        globalThis.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__ = generation;
+        try {
+          return await original.apply(this, arguments);
+        } finally {
+          globalThis.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__ = previous;
+        }
+      };
+      proto.__baselineDecoderWrapped = true;
+      return true;
+    };
+    const urls = [
+      ...performance.getEntriesByType("resource").map((entry) => entry.name),
+      ...[...globalThis.document.querySelectorAll("script[src]")].map((node) => node.src)
+    ].filter((name, index, all) => name.includes("hub_channel_protocol") && all.indexOf(name) === index);
+    for (const url of urls) {
+      try {
+        const mod = await import(url);
+        if (wrapProto(mod.HubChannelProtocol?.prototype)) {
+          globalThis.__BOTSTER_BASELINE_DECODER_HOOK__ = true;
+          return true;
+        }
+      } catch {
+        // Try the next loaded module URL.
+      }
+    }
+    return false;
+  });
+  if (!wrapped) {
+    throw new Error("legacy attach cannot wrap the production HubChannelProtocol decoder");
+  }
 }
 
 export function isSendOnlyCompletion(entry) {
@@ -1220,6 +1265,9 @@ export function assertAttachIdentity(entry, expected) {
   if (!subscriptionId) {
     throw new Error("control_response_saturation: attach subscription is missing from the decoder response");
   }
+  if (!Number.isInteger(generation)) {
+    throw new Error("control_response_saturation: attach generation is missing from the decoder response");
+  }
   if (expected.session_id && sessionId !== expected.session_id) {
     throw new Error(`control_response_saturation: attach session identity ${sessionId} is not ${expected.session_id}`);
   }
@@ -1228,6 +1276,31 @@ export function assertAttachIdentity(entry, expected) {
   }
   if (expected.generation != null && generation !== expected.generation) {
     throw new Error(`control_response_saturation: attach generation ${generation} is not ${expected.generation}`);
+  }
+  return entry;
+}
+
+export function assertFrozenAttachSession(attempt, frozenSessionId) {
+  if (!frozenSessionId) {
+    throw new Error("control_response_saturation: frozen attach session is missing");
+  }
+  if (attempt?.session_id !== frozenSessionId) {
+    throw new Error(
+      `control_response_saturation: attach session ${attempt?.session_id} drifted from frozen ${frozenSessionId}`
+    );
+  }
+  return attempt;
+}
+
+export function assertLegacyAttachAdmission(entry) {
+  if (entry?.source !== "decoder") {
+    throw new Error("control_response_saturation: legacy attach admission is not a decoded subscribed confirmation");
+  }
+  if (!entry.session_id || !entry.subscription_id) {
+    throw new Error("control_response_saturation: legacy attach identity is missing from the decoded subscribed confirmation");
+  }
+  if (!Number.isInteger(entry.generation)) {
+    throw new Error("control_response_saturation: legacy attach generation is missing from the decoder peer generation");
   }
   return entry;
 }
@@ -1307,7 +1380,12 @@ export function wrapLegacyControlTransport(transport, store = globalThis) {
   }
   transport.handleMessage = (message) => {
     if (message?.type === "subscribed") {
-      if (!store.__BOTSTER_BASELINE_ATTACH__.accepting) {
+      const generation = Number.isInteger(message.generation)
+        ? message.generation
+        : (Number.isInteger(store.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__)
+          ? store.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__
+          : null);
+      if (!store.__BOTSTER_BASELINE_ATTACH__.accepting || generation == null) {
         return original(message);
       }
       store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
@@ -1318,11 +1396,12 @@ export function wrapLegacyControlTransport(transport, store = globalThis) {
         session_id: message.session_uuid ?? message.session_id
           ?? sessionFromSubscription(message.subscriptionId ?? message.subscription_id),
         subscription_id: message.subscriptionId ?? message.subscription_id,
-        generation: Object.hasOwn(message, "generation") ? message.generation : undefined,
+        generation,
         at: Date.now()
       });
       store.__BOTSTER_BASELINE_ATTACH__.live = true;
       store.__BOTSTER_BASELINE_ATTACH__.accepting = false;
+      store.__BOTSTER_BASELINE_ATTACH__.decoder_generation = generation;
     } else if (message?.type === "raw_output" && message.data?.length > 0) {
       const prefix = message.data[0];
       const payload = Array.from(message.data);
@@ -1535,6 +1614,10 @@ function controlObservationPage(arm, semanticName) {
 }
 
 async function issueLegacyProductionAttach(arm) {
+  const frozenSessionId = arm.attachSessionId ?? arm.probeSessionId;
+  if (!frozenSessionId) {
+    throw new Error("legacy production attach requires the frozen probe session");
+  }
   if (!arm.context) {
     throw new Error("legacy production attach requires a second browser page");
   }
@@ -1542,18 +1625,25 @@ async function issueLegacyProductionAttach(arm) {
     throw new Error("legacy production attach requires the legacy app URL");
   }
   const attempt = nextAttachAttempt(arm);
-  const attachPage = await arm.context.newPage();
-  await attachPage.addInitScript(baselineObserverInitScript());
-  arm.attachPage = attachPage;
-  await attachPage.goto(arm.appUrl, { waitUntil: "domcontentloaded" });
-  await waitForBrowserControl(attachPage, "legacy", "terminal_attach");
-  const sessionId = await completeLegacyNewSession(attachPage);
-  attempt.session_id = sessionId;
-  attempt.subscription_id = `terminal_${sessionId}`;
+  attempt.session_id = frozenSessionId;
+  attempt.subscription_id = `terminal_${frozenSessionId}`;
+  if (!arm.attachPage) {
+    const attachPage = await arm.context.newPage();
+    await attachPage.addInitScript(baselineObserverInitScript());
+    await attachPage.goto(arm.appUrl, { waitUntil: "domcontentloaded" });
+    arm.attachPage = attachPage;
+  }
+  await waitForBrowserControl(arm.attachPage, "legacy", "terminal_attach");
+  await goHome(arm.attachPage);
+  await openSession(arm.attachPage, frozenSessionId);
+  const mounted = await readMountedSessionId(arm.attachPage);
+  if (mounted !== frozenSessionId) {
+    throw new Error(`legacy production attach mounted ${mounted}, not frozen ${frozenSessionId}`);
+  }
   return {
     semantic: "terminal_attach",
     wire_type: "subscribe",
-    reply: { session_id: sessionId },
+    reply: { session_id: frozenSessionId },
     attach: attempt
   };
 }
@@ -1568,8 +1658,6 @@ export async function teardownControlAttach(arm) {
   }
   if (arm.arm_id === "legacy" && arm.attachPage) {
     await goHome(arm.attachPage);
-    await arm.attachPage.close().catch(() => null);
-    arm.attachPage = null;
     attempt.live = false;
     return { torn_down: true };
   }
@@ -1954,14 +2042,19 @@ async function runArmFamilies({ page, arm, ptyClock, logPath, logWatcher }) {
       observeOutbound: (name) => observeControlOutbound(controlObservationPage(arm, name), arm, name),
       teardownAttach: () => teardownControlAttach(arm),
       verifyAttach: async (after) => {
+        const frozenSessionId = arm.attachSessionId ?? arm.probeSessionId;
+        assertFrozenAttachSession(arm.attachAttempt, frozenSessionId);
         const wireType = expectedOutboundWire(arm.arm_id, "terminal_attach");
         assertDecodedInboundEntry(after.last, wireType);
         if (arm.arm_id === "modular") {
           assertModularAttachAdmission(after.last);
+        } else {
+          assertLegacyAttachAdmission(after.last);
         }
         assertAttachIdentity(after.last, {
-          session_id: arm.attachAttempt.session_id,
-          subscription_id: arm.attachAttempt.subscription_id
+          session_id: frozenSessionId,
+          subscription_id: arm.attachAttempt.subscription_id,
+          generation: after.last.generation
         });
       },
       assertAttachTornDown: () => assertAttachTornDown(arm.attachAttempt)

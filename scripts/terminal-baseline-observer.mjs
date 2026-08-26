@@ -86,7 +86,10 @@ export function installLegacyProductionSubscribeObserver(store = globalThis) {
   json.parse = function parseLegacySubscribed(text, reviver) {
     const value = originalParse(text, reviver);
     if (value && value.type === "subscribed" && value.subscriptionId) {
-      if (store.__BOTSTER_BASELINE_ATTACH__.accepting) {
+      const generation = Number.isInteger(store.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__)
+        ? store.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__
+        : null;
+      if (store.__BOTSTER_BASELINE_ATTACH__.accepting && generation != null) {
         store.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
           type: "subscribed",
           wire: "subscribe",
@@ -95,11 +98,12 @@ export function installLegacyProductionSubscribeObserver(store = globalThis) {
           session_id: value.session_uuid ?? value.session_id
             ?? sessionFromSubscription(value.subscriptionId),
           subscription_id: value.subscriptionId,
-          generation: Object.hasOwn(value, "generation") ? value.generation : undefined,
+          generation,
           at: Date.now()
         });
         store.__BOTSTER_BASELINE_ATTACH__.live = true;
         store.__BOTSTER_BASELINE_ATTACH__.accepting = false;
+        store.__BOTSTER_BASELINE_ATTACH__.decoder_generation = generation;
       }
     }
     return value;
@@ -146,7 +150,10 @@ export function baselineObserverInitScript() {
       JSON.parse = function parseLegacySubscribed(text, reviver) {
         const value = originalParse(text, reviver);
         if (value && value.type === "subscribed" && value.subscriptionId) {
-          if (globalThis.__BOTSTER_BASELINE_ATTACH__.accepting) {
+          const generation = Number.isInteger(globalThis.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__)
+            ? globalThis.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__
+            : null;
+          if (globalThis.__BOTSTER_BASELINE_ATTACH__.accepting && generation != null) {
             globalThis.__BOTSTER_BASELINE_CONTROL_INBOUND__.push({
               type: "subscribed",
               wire: "subscribe",
@@ -155,11 +162,12 @@ export function baselineObserverInitScript() {
               session_id: value.session_uuid ?? value.session_id
                 ?? sessionIdFromTerminalSubscription(value.subscriptionId),
               subscription_id: value.subscriptionId,
-              generation: Object.hasOwn(value, "generation") ? value.generation : undefined,
+              generation,
               at: Date.now()
             });
             globalThis.__BOTSTER_BASELINE_ATTACH__.live = true;
             globalThis.__BOTSTER_BASELINE_ATTACH__.accepting = false;
+            globalThis.__BOTSTER_BASELINE_ATTACH__.decoder_generation = generation;
           }
         }
         return value;

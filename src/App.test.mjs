@@ -135,6 +135,8 @@ import {
   assertAttachIdentity,
   assertAttachTornDown,
   assertDecodedInboundEntry,
+  assertFrozenAttachSession,
+  assertLegacyAttachAdmission,
   assertModularAttachAdmission,
   attachAdmissionFromReply,
   issueControlRequest,
@@ -19062,6 +19064,7 @@ function removeCssAtRules(source) {
     generation: 0
   });
   assert.equal(legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, inboundAfterTeardown);
+  const inboundBeforeMissingGeneration = legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length;
   legacyStore.__BOTSTER_BASELINE_ATTACH__.accepting = true;
   legacyStore.__BOTSTER_BASELINE_ATTACH__.generation = 9;
   legacyTransport.handleMessage({
@@ -19069,10 +19072,32 @@ function removeCssAtRules(source) {
     subscriptionId: "terminal_sess-2",
     session_uuid: "sess-2"
   });
-  const subscribedWithoutGeneration = legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.at(-1);
-  assert.equal(subscribedWithoutGeneration.session_id, "sess-2");
-  assert.equal(subscribedWithoutGeneration.generation, undefined);
-  assert.notEqual(subscribedWithoutGeneration.generation, 9);
+  assert.equal(legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, inboundBeforeMissingGeneration);
+  legacyStore.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__ = 3;
+  legacyTransport.handleMessage({
+    type: "subscribed",
+    subscriptionId: "terminal_sess-2",
+    session_uuid: "sess-2"
+  });
+  const subscribedFromDecoderGeneration = legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.at(-1);
+  assert.equal(subscribedFromDecoderGeneration.session_id, "sess-2");
+  assert.equal(subscribedFromDecoderGeneration.generation, 3);
+  assertLegacyAttachAdmission(subscribedFromDecoderGeneration);
+  assert.throws(
+    () => assertAttachIdentity({
+      session_id: "sess-2",
+      subscription_id: "terminal_sess-2"
+    }, { session_id: "sess-2", subscription_id: "terminal_sess-2" }),
+    /attach generation is missing/
+  );
+  assert.throws(
+    () => assertAttachIdentity({
+      session_id: "sess-2",
+      subscription_id: "terminal_sess-2",
+      generation: 3
+    }, { session_id: "sess-2", subscription_id: "terminal_sess-2", generation: 4 }),
+    /attach generation 3 is not 4/
+  );
 
   const productionStore = {
     JSON: {
@@ -19097,11 +19122,18 @@ function removeCssAtRules(source) {
     subscriptionId: "terminal_prod-1"
   }));
   assert.equal(sessionIdFromTerminalSubscription("terminal_prod-1"), "prod-1");
+  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
+  productionStore.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__ = 1;
+  productionStore.JSON.parse(JSON.stringify({
+    type: "subscribed",
+    subscriptionId: "terminal_prod-1"
+  }));
   assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 1);
   assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].source, "decoder");
   assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].session_id, "prod-1");
   assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].subscription_id, "terminal_prod-1");
-  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].generation, undefined);
+  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0].generation, 1);
+  assertLegacyAttachAdmission(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0]);
   productionStore.JSON.stringify({ type: "unsubscribe", subscriptionId: "terminal_prod-1" });
   assertAttachTornDown(productionStore.__BOTSTER_BASELINE_ATTACH__);
   const inboundAfterProductionTeardown = productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length;
@@ -19122,7 +19154,27 @@ function removeCssAtRules(source) {
         }
       }
     }, "terminal_attach"),
+    /frozen probe session/
+  );
+  await assert.rejects(
+    issueControlRequest({
+      arm_id: "legacy",
+      probeSessionId: "probe-1",
+      page: {
+        evaluate: async () => {
+          throw new Error("legacy attach must not use the test-only terminal hook");
+        },
+        waitForFunction: async () => {
+          throw new Error("legacy attach must not wait for _botsterTestTerminal");
+        }
+      }
+    }, "terminal_attach"),
     /second browser page/
+  );
+  assertFrozenAttachSession({ session_id: "probe-1" }, "probe-1");
+  assert.throws(
+    () => assertFrozenAttachSession({ session_id: "created-2" }, "probe-1"),
+    /drifted from frozen/
   );
 
   const modularStore = {
@@ -19205,7 +19257,7 @@ function removeCssAtRules(source) {
     /send-only completion/
   );
   assert.throws(
-    () => assertAttachIdentity({ session_id: "other", subscription_id: "gen-1" }, { session_id: "mod-1", subscription_id: "gen-1" }),
+    () => assertAttachIdentity({ session_id: "other", subscription_id: "gen-1", generation: 4 }, { session_id: "mod-1", subscription_id: "gen-1", generation: 4 }),
     /attach session identity/
   );
   assert.throws(
@@ -19239,8 +19291,9 @@ function removeCssAtRules(source) {
       attachTornDown = true;
     },
     verifyAttach: async (after) => {
+      assertFrozenAttachSession({ session_id: after.last.session_id }, "sess-1");
       assertDecodedInboundEntry(after.last, "subscribe");
-      assertAttachIdentity(after.last, { session_id: "sess-1" });
+      assertAttachIdentity(after.last, { session_id: "sess-1", generation: after.last.generation });
     },
     assertAttachTornDown: () => assertAttachTornDown({ live: !attachTornDown })
   });
@@ -19249,6 +19302,42 @@ function removeCssAtRules(source) {
   await completeProductionAroundProbe(sequentialAttach, async () => ({ at: Date.now() }), { delayMs: 40 });
   assert.equal(attachAttempts, 2);
   assert.equal(attachTornDown, true);
+
+  let driftedSessionId = "probe-1";
+  let driftedSent = 0;
+  let driftedInbound = 0;
+  const driftedAttach = createControlResponseBurst({
+    names: ["terminal_attach"],
+    requestCount: 1,
+    issueRequest: async () => {
+      driftedSent += 1;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 15));
+      driftedSessionId = "created-2";
+      driftedInbound += 1;
+      return { ok: true };
+    },
+    observeOutbound: async () => ({ sent: driftedSent }),
+    observeInbound: async () => ({
+      frames: driftedInbound,
+      bytes: driftedInbound * 8,
+      last: {
+        source: "decoder",
+        wire: "subscribe",
+        session_id: driftedSessionId,
+        subscription_id: `terminal_${driftedSessionId}`,
+        generation: 1
+      }
+    }),
+    teardownAttach: async () => {},
+    verifyAttach: async (after) => {
+      assertFrozenAttachSession({ session_id: after.last.session_id }, "probe-1");
+    }
+  });
+  await driftedAttach.start();
+  await assert.rejects(
+    completeProductionAroundProbe(driftedAttach, async () => ({ at: Date.now() }), { delayMs: 40 }),
+    /drifted from frozen/
+  );
 
   let blockedAttachLive = true;
   const incompleteTeardown = createControlResponseBurst({
