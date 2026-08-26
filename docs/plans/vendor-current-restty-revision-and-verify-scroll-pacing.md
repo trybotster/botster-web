@@ -180,6 +180,28 @@ The mounted Restty handler keeps renderer wheel accumulation and live grid
 metrics. Web keeps the mode-gated PTY send decision. The two must agree on
 report count and direction.
 
+S5a. Make the wheel encode idempotent per browser event.
+`HubTerminalDataPlane.writeModeGatedInputAfterBarrier` can call
+`ModeDependentTerminalInput.encode` up to three times for one semantic event:
+once at `src/botster/hubTerminalDataPlane.ts:188`, again after a mode refresh at
+`:207`, and again with fresh modes after a stale reject at `:259`. A stateful
+re-encoder that mutated its accumulator inside `encode` would count one browser
+wheel event two or three times.
+
+The plan therefore fixes the boundary this way:
+
+- The mount-scoped re-encoder mutates wheel state exactly once, when the browser
+  wheel event arrives, not inside `encode`.
+- That mutation produces one immutable wheel decision for the event: the burst
+  step count, the direction, and the cell and row values used.
+- Every `encode(modes)` call for that event renders bytes from that immutable
+  decision against the modes it receives. It never advances or rewinds the
+  accumulator.
+- A stale reject therefore re-renders the same decision with fresh modes and
+  produces no extra scroll distance.
+- A deferred drain is a separate semantic event. It takes its own decision, then
+  goes through `writeModeGatedInput` once.
+
 S6. Update `PINNED_REVISIONS.modular_restty` in
 `scripts/terminal-baseline-observation-format.mjs` to
 `cd1911d0f88606270b1457c6995a3c04cb497edf`. Keep `format_version=3`.
@@ -191,6 +213,9 @@ S7. Update `docs/terminal-baseline-observation-format.md` so it states:
 - That set does not exist yet. `botster-ubuntu-24.04-16core` is unavailable.
 - Those tickets reuse the same version 3 schema when the runner exists.
 - Those tickets must not claim a measured latency improvement from this ticket.
+
+S9. Add the focused large-history and wheel scrollback lane defined in
+section 11, exposed as `npm run smoke:mounted-terminal-wheel-scrollback`.
 
 S8. Write `docs/reports/vendor-current-restty-revision-and-verify-scroll-pacing-implement.md`
 with the build provenance, the deterministic wheel evidence, and the blocked
@@ -284,6 +309,10 @@ Review. The plan does not depend on it.
 | `src/vendor/restty/README.md` | New revision, unchanged Ghostty pin, new wheel behavior. |
 | `src/botster/resttyRenderer.ts` | Mount-scoped wheel handler, grid metrics, guarded deferred drain. |
 | `src/App.test.mjs` | New revision assertion, new chunk name, new deterministic wheel tests. |
+| `src/botster/mountedKeyboardSmoke.tsx` | Large-history and wheel scrollback lane. |
+| `scripts/mounted-terminal-keyboard-smoke.mjs` | Large-history and wheel scrollback lane. |
+| `package.json` | `smoke:mounted-terminal-wheel-scrollback` script. |
+| `src/botster/botsterTerminalPtyTransport.ts` | Only if the idempotent encode boundary requires it. Implement must state whether it changed. |
 | `scripts/terminal-baseline-capture.mjs` | New chunk name in `RESTTY_RUNTIME_FILES`. |
 | `scripts/terminal-baseline-observation-format.mjs` | `modular_restty` pin. |
 | `docs/terminal-baseline-observation-format.md` | Future comparison set wording. |
@@ -332,7 +361,7 @@ P6. Every vendored import stays relative. No Vite alias is added.
 
 ### Deterministic wheel tests
 
-The human decision requires all ten. Add them to `src/App.test.mjs` through
+The human decision requires ten. W11 is the eleventh, added by Plan Review finding finding_1787762913_785846. Add them to `src/App.test.mjs` through
 the existing compiled-runtime harness so they exercise the real renderer module,
 not a source regex.
 
@@ -349,6 +378,9 @@ W8. A mouse mode change before a drain changes the drain decision.
 W9. A stale mount and a stale generation emit no bytes, and a teardown before a
 scheduled drain cancels it.
 W10. One wheel event cannot produce duplicate PTY bytes.
+W11. One forced stale `ModeGatedInput` reject calls `encode` twice for one wheel
+event, and the result is one accumulator mutation, correct fresh-mode bytes on
+the retry, and no duplicate immediate or deferred PTY bytes.
 
 ### Repository gates
 
@@ -359,16 +391,49 @@ G4. `npm run build`.
 G5. `npm run smoke:mounted-terminal-keyboard`.
 G6. `npm run smoke:ghostsnp-grid`.
 G7. `npm run smoke:incremental-ghostsnp-attach`.
+G8. `npm run smoke:mounted-terminal-wheel-scrollback`, the new focused
+large-history and wheel scrollback gate defined below.
 
-G5 through G7 are the browser render proofs for the new vendored build. They
-cover terminal render, GHOSTSNP grid install, and incremental attach against the
-production reader.
+G5 through G8 are the browser render proofs for the new vendored build. They
+cover terminal render, GHOSTSNP grid install, incremental attach against the
+production reader, and large-history scrollback under real wheel events.
+
+### Focused large-history and scrollback gate
+
+The ticket requires focused wheel, scrollback, large-history, and
+terminal-render tests. W1 through W11 cover wheel behavior. G6 covers retained
+GHOSTSNP scrollback, but its fixture retains only
+`SCROLLBACK-LINE-000` through `SCROLLBACK-LINE-029`. G7 delivers one PAGE frame
+and does not prove a large history. G8 closes that gap.
+
+G8 is deterministic. It records no wall-clock value and belongs to neither
+observation set.
+
+- Harness: extend the existing mounted terminal smoke,
+  `src/botster/mountedKeyboardSmoke.tsx` and
+  `scripts/mounted-terminal-keyboard-smoke.mjs`, with a second lane selected by
+  an environment flag. Do not add a new harness.
+- Workload: the frozen large-history workload already in the repository,
+  `fixtures/terminal-baseline/history-seed.sh`. It is 400 lines of 80 bytes,
+  and each line is its own zero-padded index. Feed those bytes through the
+  harness `emitOutput` sink, which is the production terminal output path.
+- Production reader path: the mounted `Restty` instance and the vendored
+  incremental reader. The lane uses no test-only decoder.
+- Oracle: rendered rows. After the workload settles, the lane reads the viewport
+  rows, dispatches real wheel events at the mounted canvas, and reads the rows
+  again.
+- Assertions: the settled viewport ends at line 400; a known wheel distance
+  scrolls back to the exact expected zero-padded line index for that distance;
+  every visible line keeps its full 80 bytes; and the PTY input sink receives
+  the wheel reports that match the rendered distance, per W2 and W3.
+- Failure condition: a missing line, a truncated line, a scroll distance that
+  disagrees with the rendered rows, or any page error.
 
 ### Production path proof
 
 The change is not scaffold-only. The production entry point is the mounted
 `Restty` instance created in `src/botster/resttyRenderer.ts` and the wheel bytes
-that instance sends through `ptyTransport`. W1 through W10 run against that
+that instance sends through `ptyTransport`. W1 through W11 run against that
 module. G5 through G7 render it in a real browser.
 
 ### Recorded, not claimed
@@ -399,6 +464,8 @@ E2. Renew review after any semantic rebase.
 | R6 | The plan is read as a performance claim. | R2 through R4 forbid it. The format document keeps `product_baseline_only`. |
 | R7 | The vendor copy merges over the old tree and keeps dead files. | P5 requires an exact tree match. |
 | R8 | The reviewer reads `59c6404` in the historical baseline plan as current. | Section 9 states that document is historical and unedited. |
+| R9 | A stale-mode reject double-counts one wheel event. | S5a moves the accumulator mutation out of `encode`. W11 forces the reject and proves one mutation. |
+| R10 | The large-history gate drifts into a timing claim. | G8 asserts rendered rows and PTY bytes only. It records no wall-clock value. |
 
 ## 13. Vault gaps worth capturing
 
@@ -413,3 +480,33 @@ content-hashed chunk names do not belong in harness constants.
 V3. A frozen observation format that names a per-arm revision needs one update
 point when a consumer ticket moves that revision. Candidate note: a frozen
 baseline pin table is the single update point for a vendored revision change.
+
+## 14. Plan Review response
+
+Plan Review `review_1787762913_280106` returned `changes_required` with four
+findings. This revision answers all four.
+
+- `finding_1787762913_785846` (product, high). Section 6 item S5a defines the
+  idempotent semantic event boundary and names the three `encode` call sites in
+  `src/botster/hubTerminalDataPlane.ts`. Section 11 test W11 forces one stale
+  `ModeGatedInput` reject, calls `encode` twice for one wheel event, and proves
+  one accumulator mutation, correct fresh-mode retry bytes, and no duplicate
+  immediate or deferred PTY bytes. Section 9 now lists
+  `src/botster/botsterTerminalPtyTransport.ts` as a conditional file, and
+  Implement must state whether it changed.
+- `finding_1787762913_265075` (product, high). Section 11 adds gate G8, the
+  focused large-history and wheel scrollback gate. It names the frozen 400-line,
+  80-byte workload in `fixtures/terminal-baseline/history-seed.sh`, the
+  production reader path, the rendered-row oracle, the exact assertions, and the
+  failure condition. G8 records no wall-clock value and stays separate from both
+  observation sets.
+- `finding_1787762913_645421` (process, info). The first Plan visit did submit
+  full gate evidence, and `gate_result_1787762292_620280` passed with
+  `plan_uri`, `artifact_id`, `checklist_id`, `target_id`, and
+  `target_repository`. The step completion record did not carry those fields.
+  This visit resubmits the complete set and keeps artifact identity
+  `artifact_1787762199_877842`.
+- `finding_1787762913_210296` (process, info). The first Plan visit did create
+  `checklist_1787762152_320749`. This visit reuses that checklist rather than
+  creating a second one, and it does not touch the Plan Review checklist
+  `checklist_1787762539_902444`.
