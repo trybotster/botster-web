@@ -82,6 +82,8 @@ Did not edit `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.
 
 This merge-blocker visit edits only `src/botster/mountScopedWheelReencoder.ts`, `src/botster/resttyRenderer.ts`, `src/App.test.mjs`, and this report.
 
+This W13 motion-mode visit edits only `src/App.test.mjs` and this report. Production files stay at `c244d41`.
+
 ## Ownership boundaries preserved
 
 `botster-web` owns Restty mounting, input callbacks, resize, and teardown as a renderer integration. This run changed only that repository.
@@ -199,6 +201,32 @@ This visit changes only that race:
 The mount-scoped re-encoder remains the only PTY wheel byte authority. `sendWheelDecision` still uses `ptyTransport.writeSemantic`. Restty `sendInput` wheel bytes still drop.
 
 This visit did not change the vendor, `botsterTerminalPtyTransport.ts`, or the approved plan.
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| G1 | `npm run typecheck` | pass |
+| G2 | `npm run lint` | pass (5 pre-existing `react-refresh` warnings only) |
+| G3 | `npm test` | pass |
+| G4 | `npm run build` | pass |
+| G5 | `npm run smoke:mounted-terminal-keyboard` | pass |
+| G6 | `npm run smoke:ghostsnp-grid` | pass (`90x24`) |
+| G7 | `npm run smoke:incremental-ghostsnp-attach` | pass |
+| G8 | `npm run smoke:mounted-terminal-wheel-scrollback` | pass |
+
+No merge was requested.
+
+## Review return: W13 motion-capable negative control
+
+Renewed Review `review_1787771418_299643` and artifact `artifact_1787771398_905006` sent `finding_1787771418_114278` back. The production drop at `c244d412a38aee58f5ffac62cd85f3477c665377` is correct. W13 still encoded the stale-pointer assertion with `mouse_mode` 9. That value is Core normal+SGR. Restty therefore sets motion to none, so the stale move encodes empty even at `bc6ae4bb507e328c56a25eedf704cbc1119de233`.
+
+This visit changes only the W13 fence:
+
+- The W13 `writeModeGatedInput` stub now encodes with `mouse_mode` 10 (any-motion + SGR).
+- Production helpers stay at the `c244d41` drop: `unmatchedWheelBytesShouldDrop` ignores pending kind, and `createModeDependentInput` drops unmatched wheel bytes before `takePendingSemantic`.
+- Negative control: the corrected W13 block plus `bc6ae4b` production files fails `node src/App.test.mjs` at `src/App.test.mjs:11699` with actual `\x1B[<35;1;1M` and expected `""`.
+- Positive control: the same test command passes at the new HEAD after this commit.
+
+This visit edits only `src/App.test.mjs` and this report.
 
 | Gate | Command | Result |
 | --- | --- | --- |

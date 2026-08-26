@@ -11571,6 +11571,8 @@ try {
     // W13. Mounted renderer listener: off-to-on, active Shift+wheel, deferred
     // writeSemantic drain, and unmatched sendInput bytes with zero raw write.
     // A pending mouse move must not match a later unmatched Restty wheel report.
+    // Encode with mouse_mode 10 (any-motion + SGR). mouse_mode 9 is normal+SGR
+    // and disables motion, so a stale move encodes empty even at bc6ae4b.
     // Restty construction still fails in this minimal DOM after listeners install.
     {
       const { createResttyTerminalRenderer } = await vite.ssrLoadModule("/src/botster/resttyRenderer.ts");
@@ -11585,6 +11587,7 @@ try {
         renderer: "restty"
       });
       renderer.applicationMouseTrackingActive = () => mouseActive;
+      const motionTrackingOn = testModeFlags("wheel-pty-motion", { mouse_mode: 10 });
       const fireWheel = (deltaY, extra = {}) => {
         const event = {
           deltaY,
@@ -11625,8 +11628,8 @@ try {
           writeModeGatedInput(semantic) {
             writes.push({
               kind: "semantic",
-              first: semantic.encode(trackingOn),
-              retry: semantic.encode(trackingOn)
+              first: semantic.encode(motionTrackingOn),
+              retry: semantic.encode(motionTrackingOn)
             });
             return Promise.resolve();
           },
