@@ -145,15 +145,18 @@ option A.
 ### In scope
 
 S1. Build Restty at `cd1911d0f88606270b1457c6995a3c04cb497edf` from a clean
-checkout with `bun run build:wasm` and `bun run build`, then vendor the complete
-distribution into `src/vendor/restty/`.
+checkout with `bun install --frozen-lockfile` and `bun run build`, then vendor
+the complete distribution into `src/vendor/restty/`. Confirm
+`text-shaper@0.1.18` before the build. Do not rebuild the WASM. Prove the
+copied bytes with the rebuild oracle in
+`vendored restty provenance needs a lockfile faithful rebuild`.
 
 S2. Update `src/vendor/restty/README.md` to name the new revision, the unchanged
 Ghostty pin `eb72ec6`, Zig `0.16.0`, `ReleaseSafe`, and the three wheel changes.
 
 S3. Update every non-vendor reference to the emitted chunk file name. The build
-emits a content-hashed `chunk-*.js`, so `chunk-3mc71e83.js` changes. Known
-non-vendor references: `src/App.test.mjs:2501` and
+emits a content-hashed `chunk-*.js`. The lockfile-faithful rebuild emits
+`chunk-xwdkhsew.js`. Known non-vendor references: `src/App.test.mjs:2501` and
 `scripts/terminal-baseline-capture.mjs:91`.
 
 S4. Update `src/App.test.mjs:2498` to assert the new revision, and keep the
@@ -349,18 +352,24 @@ P1. Clean checkout of `cd1911d0f88606270b1457c6995a3c04cb497edf`, with
 `git status --porcelain` empty and the `reference/ghostty` submodule at
 `eb72ec6`. Record both.
 
-P2. `bun run build:wasm` then `bun run build`. Record `bun --version` and
-`zig version`.
+P2. `bun install --frozen-lockfile`, then `bun run build`. Confirm
+`node_modules/text-shaper/package.json` reports `0.1.18`. Record
+`bun --version`. Do not rebuild WASM.
 
-P3. The emitted WASM bytes equal the currently vendored WASM bytes. Record the
-SHA-256 of both.
+P3. The blob embedded in the vendored chunk equals Restty's committed
+`src/wasm/embedded.ts` blob. Record the SHA-256 of both.
 
 P4. `fixtures/ghostsnp/rich-matrix-v1.bin` still hashes to
 `7aba861353b9d45cf28a128ba48e6e3ab0b0b87610d53e7136a591363cc4fd28`.
 
-P5. The vendored tree contains the emitted JavaScript, every `chunk-*.js`, the
-type declarations, and the font, grid, and runtime subdirectories. No file from
-the previous build remains that the new build does not emit.
+P5. Rebuild oracle: normalize the content-hashed chunk filename in the fresh
+`dist` and in `src/vendor/restty`, then diff them. `internal.js`, `restty.js`,
+and `xterm.js` must be byte-identical. The chunk add and delete hunk filter
+`diff a.js b.js | awk '/^[0-9]/ && (/a/||/d/){print}'` must print only paired
+identifier-rename hunks, or nothing when the files are identical. The vendored
+tree must contain every emitted `chunk-*.js`, the type declarations, and the
+font, grid, and runtime subdirectories. No file from the previous build may
+remain that the new build does not emit.
 
 P6. Every vendored import stays relative. No Vite alias is added.
 

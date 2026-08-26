@@ -1,6 +1,6 @@
 import {
   createRestty
-} from "./chunk-qya1z999.js";
+} from "./chunk-xwdkhsew.js";
 
 // src/xterm/app-options.ts
 function createCompatAppOptions(userAppOptions, emitData) {

@@ -2,7 +2,7 @@
 
 Ticket: `ticket_1787600689_646958`
 Run: `run_1787761714_735678`
-Step: `botster_stack_implement` / `run_step_1787767226_761393`
+Step: `botster_stack_implement` / `run_step_1787768930_469969`
 Plan: `docs/plans/vendor-current-restty-revision-and-verify-scroll-pacing.md` revision 4, commit `3259ab86df8345212f283dd78f9b877461560983`, artifact `artifact_1787764083_977190`
 Human decisions: `question_1787761913_284316` selected Q1 option B and Q2 option A. `question_1787761969_117759` keeps option B and requires one PTY wheel byte authority.
 
@@ -29,6 +29,7 @@ Role and charter, in load order:
 Targeted notes:
 
 - `Web vendors a complete Restty build from the approved commit.md`
+- `vendored restty provenance needs a lockfile faithful rebuild.md`
 - `vendored restty uses relative chunk imports so no Vite alias is needed.md`
 - `verify pinned ref contents before writing format rules.md`
 - `a product baseline is not a causality experiment.md`
@@ -54,25 +55,26 @@ Convention conflicts: none.
 New:
 
 - `src/botster/mountScopedWheelReencoder.ts`
-- `src/vendor/restty/chunk-qya1z999.js`
+- `src/vendor/restty/chunk-xwdkhsew.js`
 - `docs/reports/vendor-current-restty-revision-and-verify-scroll-pacing-implement.md`
 
 Removed:
 
 - `src/vendor/restty/chunk-3mc71e83.js`
+- `src/vendor/restty/chunk-qya1z999.js`
 
 Changed:
 
-- `src/vendor/restty/**` — complete vendor replace from `cd1911d0f`. README, `internal.js`, `restty.js`, `xterm.js`, and input type declarations updated. Relative chunk imports remain.
+- `src/vendor/restty/**` — complete vendor replace from a lockfile-faithful `cd1911d0f` rebuild. README, `internal.js`, `restty.js`, `xterm.js`, and input type declarations updated. Relative chunk imports remain. `chunk-qya1z999.js` was removed.
 - `src/botster/resttyRenderer.ts` — mount-scoped wheel consume, Restty Shift route, live cell height and rows, mode-gated send, unmatched drain drop, teardown reset.
 - `src/botster/botsterTerminalPtyTransport.ts` — **changed**. Added `writeSemantic()` so a prepared wheel decision cannot fall through as raw bytes when no mode-gated owner exists. `sendInput` uses that helper when a mode-gated path exists.
 - `src/botster/mountedKeyboardSmoke.tsx` — G8 viewport oracle, history reader, render flush, scroll-to-bottom.
 - `scripts/mounted-terminal-keyboard-smoke.mjs` — G8 lane behind `BOTSTER_MOUNTED_WHEEL_SCROLLBACK=1`.
 - `mounted-terminal-keyboard-smoke.html` — bounded host so Restty keeps a viewport smaller than the 400-line history.
 - `src/App.test.mjs` — revision and chunk asserts, W1 through W14.
-- `scripts/terminal-baseline-capture.mjs` — `RESTTY_RUNTIME_FILES` uses `chunk-qya1z999.js`.
+- `scripts/terminal-baseline-capture.mjs` — `RESTTY_RUNTIME_FILES` uses `chunk-xwdkhsew.js`.
 - `scripts/terminal-baseline-observation-format.mjs` — `PINNED_REVISIONS.modular_restty` is `cd1911d0f88606270b1457c6995a3c04cb497edf`. `format_version` stays 3.
-- `docs/plans/vendor-current-restty-revision-and-verify-scroll-pacing.md` — S5, G8, and W12 through W14 now name Restty's Shift route and the deferred-drain plus unmatched-sendInput proofs.
+- `docs/plans/vendor-current-restty-revision-and-verify-scroll-pacing.md` — S1, S3, and P2 through P5 now require a frozen-lockfile rebuild and the rebuild oracle. S5, G8, and W12 through W14 name Restty's Shift route and the deferred-drain plus unmatched-sendInput proofs.
 - `docs/terminal-baseline-observation-format.md` — post-Restty controlled set is the future comparison set and does not exist yet.
 - `package.json` — `smoke:mounted-terminal-wheel-scrollback`.
 
@@ -100,17 +102,18 @@ None of the product scope changed. These are G8-lane details:
 2. G8 strips the fixture trailing newline before `emitOutput` so the last painted row is line 400. The frozen fixture still supplies 400 lines of 80 bytes. A trailing newline left a blank cursor row and made a 3-line wheel end on line 398.
 3. G8 dispatches one line-mode `WheelEvent` (`deltaY: -1`, `deltaMode: 1`). Vendored Restty converts that to a 3-line local scroll. The lane does not use `page.mouse.wheel`.
 4. `botsterTerminalPtyTransport.ts` changed, as allowed by the plan.
+5. This visit did not rerun `bun run build:wasm`. Review proved the committed WASM blob already matches Restty's `src/wasm/embedded.ts`. The JavaScript rebuild used `bun install --frozen-lockfile` so the bundled `text-shaper` is `0.1.18`.
 
 ## Build provenance
 
 | Check | Result |
 | --- | --- |
-| P1 clean checkout | `cd1911d0f88606270b1457c6995a3c04cb497edf` in a throwaway clean checkout |
+| P1 clean checkout | `cd1911d0f88606270b1457c6995a3c04cb497edf` in a throwaway clean checkout with empty `git status --porcelain` and no inherited `node_modules` |
 | P1 Ghostty pin | `eb72ec61304ea256be1d86ed8fa961c84e43ecbd` |
-| P2 tools | bun `1.4.0`, zig `0.16.0`, `ReleaseSafe` |
-| P3 WASM SHA-256 | `e84ec527a0d47d8cb869c15c965280f838e86578a52e9061a69dceac641cb527` (680783 bytes). Same as the previous vendor. |
+| P2 tools | bun `1.4.0`. `bun install --frozen-lockfile` installed `text-shaper@0.1.18`. This visit did not rebuild WASM. |
+| P3 WASM SHA-256 | `e84ec527a0d47d8cb869c15c965280f838e86578a52e9061a69dceac641cb527` (680783 bytes). Same as Restty's committed embedded blob. |
 | P4 GHOSTSNP fixture | `7aba861353b9d45cf28a128ba48e6e3ab0b0b87610d53e7136a591363cc4fd28` |
-| P5 vendor tree | one chunk `chunk-qya1z999.js`; `chunk-3mc71e83.js` removed; fonts, grid, and runtime directories present |
+| P5 rebuild oracle | After chunk-name normalization, `internal.js`, `restty.js`, and `xterm.js` are byte-identical. The chunk files are identical, so the add/delete hunk filter printed nothing. One chunk `chunk-xwdkhsew.js`. `chunk-qya1z999.js` removed. `hintTarget ?? "auto"` occurs twice. |
 | P6 imports | relative only; no Vite alias |
 
 ## Tests and downstream proof
@@ -149,7 +152,7 @@ This report publishes no performance number, no local record, and no controlled 
 The approved plan named three vault gaps. This run did not write inbox notes for them:
 
 - V1 is now code in `mountScopedWheelReencoder.ts`. The plan and this report already record the throwaway-handler failure mode.
-- V2 is a one-time chunk rename to `chunk-qya1z999.js`. Discovery happened during this vendor.
+- V2 is a chunk rename. The lockfile-faithful rebuild emits `chunk-xwdkhsew.js`.
 - V3 is the single pin update in `scripts/terminal-baseline-observation-format.mjs`.
 
 No new product identity or convention conflict appeared. Durable capture is therefore not required for this ticket.
@@ -173,3 +176,7 @@ Review `review_1787767220_860172` sent two findings back.
 `finding_1787767220_644277`: Web now uses Restty's complete pointer route. `shouldRouteWheelToAppMouse` returns false when `event.shiftKey` is true, then `consumeWheelEvent` takes the inactive branch, clears leftover pixels, and emits no PTY decision. The renderer passes that predicate, not only `getMouseStatus().active`. W14 proves encoder leftover clear. W13 fires Shift+wheel through the installed renderer listener while tracking is active and asserts no PTY write.
 
 `finding_1787767220_388959`: W13 now waits for the drain frame after a `-80` px event and asserts one extra `writeSemantic` for the remainder. It then drives `\u001b[<64;1;1M` through `ptyTransport.sendInput` and asserts zero raw `writeInput` plus an empty gated encode. The test no longer treats the helper `unmatchedWheelBytesShouldDrop` as production-path proof.
+
+Review `review_1787768820_218673` returned `changes_required`. The MCP bridge rejected the structured findings array, so no finding row exists. This visit treats the review summary's FINDING 1 as the blocking defect.
+
+FINDING 1: The previous vendor bundled a stale `text-shaper` and dropped `hintTarget`. This visit rebuilt from a clean checkout with `bun install --frozen-lockfile`, confirmed `text-shaper@0.1.18`, ran `bun run build`, and replaced `src/vendor/restty` with that `dist`. The rebuild oracle is identical after chunk-name normalization. `App.test.mjs` now asserts two `hintTarget ?? "auto"` matches in the vendored chunk. The wheel encoder did not change.

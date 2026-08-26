@@ -1,12 +1,18 @@
 # Vendored Restty
 
 Built from approved `trybotster/restty` commit
-`cd1911d0f88606270b1457c6995a3c04cb497edf` with `bun run build:wasm`
-and `bun run build`.
+`cd1911d0f88606270b1457c6995a3c04cb497edf`.
 
-The WASM build used the Restty-pinned `trybotster/ghostty` commit
-`eb72ec61304ea256be1d86ed8fa961c84e43ecbd`, Zig `0.16.0`, and the default
-`ReleaseSafe` optimize mode.
+The JavaScript distribution came from a throwaway clean checkout, then
+`bun install --frozen-lockfile` and `bun run build`. The lockfile pin is
+`text-shaper@0.1.18`. This visit did not rebuild the WASM. The blob embedded
+in the emitted chunk matches Restty's committed `src/wasm/embedded.ts`
+SHA-256 `e84ec527a0d47d8cb869c15c965280f838e86578a52e9061a69dceac641cb527`
+(680783 bytes).
+
+The Restty-pinned `trybotster/ghostty` commit remains
+`eb72ec61304ea256be1d86ed8fa961c84e43ecbd`. The earlier WASM build used Zig
+`0.16.0` and the default `ReleaseSafe` optimize mode.
 
 The source fixture evidence states that regeneration from this Ghostty pin
 produces the existing GHOSTSNP fixture bytes. The browser fixture remains
