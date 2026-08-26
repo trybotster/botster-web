@@ -2,8 +2,8 @@
 
 Ticket: `ticket_1787603669_760394`
 Run: `run_1787632387_839095`
-Step: `botster_stack_implement` / `run_step_1787720007_892290`
-Returned from Review: `review_1787719971_189552`
+Step: `botster_stack_implement` / `run_step_1787720828_217032`
+Returned from Review: `review_1787720810_475138`
 Human decision: `question_1787702156_949472` requires `format_version=3`; earlier `question_1787678013_829162` chose B and D; `question_1787689401_836936` chose B
 Plan: `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` revision 10, resynced to format version 3
 Approved review: `review_1787638112_854617`
@@ -84,7 +84,7 @@ New:
 Changed:
 
 - `package.json` — `observe:terminal-baseline` and `observe:terminal-baseline:validate`
-- `src/App.test.mjs` — format version 3, attach+snapshot control operations, send-only reject, remount-restore, concurrent-workload, one-armed publication, and runner-admission assertions
+- `src/App.test.mjs` — format version 3, attach+snapshot control operations, subscribe-attempt generation, page-isolation teardown, message-first and close-first late confirmations, send-only reject, remount-restore, concurrent-workload, one-armed publication, and runner-admission assertions
 - `README.md` — pointer to the observation format
 - `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md` — resynced to format version 3 and attach+snapshot operations
 
@@ -109,7 +109,7 @@ Implemented in harness scope. No lens was dropped to informal follow-up.
 | --- | --- |
 | Isolation | Isolated data directory, Hub process, and browser context per arm. One arm failure stops that arm's process tree only. |
 | Bounds | SIGTERM, then SIGKILL after `teardown_budget_ms`. Escalation is recorded. No unbounded wait. |
-| Late-message matrix | Terminal attach, entity family, package-event burst, and spawned session are tagged and released before the next repetition or arm stop. |
+| Late-message matrix | Terminal attach, entity family, package-event burst, and spawned session are tagged and released before the next repetition or arm stop. Legacy attach closes the observer and the page. Tests reject a prior decoded confirmation after the next subscribe starts, in both message-first and close-first order. |
 | Production-path proof | Real browser, real client build, real Hub, real PTY dispatcher. Control saturation uses each stack's production browser control connection. The candidate record stays in memory until both arm process trees and required sockets are gone. A JSON record is written only after that proof. |
 | Ownership identity | Each arm records `arm_id`, Hub pid, data directory, and session ids. Each probe marker includes capture, arm, family, and repetition. Paint remounts restore the saturation probe session before the next probe. |
 | Sibling fail-closed | A one-armed or partial record is not a baseline. Ultimate stop failure fails the capture. |
@@ -125,12 +125,20 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 ## Review findings addressed
 
-`review_1787719971_189552` returned two open findings. This visit keeps `format_version=3` and repairs attach generation plus session identity.
+`review_1787720810_475138` returned three open findings. This visit keeps `format_version=3` and isolates each legacy attach attempt.
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787719971_691507` missing legacy generation | Legacy inbound records the peer generation from the production `HubChannelProtocol.handleDataChannelMessage` decoder and correlates it with the decoded `subscribed` confirmation. A missing or stale generation is not inbound data. Both arms require an exact integer generation. |
-| `finding_1787719971_814820` different attach session input | Both arms attach the frozen probe session. Legacy remounts that session through the production dashboard. It does not call `completeLegacyNewSession`. Session creation or identity drift fails closed. |
+| `finding_1787720810_498840` peer generation reused | Each legacy attach uses a new production page and records the subscribe-attempt generation from that page's production `subscribe` encode. A closed observer rejects a later `subscribed` confirmation, including the prior attempt's confirmation after the next subscribe starts. |
+| `finding_1787720810_671234` teardown is a local flag | Teardown waits for the production `unsubscribe` encode, proves the observer is non-live and closed, and closes the old page before the next subscribe. Tests cover message-first and close-first late confirmations. |
+| `finding_1787720810_222741` stale resize claim | The current-tense resize sentence is removed. Version 2 resize send-completion is historical only. |
+
+`review_1787719971_189552` findings from the prior visit remain resolved:
+
+| Finding | Fix |
+| --- | --- |
+| `finding_1787719971_691507` missing legacy generation | Legacy inbound requires an integer subscribe-attempt generation with the decoded `subscribed` confirmation. A missing or stale generation is not inbound data. |
+| `finding_1787719971_814820` different attach session input | Both arms attach the frozen probe session. Legacy opens that session through the production dashboard on an isolated page. It does not call `completeLegacyNewSession`. Session creation or identity drift fails closed. |
 
 `review_1787708542_834767` findings from the prior visit remain resolved:
 
@@ -150,7 +158,7 @@ These deviations do not change the two dispatcher variants, the single paint ora
 
 | Finding | Fix |
 | --- | --- |
-| `finding_1787701425_914685` unrelated reply | `observeInbound` still receives the selected semantic name. Modular counts `webrtc_response_assembly` and tagged reply bytes for that wire type only. Legacy snapshot still counts `0x02` rows. Legacy resize now counts send completion, not later untyped messages. |
+| `finding_1787701425_914685` unrelated reply | Superseded by format version 3. `observeInbound` still receives the selected semantic name. Modular counts `webrtc_response_assembly` for that wire type only. Legacy snapshot still counts `0x02` rows. Version 3 has no `terminal_resize` inbound path. |
 
 `review_1787701045_427701` findings from the prior visit remain resolved:
 
@@ -259,7 +267,7 @@ Later tickets must not use this ticket as evidence for a measured latency improv
 - Exact canvas settle-window calibration is frozen at 250 ms and may need a later `format_version` bump if both arms prove a different stable window.
 - Control-response equalization records a 0.25 tolerance. Achieved live values still require a completed two-arm set.
 - Live `issueControlRequest` is one browser RPC. The harness requires the production send before Enter and the one response after `t_key`. A reply that arrives before Enter fails closed. Package-event and sibling families still require inbound growth on both sides of Enter.
-- Legacy attach inbound is the decoded `subscribed` confirmation plus decoder peer generation from the frozen probe remount. Modular attach inbound requires decoder `attach_state` plus assembly generation. Request fields, local generation counters, missing generation, and new-session creation are not inbound data. Snapshot replies remain the producer `0x02` / `read_screen` decoder payload.
+- Legacy attach inbound is the decoded `subscribed` confirmation plus that page's subscribe-attempt generation. Each attempt uses a new page. Teardown waits for production unsubscribe, closes the observer, and closes the page before the next subscribe. Modular attach inbound requires decoder `attach_state` plus assembly generation. Request fields, peer-connection generation, local generation counters, missing generation, and new-session creation are not inbound data. Snapshot replies remain the producer `0x02` / `read_screen` decoder payload.
 
 ## Missing vault guidance discovered
 

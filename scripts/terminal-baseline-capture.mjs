@@ -42,6 +42,7 @@ import {
   appendCostSamples,
   baselineObserverInitScript,
   calibrateWatcherDetection,
+  assertLegacyObserverTornDown,
   installLegacyProductionSubscribeObserver,
   sessionIdFromTerminalSubscription,
   createLogWatcher,
@@ -1171,57 +1172,12 @@ export async function waitForBrowserControl(page, armId, semanticName = null) {
     installLegacyProductionSubscribeObserver(globalThis);
   }, installLegacyProductionSubscribeObserver.toString());
   if (semanticName === "terminal_attach") {
-    await installLegacyDecoderGenerationHook(page);
     return;
   }
   await page.waitForFunction(() => {
     return Object.keys(globalThis._botsterTestTerminal ?? {}).length > 0;
   }, null, { timeout: 30_000 });
   await installLegacyInboundObserver(page);
-}
-
-export async function installLegacyDecoderGenerationHook(page) {
-  const wrapped = await page.evaluate(async () => {
-    if (globalThis.__BOTSTER_BASELINE_DECODER_HOOK__) {
-      return true;
-    }
-    const wrapProto = (proto) => {
-      if (!proto || typeof proto.handleDataChannelMessage !== "function" || proto.__baselineDecoderWrapped) {
-        return false;
-      }
-      const original = proto.handleDataChannelMessage;
-      proto.handleDataChannelMessage = async function handleDataChannelMessageWithGeneration(hubId, data, generation) {
-        const previous = globalThis.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__;
-        globalThis.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__ = generation;
-        try {
-          return await original.apply(this, arguments);
-        } finally {
-          globalThis.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__ = previous;
-        }
-      };
-      proto.__baselineDecoderWrapped = true;
-      return true;
-    };
-    const urls = [
-      ...performance.getEntriesByType("resource").map((entry) => entry.name),
-      ...[...globalThis.document.querySelectorAll("script[src]")].map((node) => node.src)
-    ].filter((name, index, all) => name.includes("hub_channel_protocol") && all.indexOf(name) === index);
-    for (const url of urls) {
-      try {
-        const mod = await import(url);
-        if (wrapProto(mod.HubChannelProtocol?.prototype)) {
-          globalThis.__BOTSTER_BASELINE_DECODER_HOOK__ = true;
-          return true;
-        }
-      } catch {
-        // Try the next loaded module URL.
-      }
-    }
-    return false;
-  });
-  if (!wrapped) {
-    throw new Error("legacy attach cannot wrap the production HubChannelProtocol decoder");
-  }
 }
 
 export function isSendOnlyCompletion(entry) {
@@ -1300,7 +1256,7 @@ export function assertLegacyAttachAdmission(entry) {
     throw new Error("control_response_saturation: legacy attach identity is missing from the decoded subscribed confirmation");
   }
   if (!Number.isInteger(entry.generation)) {
-    throw new Error("control_response_saturation: legacy attach generation is missing from the decoder peer generation");
+    throw new Error("control_response_saturation: legacy attach generation is missing from the subscribe-attempt generation");
   }
   return entry;
 }
@@ -1380,11 +1336,7 @@ export function wrapLegacyControlTransport(transport, store = globalThis) {
   }
   transport.handleMessage = (message) => {
     if (message?.type === "subscribed") {
-      const generation = Number.isInteger(message.generation)
-        ? message.generation
-        : (Number.isInteger(store.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__)
-          ? store.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__
-          : null);
+      const generation = Number.isInteger(message.generation) ? message.generation : null;
       if (!store.__BOTSTER_BASELINE_ATTACH__.accepting || generation == null) {
         return original(message);
       }
@@ -1624,17 +1576,17 @@ async function issueLegacyProductionAttach(arm) {
   if (!arm.appUrl) {
     throw new Error("legacy production attach requires the legacy app URL");
   }
+  if (arm.attachPage) {
+    throw new Error("legacy production attach: previous attach page was not closed");
+  }
   const attempt = nextAttachAttempt(arm);
   attempt.session_id = frozenSessionId;
   attempt.subscription_id = `terminal_${frozenSessionId}`;
-  if (!arm.attachPage) {
-    const attachPage = await arm.context.newPage();
-    await attachPage.addInitScript(baselineObserverInitScript());
-    await attachPage.goto(arm.appUrl, { waitUntil: "domcontentloaded" });
-    arm.attachPage = attachPage;
-  }
+  const attachPage = await arm.context.newPage();
+  await attachPage.addInitScript(baselineObserverInitScript());
+  await attachPage.goto(arm.appUrl, { waitUntil: "domcontentloaded" });
+  arm.attachPage = attachPage;
   await waitForBrowserControl(arm.attachPage, "legacy", "terminal_attach");
-  await goHome(arm.attachPage);
   await openSession(arm.attachPage, frozenSessionId);
   const mounted = await readMountedSessionId(arm.attachPage);
   if (mounted !== frozenSessionId) {
@@ -1657,7 +1609,26 @@ export async function teardownControlAttach(arm) {
     return { torn_down: true };
   }
   if (arm.arm_id === "legacy" && arm.attachPage) {
-    await goHome(arm.attachPage);
+    const attachPage = arm.attachPage;
+    const subscriptionId = attempt.subscription_id;
+    await goHome(attachPage);
+    await attachPage.waitForFunction((subId) => {
+      const attach = globalThis.__BOTSTER_BASELINE_ATTACH__;
+      const unsubs = (globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? []).filter((entry) =>
+        entry.wire === "unsubscribe" && entry.subscription_id === subId
+      );
+      return attach?.live === false && attach?.closed === true && unsubs.length > 0;
+    }, subscriptionId, { timeout: 30_000 });
+    const observer = await attachPage.evaluate(() => ({
+      attach: globalThis.__BOTSTER_BASELINE_ATTACH__,
+      outbound: globalThis.__BOTSTER_BASELINE_CONTROL_OUTBOUND__ ?? []
+    }));
+    assertLegacyObserverTornDown({
+      __BOTSTER_BASELINE_ATTACH__: observer.attach,
+      __BOTSTER_BASELINE_CONTROL_OUTBOUND__: observer.outbound
+    }, subscriptionId);
+    await attachPage.close();
+    arm.attachPage = null;
     attempt.live = false;
     return { torn_down: true };
   }

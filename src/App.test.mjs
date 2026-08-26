@@ -145,6 +145,7 @@ import {
   writeBaselineRecord
 } from "../scripts/terminal-baseline-capture.mjs";
 import {
+  assertLegacyObserverTornDown,
   installLegacyProductionSubscribeObserver,
   sessionIdFromTerminalSubscription
 } from "../scripts/terminal-baseline-observer.mjs";
@@ -19073,11 +19074,11 @@ function removeCssAtRules(source) {
     session_uuid: "sess-2"
   });
   assert.equal(legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, inboundBeforeMissingGeneration);
-  legacyStore.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__ = 3;
   legacyTransport.handleMessage({
     type: "subscribed",
     subscriptionId: "terminal_sess-2",
-    session_uuid: "sess-2"
+    session_uuid: "sess-2",
+    generation: 3
   });
   const subscribedFromDecoderGeneration = legacyStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.at(-1);
   assert.equal(subscribedFromDecoderGeneration.session_id, "sess-2");
@@ -19117,13 +19118,7 @@ function removeCssAtRules(source) {
   });
   assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_OUTBOUND__.filter((entry) => entry.wire === "subscribe").length, 1);
   assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
-  productionStore.JSON.parse(JSON.stringify({
-    type: "subscribed",
-    subscriptionId: "terminal_prod-1"
-  }));
   assert.equal(sessionIdFromTerminalSubscription("terminal_prod-1"), "prod-1");
-  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
-  productionStore.__BOTSTER_BASELINE_DECODER_PEER_GENERATION__ = 1;
   productionStore.JSON.parse(JSON.stringify({
     type: "subscribed",
     subscriptionId: "terminal_prod-1"
@@ -19136,12 +19131,85 @@ function removeCssAtRules(source) {
   assertLegacyAttachAdmission(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__[0]);
   productionStore.JSON.stringify({ type: "unsubscribe", subscriptionId: "terminal_prod-1" });
   assertAttachTornDown(productionStore.__BOTSTER_BASELINE_ATTACH__);
+  assertLegacyObserverTornDown(productionStore, "terminal_prod-1");
   const inboundAfterProductionTeardown = productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length;
+  const nextStore = {
+    JSON: {
+      stringify: JSON.stringify.bind(JSON),
+      parse: JSON.parse.bind(JSON)
+    },
+    __BOTSTER_BASELINE_CONTROL_INBOUND__: [],
+    __BOTSTER_BASELINE_CONTROL_OUTBOUND__: [],
+    __BOTSTER_BASELINE_ATTACH__: { live: false, accepting: false, closed: false, subscribe_attempt: 0 }
+  };
+  installLegacyProductionSubscribeObserver(nextStore);
+  nextStore.JSON.stringify({
+    type: "subscribe",
+    channel: "terminal",
+    subscriptionId: "terminal_prod-1",
+    params: { session_uuid: "prod-1" }
+  });
   productionStore.JSON.parse(JSON.stringify({
     type: "subscribed",
     subscriptionId: "terminal_prod-1"
   }));
   assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, inboundAfterProductionTeardown);
+  assert.equal(nextStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
+  productionStore.JSON.stringify({
+    type: "subscribe",
+    channel: "terminal",
+    subscriptionId: "terminal_prod-1",
+    params: { session_uuid: "prod-1" }
+  });
+  productionStore.JSON.parse(JSON.stringify({
+    type: "subscribed",
+    subscriptionId: "terminal_prod-1"
+  }));
+  assert.equal(productionStore.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, inboundAfterProductionTeardown);
+  const closeFirstPrior = {
+    JSON: {
+      stringify: JSON.stringify.bind(JSON),
+      parse: JSON.parse.bind(JSON)
+    },
+    __BOTSTER_BASELINE_CONTROL_INBOUND__: [],
+    __BOTSTER_BASELINE_CONTROL_OUTBOUND__: [],
+    __BOTSTER_BASELINE_ATTACH__: { live: false, accepting: false, closed: false, subscribe_attempt: 0 }
+  };
+  installLegacyProductionSubscribeObserver(closeFirstPrior);
+  closeFirstPrior.JSON.stringify({
+    type: "subscribe",
+    channel: "terminal",
+    subscriptionId: "terminal_prod-1",
+    params: { session_uuid: "prod-1" }
+  });
+  closeFirstPrior.JSON.parse(JSON.stringify({
+    type: "subscribed",
+    subscriptionId: "terminal_prod-1"
+  }));
+  closeFirstPrior.JSON.stringify({ type: "unsubscribe", subscriptionId: "terminal_prod-1" });
+  assertLegacyObserverTornDown(closeFirstPrior, "terminal_prod-1");
+  const closeFirstNext = {
+    JSON: {
+      stringify: JSON.stringify.bind(JSON),
+      parse: JSON.parse.bind(JSON)
+    },
+    __BOTSTER_BASELINE_CONTROL_INBOUND__: [],
+    __BOTSTER_BASELINE_CONTROL_OUTBOUND__: [],
+    __BOTSTER_BASELINE_ATTACH__: { live: false, accepting: false, closed: false, subscribe_attempt: 0 }
+  };
+  installLegacyProductionSubscribeObserver(closeFirstNext);
+  closeFirstPrior.JSON.parse(JSON.stringify({
+    type: "subscribed",
+    subscriptionId: "terminal_prod-1"
+  }));
+  closeFirstNext.JSON.stringify({
+    type: "subscribe",
+    channel: "terminal",
+    subscriptionId: "terminal_prod-1",
+    params: { session_uuid: "prod-1" }
+  });
+  assert.equal(closeFirstNext.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 0);
+  assert.equal(closeFirstPrior.__BOTSTER_BASELINE_CONTROL_INBOUND__.length, 1);
   await assert.rejects(
     issueControlRequest({
       arm_id: "legacy",
@@ -19170,6 +19238,21 @@ function removeCssAtRules(source) {
       }
     }, "terminal_attach"),
     /second browser page/
+  );
+  await assert.rejects(
+    issueControlRequest({
+      arm_id: "legacy",
+      probeSessionId: "probe-1",
+      context: {},
+      appUrl: "http://127.0.0.1:3000",
+      attachPage: { close: async () => {} },
+      page: {
+        evaluate: async () => {
+          throw new Error("legacy attach must not use the test-only terminal hook");
+        }
+      }
+    }, "terminal_attach"),
+    /previous attach page was not closed/
   );
   assertFrozenAttachSession({ session_id: "probe-1" }, "probe-1");
   assert.throws(
