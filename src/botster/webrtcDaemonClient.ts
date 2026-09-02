@@ -265,7 +265,6 @@ export const localWebrtcResponseChunkLimits = Object.freeze({
   maximumResponseBytes: 16_777_216,
   maximumAggregateRetainedBytes: 32 * 1_024 * 1_024,
   maximumConcurrentAssemblies: 16,
-  maximumTerminalDeliveryBacklog: 16,
   maximumCompletedMessageIds: 64,
   requestTimeoutMs: 10_000,
   assemblyBookkeepingBytes: 256,
@@ -375,7 +374,10 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
           if (reservation.session_id !== sessionId || reservation.subscription_id !== subscriptionId) {
             throw webrtcFailure("data-plane", "terminal reservation identity did not match Attach");
           }
-          binding = await transport.openTerminalChannel(listener, reservation);
+          binding = await transport.openTerminalChannel(listener, reservation, (createdBinding) => {
+            binding = createdBinding;
+            if (closed) transport.closeTerminalChannel(createdBinding);
+          });
         })
         .catch((error: unknown) => {
           recordLiveHarnessEvent("terminal_stream_error", {
@@ -424,9 +426,6 @@ class WebrtcDaemonTransport {
   private readonly peerConnectionFactory: () => RTCPeerConnection;
   private readonly pageHideHandler: (() => void) | undefined;
   private readonly pendingRequests: PendingRequest[] = [];
-  private terminalDeliveryQueue: Promise<void> = Promise.resolve();
-  private terminalDeliveryBacklog = 0;
-  private terminalDeliveryEpoch = 0;
   private peerFailed = false;
   private readonly responseAssemblies = new Map<string, ResponseAssembly>();
   private readonly completedMessageIds = new Set<string>();
@@ -513,8 +512,12 @@ class WebrtcDaemonTransport {
 
   async openTerminalChannel(
     listener: TerminalStreamListener,
-    reservation: DaemonTerminalReservation
+    reservation: DaemonTerminalReservation,
+    onCreated: (binding: TerminalChannelBinding) => void
   ): Promise<TerminalChannelBinding> {
+    if (listener.closed) {
+      throw webrtcFailure("transport", "terminal reservation owner closed before channel creation");
+    }
     const peerConnection = this.peerConnection;
     const key = this.cryptoKey;
     if (!peerConnection || !key || this.dataChannel?.readyState !== "open") {
@@ -552,6 +555,11 @@ class WebrtcDaemonTransport {
       };
     });
     this.terminalChannels.add(binding);
+    onCreated(binding);
+    if (listener.closed || binding.closed) {
+      this.closeTerminalChannel(binding);
+      throw webrtcFailure("transport", "terminal reservation owner closed during channel creation");
+    }
     let messageQueue = Promise.resolve();
     channel.addEventListener("message", (event) => {
       if (binding.closed) return;
@@ -566,7 +574,7 @@ class WebrtcDaemonTransport {
     channel.addEventListener("error", () => this.closeTerminalChannel(binding, true));
     try {
       await waitForDataChannelOpen(channel);
-      if (binding.closed || transportGeneration !== this.peerGeneration) {
+      if (listener.closed || binding.closed || transportGeneration !== this.peerGeneration) {
         throw webrtcFailure("transport", "terminal DataChannel opened for a stale reservation");
       }
       const hello: DaemonHello = {
@@ -576,6 +584,9 @@ class WebrtcDaemonTransport {
       };
       channel.send(JSON.stringify(await encryptJsonPayload(key, hello)));
       await ready;
+      if (listener.closed || binding.closed || transportGeneration !== this.peerGeneration) {
+        throw webrtcFailure("transport", "terminal DataChannel admitted for a stale reservation");
+      }
       return binding;
     } catch (error) {
       binding.rejectReady(error);
@@ -630,6 +641,14 @@ class WebrtcDaemonTransport {
   closeTerminalChannel(binding: TerminalChannelBinding, remote = false): void {
     if (binding.closed) return;
     binding.closed = true;
+    recordLiveHarnessEvent("terminal_data_channel", {
+      state: "closed",
+      label: binding.label,
+      generation: binding.generation,
+      peer_generation: binding.peerGeneration,
+      remote
+    });
+    binding.rejectReady(webrtcFailure("transport", "terminal subscription channel closed"));
     window.clearTimeout(binding.expiryTimeout);
     if (binding.assembly) window.clearTimeout(binding.assembly.timeout);
     binding.listener.closed = true;
@@ -683,6 +702,17 @@ class WebrtcDaemonTransport {
     ) {
       throw webrtcFailure("data-plane", "terminal delivery chunk order or metadata was invalid");
     }
+    recordLiveHarnessEvent("terminal_data_channel_receive", {
+      label: binding.label,
+      generation: binding.generation,
+      peer_generation: binding.peerGeneration,
+      message_id: chunk.message_id,
+      chunk_index: chunk.chunk_index,
+      chunk_count: chunk.chunk_count,
+      total_bytes: chunk.total_bytes,
+      delivery_kind: chunk.delivery_kind,
+      frame_bytes: utf8ByteLength(data)
+    });
     assembly.payloads.push(chunk.payload);
     assembly.receivedBytes += utf8ByteLength(chunk.payload);
     if (assembly.receivedBytes > assembly.totalBytes) {
@@ -1294,16 +1324,7 @@ class WebrtcDaemonTransport {
       return;
     }
     if (assembly.deliveryKind === "daemon_terminal_frame") {
-      recordLiveHarnessEvent("webrtc_terminal_frame_assembly", {
-        generation,
-        total_bytes: assembly.totalBytes,
-        chunk_count: assembly.chunkCount,
-        started_at: assembly.startedAt,
-        finished_at: finishedAt,
-        duration_ms: finishedAt - assembly.startedAt
-      });
-      await this.receiveTerminalFrame(payload, generation);
-      return;
+      throw webrtcFailure("data-plane", "control DataChannel received a terminal delivery");
     }
     if (assembly.deliveryKind === "daemon_event") {
       recordLiveHarnessEvent("webrtc_daemon_event_assembly", {
@@ -1436,9 +1457,6 @@ class WebrtcDaemonTransport {
   }
 
   private resetPeerState(): void {
-    this.terminalDeliveryEpoch += 1;
-    this.terminalDeliveryQueue = Promise.resolve();
-    this.terminalDeliveryBacklog = 0;
     const dataChannel = this.dataChannel;
     const peerConnection = this.peerConnection;
     for (const binding of [...this.terminalChannels]) {
@@ -1602,72 +1620,6 @@ class WebrtcDaemonTransport {
       });
     });
     return holder.ready;
-  }
-
-  private async receiveTerminalFrame(payload: unknown, generation: number): Promise<void> {
-    if (generation !== this.peerGeneration) {
-      recordLiveHarnessEvent("webrtc_terminal_frame_discarded", {
-        reason: "stale_peer_generation",
-        generation
-      });
-      return;
-    }
-    const event = parseTerminalEvent(payload);
-    const eventSessionId = event.type === "input_result" ? undefined : event.session_id;
-    const listeners = [...this.terminalStreamListeners].filter(
-      (listener) =>
-        !listener.closed &&
-        (eventSessionId === undefined || listener.sessionId === eventSessionId) &&
-        listener.subscriptionId === event.subscription_id
-    );
-    if (listeners.length === 0) {
-      recordLiveHarnessEvent("webrtc_terminal_frame_discarded", {
-        reason: "stale_generation_or_subscription",
-        generation,
-        session_id: eventSessionId ?? null,
-        subscription_id: event.subscription_id,
-        type: event.type
-      });
-      return;
-    }
-    recordLiveHarnessEvent("daemon_terminal_event", event);
-    // Terminal consumers stay ordered. Host responses use the DataChannel
-    // message queue and must not wait on this terminal delivery queue.
-    void this.enqueueTerminalDelivery(generation, async () => {
-      for (const listener of listeners) {
-        if (listener.closed) continue;
-        await listener.onEvent(event);
-      }
-    }).catch((error: unknown) => {
-      this.failPeerGeneration(generation, error);
-    });
-  }
-
-  private enqueueTerminalDelivery(generation: number, work: () => Promise<void>): Promise<void> {
-    if (generation !== this.peerGeneration) {
-      return Promise.resolve();
-    }
-    if (this.terminalDeliveryBacklog >= localWebrtcResponseChunkLimits.maximumTerminalDeliveryBacklog) {
-      const error = webrtcFailure("data-plane", "local WebRTC terminal delivery queue overflow");
-      this.failPeerGeneration(generation, error);
-      return Promise.reject(error);
-    }
-    this.terminalDeliveryBacklog += 1;
-    const epoch = this.terminalDeliveryEpoch;
-    const delivery = this.terminalDeliveryQueue.then(async () => {
-      try {
-        if (epoch !== this.terminalDeliveryEpoch || generation !== this.peerGeneration) {
-          return;
-        }
-        await work();
-      } finally {
-        if (epoch === this.terminalDeliveryEpoch) {
-          this.terminalDeliveryBacklog = Math.max(0, this.terminalDeliveryBacklog - 1);
-        }
-      }
-    });
-    this.terminalDeliveryQueue = delivery.catch(() => undefined);
-    return delivery;
   }
 
   private async receiveHostEvent(payload: unknown, generation: number): Promise<void> {

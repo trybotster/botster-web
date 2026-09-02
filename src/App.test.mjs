@@ -2020,7 +2020,7 @@ assert.doesNotMatch(hubTransport, /["']view_surface["']|["']settings_surface["']
 assert.match(hubTerminalDataPlane, /streamTerminal/);
 assert.match(hubTransport, /ready: Promise<void>/);
 assert.match(webrtcDaemonClient, /await listener\.onEvent\(event\)/);
-assert.match(webrtcDaemonClient, /enqueueTerminalDelivery/);
+assert.doesNotMatch(webrtcDaemonClient, /enqueueTerminalDelivery|receiveTerminalFrame/);
 assert.match(webrtcDaemonClient, /daemon_hello/);
 assert.match(webrtcDaemonClient, /daemon_terminal_frame/);
 assert.match(webrtcDaemonClient, /daemon_terminal_event/);
@@ -2039,8 +2039,7 @@ assert.match(webrtcDaemonClient, /host drain returned a terminal body/);
 assert.match(hubTerminalDataPlane, /this\.ensureHydration\(attachmentGeneration\)[\s\S]*streamTerminal/);
 assert.match(hubTerminalDataPlane, /progress === "finish"[\s\S]*hydration\.finishReceived = true/);
 assert.match(hubTerminalDataPlane, /this\.pendingResize = \{ rows, columns \}[\s\S]*enqueueTerminalFrame/);
-assert.match(webrtcDaemonClient, /terminalDeliveryEpoch/);
-assert.match(webrtcDaemonClient, /maximumTerminalDeliveryBacklog/);
+assert.match(webrtcDaemonClient, /control DataChannel received a terminal delivery/);
 assert.match(
   webrtcDaemonClient,
   /const shouldReconnect = this\.hasReconnectDemand\(\);\s*this\.emitLifecycle\(\{ type: "data-channel-error" \}\)/
@@ -2350,6 +2349,18 @@ assert.match(liveProtocolHarnessScript, /waitForResizeProof/);
 assert.match(liveProtocolHarnessScript, /assertNoUnknownSession/);
 assert.match(liveProtocolHarnessScript, /last observed/);
 assert.match(liveProtocolHarnessScript, /botster-web-production-exiting/);
+assert.match(liveProtocolHarnessScript, /BOTSTER_LIVE_DIRECT_TERMINAL/);
+assert.match(liveProtocolHarnessScript, /encodePaste\(operationId/);
+assert.match(liveProtocolHarnessScript, /"p"\.repeat\(70_000\)/);
+assert.match(liveProtocolHarnessScript, /outbound_large_delivery/);
+assert.match(liveProtocolHarnessScript, /direct terminal reconnect reused stale binding/);
+assert.match(liveProtocolHarnessScript, /waitForDirectTerminalChannelClosed/);
+assert.match(productionSessionScriptSource(), /stty -echo -icanon min 1 time 0/);
+assert.match(productionSessionScriptSource(), /botster-web-production-large-paste-ok/);
+assert.match(
+  liveSharedSessionCoordinatorScript,
+  /direct-binary-terminal-shared-session-coordinator-passed/
+);
 assert.match(liveProtocolHarnessScript, /proveExternalSessionLifecycle/);
 assert.match(liveProtocolHarnessScript, /entity_remove/);
 assert.match(liveProtocolHarnessScript, /waitForSessionStatus/);
@@ -6155,7 +6166,6 @@ try {
     maximumResponseBytes: 16_777_216,
     maximumAggregateRetainedBytes: 32 * 1_024 * 1_024,
     maximumConcurrentAssemblies: 16,
-    maximumTerminalDeliveryBacklog: 16,
     maximumCompletedMessageIds: 64,
     requestTimeoutMs: 10_000,
     assemblyBookkeepingBytes: 256,
@@ -6666,6 +6676,90 @@ try {
   await waitForTestCondition(() => secondTerminalEvents.length === 1);
   assert.equal(secondTerminalEvents[0].type, "terminal_output");
   secondStream.abandon();
+
+  const cancelledControlChannel = createFakeDataChannel();
+  const cancelledClient = createWebrtcTestClient(
+    [cancelledControlChannel],
+    localWebrtcBootstrapFixture,
+    { autoAckTerminal: false }
+  );
+  const cancelledEvents = [];
+  const cancelledStream = cancelledClient.streamTerminal(
+    "cancelled-session",
+    "cancelled-subscription",
+    (event) => cancelledEvents.push(event)
+  );
+  const cancelledReady = assert.rejects(cancelledStream.ready, /closed|stale/);
+  await waitForTestCondition(() => cancelledControlChannel.sent.length === 1);
+  await emitChunkedTestResponse(
+    cancelledControlChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "terminal_reservation",
+      terminal_reservation: {
+        session_id: "cancelled-session",
+        subscription_id: "cancelled-subscription",
+        generation: 51,
+        peer_generation: 73,
+        label: "opaque-terminal-label-cancelled",
+        expires_in_seconds: 30
+      },
+      events: []
+    },
+    { messageId: "cancelled-reservation" }
+  );
+  await waitForTestCondition(() => cancelledControlChannel.createdDataChannels.length === 2);
+  const cancelledTerminalChannel = cancelledControlChannel.createdDataChannels[1];
+  await waitForTestCondition(() => cancelledTerminalChannel.sent.length === 1);
+  cancelledStream.abandon();
+  await cancelledReady;
+  assert.equal(cancelledTerminalChannel.readyState, "closed");
+  await emitChunkedTestResponse(
+    cancelledTerminalChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      protocol: "botster-hub-daemon-v1",
+      terminal_compatibility: terminalProtocolModule.metadata,
+      diagnostics: []
+    },
+    { messageId: "late-cancelled-hello" }
+  );
+  await flushMicrotasks();
+  assert.equal(cancelledTerminalChannel.readyState, "closed");
+  assert.deepEqual(cancelledEvents, []);
+  assert.equal(cancelledControlChannel.readyState, "open");
+
+  const fallbackControlChannel = createFakeDataChannel();
+  const fallbackClient = createWebrtcTestClient(
+    [fallbackControlChannel],
+    localWebrtcBootstrapFixture
+  );
+  const fallbackEvents = [];
+  fallbackClient.subscribeEvents((event) => fallbackEvents.push(event));
+  const fallbackStatus = fallbackClient.request({ type: "status" });
+  await waitForTestCondition(() => fallbackControlChannel.sent.length === 1);
+  await emitChunkedTestResponse(
+    fallbackControlChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "status", status: null, sessions: [], packages: [], events: [], diagnostics: [] },
+    { messageId: "fallback-status" }
+  );
+  await fallbackStatus;
+  await emitChunkedTestResponse(
+    fallbackControlChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "terminal_output",
+      session_id: "fallback-session",
+      subscription_id: "fallback-subscription",
+      payload_base64: Buffer.from("forbidden").toString("base64"),
+      payload_encoding: "base64",
+      bytes: 9
+    },
+    { messageId: "forbidden-control-terminal", deliveryKind: "daemon_terminal_frame" }
+  );
+  await waitForTestCondition(() => fallbackControlChannel.readyState === "closed");
+  assert.deepEqual(fallbackEvents, []);
 
   const mixedFamilyEntries = [
     {
@@ -14712,7 +14806,7 @@ function createFakeDataChannel() {
   };
 }
 
-function createFakePeerConnection(dataChannel, secret) {
+function createFakePeerConnection(dataChannel, secret, { autoAckTerminal = true } = {}) {
   const createdDataChannels = [];
   let remoteDescriptionSet = false;
   dataChannel.label = "botster-daemon";
@@ -14730,7 +14824,7 @@ function createFakePeerConnection(dataChannel, secret) {
       const channel = createFakeDataChannel();
       channel.label = label;
       channel.options = options;
-      installAutoHelloAck(channel, secret);
+      if (autoAckTerminal) installAutoHelloAck(channel, secret);
       createdDataChannels.push(channel);
       if (remoteDescriptionSet) queueMicrotask(() => channel.open());
       return channel;
@@ -14752,12 +14846,13 @@ function createFakePeerConnection(dataChannel, secret) {
 }
 
 function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
+  const { autoAckTerminal = true, ...clientOptions } = options;
   let nextDataChannel = 0;
   for (const channel of dataChannels) {
     installAutoHelloAck(channel, bootstrap.grant_secret);
   }
   return createWebrtcDaemonClient({
-    ...options,
+    ...clientOptions,
     bootstrap,
     peerConnectionFactory: () => {
       if (nextDataChannel >= dataChannels.length) {
@@ -14765,7 +14860,11 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
         installAutoHelloAck(extra, bootstrap.grant_secret);
         dataChannels.push(extra);
       }
-      return createFakePeerConnection(dataChannels[nextDataChannel++], bootstrap.grant_secret);
+      return createFakePeerConnection(
+        dataChannels[nextDataChannel++],
+        bootstrap.grant_secret,
+        { autoAckTerminal }
+      );
     },
     fetchImpl: async () => ({
       ok: true,

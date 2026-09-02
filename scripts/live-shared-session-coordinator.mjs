@@ -18,6 +18,7 @@ const sessionId = typeof process.env.BOTSTER_SHARED_SESSION_ID === "string"
   && process.env.BOTSTER_SHARED_SESSION_ID.trim() !== ""
   ? process.env.BOTSTER_SHARED_SESSION_ID.trim()
   : DEFAULT_SHARED_SESSION_ID;
+const directTerminalMode = process.env.BOTSTER_LIVE_DIRECT_TERMINAL === "1";
 
 const dataDir = await mkdtemp(join(process.platform === "win32" ? tmpdir() : "/tmp", "botster-web-shared-session-"));
 const socketPath = join(dataDir, "botster-hub.sock");
@@ -60,27 +61,41 @@ try {
   }
   await waitForSessionLifecycle(sessionId, "running");
 
-  const ablation = await runDriver({ BOTSTER_LIVE_ABLATE_CANCEL_DETACH: "1" });
-  assertCancelAblation(ablation);
-  await waitForSessionLifecycle(sessionId, "running");
+  if (directTerminalMode) {
+    const keepAlive = await runDriver();
+    assertDirectTerminalPass(keepAlive, false);
+    await waitForSessionLifecycle(sessionId, "running");
+    const exitPass = await runDriver({ BOTSTER_SHARED_SESSION_PROVE_EXIT: "1" });
+    assertDirectTerminalPass(exitPass, true);
+    await waitForSessionLifecycle(sessionId, ["exited", "failed"]);
+    console.log(`direct-binary-terminal-shared-session-coordinator-passed ${JSON.stringify({
+      session_id: sessionId,
+      keep_alive_runs: 1,
+      exit_pass: true
+    })}`);
+  } else {
+    const ablation = await runDriver({ BOTSTER_LIVE_ABLATE_CANCEL_DETACH: "1" });
+    assertCancelAblation(ablation);
+    await waitForSessionLifecycle(sessionId, "running");
 
-  const first = await runDriver();
-  assertKeepAlivePass(first, "first");
-  await waitForSessionLifecycle(sessionId, "running");
-  const second = await runDriver();
-  assertKeepAlivePass(second, "second");
-  await waitForSessionLifecycle(sessionId, "running");
+    const first = await runDriver();
+    assertKeepAlivePass(first, "first");
+    await waitForSessionLifecycle(sessionId, "running");
+    const second = await runDriver();
+    assertKeepAlivePass(second, "second");
+    await waitForSessionLifecycle(sessionId, "running");
 
-  const exitPass = await runDriver({ BOTSTER_SHARED_SESSION_PROVE_EXIT: "1" });
-  assertExitPass(exitPass);
-  await waitForSessionLifecycle(sessionId, ["exited", "failed"]);
+    const exitPass = await runDriver({ BOTSTER_SHARED_SESSION_PROVE_EXIT: "1" });
+    assertExitPass(exitPass);
+    await waitForSessionLifecycle(sessionId, ["exited", "failed"]);
 
-  console.log(`live-shared-session-coordinator-passed ${JSON.stringify({
-    session_id: sessionId,
-    keep_alive_runs: 2,
-    cancel_ablation: true,
-    exit_pass: true
-  })}`);
+    console.log(`live-shared-session-coordinator-passed ${JSON.stringify({
+      session_id: sessionId,
+      keep_alive_runs: 2,
+      cancel_ablation: true,
+      exit_pass: true
+    })}`);
+  }
 } finally {
   if (hub) {
     await runHub(["shutdown", "--data-dir", dataDir]).catch((error) => {
@@ -95,6 +110,22 @@ try {
     if (hub.exitCode === null) hub.kill("SIGTERM");
   }
   await rm(dataDir, { recursive: true, force: true });
+}
+
+function assertDirectTerminalPass(result, proveExit) {
+  assertSharedSessionDriverSuccess(result, proveExit ? "direct exit" : "direct keep-alive");
+  const marker = result.output.match(/direct-binary-terminal-live-proof-passed (\{.*\})/);
+  if (!marker) throw new Error("direct terminal driver omitted its completion marker");
+  const proof = JSON.parse(marker[1]);
+  if (
+    proof.session_id !== sessionId ||
+    proof.shared_session !== true ||
+    proof.prove_exit !== proveExit ||
+    proof.proof?.close?.process_exit !== proveExit ||
+    proof.proof?.close?.caller_owned_session_preserved !== !proveExit
+  ) {
+    throw new Error(`direct terminal driver returned invalid proof: ${marker[1]}`);
+  }
 }
 
 function assertCancelAblation(result) {

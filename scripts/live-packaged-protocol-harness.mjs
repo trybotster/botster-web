@@ -9,6 +9,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { chromium } from "playwright";
 import { createServer as createViteServer } from "vite";
 import {
+  encodeModeGatedInput,
+  encodePaste,
+  encodeResize
+} from "@trybotster/terminal-protocol";
+import {
   assertDurableStateOwnership,
   assertPackageReused,
   assertWorkspacesLifecycleStateOwnership,
@@ -64,6 +69,7 @@ const sharedHubDriverMode = process.env.BOTSTER_LIVE_SHARED_HUB_DRIVER === "1";
 const sharedSessionContract = assertCallerOwnedSharedSessionContract();
 const sharedSessionMode = sharedSessionContract.mode;
 const sharedSessionProveExit = sharedSessionContract.proveExit;
+const directTerminalMode = process.env.BOTSTER_LIVE_DIRECT_TERMINAL === "1";
 const sharedHubAssignment = sharedHubDriverMode
   ? parseWorkspacesSpawnAssignment(process.env.BOTSTER_WORKSPACES_SPAWN_CASES)
   : undefined;
@@ -208,6 +214,8 @@ try {
   appUrl = await startWebrtcPackageRuntime();
   if (sharedSessionMode) {
     await assertSuppliedSessionRunningOnDaemon();
+  } else if (directTerminalMode) {
+    await startProductionSession();
   }
   if (sharedHubDriverMode || sharedSessionMode) {
     console.log(`live packaged protocol binary provenance ${JSON.stringify(binaryProvenance)}`);
@@ -237,6 +245,19 @@ try {
   await waitForTransportLabel(page);
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "status request");
   const authoritativeHubStatus = await assertCurrentHubCompatibilityAndSchema(page);
+  if (directTerminalMode) {
+    const directTerminalProof = await proveDirectBinaryTerminalLane(page, productionSessionId);
+    assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+    if (!sharedSessionMode) await requestDaemonShutdown();
+    console.log(`direct-binary-terminal-live-proof-passed ${JSON.stringify({
+      session_id: productionSessionId,
+      shared_session: sharedSessionMode,
+      prove_exit: sharedSessionProveExit,
+      binary_provenance: binaryProvenance,
+      proof: directTerminalProof
+    })}`);
+    process.exit(0);
+  }
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
   const originalRemoteAccessValue = await waitForRemoteAccessPackageConfiguration(page);
@@ -7578,6 +7599,216 @@ async function assertSuppliedSessionRunningOnDaemon() {
     );
   }
   return row;
+}
+
+async function proveDirectBinaryTerminalLane(page, sessionId) {
+  const subscriptionId = `direct-terminal-${Date.now().toString(36)}`;
+  const first = await openDirectTerminalStream(page, sessionId, subscriptionId, "first");
+  const modeFlags = await readDirectTerminalModeFlags(page, sessionId);
+  const typing = new TextEncoder().encode("direct-typing\n");
+  const paste = new TextEncoder().encode(
+    `botster-web-production-large-paste:${"p".repeat(70_000)}\n`
+  );
+  const operationId = 1;
+  const frames = [
+    encodeResize(31, 111),
+    encodeModeGatedInput(modeFlags.mode_generation, modeFlags.mode_revision, typing),
+    ...encodePaste(operationId, modeFlags.mode_generation, modeFlags.mode_revision, paste)
+  ].map((frame) => [...frame]);
+
+  await page.evaluate(async ({ frames: encodedFrames }) => {
+    const stream = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.directTerminalStream;
+    if (!stream) throw new Error("direct terminal stream is unavailable");
+    for (const frame of encodedFrames) await stream.sendFrame(Uint8Array.from(frame));
+  }, { frames });
+
+  const transfer = await page.waitForFunction(
+    ({ expectedSessionId, expectedSubscriptionId, expectedPasteBytes, expectedOperationId }) => {
+      const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+      const events = harness?.directTerminalEvents ?? [];
+      const outputText = events
+        .filter((event) => event?.type === "terminal_output")
+        .map((event) => globalThis.atob(event.payload_base64 ?? ""))
+        .join("");
+      const typingResult = events.find((event) =>
+        event?.type === "input_result" &&
+        event.kind === "mode_gated_input" &&
+        event.admitted === true
+      );
+      const pasteResult = events.find((event) =>
+        event?.type === "input_result" &&
+        event.kind === "paste" &&
+        event.operation_id === expectedOperationId &&
+        event.admitted === true &&
+        event.bytes_written === expectedPasteBytes
+      );
+      const outboundChunks = (harness?.events ?? [])
+        .filter((entry) =>
+          entry.kind === "terminal_data_channel_send"
+        )
+        .map((entry) => entry.payload);
+      const largeDelivery = outboundChunks.find((delivery) => delivery.chunk_count > 1);
+      if (
+        !outputText.includes("botster-web-production-echo:direct-typing") ||
+        !outputText.includes("botster-web-production-large-paste-ok") ||
+        !typingResult ||
+        !pasteResult ||
+        !largeDelivery
+      ) return null;
+      return {
+        session_id: expectedSessionId,
+        subscription_id: expectedSubscriptionId,
+        typing_bytes: typingResult.bytes_written,
+        paste_bytes: pasteResult.bytes_written,
+        paste_operation_id: pasteResult.operation_id,
+        outbound_large_delivery: largeDelivery
+      };
+    },
+    {
+      expectedSessionId: sessionId,
+      expectedSubscriptionId: subscriptionId,
+      expectedPasteBytes: paste.length,
+      expectedOperationId: operationId
+    },
+    { timeout: 30_000 }
+  ).then((handle) => handle.jsonValue());
+
+  await page.evaluate(() => {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.directTerminalStream?.unsubscribe();
+  });
+  await waitForDirectTerminalChannelClosed(page, first.label, subscriptionId);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  const second = await openDirectTerminalStream(page, sessionId, subscriptionId, "second");
+  if (second.label === first.label || second.generation <= first.generation) {
+    throw new Error(
+      `direct terminal reconnect reused stale binding: ${JSON.stringify({ first, second })}`
+    );
+  }
+
+  const secondModeFlags = await readDirectTerminalModeFlags(page, sessionId);
+  const closeCommand = sharedSessionMode && !sharedSessionProveExit
+    ? "direct-reconnect\n"
+    : "botster-web-production-exit\n";
+  const closeFrame = [...encodeModeGatedInput(
+    secondModeFlags.mode_generation,
+    secondModeFlags.mode_revision,
+    new TextEncoder().encode(closeCommand)
+  )];
+  await page.evaluate(async ({ frame }) => {
+    const stream = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.directTerminalStream;
+    if (!stream) throw new Error("reconnected direct terminal stream is unavailable");
+    await stream.sendFrame(Uint8Array.from(frame));
+  }, { frame: closeFrame });
+  await page.waitForFunction(
+    ({ shouldExit }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.directTerminalEvents ?? [];
+      return shouldExit
+        ? events.some((event) => event?.type === "process_exit") ||
+          events.some((event) =>
+            event?.type === "terminal_output" &&
+            globalThis.atob(event.payload_base64 ?? "").includes("botster-web-production-exiting")
+          )
+        : events.some((event) =>
+            event?.type === "terminal_output" &&
+            globalThis.atob(event.payload_base64 ?? "").includes("botster-web-production-echo:direct-reconnect")
+          );
+    },
+    { shouldExit: !sharedSessionMode || sharedSessionProveExit },
+    { timeout: 20_000 }
+  );
+  await page.evaluate(() => {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.directTerminalStream?.unsubscribe();
+  });
+  await waitForDirectTerminalChannelClosed(page, second.label, subscriptionId);
+
+  return {
+    first,
+    transfer,
+    second,
+    close: {
+      label: second.label,
+      process_exit: !sharedSessionMode || sharedSessionProveExit,
+      caller_owned_session_preserved: sharedSessionMode && !sharedSessionProveExit
+    }
+  };
+}
+
+async function openDirectTerminalStream(page, sessionId, subscriptionId, cycle) {
+  return page.evaluate(async ({ expectedSessionId, expectedSubscriptionId, cycleName }) => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    const control = harness?.transportControl;
+    if (!harness || !control?.streamTerminal) {
+      throw new Error("live harness transport control does not expose terminal streaming");
+    }
+    harness.directTerminalEvents = [];
+    const stream = control.streamTerminal(expectedSessionId, expectedSubscriptionId, (event) => {
+      harness.directTerminalEvents.push(event);
+    });
+    harness.directTerminalStream = stream;
+    await stream.ready;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      if (harness.directTerminalEvents.some((event) =>
+        event?.type === "attach_state" && event.state === "attached"
+      )) {
+        return {
+          cycle: cycleName,
+          label: stream.label,
+          generation: stream.generation,
+          peer_generation: stream.peerGeneration
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`direct terminal ${cycleName} attach did not reach attached state`);
+  }, {
+    expectedSessionId: sessionId,
+    expectedSubscriptionId: subscriptionId,
+    cycleName: cycle
+  });
+}
+
+async function readDirectTerminalModeFlags(page, sessionId) {
+  const response = await page.evaluate(async ({ expectedSessionId }) => {
+    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
+    if (!control?.request) throw new Error("live harness transport control is unavailable");
+    return control.request({ type: "read_mode_flags", session_id: expectedSessionId });
+  }, { expectedSessionId: sessionId });
+  if (
+    response.kind !== "read_mode_flags" ||
+    !Number.isSafeInteger(response.mode_flags?.mode_generation) ||
+    !Number.isSafeInteger(response.mode_flags?.mode_revision)
+  ) {
+    throw new Error(`direct terminal mode flags are invalid: ${JSON.stringify(response)}`);
+  }
+  return response.mode_flags;
+}
+
+async function waitForDirectTerminalChannelClosed(page, label, subscriptionId) {
+  await page.waitForFunction(
+    ({ expectedLabel, expectedSubscriptionId }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const localClose = events.some((entry) =>
+        entry.kind === "terminal_data_channel" &&
+        entry.payload?.state === "closed" &&
+        entry.payload?.label === expectedLabel
+      );
+      const detachSent = events.some((entry) =>
+        entry.kind === "daemon_request" &&
+        entry.payload?.type === "detach" &&
+        entry.payload?.subscription_id === expectedSubscriptionId
+      );
+      const adapterClosed = events.some((entry) =>
+        entry.kind === "daemon_event" &&
+        entry.payload?.type === "terminal_subscription_closed" &&
+        entry.payload?.subscription_id === expectedSubscriptionId
+      );
+      return localClose || (detachSent && adapterClosed);
+    },
+    { expectedLabel: label, expectedSubscriptionId: subscriptionId },
+    { timeout: 10_000 }
+  );
 }
 
 async function assertNoSuppliedSessionShutdown(page, sessionId) {
