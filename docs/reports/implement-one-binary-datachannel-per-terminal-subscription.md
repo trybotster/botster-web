@@ -10,6 +10,8 @@
 
 The approved plan uses the same repository and target id.
 
+Implementation commits: `fa074f884c9e6d56cc799c2746a6e104818e68c5` and `e196c79`.
+
 ## Guidance applied
 
 The implementation used these playbooks and maps:
