@@ -1639,6 +1639,21 @@ async function exercisePackageEvents(page, { forceGap }) {
     throw new Error("session-scoped notice subscribed with an empty subject set");
   }
   const subscriptionId = subscribe.subscription_id;
+  await page.waitForFunction(({ expectedSubscriptionId, expectedOwner, expectedName }) => {
+    const ready = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).find((entry) =>
+      entry.kind === "subscription_data_channel" &&
+      entry.payload?.state === "ready" &&
+      entry.payload?.class === "package_event" &&
+      entry.payload?.subscription_id === expectedSubscriptionId &&
+      entry.payload?.owner === expectedOwner &&
+      entry.payload?.name === expectedName
+    );
+    return ready?.payload?.label ? ready.payload : null;
+  }, {
+    expectedSubscriptionId: subscriptionId,
+    expectedOwner: packageEventsPackageName,
+    expectedName: packageEventsEventName
+  }, { timeout: 15_000 }).then((handle) => handle.jsonValue());
 
   await page.waitForFunction(() =>
     typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.demandEntityFamily === "function"
@@ -1777,11 +1792,13 @@ async function exercisePackageEvents(page, { forceGap }) {
   await waitForSessionStatus(page, "running");
   await openSessionTerminal(page, productionSessionId);
   await waitForTerminalSession(page, productionSessionId);
+  await waitForTerminalAttachState(page, ["attached"]);
 
   const openEventsBefore = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
       .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length
   );
+  const subscriptionChannelsBeforeReconnect = await activeSubscriptionChannels(page);
   const closedChannelEvents = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
       (entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event"
@@ -1816,6 +1833,18 @@ async function exercisePackageEvents(page, { forceGap }) {
   ).catch((error) => {
     throw new Error(`package-events reconnect never reopened the data channel: ${error.message}`);
   });
+  const subscriptionReconnect = await waitForSubscriptionChannelReconnect(
+    page,
+    subscriptionChannelsBeforeReconnect
+  );
+  await waitForTerminalAttachState(page, ["attached"]);
+  if (!subscriptionReconnect.replacements.some((entry) =>
+    entry.class === "package_event" &&
+    entry.owner === packageEventsPackageName &&
+    entry.name === packageEventsEventName
+  )) {
+    throw new Error("package-events reconnect did not replace the admitted package-event DataChannel");
+  }
   const eventsAfterReconnect = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
       (entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event"
@@ -1870,16 +1899,44 @@ async function exercisePackageEvents(page, { forceGap }) {
       (entry) => entry.kind === "terminal_data_channel" && entry.payload?.state === "closed"
     ).length
   );
-  const controlStarted = Date.now();
-  const controlPromise = sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), { type: "status" });
+  const entityRecoveryBeforeFlood = await page.evaluate(() => {
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    return {
+      requested: events.filter((entry) =>
+        entry.kind === "webrtc_entity_subscription" && entry.payload?.state === "requested"
+      ).length,
+      remote_closes: events.filter((entry) =>
+        entry.kind === "subscription_data_channel" &&
+        entry.payload?.class === "entity" &&
+        entry.payload?.state === "closed" &&
+        entry.payload?.remote === true
+      ).length
+    };
+  });
   await emitPackageEventFixtureAction(page, packageEventsBurstAction, { count: floodCount });
-  const controlReply = await controlPromise;
-  const controlMs = Date.now() - controlStarted;
-  if (controlMs > 10_000) {
-    throw new Error(`mid-flood control request exceeded 10000ms: ${controlMs}`);
+  const browserControlStarted = Date.now();
+  const browserControlPromise = page.evaluate(() => {
+    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
+    if (!control?.request) throw new Error("browser transport control is unavailable");
+    return control.request({ type: "status" });
+  });
+  const unixControlStarted = Date.now();
+  const unixControlPromise = sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), { type: "status" });
+  const browserControlReply = await browserControlPromise;
+  const browserControlMs = Date.now() - browserControlStarted;
+  if (browserControlMs > 10_000) {
+    throw new Error(`mid-flood browser control request exceeded 10000ms: ${browserControlMs}`);
   }
-  if (controlReply.error) {
-    throw new Error(`mid-flood control request failed: ${JSON.stringify(controlReply.error)}`);
+  if (browserControlReply.error) {
+    throw new Error(`mid-flood browser control request failed: ${JSON.stringify(browserControlReply.error)}`);
+  }
+  const unixControlReply = await unixControlPromise;
+  const unixControlMs = Date.now() - unixControlStarted;
+  if (unixControlMs > 10_000) {
+    throw new Error(`mid-flood Unix control request exceeded 10000ms: ${unixControlMs}`);
+  }
+  if (unixControlReply.error) {
+    throw new Error(`mid-flood Unix control request failed: ${JSON.stringify(unixControlReply.error)}`);
   }
   const entityStarted = Date.now();
   await page.evaluate(async (family) => {
@@ -1921,6 +1978,11 @@ async function exercisePackageEvents(page, { forceGap }) {
   await waitForTerminalOutput(page, `botster-web-production-echo:${echoProbe}`).catch((error) => {
     throw new Error(`terminal echo exceeded 15000ms during flood: ${error.message}`);
   });
+  const outputProgressProbe = "package-events-output-progress";
+  await typeThroughMountedTerminal(page, `${outputProgressProbe}\n`);
+  await waitForTerminalOutput(page, `botster-web-production-echo:${outputProgressProbe}`).catch((error) => {
+    throw new Error(`terminal output progress exceeded 15000ms during flood: ${error.message}`);
+  });
   const floodMs = Date.now() - floodStarted;
   const terminalClosesAfterFlood = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
@@ -1929,6 +1991,27 @@ async function exercisePackageEvents(page, { forceGap }) {
   );
   if (terminalClosesAfterFlood !== terminalClosesBeforeFlood) {
     throw new Error("package-event flood closed the terminal subscription channel");
+  }
+  const entityRecoveryAfterFlood = await page.evaluate(() => {
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    return {
+      requested: events.filter((entry) =>
+        entry.kind === "webrtc_entity_subscription" && entry.payload?.state === "requested"
+      ).length,
+      remote_closes: events.filter((entry) =>
+        entry.kind === "subscription_data_channel" &&
+        entry.payload?.class === "entity" &&
+        entry.payload?.state === "closed" &&
+        entry.payload?.remote === true
+      ).length
+    };
+  });
+  const entityRecoveryRequests = entityRecoveryAfterFlood.requested - entityRecoveryBeforeFlood.requested;
+  const entityRemoteCloses = entityRecoveryAfterFlood.remote_closes - entityRecoveryBeforeFlood.remote_closes;
+  if (entityRecoveryRequests > entityRemoteCloses + 1) {
+    throw new Error(
+      `entity subscriptions retried more than once per remote close: requests=${entityRecoveryRequests}, closes=${entityRemoteCloses}`
+    );
   }
   const eventKinds = await page.evaluate(() => {
     const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
@@ -1943,14 +2026,29 @@ async function exercisePackageEvents(page, { forceGap }) {
   if (eventKinds.terminal_from_event > 0) {
     throw new Error("package events entered the terminal adapter path");
   }
+  const peakSubscriptionChannels = await page.evaluate(() => {
+    const open = new Set();
+    let peak = 0;
+    for (const entry of globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []) {
+      if (entry.kind !== "subscription_data_channel" || !entry.payload?.label) continue;
+      if (entry.payload.state === "ready") open.add(entry.payload.label);
+      if (entry.payload.state === "closed") open.delete(entry.payload.label);
+      peak = Math.max(peak, open.size);
+    }
+    return peak;
+  });
   console.log(`package-events flood budgets ${JSON.stringify({
-    control_ms: controlMs,
+    browser_control_ms: browserControlMs,
+    unix_control_ms: unixControlMs,
     entity_ms: entityMs,
     flood_ms: floodMs,
     emitted: floodCount,
     received_events: receivedEvents,
     received_notices: receivedNotices,
     terminal_channel_closes: terminalClosesAfterFlood - terminalClosesBeforeFlood,
+    peak_subscription_channels: peakSubscriptionChannels,
+    entity_recovery_requests: entityRecoveryRequests,
+    entity_remote_closes: entityRemoteCloses,
     subscription_id: subscriptionId
   })}`);
 }
@@ -6248,6 +6346,7 @@ async function proveInPageReconnectReplaysHubStatus(page, expectedIdentity) {
       .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length
   );
   const hubStatusFramesBefore = await hubStatusProjectionCount(page);
+  const subscriptionChannelsBefore = await activeSubscriptionChannels(page);
 
   const closed = await page.evaluate(
     () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
@@ -6298,6 +6397,10 @@ async function proveInPageReconnectReplaysHubStatus(page, expectedIdentity) {
   ).catch((error) => {
     throw new Error(`reconnect produced no fresh botster-web.hub_status projection: ${error.message}`);
   });
+  const subscriptionChannelReconnect = await waitForSubscriptionChannelReconnect(
+    page,
+    subscriptionChannelsBefore
+  );
 
   // The document was never replaced, so this is genuinely the in-page path.
   const sentinel = await page.evaluate(() => globalThis.__BOTSTER_RECONNECT_DOCUMENT_SENTINEL__);
@@ -6323,7 +6426,61 @@ async function proveInPageReconnectReplaysHubStatus(page, expectedIdentity) {
     host_id: expectedIdentity.host_id,
     schema_version: expectedIdentity.schema_version
   }, "in-page data-channel reconnect");
-  return { ...evidence, rendered_after_reconnect: rendered };
+  return {
+    ...evidence,
+    rendered_after_reconnect: rendered,
+    subscription_channels: subscriptionChannelReconnect
+  };
+}
+
+async function activeSubscriptionChannels(page) {
+  return page.evaluate(() => {
+    const active = new Map();
+    for (const entry of globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []) {
+      if (entry.kind !== "subscription_data_channel" || !entry.payload?.label) continue;
+      if (entry.payload.state === "ready") active.set(entry.payload.label, entry.payload);
+      if (entry.payload.state === "closed") active.delete(entry.payload.label);
+    }
+    return [...active.values()];
+  });
+}
+
+async function waitForSubscriptionChannelReconnect(page, priorBindings) {
+  if (priorBindings.length === 0) {
+    throw new Error("in-page reconnect had no active entity or package-event DataChannel baseline");
+  }
+  return page.waitForFunction((prior) => {
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    const channelEvents = events.filter((entry) => entry.kind === "subscription_data_channel");
+    const replacements = [];
+    for (const previous of prior) {
+      const closed = channelEvents.some((entry) =>
+        entry.payload?.state === "closed" && entry.payload?.label === previous.label
+      );
+      if (!closed) return null;
+      const replacement = channelEvents.find((entry) => {
+        const payload = entry.payload ?? {};
+        if (payload.state !== "ready" || payload.class !== previous.class) return false;
+        if (payload.label === previous.label || payload.subscription_id === previous.subscription_id) return false;
+        if (previous.class === "entity") return payload.entity_type === previous.entity_type;
+        return payload.owner === previous.owner && payload.name === previous.name;
+      })?.payload;
+      if (!replacement) return null;
+      replacements.push({
+        class: previous.class,
+        prior_label: previous.label,
+        label: replacement.label,
+        prior_subscription_id: previous.subscription_id,
+        subscription_id: replacement.subscription_id,
+        entity_type: replacement.entity_type ?? null,
+        owner: replacement.owner ?? null,
+        name: replacement.name ?? null
+      });
+    }
+    return { prior_count: prior.length, replacements };
+  }, priorBindings, { timeout: 20_000 }).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(`subscription DataChannels did not reconnect on the surviving document: ${error.message}`);
+  });
 }
 
 async function hubStatusProjectionCount(page) {
@@ -7101,7 +7258,10 @@ async function proveLiveTerminalAfterAttach(page, probe) {
   const helloProof = await page.evaluate(() => {
     const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
     const hello = events.find((entry) => entry.kind === "daemon_hello")?.payload;
-    const terminalFrame = events.some((entry) => entry.kind === "webrtc_terminal_frame_assembly");
+    const terminalFrame = events.some((entry) =>
+      entry.kind === "terminal_data_channel_receive" &&
+      entry.payload?.delivery_kind === "daemon_terminal_frame"
+    );
     const drainBodies = events.some((entry) =>
       entry.kind === "daemon_request" &&
       entry.payload?.type === "drain"

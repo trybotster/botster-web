@@ -153,6 +153,7 @@ import {
 const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
 let nextTestResponseMessageId = 0;
+let nextTestSubscriptionReservationGeneration = 0;
 const uiContractConformanceFixtures = await readUiContractConformanceFixtures();
 
 const sharedHubColdAssignment = parseWorkspacesSpawnAssignment(JSON.stringify({
@@ -2049,7 +2050,8 @@ assert.doesNotMatch(hubTerminalDataPlane, /terminalInputQueue/);
 assert.doesNotMatch(hubTerminalDataPlane, /type: "send_input"|type: "mode_gated_input"|type: "resize"/);
 assert.match(hubTerminalDataPlane, /encodeTerminalInput|encodeModeGatedInput|encodeResize/);
 assert.match(webrtcDaemonClient, /response\.terminal_reservation/);
-assert.match(webrtcDaemonClient, /createDataChannel\(reservation\.label, \{ ordered: true \}\)/);
+assert.match(webrtcDaemonClient, /createReservedDataChannel\(\s*reservation\.label,/);
+assert.match(webrtcDaemonClient, /createDataChannel\(label, \{ ordered: true \}\)/);
 assert.match(webrtcDaemonClient, /version: 2[\s\S]*delivery_kind: "daemon_terminal_frame"/);
 assert.match(hubTerminalDataPlane, /writeModeGatedInput/);
 assert.match(hubTerminalDataPlane, /decodeDaemonByteEnvelope/);
@@ -2452,8 +2454,8 @@ assert.match(terminalSmokeFixture, /bridge\.unmount\(descriptor\)/);
 assert.match(pluginSurfaces, /sandbox: "host_rendered" \| "isolated_asset"/);
 assert.match(architecture, /Production transport/);
 assert.match(architecture, /Terminal data stays outside `HubControlFrame`/);
-assert.match(architecture, /one ordered WebRTC control DataChannel and one ordered DataChannel for each terminal subscription/);
-assert.match(architecture, /control channel rejects `daemon_terminal_frame` deliveries/);
+assert.match(architecture, /one ordered WebRTC control DataChannel and one ordered DataChannel for each terminal, entity, and package-event subscription/);
+assert.match(architecture, /control channel rejects terminal, entity, and package-event data-plane deliveries/);
 assert.match(architecture, /creates one ordered DataChannel with that exact label/);
 assert.match(architecture, /version 2 `daemon_terminal_frame` delivery chunks/);
 assert.match(architecture, /Restty is a terminal renderer only/);
@@ -2463,9 +2465,10 @@ assert.match(readme, /BOTSTER_HUB_BIN/);
 assert.match(readme, /smoke:live-packaged-protocol/);
 assert.match(readme, /local WebRTC bootstrap grant/);
 assert.match(readme, /Each terminal subscription uses one separate ordered DataChannel/);
+assert.match(readme, /Each entity or package-event subscription uses one separate ordered DataChannel/);
 assert.match(readme, /only after Hub reserves an opaque label and generation/);
 assert.match(architecture, /src\/botster\/webrtcDaemonClient\.ts/);
-assert.match(architecture, /encrypted ordered data-channel delivery/);
+assert.match(architecture, /encrypted ordered DataChannel delivery/);
 assert.match(generatedDaemonProtocol, /export interface AesGcmEnvelope/);
 assert.match(generatedDaemonProtocol, /export interface DaemonLocalWebrtcDeliveryChunk/);
 assert.match(generatedDaemonProtocol, /type: "local_webrtc_signal"/);
@@ -2487,6 +2490,8 @@ assert.match(architecture, /Published Web event-plane budgets/);
 assert.match(architecture, /notice_reactions/);
 assert.match(architecture, /resolveNoticeText/);
 assert.match(architecture, /Terminal delivery assembly/);
+assert.match(architecture, /Entity delivery assembly/);
+assert.match(architecture, /Package-event delivery assembly/);
 assert.doesNotMatch(architecture, /maximumTerminalDeliveryBacklog|Terminal delivery backlog/);
 assert.match(appShellSource, /usePackageEventNotices/);
 assert.match(appShellSource, /packages,/);
@@ -2503,6 +2508,11 @@ assert.match(webrtcDaemonClient, /crypto\.subtle\.encrypt/);
 assert.match(webrtcDaemonClient, /crypto\.subtle\.decrypt/);
 assert.match(webrtcDaemonClient, /AesGcmEnvelope/);
 assert.match(webrtcDaemonClient, /DaemonLocalWebrtcDeliveryChunk/);
+assert.match(webrtcDaemonClient, /response\.subscription_reservation/);
+assert.match(webrtcDaemonClient, /control DataChannel received an entity delivery/);
+assert.match(webrtcDaemonClient, /control DataChannel received a package-event delivery/);
+assert.match(liveProtocolHarnessScript, /browserControlPromise/);
+assert.match(liveProtocolHarnessScript, /peak_subscription_channels/);
 assert.match(webrtcDaemonClient, /maximumFrameBytesExclusive: 65_536/);
 assert.match(webrtcDaemonClient, /maximumResponseBytes: 16_777_216/);
 assert.match(webrtcDaemonClient, /maximumAggregateRetainedBytes: 32 \* 1_024 \* 1_024/);
@@ -3342,6 +3352,7 @@ const {
 } = requireRuntime("./app/packageEventNotices.js");
 const { createInMemoryEntityFrameStore } = requireRuntime("./botster/entities.js");
 const { createHubRuntimeConfig, terminalDataPlaneLabel } = requireRuntime("./botster/hubRuntime.js");
+const { hostCompatibilityRequirement } = requireRuntime("./botster/protocolPlanes.js");
 const {
   createHubTransport,
   daemonEntityFrame,
@@ -5218,6 +5229,49 @@ try {
     2
   );
 
+  for (const [deliveryKind, payload, expectedError] of [
+    [
+      "daemon_entity_frame",
+      {
+        type: "entity_snapshot",
+        subscription_id: "control-entity",
+        entity_type: "session",
+        snapshot_seq: 0,
+        items: []
+      },
+      /control DataChannel received an entity delivery/
+    ],
+    [
+      "daemon_event",
+      {
+        type: "package_event",
+        subscription_id: "control-event",
+        owner: "package-notice-reaction",
+        name: "sample.notice",
+        payload: { notice: "must not arrive" }
+      },
+      /control DataChannel received a package-event delivery/
+    ]
+  ]) {
+    const rejectedControlChannel = createFakeDataChannel();
+    const rejectedControlClient = createWebrtcTestClient(
+      [rejectedControlChannel],
+      localWebrtcBootstrapFixture
+    );
+    const pendingControlRequest = rejectedControlClient.request({ type: "status" });
+    const rejectedControlRequest = assert.rejects(pendingControlRequest, expectedError);
+    await waitForTestCondition(() => rejectedControlChannel.sent.length === 1);
+    const rejectedChunks = await chunkedTestResponse(
+      localWebrtcBootstrapFixture.grant_secret,
+      payload,
+      { deliveryKind, messageId: `rejected-control-${deliveryKind}` }
+    );
+    for (const chunk of rejectedChunks) rejectedControlChannel.emitMessage(JSON.stringify(chunk));
+    await rejectedControlRequest;
+    assert.equal(rejectedControlChannel.readyState, "closed");
+    rejectedControlClient.disconnect();
+  }
+
   const entityChannels = [createFakeDataChannel(), createFakeDataChannel()];
   let nextEntitySubscriptionId = 0;
   const entityClient = createWebrtcTestClient(entityChannels, localWebrtcBootstrapFixture, {
@@ -5237,6 +5291,20 @@ try {
       subscription_id: "session-generation-1-1"
     }
   );
+  assert.equal(entityChannels[0].createdDataChannels.length, 1);
+  await emitChunkedTestResponse(
+    entityChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_subscribed", events: [], diagnostics: [] },
+    { messageId: "entity-subscribe-response" }
+  );
+  const entityDataChannel = entityChannels[0].createdDataChannels[1];
+  assert.equal(entityDataChannel.label, entityChannels[0].testSubscriptionReservations[0].label);
+  assert.deepEqual(entityDataChannel.options, { ordered: true });
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, entityDataChannel.helloSent[0]),
+    { protocol: "botster-hub-daemon-v1", compatibility: hostCompatibilityRequirement }
+  );
   await emitChunkedTestResponse(
     entityChannels[0],
     localWebrtcBootstrapFixture.grant_secret,
@@ -5248,12 +5316,6 @@ try {
       items: []
     },
     { deliveryKind: "daemon_entity_frame", messageId: "entity-initial-snapshot" }
-  );
-  await emitChunkedTestResponse(
-    entityChannels[0],
-    localWebrtcBootstrapFixture.grant_secret,
-    { kind: "entity_subscribed", events: [], diagnostics: [] },
-    { messageId: "entity-subscribe-response" }
   );
   await entitySubscription.ready;
   assert.deepEqual(receivedEntityFrames.map((frame) => frame.type), ["entity_snapshot"]);
@@ -5317,6 +5379,48 @@ try {
   );
   assert.equal(receivedEntityFrames.length, 2);
 
+  entityDataChannel.close();
+  await waitForTestCondition(() => entityChannels[0].sent.length === 3);
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, entityChannels[0].sent[2]),
+    { type: "unsubscribe_entities", subscription_id: "session-generation-1-1" }
+  );
+  await emitChunkedTestResponse(
+    entityChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_unsubscribed", events: [], diagnostics: [] },
+    { messageId: "entity-remote-close-unsubscribe-response" }
+  );
+  await waitForTestCondition(() => entityChannels[0].sent.length === 4);
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, entityChannels[0].sent[3]),
+    {
+      type: "subscribe_entities",
+      entity_type: "session",
+      subscription_id: "session-generation-1-2"
+    }
+  );
+  await emitChunkedTestResponse(
+    entityChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_subscribed", events: [], diagnostics: [] },
+    { messageId: "entity-remote-close-subscribe-response" }
+  );
+  assert.notEqual(entityChannels[0].createdDataChannels[2].label, entityDataChannel.label);
+  await emitChunkedTestResponse(
+    entityChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_snapshot",
+      subscription_id: "session-generation-1-2",
+      entity_type: "session",
+      snapshot_seq: 3,
+      items: []
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "entity-remote-close-snapshot" }
+  );
+  await waitForTestCondition(() => receivedEntityFrames.length === 3);
+
   entityChannels[0].close();
   await waitForTestCondition(() => entityChannels[1].sent.length === 1);
   assert.deepEqual(
@@ -5324,7 +5428,7 @@ try {
     {
       type: "subscribe_entities",
       entity_type: "session",
-      subscription_id: "session-generation-2-2"
+      subscription_id: "session-generation-2-3"
     }
   );
   await emitChunkedTestResponse(
@@ -5346,21 +5450,21 @@ try {
     },
     { deliveryKind: "daemon_entity_frame", messageId: "prior-generation-frame" }
   );
-  assert.equal(receivedEntityFrames.length, 2);
+  assert.equal(receivedEntityFrames.length, 3);
   await emitChunkedTestResponse(
     entityChannels[1],
     localWebrtcBootstrapFixture.grant_secret,
     {
       type: "entity_snapshot",
-      subscription_id: "session-generation-2-2",
+      subscription_id: "session-generation-2-3",
       entity_type: "session",
       snapshot_seq: 4,
       items: []
     },
     { deliveryKind: "daemon_entity_frame", messageId: "entity-reconnect-snapshot" }
   );
-  await waitForTestCondition(() => receivedEntityFrames.length === 3);
-  assert.equal(receivedEntityFrames[2].subscription_id, "session-generation-2-2");
+  await waitForTestCondition(() => receivedEntityFrames.length === 4);
+  assert.equal(receivedEntityFrames[3].subscription_id, "session-generation-2-3");
   entitySubscription.unsubscribe();
   await waitForTestCondition(() => entityChannels[1].sent.length === 2);
   await emitChunkedTestResponse(
@@ -5485,26 +5589,39 @@ try {
     { deliveryKind: "daemon_event", messageId: "package-event-gap" }
   );
   await waitForTestCondition(() => receivedPackageEvents.at(-1)?.type === "event_gap");
-  packageEventChannels[0].close();
-  await waitForTestCondition(() => packageEventChannels[1].sent.length === 1);
+  const firstPackageEventDataChannel = packageEventChannels[0].createdDataChannels[1];
+  firstPackageEventDataChannel.close();
+  await waitForTestCondition(() => packageEventChannels[0].sent.length === 2);
   assert.deepEqual(
-    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, packageEventChannels[1].sent[0]),
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, packageEventChannels[0].sent[1]),
+    { type: "unsubscribe_events", subscription_id: "event-generation-1-1" }
+  );
+  await emitChunkedTestResponse(
+    packageEventChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "event_unsubscribed", events: [], diagnostics: [] },
+    { messageId: "event-remote-close-unsubscribe-response" }
+  );
+  await waitForTestCondition(() => packageEventChannels[0].sent.length === 3);
+  assert.deepEqual(
+    await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, packageEventChannels[0].sent[2]),
     {
       type: "subscribe_events",
-      subscription_id: "event-generation-2-2",
+      subscription_id: "event-generation-1-2",
       owner: "package-notice-reaction",
       name: "sample.notice",
       subjects: ["web-prod"]
     }
   );
   await emitChunkedTestResponse(
-    packageEventChannels[1],
+    packageEventChannels[0],
     localWebrtcBootstrapFixture.grant_secret,
     { kind: "event_subscribed", events: [], diagnostics: [] },
     { messageId: "event-reconnect-subscribe-response" }
   );
-  await emitChunkedTestResponse(
-    packageEventChannels[1],
+  const replacementPackageEventDataChannel = packageEventChannels[0].createdDataChannels[2];
+  assert.notEqual(replacementPackageEventDataChannel.label, firstPackageEventDataChannel.label);
+  const staleEventChunks = await chunkedTestResponse(
     localWebrtcBootstrapFixture.grant_secret,
     {
       type: "package_event",
@@ -5515,11 +5632,13 @@ try {
     },
     { deliveryKind: "daemon_event", messageId: "stale-package-event" }
   );
+  for (const chunk of staleEventChunks) replacementPackageEventDataChannel.emitMessage(JSON.stringify(chunk));
+  await flushMicrotasks();
   assert.equal(receivedPackageEvents.filter((event) => event.type === "package_event").length, 1);
   packageEventSubscription.unsubscribe();
-  await waitForTestCondition(() => packageEventChannels[1].sent.length === 2);
+  await waitForTestCondition(() => packageEventChannels[0].sent.length === 4);
   assert.equal(
-    (await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, packageEventChannels[1].sent[1])).type,
+    (await decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, packageEventChannels[0].sent[3])).type,
     "unsubscribe_events"
   );
   packageEventClient.disconnect();
@@ -5541,25 +5660,72 @@ try {
     releaseBeforeAckChannels[0],
     localWebrtcBootstrapFixture.grant_secret,
     { kind: "event_subscribed", events: [], diagnostics: [] },
-    { messageId: "late-event-subscribe-ack" }
+    { messageId: "late-event-subscribe-ack", expectNoSubscriptionChannel: true }
   );
-  await emitChunkedTestResponse(
-    releaseBeforeAckChannels[0],
-    localWebrtcBootstrapFixture.grant_secret,
-    {
-      type: "package_event",
-      subscription_id: "release-before-ack-id",
-      owner: "package-notice-reaction",
-      name: "sample.notice",
-      payload: validPayload
-    },
-    { deliveryKind: "daemon_event", messageId: "late-package-event-after-release" }
-  );
+  assert.equal(releaseBeforeAckChannels[0].createdDataChannels.length, 1);
   assert.equal(lateEvents.length, 0);
   releaseBeforeAckChannels[0].close();
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(releaseBeforeAckChannels[1].sent.length, 0);
   releaseBeforeAckClient.disconnect();
+
+  const missingReservationChannels = [createFakeDataChannel()];
+  const missingReservationClient = createWebrtcTestClient(
+    missingReservationChannels,
+    localWebrtcBootstrapFixture,
+    { entitySubscriptionIdGenerator: () => "missing-reservation-id" }
+  );
+  const missingReservationSubscription = missingReservationClient.subscribeEntityFrames("session", () => {});
+  const missingReservationFailure = assert.rejects(
+    missingReservationSubscription.ready,
+    /entity subscription response omitted its reservation/
+  );
+  await waitForTestCondition(() => missingReservationChannels[0].sent.length === 1);
+  await emitChunkedTestResponse(
+    missingReservationChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "entity_subscribed", events: [], diagnostics: [], subscription_reservation: null },
+    { messageId: "missing-entity-reservation", preserveSubscriptionReservation: true }
+  );
+  await missingReservationFailure;
+  assert.equal(missingReservationChannels[0].createdDataChannels.length, 1);
+  missingReservationClient.disconnect();
+
+  const openTimeoutChannels = [createFakeDataChannel()];
+  const openTimeoutClient = createWebrtcTestClient(
+    openTimeoutChannels,
+    localWebrtcBootstrapFixture,
+    { entitySubscriptionIdGenerator: () => "open-timeout-id", autoAckTerminal: false }
+  );
+  const openTimeoutSubscription = openTimeoutClient.subscribeEntityFrames("session", () => {});
+  const openTimeoutFailure = assert.rejects(
+    openTimeoutSubscription.ready,
+    /subscription reservation expired before admission/
+  );
+  await waitForTestCondition(() => openTimeoutChannels[0].sent.length === 1);
+  await emitChunkedTestResponse(
+    openTimeoutChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "entity_subscribed",
+      events: [],
+      diagnostics: [],
+      subscription_reservation: {
+        kind: "entity",
+        subscription_id: "open-timeout-id",
+        generation: 9001,
+        peer_generation: 1,
+        label: "r-open-timeout-exact-label",
+        expires_in_seconds: 0.001
+      }
+    },
+    { messageId: "open-timeout-reservation", expectUnackedSubscriptionChannel: true }
+  );
+  await openTimeoutFailure;
+  assert.equal(openTimeoutChannels[0].createdDataChannels[1].label, "r-open-timeout-exact-label");
+  assert.equal(openTimeoutChannels[0].createdDataChannels[1].readyState, "closed");
+  assert.equal(openTimeoutChannels[0].createdDataChannels.length, 2);
+  openTimeoutClient.disconnect();
 
   const eventSiblingChannels = [createFakeDataChannel()];
   const eventSiblingClient = createWebrtcTestClient(eventSiblingChannels, localWebrtcBootstrapFixture, {
@@ -14872,6 +15038,7 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
         installAutoHelloAck(extra, bootstrap.grant_secret);
         dataChannels.push(extra);
       }
+      dataChannels[nextDataChannel].testPeerGeneration = nextDataChannel + 1;
       return createFakePeerConnection(
         dataChannels[nextDataChannel++],
         bootstrap.grant_secret,
@@ -14933,7 +15100,10 @@ function installAutoHelloAck(dataChannel, secret) {
           conformance_fixture_revision: 2
         },
         diagnostics: []
-      }, { messageId: `hello-ack-${dataChannel.helloSent.length}` });
+      }, { messageId: `hello-ack-${dataChannel.helloSent.length}` }).then(async () => {
+        await flushMicrotasks();
+        dataChannel.helloAckDelivered = true;
+      });
       return;
     }
     originalSend(data);
@@ -14966,10 +15136,66 @@ function reassembleFixtureChunks(chunks) {
 }
 
 async function emitChunkedTestResponse(dataChannel, secret, response, options = {}) {
-  const chunks = await chunkedTestResponse(secret, response, options);
+  let responsePayload = response;
+  if (
+    (response?.kind === "entity_subscribed" || response?.kind === "event_subscribed") &&
+    !response.subscription_reservation &&
+    !options.preserveSubscriptionReservation
+  ) {
+    const requestType = response.kind === "entity_subscribed" ? "subscribe_entities" : "subscribe_events";
+    const requests = [];
+    for (const sent of dataChannel.sent ?? []) {
+      try {
+        requests.push(await decryptTestEnvelope(secret, sent));
+      } catch {
+        // Subscription channel chunks are not encrypted request envelopes.
+      }
+    }
+    const request = requests.toReversed().find((candidate) => candidate.type === requestType);
+    if (!request) throw new Error(`Missing ${requestType} request for automatic test reservation.`);
+    const kind = requestType === "subscribe_entities" ? "entity" : "package_event";
+    const reservation = {
+      kind,
+      subscription_id: request.subscription_id,
+      generation: ++nextTestSubscriptionReservationGeneration,
+      peer_generation: dataChannel.testPeerGeneration ?? 1,
+      label: `r-test-${kind}-${nextTestSubscriptionReservationGeneration}-${request.subscription_id}`,
+      expires_in_seconds: 30
+    };
+    dataChannel.testSubscriptionReservations ??= [];
+    dataChannel.testSubscriptionReservations.push(reservation);
+    responsePayload = { ...response, subscription_reservation: reservation };
+  }
+
+  let deliveryChannel = dataChannel;
+  if (options.deliveryKind === "daemon_entity_frame" || options.deliveryKind === "daemon_event") {
+    const kind = options.deliveryKind === "daemon_entity_frame" ? "entity" : "package_event";
+    const reservations = dataChannel.testSubscriptionReservations ?? [];
+    const reservation = reservations.toReversed().find((candidate) =>
+      candidate.kind === kind && candidate.subscription_id === response?.subscription_id
+    ) ?? reservations.toReversed().find((candidate) => candidate.kind === kind);
+    if (reservation) {
+      await waitForTestCondition(() =>
+        (dataChannel.createdDataChannels ?? []).some((channel) => channel.label === reservation.label)
+      );
+      deliveryChannel = dataChannel.createdDataChannels.find((channel) => channel.label === reservation.label);
+    }
+  }
+
+  const chunks = await chunkedTestResponse(secret, responsePayload, options);
   const orderedChunks = options.reordered ? chunks.toReversed() : chunks;
   for (const chunk of orderedChunks) {
-    dataChannel.emitMessage(JSON.stringify(chunk));
+    deliveryChannel.emitMessage(JSON.stringify(chunk));
+  }
+  if (responsePayload?.subscription_reservation && !options.expectNoSubscriptionChannel) {
+    const reservation = responsePayload.subscription_reservation;
+    await waitForTestCondition(() =>
+      (dataChannel.createdDataChannels ?? []).some((channel) => channel.label === reservation.label)
+    );
+    const subscriptionChannel = dataChannel.createdDataChannels.find((channel) => channel.label === reservation.label);
+    if (!options.expectUnackedSubscriptionChannel) {
+      await waitForTestCondition(() => subscriptionChannel.helloAckDelivered === true);
+    }
   }
   return chunks;
 }

@@ -12,6 +12,7 @@ import type {
   DaemonLocalWebrtcDeliveryKind,
   DaemonRequest,
   DaemonResponse,
+  DaemonSubscriptionReservation,
   DaemonTerminalReservation,
   JsonValue
 } from "./realHubDaemonDto";
@@ -52,6 +53,13 @@ export type WebrtcDaemonLifecycleEvent =
   | { type: "data-channel-error" }
   | { type: "encrypted-stream-ready"; requestType: string }
   | { type: "terminal-data-channel-closed"; sessionId: string; subscriptionId: string; generation: number }
+  | {
+      type: "subscription-data-channel-failed";
+      channelClass: "entity" | "package_event";
+      subscriptionId: string;
+      reason: "reservation_missing" | "rejected" | "expired" | "closed";
+      detail: string;
+    }
   | { type: "hello-ack"; hostCompatible: boolean; terminalCompatible: boolean; detail: string };
 
 export const webRtcDaemonLifecycleEventName = "botster:webrtc-daemon-lifecycle";
@@ -103,6 +111,45 @@ type TerminalChannelBinding = {
   expiryTimeout: number;
 };
 
+type SubscriptionChannelAssembly = {
+  messageId: string;
+  chunkCount: number;
+  totalBytes: number;
+  nextIndex: number;
+  payloads: string[];
+  receivedBytes: number;
+  timeout: number;
+};
+
+type SubscriptionChannelBindingBase = {
+  channel: RTCDataChannel;
+  peerGeneration: number;
+  transportGeneration: number;
+  generation: number;
+  subscriptionId: string;
+  label: string;
+  closed: boolean;
+  admitted: boolean;
+  completedMessageIds: Set<string>;
+  assembly?: SubscriptionChannelAssembly;
+  resolveReady(): void;
+  rejectReady(error: unknown): void;
+  expiryTimeout: number;
+};
+
+type EntityChannelBinding = SubscriptionChannelBindingBase & {
+  channelClass: "entity";
+  owner: EntitySubscription;
+};
+
+type PackageEventChannelBinding = SubscriptionChannelBindingBase & {
+  channelClass: "package_event";
+  owner: PackageEventHolder;
+};
+
+type SubscriptionChannelBinding = EntityChannelBinding | PackageEventChannelBinding;
+type PackageEvent = Extract<DaemonEvent, { type: "package_event" | "event_gap" }>;
+
 /** Test/live-harness switch: skip production assembly-timeout cleanup so ablation goes red. */
 export let applyAssemblyTimeoutCleanup = true;
 
@@ -132,6 +179,7 @@ type EntitySubscription = {
   ready?: Promise<void>;
   resolveReady?: () => void;
   rejectReady?: (error: unknown) => void;
+  channel?: EntityChannelBinding;
   resubscribing: boolean;
   closed: boolean;
 };
@@ -146,6 +194,8 @@ type PackageEventHolder = {
   ready?: Promise<void>;
   resolveReady?: () => void;
   rejectReady?: (error: unknown) => void;
+  channel?: PackageEventChannelBinding;
+  resubscribing: boolean;
   closed: boolean;
 };
 
@@ -433,6 +483,7 @@ class WebrtcDaemonTransport {
   private readonly packageEventHolders = new Set<PackageEventHolder>();
   private readonly terminalStreamListeners = new Set<TerminalStreamListener>();
   private readonly terminalChannels = new Set<TerminalChannelBinding>();
+  private readonly subscriptionChannels = new Set<SubscriptionChannelBinding>();
   private readonly subscriptionGenerations = new Map<string, number>();
   private helloPromise: Promise<DaemonHelloAck> | undefined;
   private peerConnection: RTCPeerConnection | undefined;
@@ -756,6 +807,316 @@ class WebrtcDaemonTransport {
     await binding.listener.onEvent(event);
   }
 
+  private async openSubscriptionChannel(
+    owner: EntitySubscription | PackageEventHolder,
+    reservation: DaemonSubscriptionReservation,
+    channelClass: "entity" | "package_event"
+  ): Promise<SubscriptionChannelBinding> {
+    if (owner.closed) {
+      throw webrtcFailure("transport", "subscription reservation owner closed before channel creation");
+    }
+    if (reservation.kind !== channelClass || reservation.subscription_id !== owner.subscriptionId) {
+      throw webrtcFailure("data-plane", "subscription reservation identity did not match the request");
+    }
+    const { channel, key, transportGeneration } = this.createReservedDataChannel(
+      reservation.label,
+      channelClass
+    );
+
+    let binding!: SubscriptionChannelBinding;
+    const ready = new Promise<void>((resolve, reject) => {
+      const base: SubscriptionChannelBindingBase = {
+        channel,
+        peerGeneration: reservation.peer_generation,
+        transportGeneration,
+        generation: reservation.generation,
+        subscriptionId: reservation.subscription_id,
+        label: reservation.label,
+        closed: false,
+        admitted: false,
+        completedMessageIds: new Set(),
+        resolveReady: resolve,
+        rejectReady: reject,
+        expiryTimeout: window.setTimeout(() => {
+          const error = webrtcFailure("data-plane", "subscription reservation expired before admission");
+          this.emitSubscriptionChannelFailure(binding, "expired", error);
+          binding.rejectReady(error);
+          this.closeSubscriptionChannel(binding);
+        }, Math.max(1, reservation.expires_in_seconds) * 1_000)
+      };
+      binding = channelClass === "entity"
+        ? { ...base, channelClass, owner: owner as EntitySubscription }
+        : { ...base, channelClass, owner: owner as PackageEventHolder };
+    });
+
+    this.subscriptionChannels.add(binding);
+    if (binding.channelClass === "entity") binding.owner.channel = binding;
+    else binding.owner.channel = binding;
+    recordLiveHarnessEvent("subscription_data_channel", {
+      class: channelClass,
+      state: "created",
+      label: binding.label,
+      generation: binding.generation,
+      peer_generation: binding.peerGeneration,
+      subscription_id: binding.subscriptionId,
+      ...subscriptionChannelOwnerPayload(binding),
+      remote: false
+    });
+
+    let messageQueue = Promise.resolve();
+    channel.addEventListener("message", (event) => {
+      if (binding.closed) return;
+      messageQueue = messageQueue
+        .then(() => this.handleSubscriptionChannelMessage(binding, event.data))
+        .catch((error: unknown) => {
+          this.emitSubscriptionChannelFailure(binding, "rejected", error);
+          binding.rejectReady(error);
+          this.closeSubscriptionChannel(binding, true);
+        });
+    });
+    channel.addEventListener("close", () => this.closeSubscriptionChannel(binding, true));
+    channel.addEventListener("error", () => this.closeSubscriptionChannel(binding, true));
+
+    try {
+      await waitForDataChannelOpen(channel);
+      if (!this.isCurrentSubscriptionBinding(binding)) {
+        throw webrtcFailure("transport", "subscription DataChannel opened for a stale reservation");
+      }
+      recordLiveHarnessEvent("subscription_data_channel", {
+        class: channelClass,
+        state: "open",
+        label: binding.label,
+        generation: binding.generation,
+        peer_generation: binding.peerGeneration,
+        subscription_id: binding.subscriptionId,
+        ...subscriptionChannelOwnerPayload(binding),
+        remote: false
+      });
+      const hello: DaemonHello = {
+        protocol: hostHelloProtocol,
+        compatibility: hostCompatibilityRequirement
+      };
+      channel.send(JSON.stringify(await encryptJsonPayload(key, hello)));
+      await ready;
+      if (!this.isCurrentSubscriptionBinding(binding)) {
+        throw webrtcFailure("transport", "subscription DataChannel admitted for a stale reservation");
+      }
+      return binding;
+    } catch (error) {
+      binding.rejectReady(error);
+      this.closeSubscriptionChannel(binding);
+      throw error;
+    }
+  }
+
+  private closeSubscriptionChannel(binding: SubscriptionChannelBinding, remote = false): void {
+    if (binding.closed) return;
+    const wasCurrent = this.isCurrentSubscriptionBinding(binding);
+    binding.closed = true;
+    recordLiveHarnessEvent("subscription_data_channel", {
+      class: binding.channelClass,
+      state: "closed",
+      label: binding.label,
+      generation: binding.generation,
+      peer_generation: binding.peerGeneration,
+      subscription_id: binding.subscriptionId,
+      ...subscriptionChannelOwnerPayload(binding),
+      remote
+    });
+    binding.rejectReady(webrtcFailure("transport", "subscription DataChannel closed"));
+    window.clearTimeout(binding.expiryTimeout);
+    if (binding.assembly) window.clearTimeout(binding.assembly.timeout);
+    this.subscriptionChannels.delete(binding);
+    if (binding.owner.channel === binding) binding.owner.channel = undefined;
+    if (binding.channel.readyState !== "closed") binding.channel.close?.();
+
+    if (!remote || !binding.admitted || !wasCurrent) return;
+    this.emitSubscriptionChannelFailure(
+      binding,
+      "closed",
+      webrtcFailure("transport", "admitted subscription DataChannel closed")
+    );
+    if (binding.channelClass === "entity") {
+      void this.resubscribeEntity(binding.owner, binding.transportGeneration, "channel_closed");
+    } else {
+      void this.resubscribePackageEvent(binding.owner, binding.transportGeneration);
+    }
+  }
+
+  private async handleSubscriptionChannelMessage(
+    binding: SubscriptionChannelBinding,
+    data: unknown
+  ): Promise<void> {
+    if (typeof data !== "string" || utf8ByteLength(data) >= localWebrtcResponseChunkLimits.maximumFrameBytesExclusive) {
+      throw webrtcFailure("data-plane", "subscription DataChannel delivery must be a bounded string chunk");
+    }
+    const chunk = parseDeliveryChunk(data);
+    const expectedKind = binding.channelClass === "entity" ? "daemon_entity_frame" : "daemon_event";
+    if (binding.admitted && chunk.delivery_kind !== expectedKind) {
+      throw webrtcFailure("data-plane", "bound subscription channel received a delivery for another class");
+    }
+    if (binding.completedMessageIds.has(chunk.message_id)) {
+      throw webrtcFailure("data-plane", "subscription channel reused a completed message id");
+    }
+    let assembly = binding.assembly;
+    if (!assembly) {
+      if (chunk.chunk_index !== 0) {
+        throw webrtcFailure("data-plane", "subscription delivery did not start at chunk zero");
+      }
+      assembly = binding.assembly = {
+        messageId: chunk.message_id,
+        chunkCount: chunk.chunk_count,
+        totalBytes: chunk.total_bytes,
+        nextIndex: 0,
+        payloads: [],
+        receivedBytes: 0,
+        timeout: window.setTimeout(() => {
+          if (!binding.closed) {
+            const error = webrtcFailure("data-plane", "subscription delivery assembly timed out");
+            this.emitSubscriptionChannelFailure(binding, "rejected", error);
+            binding.rejectReady(error);
+            this.closeSubscriptionChannel(binding, true);
+          }
+        }, requestTimeoutMs)
+      };
+    }
+    if (
+      assembly.messageId !== chunk.message_id ||
+      assembly.chunkCount !== chunk.chunk_count ||
+      assembly.totalBytes !== chunk.total_bytes ||
+      chunk.chunk_index !== assembly.nextIndex
+    ) {
+      throw webrtcFailure("data-plane", "subscription delivery chunk order or metadata was invalid");
+    }
+    recordLiveHarnessEvent("subscription_data_channel_receive", {
+      class: binding.channelClass,
+      label: binding.label,
+      generation: binding.generation,
+      peer_generation: binding.peerGeneration,
+      subscription_id: binding.subscriptionId,
+      ...subscriptionChannelOwnerPayload(binding),
+      message_id: chunk.message_id,
+      chunk_index: chunk.chunk_index,
+      chunk_count: chunk.chunk_count,
+      total_bytes: chunk.total_bytes,
+      delivery_kind: chunk.delivery_kind,
+      frame_bytes: utf8ByteLength(data)
+    });
+    assembly.payloads.push(chunk.payload);
+    assembly.receivedBytes += utf8ByteLength(chunk.payload);
+    if (assembly.receivedBytes > assembly.totalBytes) {
+      throw webrtcFailure("data-plane", "subscription delivery exceeded the declared total bytes");
+    }
+    assembly.nextIndex += 1;
+    if (assembly.nextIndex !== assembly.chunkCount) return;
+    if (assembly.receivedBytes !== assembly.totalBytes) {
+      throw webrtcFailure("data-plane", "subscription delivery bytes did not match the declared total");
+    }
+    window.clearTimeout(assembly.timeout);
+    binding.assembly = undefined;
+    if (binding.completedMessageIds.size >= localWebrtcResponseChunkLimits.maximumCompletedMessageIds) {
+      const oldestMessageId = binding.completedMessageIds.values().next().value as string;
+      binding.completedMessageIds.delete(oldestMessageId);
+    }
+    binding.completedMessageIds.add(assembly.messageId);
+    const key = this.cryptoKey;
+    if (!key) throw webrtcFailure("encryption", "subscription response key is unavailable");
+    const payload = await decryptDaemonPayload(key, assembly.payloads.join(""));
+
+    if (!binding.admitted) {
+      const ack = payload as DaemonHelloAck;
+      if (!ack || ack.protocol !== hostHelloProtocol || !ack.compatibility) {
+        throw webrtcFailure("data-plane", "subscription DataChannel Hello was rejected");
+      }
+      binding.admitted = true;
+      window.clearTimeout(binding.expiryTimeout);
+      binding.resolveReady();
+      recordLiveHarnessEvent("subscription_data_channel", {
+        class: binding.channelClass,
+        state: "ready",
+        label: binding.label,
+        generation: binding.generation,
+        peer_generation: binding.peerGeneration,
+        subscription_id: binding.subscriptionId,
+        ...subscriptionChannelOwnerPayload(binding),
+        remote: false
+      });
+      return;
+    }
+
+    if (!this.isCurrentSubscriptionBinding(binding)) return;
+    if (binding.channelClass === "entity") {
+      const frame = payload as DaemonEntityFrame;
+      recordLiveHarnessEvent("webrtc_entity_frame_assembly", {
+        generation: binding.transportGeneration,
+        label: binding.label,
+        total_bytes: assembly.totalBytes,
+        chunk_count: assembly.chunkCount
+      });
+      if (!this.maybeDropArmedInboundEntityFrame(frame, binding.transportGeneration)) {
+        this.receiveEntityFrame(frame, binding.transportGeneration);
+      }
+      return;
+    }
+
+    const event = payload as DaemonEvent;
+    if (event.type !== "package_event" && event.type !== "event_gap") {
+      throw webrtcFailure("data-plane", "package-event channel received an unsupported event type");
+    }
+    recordLiveHarnessEvent("webrtc_daemon_event_assembly", {
+      generation: binding.transportGeneration,
+      label: binding.label,
+      total_bytes: assembly.totalBytes,
+      chunk_count: assembly.chunkCount
+    });
+    this.receivePackageEvent(binding, event);
+  }
+
+  private isCurrentSubscriptionBinding(binding: SubscriptionChannelBinding): boolean {
+    return (
+      !binding.closed &&
+      binding.transportGeneration === this.peerGeneration &&
+      !binding.owner.closed &&
+      binding.owner.channel === binding &&
+      binding.owner.generation === binding.transportGeneration &&
+      binding.owner.subscriptionId === binding.subscriptionId
+    );
+  }
+
+  private emitSubscriptionChannelFailure(
+    binding: Pick<SubscriptionChannelBindingBase, "subscriptionId"> & { channelClass: "entity" | "package_event" },
+    reason: "reservation_missing" | "rejected" | "expired" | "closed",
+    error: unknown
+  ): void {
+    this.emitLifecycle({
+      type: "subscription-data-channel-failed",
+      channelClass: binding.channelClass,
+      subscriptionId: binding.subscriptionId,
+      reason,
+      detail: errorMessage(error)
+    });
+  }
+
+  private createReservedDataChannel(
+    label: string,
+    channelClass: "entity" | "package_event"
+  ): { channel: RTCDataChannel; key: CryptoKey; transportGeneration: number } {
+    const peerConnection = this.peerConnection;
+    const key = this.cryptoKey;
+    if (!peerConnection || !key || this.dataChannel?.readyState !== "open") {
+      throw webrtcFailure("transport", `${channelClass} reservation arrived without an open control peer`);
+    }
+    try {
+      return {
+        channel: peerConnection.createDataChannel(label, { ordered: true }),
+        key,
+        transportGeneration: this.peerGeneration
+      };
+    } catch (error) {
+      throw webrtcFailure("transport", `${channelClass} DataChannel creation failed: ${errorMessage(error)}`);
+    }
+  }
+
   private async sendEncrypted<T extends DaemonResponse | DaemonHelloAck>(
     plaintext: DaemonRequest | DaemonHello,
     requestType: string,
@@ -880,6 +1241,7 @@ class WebrtcDaemonTransport {
         if (subscription.closed) return;
         subscription.closed = true;
         this.entitySubscriptions.delete(subscription);
+        if (subscription.channel) this.closeSubscriptionChannel(subscription.channel);
         const subscriptionId = subscription.subscriptionId;
         if (subscriptionId) {
           void this.request({ type: "unsubscribe_entities", subscription_id: subscriptionId }).catch(() => undefined);
@@ -897,6 +1259,7 @@ class WebrtcDaemonTransport {
       name: spec.name,
       subjects: spec.subjects,
       listener,
+      resubscribing: false,
       closed: false
     };
     this.packageEventHolders.add(holder);
@@ -908,6 +1271,7 @@ class WebrtcDaemonTransport {
         if (holder.closed) return;
         holder.closed = true;
         this.packageEventHolders.delete(holder);
+        if (holder.channel) this.closeSubscriptionChannel(holder.channel);
         const subscriptionId = holder.subscriptionId;
         if (subscriptionId) {
           void this.request({ type: "unsubscribe_events", subscription_id: subscriptionId }).catch(() => undefined);
@@ -1308,20 +1672,7 @@ class WebrtcDaemonTransport {
     this.retainCompletedMessageId(chunk.message_id);
     const finishedAt = Date.now();
     if (assembly.deliveryKind === "daemon_entity_frame") {
-      recordLiveHarnessEvent("webrtc_entity_frame_assembly", {
-        generation,
-        total_bytes: assembly.totalBytes,
-        chunk_count: assembly.chunkCount,
-        started_at: assembly.startedAt,
-        finished_at: finishedAt,
-        duration_ms: finishedAt - assembly.startedAt
-      });
-      const entityFrame = payload as DaemonEntityFrame;
-      if (this.maybeDropArmedInboundEntityFrame(entityFrame, generation)) {
-        return;
-      }
-      this.receiveEntityFrame(entityFrame, generation);
-      return;
+      throw webrtcFailure("data-plane", "control DataChannel received an entity delivery");
     }
     if (assembly.deliveryKind === "daemon_terminal_frame") {
       throw webrtcFailure("data-plane", "control DataChannel received a terminal delivery");
@@ -1462,6 +1813,9 @@ class WebrtcDaemonTransport {
     for (const binding of [...this.terminalChannels]) {
       this.closeTerminalChannel(binding);
     }
+    for (const binding of [...this.subscriptionChannels]) {
+      this.closeSubscriptionChannel(binding);
+    }
     this.dataChannel = undefined;
     this.peerConnection = undefined;
     this.connectPromise = undefined;
@@ -1478,10 +1832,13 @@ class WebrtcDaemonTransport {
       subscription.subscriptionId = undefined;
       subscription.snapshotSeq = undefined;
       subscription.resubscribing = false;
+      subscription.channel = undefined;
     }
     for (const holder of this.packageEventHolders) {
       holder.generation = undefined;
       holder.subscriptionId = undefined;
+      holder.channel = undefined;
+      holder.resubscribing = false;
     }
 
     if (this.closing) return;
@@ -1544,10 +1901,24 @@ class WebrtcDaemonTransport {
       entity_type: subscription.entityType,
       subscription_id: subscriptionId
     }).then((response) => {
+      if (subscription.closed || subscription.generation !== generation || subscription.subscriptionId !== subscriptionId) {
+        return;
+      }
       if (response.error) throw new Error(response.error.message);
       if (response.kind !== "entity_subscribed") {
         throw new Error(`entity subscription returned ${response.kind}`);
       }
+      const reservation = response.subscription_reservation;
+      if (!reservation) {
+        const error = webrtcFailure("data-plane", "entity subscription response omitted its reservation");
+        this.emitSubscriptionChannelFailure(
+          { channelClass: "entity", subscriptionId },
+          "reservation_missing",
+          error
+        );
+        throw error;
+      }
+      return this.openSubscriptionChannel(subscription, reservation, "entity");
     }).catch((error: unknown) => {
       if (subscription.generation !== generation || subscription.subscriptionId !== subscriptionId) return;
       subscription.rejectReady?.(error);
@@ -1604,7 +1975,31 @@ class WebrtcDaemonTransport {
       if (response.kind !== "event_subscribed") {
         throw new Error(`event subscription returned ${response.kind}`);
       }
-      holder.resolveReady?.();
+      const reservation = response.subscription_reservation;
+      if (!reservation) {
+        const error = webrtcFailure("data-plane", "package-event subscription response omitted its reservation");
+        this.emitSubscriptionChannelFailure(
+          { channelClass: "package_event", subscriptionId },
+          "reservation_missing",
+          error
+        );
+        throw error;
+      }
+      return this.openSubscriptionChannel(holder, reservation, "package_event").then(() => {
+        if (!holder.closed && holder.subscriptionId === subscriptionId && holder.generation === generation) {
+          recordLiveHarnessEvent("webrtc_package_event_subscription", {
+            state: "ready",
+            owner: holder.owner,
+            name: holder.name,
+            subjects: holder.subjects,
+            subscription_id: subscriptionId,
+            generation,
+            reservation_generation: holder.channel?.generation ?? null,
+            label: holder.channel?.label ?? null
+          });
+          holder.resolveReady?.();
+        }
+      });
     }).catch((error: unknown) => {
       if (holder.closed || holder.generation !== generation || holder.subscriptionId !== subscriptionId) {
         return;
@@ -1631,30 +2026,10 @@ class WebrtcDaemonTransport {
       return;
     }
     const event = payload as DaemonEvent;
-    recordLiveHarnessEvent("daemon_event", event);
     if (event.type === "package_event" || event.type === "event_gap") {
-      const holder = Array.from(this.packageEventHolders).find(
-        (candidate) =>
-          !candidate.closed &&
-          candidate.generation === generation &&
-          candidate.subscriptionId === event.subscription_id &&
-          candidate.owner === event.owner &&
-          candidate.name === event.name
-      );
-      if (!holder) {
-        recordLiveHarnessEvent("webrtc_daemon_event_discarded", {
-          reason: "stale_generation_or_subscription",
-          generation,
-          subscription_id: event.subscription_id,
-          owner: event.owner,
-          name: event.name,
-          type: event.type
-        });
-        return;
-      }
-      holder.listener(event);
-      return;
+      throw webrtcFailure("data-plane", "control DataChannel received a package-event delivery");
     }
+    recordLiveHarnessEvent("daemon_event", event);
     if (event.type === "terminal_subscription_closed") {
       const listeners = [...this.terminalStreamListeners].filter(
         (listener) =>
@@ -1678,6 +2053,33 @@ class WebrtcDaemonTransport {
       }
       return;
     }
+  }
+
+  private receivePackageEvent(binding: PackageEventChannelBinding, event: PackageEvent): void {
+    const holder = binding.owner;
+    if (
+      holder.closed ||
+      holder.channel !== binding ||
+      holder.generation !== binding.transportGeneration ||
+      holder.subscriptionId !== event.subscription_id ||
+      holder.owner !== event.owner ||
+      holder.name !== event.name
+    ) {
+      recordLiveHarnessEvent("webrtc_daemon_event_discarded", {
+        reason: "stale_generation_or_subscription",
+        generation: binding.transportGeneration,
+        subscription_id: event.subscription_id,
+        owner: event.owner,
+        name: event.name,
+        type: event.type
+      });
+      return;
+    }
+    recordLiveHarnessEvent("daemon_event", {
+      ...event,
+      label: binding.label
+    });
+    holder.listener(event);
   }
 
   private receiveEntityFrame(frame: DaemonEntityFrame, generation: number): void {
@@ -1720,6 +2122,8 @@ class WebrtcDaemonTransport {
         entity_type: frame.entity_type,
         subscription_id: frame.subscription_id,
         generation,
+        reservation_generation: subscription.channel?.generation ?? null,
+        label: subscription.channel?.label ?? null,
         snapshot_seq: frame.snapshot_seq,
         resync_reason: frame.resync_reason ?? null
       });
@@ -1775,6 +2179,7 @@ class WebrtcDaemonTransport {
         : {})
     });
     try {
+      if (subscription.channel) this.closeSubscriptionChannel(subscription.channel);
       if (previousSubscriptionId) {
         await this.request({ type: "unsubscribe_entities", subscription_id: previousSubscriptionId }).catch(() => undefined);
       }
@@ -1784,6 +2189,29 @@ class WebrtcDaemonTransport {
       await this.startEntitySubscription(subscription, generation);
     } finally {
       subscription.resubscribing = false;
+    }
+  }
+
+  private async resubscribePackageEvent(
+    holder: PackageEventHolder,
+    generation: number
+  ): Promise<void> {
+    if (holder.resubscribing || holder.closed || generation !== this.peerGeneration) return;
+    holder.resubscribing = true;
+    const previousSubscriptionId = holder.subscriptionId;
+    try {
+      if (holder.channel) this.closeSubscriptionChannel(holder.channel);
+      if (previousSubscriptionId) {
+        await this.request({ type: "unsubscribe_events", subscription_id: previousSubscriptionId }).catch(() => undefined);
+      }
+      holder.generation = undefined;
+      holder.subscriptionId = undefined;
+      holder.ready = undefined;
+      holder.resolveReady = undefined;
+      holder.rejectReady = undefined;
+      await this.startPackageEventSubscription(holder, generation);
+    } finally {
+      holder.resubscribing = false;
     }
   }
 }
@@ -1796,6 +2224,17 @@ function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string" && error) return error;
   return "unknown error";
+}
+
+function subscriptionChannelOwnerPayload(binding: SubscriptionChannelBinding): Record<string, unknown> {
+  if (binding.channelClass === "entity") {
+    return { entity_type: binding.owner.entityType };
+  }
+  return {
+    owner: binding.owner.owner,
+    name: binding.owner.name,
+    subjects: binding.owner.subjects
+  };
 }
 
 function parseDeliveryChunk(frame: string): DaemonLocalWebrtcDeliveryChunk {

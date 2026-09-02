@@ -181,7 +181,7 @@ export function createHubTransport({ bridge }: HubTransportOptions): HubControlT
       return existing.subscription.ready;
     }
     if (!bridge.subscribePackageEvents) {
-      throw new Error("package event subscription requires the WebRTC host-control event path");
+      throw new Error("package event subscription requires the dedicated WebRTC event path");
     }
     const subscription = bridge.subscribePackageEvents(spec, emitPackageEvent);
     packageEventSubscriptions.set(key, { refCount: 1, subscription });

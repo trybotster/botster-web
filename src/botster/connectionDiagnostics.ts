@@ -180,6 +180,23 @@ export function webRtcLifecycleDiagnostic(event: WebrtcDaemonLifecycleEvent): Co
         severity: "warning",
         source: "webrtc"
       };
+    case "subscription-data-channel-failed": {
+      const channelName = event.channelClass === "entity" ? "Entity" : "Package-event";
+      const title = event.reason === "reservation_missing"
+        ? `${channelName} reservation missing`
+        : event.reason === "expired"
+          ? `${channelName} DataChannel expired`
+          : event.reason === "closed"
+            ? `${channelName} DataChannel closed`
+            : `${channelName} DataChannel rejected`;
+      return {
+        id: `subscription-data-channel-${event.channelClass}-${event.subscriptionId}`,
+        title,
+        detail: event.detail,
+        severity: event.reason === "closed" ? "warning" : "danger",
+        source: "webrtc"
+      };
+    }
     case "encrypted-stream-ready":
       return {
         id: "webrtc-encrypted-stream",

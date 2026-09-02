@@ -6,7 +6,7 @@
 
 - `src/botster/client.ts` composes UI-tree, entity-store, action, and injected transport seams.
 - `src/botster/hubRuntime.ts` composes the single production WebRTC runtime. A missing bootstrap grant fails closed into a rendered danger diagnostic.
-- `src/botster/webrtcDaemonClient.ts` owns bootstrap refresh, signaling, encrypted ordered data-channel delivery, reconnect generations, and session entity subscriptions.
+- `src/botster/webrtcDaemonClient.ts` owns bootstrap refresh, signaling, encrypted ordered DataChannel delivery, reconnect generations, and browser-created subscription channels.
 - `src/botster/hubTransport.ts` consumes canonical package-surface types from `@trybotster/ui-contract` and projects Hub-sanitized daemon package/navigation responses plus unmodified session DTO fields into canonical entity family `session`. Manifest parsing, admission, and lifecycle classification remain Hub-owned.
 - `src/botster/hubTerminalDataPlane.ts` adapts WebRTC daemon requests and Core `TerminalEvent`s from `daemon_terminal_frame` into `TerminalDataPlaneAttachment`.
 - `src/botster/entities.ts`, `uiNodes.ts`, and `actions.ts` implement the canonical read, render, and semantic-dispatch seams. `uiNodes.ts` imports the Hub-owned declarations from `@trybotster/ui-contract`; it does not redeclare a browser wire grammar.
@@ -15,7 +15,7 @@
 
 ## Production transport
 
-Installed package runtime uses one ordered WebRTC control DataChannel and one ordered DataChannel for each terminal subscription. The first encrypted control-channel send after AES-GCM is `DaemonHello` with independent host and Core terminal compatibility. Control-channel `DaemonLocalWebrtcDeliveryChunk` frames carry correlated daemon responses, unsolicited entity frames, and host `daemon_event`s. The control channel rejects `daemon_terminal_frame` deliveries.
+Installed package runtime uses one ordered WebRTC control DataChannel and one ordered DataChannel for each terminal, entity, and package-event subscription. The first encrypted control-channel send after AES-GCM is `DaemonHello` with independent host and Core terminal compatibility. Control-channel `DaemonLocalWebrtcDeliveryChunk` frames carry correlated daemon responses and small lifecycle `daemon_event`s. The control channel rejects terminal, entity, and package-event data-plane deliveries.
 
 Web sends `Attach` on the control channel. Hub returns a terminal reservation with an opaque label, a subscription generation, and a peer generation. Web then creates one ordered DataChannel with that exact label. Web sends an encrypted `DaemonHello` on the new channel and waits for `DaemonHelloAck`. The admitted channel carries only Core binary input frames and version 2 `daemon_terminal_frame` delivery chunks. Each chunk records `message_id`, `chunk_index`, `chunk_count`, and `total_bytes`. Web encrypts each complete Core frame before it splits the envelope into chunks.
 
@@ -33,13 +33,15 @@ There is no HTTP daemon client, SSE terminal stream, polling, `list_sessions` hy
 
 Terminal data stays outside `HubControlFrame` and outside the shared control DataChannel. After terminal-channel admission, the Hub terminal data plane imports authoritative GHOSTSNP Snapshot bytes into Restty (H0–H5), buffers live output across install, reads mode flags for ModeGatedInput, and never imports Scrollback as renderer state. ReadScreen is an optional supplement only. Restty mounts as a pure renderer (`readOnly`) and does not answer OSC color queries in the browser. A lost PAGE starts a fresh Attach with a new reservation and decoder. `terminal_subscription_closed` arrives only as a control-channel `daemon_event`.
 
-Package events stay on the Hub host-control plane. Hello requires `package_event_subscriptions`. The route-owned connection holds one `subscribe_events` per admitted `DaemonPackage.notice_reactions` descriptor. Owner and name come from the descriptor. A session-scoped descriptor subscribes with the viewed session subject and sends no subscription when no session is viewed. Delivery is unsolicited `daemon_event` (`package_event` / `event_gap`) and never enters terminal channel state. Web calls `resolveNoticeText` from `@trybotster/ui-contract@0.3.3` and maps declared severity onto Ionic toast colour (`info` to `medium`, `warning` to `warning`, `error` to `danger`). Declared `ttl_ms` is clamped to 1,000 through 60,000 milliseconds. `event_gap` records a connection diagnostic and leaves entity state unchanged. Durable package state remains package-entity driven. Reconnect issues a fresh subscription id and does not replay notices.
+Package-event commands stay on the Hub control channel. Hello requires `package_event_subscriptions`. The route-owned connection holds one `subscribe_events` per admitted `DaemonPackage.notice_reactions` descriptor. Owner and name come from the descriptor. A session-scoped descriptor subscribes with the viewed session subject and sends no subscription when no session is viewed. Hub returns a reservation after admission. Web creates the exact ordered channel, sends an encrypted Hello, and accepts only `package_event` or `event_gap` deliveries on that channel. Web calls `resolveNoticeText` from `@trybotster/ui-contract@0.3.3` and maps declared severity onto Ionic toast colour (`info` to `medium`, `warning` to `warning`, `error` to `danger`). Declared `ttl_ms` is clamped to 1,000 through 60,000 milliseconds. `event_gap` records a connection diagnostic and leaves entity state unchanged. Durable package state remains package-entity driven. Reconnect issues a fresh subscription id and does not replay notices.
 
 Published Web event-plane budgets:
 
 | Budget | Value | Source |
 | --- | --- | --- |
 | Terminal delivery assembly | 1 message per terminal channel | `TerminalChannelBinding.assembly` |
+| Entity delivery assembly | 1 message per entity channel | `SubscriptionChannelBinding.assembly` |
+| Package-event delivery assembly | 1 message per package-event channel | `SubscriptionChannelBinding.assembly` |
 | Host request round-trip | 10,000 ms | `localWebrtcResponseChunkLimits.requestTimeoutMs` |
 | Entity reconciliation deadline | 15,000 ms | live packaged harness standing wait ceiling |
 | Terminal echo round-trip deadline | 15,000 ms | live packaged harness standing wait ceiling |
