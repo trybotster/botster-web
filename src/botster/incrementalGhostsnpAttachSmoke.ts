@@ -26,6 +26,7 @@ ResttyWasm.prototype.create = function create(columns, rows, maxScrollback) {
 
 let deliverEvent: ((event: TerminalStreamEvent) => void | Promise<void>) | undefined;
 const requests: DaemonRequest[] = [];
+const sentFrames: Uint8Array[] = [];
 const statuses: TerminalAttachmentStatus[] = [];
 const dataPlane = createHubTerminalDataPlane({
   sessionId,
@@ -67,6 +68,9 @@ const dataPlane = createHubTerminalDataPlane({
       deliverEvent = onEvent;
       return {
         ready: Promise.resolve(),
+        async sendFrame(frame) {
+          sentFrames.push(frame.slice());
+        },
         abandon() {},
         unsubscribe() {}
       };
@@ -136,6 +140,7 @@ type IncrementalAttachSmoke = {
   deliverSnapshot(bytes: number[]): Promise<void>;
   deliverAttaching(): Promise<void>;
   getRequests(): DaemonRequest[];
+  getSentFrames(): number[][];
   getRenderGrid(): { columns: number; rows: number } | null;
   getStatuses(): TerminalAttachmentStatus[];
   readViewportRows(): string[];
@@ -152,6 +157,7 @@ const harness: IncrementalAttachSmoke = {
   writeInput: (data) => Promise.resolve(dataPlane.writeInput(data)),
   resize: (rows, columns) => Promise.resolve(renderer.resize(rows, columns)),
   getRequests: () => requests.map((request) => structuredClone(request)),
+  getSentFrames: () => sentFrames.map((frame) => Array.from(frame)),
   getRenderGrid: () => {
     const state = runtime?.getRenderState(activeHandle);
     return state ? { columns: state.cols, rows: state.rows } : null;

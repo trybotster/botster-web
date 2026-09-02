@@ -63,9 +63,9 @@ reads the generic entity store, including nested row context, while
 Bind-list identity has one materialization order. The direct item-template root
 retains its item-relative `$bind`; after that root becomes a nonblank literal,
 `bind_list_descendant_id` children call the runtime helper exported by
-`@trybotster/ui-contract@0.3.3`. Host DTOs and revision-46 shared conformance
-fixtures come from `@trybotster/hub-test-support@0.1.41`. Core terminal types
-and feature tokens come from `@trybotster/terminal-protocol@0.1.0`. Web does
+`@trybotster/ui-contract@0.3.3`. Host DTOs and revision-48 shared conformance
+fixtures come from `@trybotster/hub-test-support@0.1.43`. Core terminal types,
+binary input encoders, and feature tokens come from `@trybotster/terminal-protocol@0.3.0`. Web does
 not pin a Hub Git revision for terminal compatibility.
 Nested bind lists establish a new nearest-row context. Web never encodes,
 parses, normalizes, indexes, or repairs those identities.

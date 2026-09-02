@@ -4,6 +4,7 @@ import {
   FEATURE_RESIZE,
   FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY,
   FEATURE_TERMINAL_STREAMING,
+  FEATURE_TRANSPORT_DUPLEX_BINARY,
   PROTOCOL as TERMINAL_PROTOCOL,
   PROTOCOL_VERSION as TERMINAL_PROTOCOL_VERSION
 } from "@trybotster/terminal-protocol";
@@ -17,7 +18,6 @@ export const requiredHostFeatures = [
   "terminal_readback",
   "plugin_surface_render",
   "plugin_surface_action",
-  "mode_gated_input",
   "webrtc_terminal_adapter",
   "terminal_subscription_closed",
   "package_event_subscriptions"
@@ -26,6 +26,7 @@ export const requiredHostFeatures = [
 export const requiredTerminalFeatures = [
   FEATURE_TERMINAL_STREAMING,
   FEATURE_RESIZE,
+  FEATURE_TRANSPORT_DUPLEX_BINARY,
   FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY
 ] as const;
 

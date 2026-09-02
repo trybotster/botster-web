@@ -2038,7 +2038,7 @@ assert.doesNotMatch(webrtcDaemonClient, /for_webrtc_terminal_subscription_closed
 assert.match(webrtcDaemonClient, /host drain returned a terminal body/);
 assert.match(hubTerminalDataPlane, /this\.ensureHydration\(attachmentGeneration\)[\s\S]*streamTerminal/);
 assert.match(hubTerminalDataPlane, /progress === "finish"[\s\S]*hydration\.finishReceived = true/);
-assert.match(hubTerminalDataPlane, /hydration\.completed = true[\s\S]*flushPendingResizeBestEffort/);
+assert.match(hubTerminalDataPlane, /this\.pendingResize = \{ rows, columns \}[\s\S]*enqueueTerminalFrame/);
 assert.match(webrtcDaemonClient, /terminalDeliveryEpoch/);
 assert.match(webrtcDaemonClient, /maximumTerminalDeliveryBacklog/);
 assert.match(
@@ -2046,9 +2046,12 @@ assert.match(
   /const shouldReconnect = this\.hasReconnectDemand\(\);\s*this\.emitLifecycle\(\{ type: "data-channel-error" \}\)/
 );
 assert.match(hubTerminalDataPlane, /terminalEventQueue/);
-assert.match(hubTerminalDataPlane, /terminalInputQueue/);
-assert.match(hubTerminalDataPlane, /type: "send_input"/);
-assert.match(hubTerminalDataPlane, /type: "mode_gated_input"/);
+assert.doesNotMatch(hubTerminalDataPlane, /terminalInputQueue/);
+assert.doesNotMatch(hubTerminalDataPlane, /type: "send_input"|type: "mode_gated_input"|type: "resize"/);
+assert.match(hubTerminalDataPlane, /encodeTerminalInput|encodeModeGatedInput|encodeResize/);
+assert.match(webrtcDaemonClient, /response\.terminal_reservation/);
+assert.match(webrtcDaemonClient, /createDataChannel\(reservation\.label, \{ ordered: true \}\)/);
+assert.match(webrtcDaemonClient, /version: 2[\s\S]*delivery_kind: "daemon_terminal_frame"/);
 assert.match(hubTerminalDataPlane, /writeModeGatedInput/);
 assert.match(hubTerminalDataPlane, /decodeDaemonByteEnvelope/);
 assert.match(hubTerminalDataPlane, /bindIncrementalSnapshotReader/);
@@ -2332,7 +2335,7 @@ assert.match(liveProtocolHarnessScript, /waitForTerminalRendererWrite/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalCanvas/);
 assert.match(liveProtocolHarnessScript, /waitForDaemonRequestCount/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
-assert.match(liveProtocolHarnessScript, /type: "send_input"/);
+assert.doesNotMatch(liveProtocolHarnessScript, /type: "send_input"/);
 assert.match(liveProtocolHarnessScript, /typeThroughMountedTerminal\(page, `\$\{echoProbe\}\\n`\)/);
 assert.match(liveProtocolHarnessScript, /callTerminalControl\(page, "focus"\)/);
 assert.match(liveProtocolHarnessScript, /page\.waitForTimeout\(100\)|setTimeout\(r, 100\)/);
@@ -2525,21 +2528,21 @@ const expectedHubDaemonProtocolSha256 = hubTestSupportMetadata.daemon_protocol.s
 const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(
   hubTestSupportMetadata.daemon_protocol.sha256,
-  "14121c4b1aa15f0728040b7ab3cc0189bf7720dc3159d994926d54e0251c5996"
+  "33c0c27941c0e9751342cfdbeb53d27bb4a1225e5ce7f4be280d9f0dc11ad7f3"
 );
 assert.equal(hubTestSupportMetadata.ui_contract.package_version, "0.3.3");
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.41");
-assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.41");
-assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], "0.1.0");
-assert.equal(hubTestSupportMetadata.protocol_version, 7);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 46);
+assert.equal(hubTestSupportMetadata.package_version, "0.1.43");
+assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.43");
+assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], "0.3.0");
+assert.equal(hubTestSupportMetadata.protocol_version, 8);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 48);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
-  `@trybotster/terminal-protocol@0.1.0`,
+  `@trybotster/terminal-protocol@0.3.0`,
   `revision-${hubTestSupportMetadata.conformance_fixture_revision}`
 ];
 for (const document of [readme, architecture]) {
@@ -3197,8 +3200,28 @@ await writeFile(
     CONFORMANCE_FIXTURE_REVISION: terminalProtocolModule.CONFORMANCE_FIXTURE_REVISION,
     FEATURE_TERMINAL_STREAMING: terminalProtocolModule.FEATURE_TERMINAL_STREAMING,
     FEATURE_RESIZE: terminalProtocolModule.FEATURE_RESIZE,
-    FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY: terminalProtocolModule.FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY
-  })};\n`
+    FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY: terminalProtocolModule.FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY,
+    FEATURE_TRANSPORT_DUPLEX_BINARY: terminalProtocolModule.FEATURE_TRANSPORT_DUPLEX_BINARY
+  })};
+const MAX_INPUT_DATA_BYTES = 65535;
+const MAX_MODE_GATED_DATA_BYTES = 65519;
+const MAX_PASTE_CHUNK_DATA_BYTES = 65527;
+const MAX_PASTE_BYTES = 1048576;
+module.exports.MAX_INPUT_DATA_BYTES = MAX_INPUT_DATA_BYTES;
+module.exports.encodeTerminalInput = ${terminalProtocolModule.encodeTerminalInput.toString()};
+module.exports.encodeModeGatedInput = ${terminalProtocolModule.encodeModeGatedInput.toString()};
+module.exports.encodeResize = ${terminalProtocolModule.encodeResize.toString()};
+module.exports.encodePaste = ${terminalProtocolModule.encodePaste.toString()};
+module.exports.encodePasteAbort = ${terminalProtocolModule.encodePasteAbort.toString()};
+function assertOperationId(operation_id) {
+  if (!Number.isInteger(operation_id) || operation_id < 0 || operation_id > 0xffffffff) throw new Error("InvalidOperationId");
+}
+function encodeTerminalInputFrame(kind, body) {
+  const frame = new Uint8Array(4 + body.length);
+  frame[0] = 1; frame[1] = kind;
+  new DataView(frame.buffer).setUint16(2, body.length, false);
+  frame.set(body, 4); return frame;
+}\n`
 );
 await writeFile(
   join(compiledRoot, "node_modules/@trybotster/hub-test-support/package.json"),
@@ -3367,14 +3390,6 @@ function opaqueFinishSnapshotEvent(sessionId, subscriptionId) {
   };
 }
 
-function outputText(data) {
-  return Buffer.from(data).toString("utf8");
-}
-
-function outputsIncludeText(outputs, text) {
-  return outputs.some((data) => outputText(data).includes(text));
-}
-
 const ghostsnpFixturePayloadBase64 = 'R0hPU1RTTlABAAEAmQMAACJWCmBQABgAAAAAAAAAAAAAABcAAABPAAAAAAEAZQAAAAEBAQEAAAAACAAEIgBkAAAAAAQiAGQAAAAABCIAZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//////////AAEBAQEBAQEBAR0fIcxmZrW9aPDGdIGivrKUu4q+t8XIxmZmZtVOU7nKSufFR3qm2sOX2HDAserq6gAAAAAAXwAAhwAArwAA1wAA/wBfAABfXwBfhwBfrwBf1wBf/wCHAACHXwCHhwCHrwCH1wCH/wCvAACvXwCvhwCvrwCv1wCv/wDXAADXXwDXhwDXrwDX1wDX/wD/AAD/XwD/hwD/rwD/1wD//18AAF8AX18Ah18Ar18A118A/19fAF9fX19fh19fr19f119f/1+HAF+HX1+Hh1+Hr1+H11+H/1+vAF+vX1+vh1+vr1+v11+v/1/XAF/XX1/Xh1/Xr1/X11/X/1//AF//X1//h1//r1//11///4cAAIcAX4cAh4cAr4cA14cA/4dfAIdfX4dfh4dfr4df14df/4eHAIeHX4eHh4eHr4eH14eH/4evAIevX4evh4evr4ev14ev/4fXAIfXX4fXh4fXr4fX14fX/4f/AIf/X4f/h4f/r4f/14f//68AAK8AX68Ah68Ar68A168A/69fAK9fX69fh69fr69f169f/6+HAK+HX6+Hh6+Hr6+H16+H/6+vAK+vX6+vh6+vr6+v16+v/6/XAK/XX6/Xh6/Xr6/X16/X/6//AK//X6//h6//r6//16///9cAANcAX9cAh9cAr9cA19cA/9dfANdfX9dfh9dfr9df19df/9eHANeHX9eHh9eHr9eH19eH/9evANevX9evh9evr9ev19ev/9fXANfXX9fXh9fXr9fX19fX/9f/ANf/X9f/h9f/r9f/19f///8AAP8AX/8Ah/8Ar/8A1/8A//9fAP9fX/9fh/9fr/9f1/9f//+HAP+HX/+Hh/+Hr/+H1/+H//+vAP+vX/+vh/+vr/+v1/+v///XAP/XX//Xh//Xr//X1//X////AP//X///h///r///1////wgICBISEhwcHCYmJjAwMDo6OkRERE5OTlhYWGJiYmxsbHZ2doCAgIqKipSUlJ6enqioqLKysry8vMbGxtDQ0Nra2uTk5O7u7gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACADYAAAB7ZgmSAAABAAAAAAAAAAAAAAABAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAwBzAAAAV+gBEVAAGAAAAAAAgADAAAAgAAAACAAAABMAaGlzdG9yeS1iZWZvcmUtbGl2ZQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAAAAAngGPRBQAAAAAA5CDvCgQABgAAAKERil4AAAAAAAAGAAAAAAA+61M+';
 const ghostsnpFixtureBytes = 1176;
 
@@ -3528,6 +3543,7 @@ await runGhostsnpGridCase("after");
   const gridState = new TerminalGridState();
   const probe = terminalGridProbe();
   const requests = [];
+  const terminalFrames = [];
   let releaseSnapshotInstall = () => undefined;
   let markSnapshotInstallEntered = () => undefined;
   let markFinalHubResize = () => undefined;
@@ -3553,14 +3569,6 @@ await runGhostsnpGridCase("after");
     bridge: {
       async request(request) {
         requests.push({ ...request });
-        if (
-          reapplyObserved &&
-          request.type === "resize" &&
-          request.rows === 44 &&
-          request.cols === 124
-        ) {
-          markFinalHubResize();
-        }
         if (request.type === "read_mode_flags") {
           return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
         }
@@ -3594,7 +3602,21 @@ await runGhostsnpGridCase("after");
             state: "attached"
           });
         });
-        return { unsubscribe() {} };
+        return {
+          ready: Promise.resolve(),
+          sendFrame(frame) {
+            terminalFrames.push(new Uint8Array(frame));
+            if (reapplyObserved && frame[1] === 3) {
+              const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+              if (view.getUint16(4, false) === 44 && view.getUint16(6, false) === 124) {
+                markFinalHubResize();
+              }
+            }
+            return Promise.resolve();
+          },
+          abandon() {},
+          unsubscribe() {}
+        };
       }
     }
   });
@@ -3636,10 +3658,11 @@ await runGhostsnpGridCase("after");
   const reappliedAt = probe.rendered.events.findIndex(({ event }) => event === "ghostsnp_grid_reapply");
   assert.equal(reappliedAt > importedAt, true);
   assert.deepEqual(probe.rendered.grid, expected);
-  assert.deepEqual(
-    requests.filter(({ type }) => type === "resize").at(-1),
-    { type: "resize", session_id: sessionId, rows: expected.rows, cols: expected.columns }
-  );
+  const finalResizeFrame = terminalFrames.at(-1);
+  assert.equal(finalResizeFrame[1], 3);
+  const finalResizeView = new DataView(finalResizeFrame.buffer, finalResizeFrame.byteOffset, finalResizeFrame.byteLength);
+  assert.equal(finalResizeView.getUint16(4, false), expected.rows);
+  assert.equal(finalResizeView.getUint16(6, false), expected.columns);
   outputSubscription.unsubscribe();
   await dataPlane.detach();
 }
@@ -6492,660 +6515,157 @@ try {
     globalThis.window.clearTimeout = originalWindowClearTimeout;
   }
 
-  const orderedAttachChannel = createFakeDataChannel();
-  const orderedAttachClient = createWebrtcTestClient([orderedAttachChannel], localWebrtcBootstrapFixture);
-  const orderedAttachTimeline = [];
-  let releaseFirstAttachEvent;
-  let markFirstAttachEventStarted;
-  const firstAttachEventGate = new Promise((resolve) => {
-    releaseFirstAttachEvent = resolve;
-  });
-  const firstAttachEventStarted = new Promise((resolve) => {
-    markFirstAttachEventStarted = resolve;
-  });
-  let attachReadySettled = false;
-  const orderedAttachment = orderedAttachClient.streamTerminal(
-    "ordered-webrtc-session",
-    "ordered-webrtc-subscription",
-    async (event) => {
-      orderedAttachTimeline.push(`start:${event.type}`);
-      if (orderedAttachTimeline.length === 1) {
-        markFirstAttachEventStarted();
-        await firstAttachEventGate;
-      }
-      orderedAttachTimeline.push(`end:${event.type}`);
+  const dedicatedControlChannel = createFakeDataChannel();
+  const dedicatedClient = createWebrtcTestClient(
+    [dedicatedControlChannel],
+    localWebrtcBootstrapFixture
+  );
+  const firstTerminalEvents = [];
+  const firstStream = dedicatedClient.streamTerminal(
+    "dedicated-session-a",
+    "dedicated-subscription-a",
+    (event) => firstTerminalEvents.push(event)
+  );
+  await waitForTestCondition(() => dedicatedControlChannel.sent.length === 1);
+  assert.equal(dedicatedControlChannel.createdDataChannels.length, 1);
+  assert.deepEqual(
+    await decryptTestEnvelope(
+      localWebrtcBootstrapFixture.grant_secret,
+      dedicatedControlChannel.sent[0]
+    ),
+    {
+      type: "attach",
+      session_id: "dedicated-session-a",
+      subscription_id: "dedicated-subscription-a"
     }
   );
-  void orderedAttachment.ready.finally(() => {
-    attachReadySettled = true;
-  });
-  await waitForTestCondition(() => orderedAttachChannel.sent.length === 1);
   await emitChunkedTestResponse(
-    orderedAttachChannel,
+    dedicatedControlChannel,
     localWebrtcBootstrapFixture.grant_secret,
     {
-      kind: "events",
-      events: [
-        {
-          type: "attach_state",
-          session_id: "ordered-webrtc-session",
-          subscription_id: "ordered-webrtc-subscription",
-          state: "attaching"
-        }
-      ]
+      kind: "terminal_reservation",
+      terminal_reservation: {
+        session_id: "dedicated-session-a",
+        subscription_id: "dedicated-subscription-a",
+        generation: 41,
+        peer_generation: 73,
+        label: "opaque-terminal-label-a",
+        expires_in_seconds: 30
+      },
+      events: []
     },
-    { messageId: "ordered-attach-response" }
+    { messageId: "dedicated-reservation-a" }
   );
-  await firstAttachEventStarted;
-  assert.deepEqual(orderedAttachTimeline, ["start:attach_state"]);
-  assert.equal(attachReadySettled, false);
-  releaseFirstAttachEvent();
-  await orderedAttachment.ready;
-  assert.deepEqual(orderedAttachTimeline, [
-    "start:attach_state",
-    "end:attach_state"
-  ]);
-  await emitChunkedTestResponse(
-    orderedAttachChannel,
+  await firstStream.ready;
+  const firstTerminalChannel = dedicatedControlChannel.createdDataChannels[1];
+  assert.equal(firstTerminalChannel.label, "opaque-terminal-label-a");
+  assert.deepEqual(firstTerminalChannel.options, { ordered: true });
+  assert.equal(firstTerminalChannel.helloSent.length, 1);
+  const subscriptionHello = await decryptTestEnvelope(
     localWebrtcBootstrapFixture.grant_secret,
-    {
-      type: "attach_state",
-      session_id: "ordered-webrtc-session",
-      subscription_id: "ordered-webrtc-subscription",
-      state: "attached"
-    },
-    { messageId: "ordered-attached-frame", deliveryKind: "daemon_terminal_frame" }
+    firstTerminalChannel.helloSent[0]
   );
-  await waitForTestCondition(() => orderedAttachTimeline.includes("end:attach_state") && orderedAttachTimeline.length === 4);
-  assert.deepEqual(orderedAttachTimeline, [
-    "start:attach_state",
-    "end:attach_state",
-    "start:attach_state",
-    "end:attach_state"
-  ]);
-  const helloPayload = await decryptTestEnvelope(
-    localWebrtcBootstrapFixture.grant_secret,
-    orderedAttachChannel.helloSent[0]
-  );
-  assert.equal(helloPayload.protocol, "botster-hub-daemon-v1");
-  assert.deepEqual(helloPayload.compatibility.required_features, [...requiredDaemonFeatures]);
-  assert.ok(helloPayload.terminal_compatibility.required_features.includes("snapshot_delivery=ready_then_history"));
-  assert.ok(!helloPayload.compatibility.required_features.includes("snapshot_delivery=ready_then_history"));
-  orderedAttachment.abandon();
+  assert.equal(subscriptionHello.protocol, "botster-hub-daemon-v1");
+  assert.ok(subscriptionHello.terminal_compatibility.required_features.includes("transport=duplex_binary"));
 
-  const terminalQueueChannel = createFakeDataChannel();
-  const terminalQueueClient = createWebrtcTestClient([terminalQueueChannel], localWebrtcBootstrapFixture);
-  const terminalQueueSeen = [];
-  let releaseFirstTerminalConsumer;
-  let markFirstTerminalConsumerStarted;
-  const firstTerminalConsumerGate = new Promise((resolve) => {
-    releaseFirstTerminalConsumer = resolve;
-  });
-  const firstTerminalConsumerStarted = new Promise((resolve) => {
-    markFirstTerminalConsumerStarted = resolve;
-  });
-  const terminalQueueStream = terminalQueueClient.streamTerminal(
-    "queue-session",
-    "queue-subscription",
-    async (event) => {
-      terminalQueueSeen.push(event.type);
-      if (event.type === "snapshot") {
-        markFirstTerminalConsumerStarted();
-        await firstTerminalConsumerGate;
-      }
-    }
+  const inputFrame = terminalProtocolModule.encodeTerminalInput(new TextEncoder().encode("typed"));
+  await firstStream.sendFrame(inputFrame);
+  const outboundChunks = firstTerminalChannel.sent.map((value) => JSON.parse(value));
+  assert.ok(outboundChunks.length >= 1);
+  assert.equal(outboundChunks[0].version, 2);
+  assert.equal(outboundChunks[0].delivery_kind, "daemon_terminal_frame");
+  assert.equal(outboundChunks[0].chunk_index, 0);
+  assert.equal(outboundChunks[0].chunk_count, outboundChunks.length);
+  assert.ok(firstTerminalChannel.sent.every((value) => Buffer.byteLength(value) < 65_536));
+  assert.deepEqual(
+    await decryptTestEnvelopeBytes(
+      localWebrtcBootstrapFixture.grant_secret,
+      outboundChunks.map((chunk) => chunk.payload).join("")
+    ),
+    inputFrame
   );
-  await waitForTestCondition(() => terminalQueueChannel.sent.length === 1);
-  await emitChunkedTestResponse(
-    terminalQueueChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    {
-      kind: "events",
-      events: [
-        {
-          type: "attach_state",
-          session_id: "queue-session",
-          subscription_id: "queue-subscription",
-          state: "attaching"
-        }
-      ]
-    },
-    { messageId: "queue-attach-response" }
+
+  const largeFrame = terminalProtocolModule.encodeTerminalInput(
+    new Uint8Array(terminalProtocolModule.MAX_INPUT_DATA_BYTES).fill(0x61)
   );
-  await terminalQueueStream.ready;
-  await emitChunkedTestResponse(
-    terminalQueueChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    {
-      type: "snapshot",
-      session_id: "queue-session",
-      subscription_id: "queue-subscription",
-      payload_base64: Buffer.from("ready").toString("base64"),
-      payload_encoding: "base64",
-      bytes: 5,
-      phase: "ready"
-    },
-    { messageId: "queue-first-terminal", deliveryKind: "daemon_terminal_frame" }
+  const priorChunkCount = firstTerminalChannel.sent.length;
+  await firstStream.sendFrame(largeFrame);
+  const largeChunks = firstTerminalChannel.sent
+    .slice(priorChunkCount)
+    .map((value) => JSON.parse(value));
+  assert.ok(largeChunks.length > 1);
+  assert.deepEqual(largeChunks.map((chunk) => chunk.chunk_index), [...largeChunks.keys()]);
+  assert.ok(largeChunks.every((chunk) => Buffer.byteLength(chunk.payload) <= 12_288));
+  assert.ok(firstTerminalChannel.sent.every((value) => Buffer.byteLength(value) < 65_536));
+  assert.deepEqual(
+    await decryptTestEnvelopeBytes(
+      localWebrtcBootstrapFixture.grant_secret,
+      largeChunks.map((chunk) => chunk.payload).join("")
+    ),
+    largeFrame
   );
-  await firstTerminalConsumerStarted;
+
   await emitChunkedTestResponse(
-    terminalQueueChannel,
+    firstTerminalChannel,
     localWebrtcBootstrapFixture.grant_secret,
     {
       type: "terminal_output",
-      session_id: "queue-session",
-      subscription_id: "queue-subscription",
-      payload_base64: Buffer.from("live").toString("base64"),
+      session_id: "dedicated-session-a",
+      subscription_id: "dedicated-subscription-a",
+      payload_base64: Buffer.from("live-a").toString("base64"),
       payload_encoding: "base64",
-      bytes: 4
+      bytes: 6
     },
-    { messageId: "queue-second-terminal", deliveryKind: "daemon_terminal_frame" }
+    { messageId: "dedicated-output-a", deliveryKind: "daemon_terminal_frame" }
   );
-  const sentBeforeStatus = terminalQueueChannel.sent.length;
-  const hostStatusWhileBlocked = terminalQueueClient.request({ type: "status" });
-  await waitForTestCondition(() => terminalQueueChannel.sent.length > sentBeforeStatus);
+  await waitForTestCondition(() => firstTerminalEvents.length === 1);
+  assert.equal(firstTerminalEvents[0].type, "terminal_output");
+
+  const secondTerminalEvents = [];
+  const secondStream = dedicatedClient.streamTerminal(
+    "dedicated-session-b",
+    "dedicated-subscription-b",
+    (event) => secondTerminalEvents.push(event)
+  );
+  await waitForTestCondition(() => dedicatedControlChannel.sent.length === 2);
   await emitChunkedTestResponse(
-    terminalQueueChannel,
+    dedicatedControlChannel,
     localWebrtcBootstrapFixture.grant_secret,
     {
-      kind: "status",
-      status: null,
-      sessions: [],
-      packages: [],
-      package_decision: null,
-      lifecycle: [],
-      plugin_tools: [],
-      plugin_tool_result: null,
-      events: [],
-      cleanup: null,
-      coordination: null,
-      error: null
-    },
-    { messageId: "queue-host-status" }
-  );
-  assert.equal((await hostStatusWhileBlocked).kind, "status");
-  assert.deepEqual(terminalQueueSeen, ["attach_state", "snapshot"]);
-  releaseFirstTerminalConsumer();
-  await waitForTestCondition(() => terminalQueueSeen.includes("terminal_output"));
-  assert.deepEqual(terminalQueueSeen, ["attach_state", "snapshot", "terminal_output"]);
-  terminalQueueStream.abandon();
-
-  const previousHarness = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-  globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = { events: [] };
-  try {
-    const generationChannels = [createFakeDataChannel(), createFakeDataChannel()];
-    const generationClient = createWebrtcTestClient(generationChannels, localWebrtcBootstrapFixture);
-    const firstGenerationSeen = [];
-    const secondGenerationSeen = [];
-    let releaseStaleConsumer;
-    let markStaleConsumerStarted;
-    const staleConsumerGate = new Promise((resolve) => {
-      releaseStaleConsumer = resolve;
-    });
-    const staleConsumerStarted = new Promise((resolve) => {
-      markStaleConsumerStarted = resolve;
-    });
-    const firstGenerationStream = generationClient.streamTerminal(
-      "generation-session",
-      "generation-sub-1",
-      async (event) => {
-        firstGenerationSeen.push(event.type);
-        if (event.type === "snapshot") {
-          markStaleConsumerStarted();
-          await staleConsumerGate;
-        }
-      }
-    );
-    await waitForTestCondition(() => generationChannels[0].sent.length === 1);
-    await emitChunkedTestResponse(
-      generationChannels[0],
-      localWebrtcBootstrapFixture.grant_secret,
-      {
-        kind: "events",
-        events: [
-          {
-            type: "attach_state",
-            session_id: "generation-session",
-            subscription_id: "generation-sub-1",
-            state: "attaching"
-          }
-        ]
+      kind: "terminal_reservation",
+      terminal_reservation: {
+        session_id: "dedicated-session-b",
+        subscription_id: "dedicated-subscription-b",
+        generation: 42,
+        peer_generation: 73,
+        label: "opaque-terminal-label-b",
+        expires_in_seconds: 30
       },
-      { messageId: "generation-1-attach" }
-    );
-    await firstGenerationStream.ready;
-    await emitChunkedTestResponse(
-      generationChannels[0],
-      localWebrtcBootstrapFixture.grant_secret,
-      {
-        type: "snapshot",
-        session_id: "generation-session",
-        subscription_id: "generation-sub-1",
-        payload_base64: Buffer.from("stale").toString("base64"),
-        payload_encoding: "base64",
-        bytes: 5,
-        phase: "ready"
-      },
-      { messageId: "generation-1-held", deliveryKind: "daemon_terminal_frame" }
-    );
-    await staleConsumerStarted;
-    const generationControl = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl;
-    assert.equal(generationControl.closeDataChannel(), true);
-    const secondGenerationStream = generationClient.streamTerminal(
-      "generation-session",
-      "generation-sub-2",
-      (event) => {
-        secondGenerationSeen.push(event.type);
-      }
-    );
-    await waitForTestCondition(() => generationChannels[1].sent.length === 1);
-    await emitChunkedTestResponse(
-      generationChannels[1],
-      localWebrtcBootstrapFixture.grant_secret,
-      {
-        kind: "events",
-        events: [
-          {
-            type: "attach_state",
-            session_id: "generation-session",
-            subscription_id: "generation-sub-2",
-            state: "attaching"
-          }
-        ]
-      },
-      { messageId: "generation-2-attach" }
-    );
-    await secondGenerationStream.ready;
-    await emitChunkedTestResponse(
-      generationChannels[1],
-      localWebrtcBootstrapFixture.grant_secret,
-      {
-        type: "terminal_output",
-        session_id: "generation-session",
-        subscription_id: "generation-sub-2",
-        payload_base64: Buffer.from("fresh").toString("base64"),
-        payload_encoding: "base64",
-        bytes: 5
-      },
-      { messageId: "generation-2-live", deliveryKind: "daemon_terminal_frame" }
-    );
-    await waitForTestCondition(() => secondGenerationSeen.includes("terminal_output"));
-    assert.deepEqual(secondGenerationSeen, ["attach_state", "terminal_output"]);
-    assert.equal(firstGenerationSeen.includes("terminal_output"), false);
-    releaseStaleConsumer();
-    firstGenerationStream.abandon();
-    secondGenerationStream.abandon();
-  } finally {
-    if (previousHarness) {
-      globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = previousHarness;
-    } else {
-      delete globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    }
-  }
-
-  const overflowHarnessPrevious = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-  const overflowHarness = { terminal: [] };
-  globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = overflowHarness;
-  let releaseOverflowConsumer = () => undefined;
-  const overflowPrimaryOutput = [];
-  const overflowSiblingOutput = [];
-  try {
-    const overflowChannels = [
-      createFakeDataChannel(),
-      createFakeDataChannel(),
-      createFakeDataChannel(),
-      createFakeDataChannel(),
-      createFakeDataChannel()
-    ];
-    const overflowClient = createWebrtcTestClient(overflowChannels, localWebrtcBootstrapFixture);
-    let overflowPrimaryDeliveries = 0;
-    let markOverflowConsumerStarted;
-    const overflowConsumerGate = new Promise((resolve) => {
-      releaseOverflowConsumer = resolve;
-    });
-    const overflowConsumerStarted = new Promise((resolve) => {
-      markOverflowConsumerStarted = resolve;
-    });
-    const overflowLifecycleBefore = lifecycleEvents.length;
-    const overflowPrimary = createHubTerminalDataPlane({
-      sessionId: "overflow-primary",
-      bridge: overflowClient,
-      testHooks: {
-        async beforeListenerDelivery() {
-          overflowPrimaryDeliveries += 1;
-          if (overflowPrimaryDeliveries < 2) return;
-          if (overflowPrimaryDeliveries === 2) {
-            markOverflowConsumerStarted();
-            await overflowConsumerGate;
-          }
-        }
-      }
-    });
-    const overflowSibling = createHubTerminalDataPlane({
-      sessionId: "overflow-sibling",
-      bridge: overflowClient
-    });
-    bindGhostsnpInstaller(overflowPrimary);
-    bindGhostsnpInstaller(overflowSibling);
-    const overflowPrimarySubscription = overflowPrimary.subscribeOutput((data) => {
-      overflowPrimaryOutput.push(outputText(data));
-    });
-    const overflowSiblingSubscription = overflowSibling.subscribeOutput((data) => {
-      overflowSiblingOutput.push(outputText(data));
-    });
-    const firstOverflowAttaches = await waitForAttachRequests(
-      overflowChannels[0],
-      localWebrtcBootstrapFixture.grant_secret,
-      ["overflow-primary", "overflow-sibling"]
-    );
-    await serveWebrtcRequests(
-      overflowChannels[0],
-      localWebrtcBootstrapFixture.grant_secret,
-      "overflow-gen1",
-      new Set()
-    );
-    const firstPrimaryAttach = firstOverflowAttaches.find((request) => request.session_id === "overflow-primary");
-    const firstSiblingAttach = firstOverflowAttaches.find((request) => request.session_id === "overflow-sibling");
-    assert.equal(Boolean(firstPrimaryAttach?.subscription_id), true);
-    assert.equal(Boolean(firstSiblingAttach?.subscription_id), true);
-    await emitChunkedTestResponse(
-      overflowChannels[0],
-      localWebrtcBootstrapFixture.grant_secret,
-      {
-        type: "snapshot",
-        session_id: "overflow-primary",
-        subscription_id: firstPrimaryAttach.subscription_id,
-        payload_base64: Buffer.from("hold").toString("base64"),
-        payload_encoding: "base64",
-        bytes: 4,
-        phase: "ready"
-      },
-      { messageId: "overflow-held", deliveryKind: "daemon_terminal_frame" }
-    );
-    await overflowConsumerStarted;
-    for (let index = 0; index < localWebrtcResponseChunkLimits.maximumTerminalDeliveryBacklog; index += 1) {
-      await emitChunkedTestResponse(
-        overflowChannels[0],
-        localWebrtcBootstrapFixture.grant_secret,
-        {
-          type: "terminal_output",
-          session_id: "overflow-primary",
-          subscription_id: firstPrimaryAttach.subscription_id,
-          payload_base64: Buffer.from("qx").toString("base64"),
-          payload_encoding: "base64",
-          bytes: 2
-        },
-        { messageId: `overflow-queued-${index}`, deliveryKind: "daemon_terminal_frame" }
-      );
-    }
-    await waitFor(() =>
-      lifecycleEvents.slice(overflowLifecycleBefore).some((event) => event.detail?.type === "data-channel-error")
-    );
-    await waitFor(() =>
-      overflowHarness.terminal.filter((entry) => entry.kind === "transport_lost").length >= 2
-    );
-    const recoveredDeadline = Date.now() + 5_000;
-    let recoveredChannel;
-    while (Date.now() < recoveredDeadline) {
-      recoveredChannel = overflowChannels.slice(1).find((channel) => channel.helloSent?.length > 0);
-      if (recoveredChannel) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    if (!recoveredChannel) {
-      throw new Error("overflow recovery never sent a replacement Hello");
-    }
-    const recoveredReadyDeadline = Date.now() + 5_000;
-    while (
-      Date.now() < recoveredReadyDeadline &&
-      !lifecycleEvents.slice(overflowLifecycleBefore).some((event) => event.detail?.type === "encrypted-stream-ready")
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    if (!lifecycleEvents.slice(overflowLifecycleBefore).some((event) => event.detail?.type === "encrypted-stream-ready")) {
-      throw new Error("overflow recovery never reached encrypted-stream-ready");
-    }
-    const recoveredSeen = new Set();
-    const recoveredAttaches = await waitForAttachRequests(
-      recoveredChannel,
-      localWebrtcBootstrapFixture.grant_secret,
-      ["overflow-primary", "overflow-sibling"],
-      {
-        excludeSubscriptionIds: new Set([
-          firstPrimaryAttach.subscription_id,
-          firstSiblingAttach.subscription_id
-        ]),
-        serve: async () =>
-          serveWebrtcRequests(
-            recoveredChannel,
-            localWebrtcBootstrapFixture.grant_secret,
-            "overflow-recovered",
-            recoveredSeen
-          )
-      }
-    );
-    const recoveredPrimaryAttach = recoveredAttaches.find((request) => request.session_id === "overflow-primary");
-    const recoveredSiblingAttach = recoveredAttaches.find((request) => request.session_id === "overflow-sibling");
-    assert.equal(Boolean(recoveredPrimaryAttach?.subscription_id), true);
-    assert.equal(Boolean(recoveredSiblingAttach?.subscription_id), true);
-    assert.notEqual(recoveredPrimaryAttach.subscription_id, firstPrimaryAttach.subscription_id);
-    assert.notEqual(recoveredSiblingAttach.subscription_id, firstSiblingAttach.subscription_id);
-    await completeRecoveredOverflowHydration(
-      recoveredChannel,
-      localWebrtcBootstrapFixture.grant_secret,
-      recoveredPrimaryAttach,
-      "new-a",
-      "overflow-recovered-primary"
-    );
-    await completeRecoveredOverflowHydration(
-      recoveredChannel,
-      localWebrtcBootstrapFixture.grant_secret,
-      recoveredSiblingAttach,
-      "new-b",
-      "overflow-recovered-sibling"
-    );
-    const recoveredOutputDeadline = Date.now() + 5_000;
-    while (Date.now() < recoveredOutputDeadline) {
-      await serveWebrtcRequests(
-        recoveredChannel,
-        localWebrtcBootstrapFixture.grant_secret,
-        "overflow-recovered-host",
-        recoveredSeen
-      );
-      if (overflowPrimaryOutput.includes("new-a") && overflowSiblingOutput.includes("new-b")) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    assert.equal(overflowPrimaryOutput.includes("qx"), false);
-    assert.equal(overflowSiblingOutput.includes("qx"), false);
-    assert.equal(overflowPrimaryOutput.includes("new-a"), true);
-    assert.equal(overflowSiblingOutput.includes("new-b"), true);
-    assert.equal(
-      overflowHarness.terminal.some((entry) => (
-        entry.kind === "attach" &&
-        entry.payload?.subscription_id === recoveredPrimaryAttach.subscription_id
-      )),
-      true
-    );
-    assert.equal(
-      overflowHarness.terminal.some((entry) => (
-        entry.kind === "attach" &&
-        entry.payload?.subscription_id === recoveredSiblingAttach.subscription_id
-      )),
-      true
-    );
-    overflowPrimarySubscription.unsubscribe();
-    overflowSiblingSubscription.unsubscribe();
-  } finally {
-    releaseOverflowConsumer();
-    if (overflowHarnessPrevious) {
-      globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = overflowHarnessPrevious;
-    } else {
-      delete globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    }
-  }
-
-  const staleAttachChannel = createFakeDataChannel();
-  const staleAttachClient = createWebrtcTestClient([staleAttachChannel], localWebrtcBootstrapFixture);
-  const staleAttachEvents = [];
-  const staleAttachment = staleAttachClient.streamTerminal(
-    "stale-attach-session",
-    "stale-attach-subscription",
-    (event) => staleAttachEvents.push(event)
-  );
-  await waitForTestCondition(() => staleAttachChannel.sent.length === 1);
-  staleAttachment.unsubscribe();
-  await waitForTestCondition(() => staleAttachChannel.sent.length === 2);
-  await emitChunkedTestResponse(
-    staleAttachChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    {
-      kind: "events",
-      events: [{
-        type: "attach_state",
-        session_id: "stale-attach-session",
-        subscription_id: "stale-attach-subscription",
-        state: "attaching"
-      }]
+      events: []
     },
-    { messageId: "stale-attach-response" }
+    { messageId: "dedicated-reservation-b" }
   );
+  await secondStream.ready;
+  const secondTerminalChannel = dedicatedControlChannel.createdDataChannels[2];
+  firstStream.abandon();
+  assert.equal(firstTerminalChannel.readyState, "closed");
+  assert.equal(secondTerminalChannel.readyState, "open");
   await emitChunkedTestResponse(
-    staleAttachChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    {
-      type: "snapshot",
-      session_id: "stale-attach-session",
-      subscription_id: "stale-attach-subscription",
-      payload_base64: Buffer.from("must-not-render").toString("base64"),
-      payload_encoding: "base64",
-      bytes: 15,
-      phase: "ready"
-    },
-    { messageId: "stale-snapshot-frame", deliveryKind: "daemon_terminal_frame" }
-  );
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(staleAttachEvents, []);
-
-  const bodyOnAttachChannel = createFakeDataChannel();
-  const bodyOnAttachClient = createWebrtcTestClient([bodyOnAttachChannel], localWebrtcBootstrapFixture);
-  const bodyOnAttach = bodyOnAttachClient.streamTerminal(
-    "body-attach-session",
-    "body-attach-subscription",
-    () => undefined
-  );
-  await waitForTestCondition(() => bodyOnAttachChannel.sent.length === 1);
-  const bodyOnAttachRejection = assert.rejects(
-    bodyOnAttach.ready,
-    (error) => error instanceof WebrtcDaemonClientError && /attach response contained a terminal body/.test(error.message)
-  );
-  await emitChunkedTestResponse(
-    bodyOnAttachChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    {
-      kind: "events",
-      events: [{
-        type: "snapshot",
-        session_id: "body-attach-session",
-        subscription_id: "body-attach-subscription",
-        payload_base64: "YQ==",
-        payload_encoding: "base64",
-        bytes: 1
-      }]
-    },
-    { messageId: "body-on-attach-response" }
-  );
-  await bodyOnAttachRejection;
-
-  const siblingChannel = createFakeDataChannel();
-  const siblingClient = createWebrtcTestClient([siblingChannel], localWebrtcBootstrapFixture);
-  const siblingA = [];
-  const siblingB = [];
-  const streamA = siblingClient.streamTerminal("session-a", "sub-a", (event) => { siblingA.push(event.type); });
-  const streamB = siblingClient.streamTerminal("session-b", "sub-b", (event) => { siblingB.push(event.type); });
-  await waitForTestCondition(() => siblingChannel.sent.length === 2);
-  await emitChunkedTestResponse(
-    siblingChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    { kind: "events", events: [{ type: "attach_state", session_id: "session-a", subscription_id: "sub-a", state: "attaching" }] },
-    { messageId: "sibling-a-attach" }
-  );
-  await emitChunkedTestResponse(
-    siblingChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    { kind: "events", events: [{ type: "attach_state", session_id: "session-b", subscription_id: "sub-b", state: "attaching" }] },
-    { messageId: "sibling-b-attach" }
-  );
-  await streamA.ready;
-  await streamB.ready;
-  await emitChunkedTestResponse(
-    siblingChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    {
-      type: "terminal_subscription_closed",
-      session_id: "session-a",
-      subscription_id: "sub-a",
-      generation: 1,
-      reason: "core_adapter_closed"
-    },
-    { messageId: "sibling-a-close", deliveryKind: "daemon_event" }
-  );
-  await emitChunkedTestResponse(
-    siblingChannel,
+    secondTerminalChannel,
     localWebrtcBootstrapFixture.grant_secret,
     {
       type: "terminal_output",
-      session_id: "session-b",
-      subscription_id: "sub-b",
+      session_id: "dedicated-session-b",
+      subscription_id: "dedicated-subscription-b",
       payload_base64: Buffer.from("live-b").toString("base64"),
       payload_encoding: "base64",
       bytes: 6
     },
-    { messageId: "sibling-b-live", deliveryKind: "daemon_terminal_frame" }
+    { messageId: "dedicated-output-b", deliveryKind: "daemon_terminal_frame" }
   );
-  await waitForTestCondition(() => siblingB.includes("terminal_output"));
-  assert.deepEqual(siblingA, ["attach_state", "terminal_subscription_closed"]);
-  assert.deepEqual(siblingB, ["attach_state", "terminal_output"]);
-  streamA.abandon();
-  const replacedA = siblingClient.streamTerminal("session-a", "sub-a", (event) => { siblingA.push(`n+1:${event.type}:${event.generation ?? ""}`); });
-  await waitForTestCondition(() => siblingChannel.sent.length === 3);
-  await emitChunkedTestResponse(
-    siblingChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    { kind: "events", events: [{ type: "attach_state", session_id: "session-a", subscription_id: "sub-a", state: "attaching" }] },
-    { messageId: "sibling-a-prime-attach" }
-  );
-  await replacedA.ready;
-  await emitChunkedTestResponse(
-    siblingChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    {
-      type: "terminal_subscription_closed",
-      session_id: "session-a",
-      subscription_id: "sub-a",
-      generation: 1,
-      reason: "core_adapter_closed"
-    },
-    { messageId: "stale-generation-close", deliveryKind: "daemon_event" }
-  );
-  await emitChunkedTestResponse(
-    siblingChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    {
-      type: "terminal_output",
-      session_id: "session-a",
-      subscription_id: "sub-a",
-      payload_base64: Buffer.from("prime").toString("base64"),
-      payload_encoding: "base64",
-      bytes: 5
-    },
-    { messageId: "a-prime-live", deliveryKind: "daemon_terminal_frame" }
-  );
-  await waitForTestCondition(() => siblingA.includes("n+1:terminal_output:"));
-  assert.equal(siblingA.includes("n+1:terminal_subscription_closed:1"), false);
-  streamA.abandon();
-  streamB.abandon();
-  replacedA.abandon();
+  await waitForTestCondition(() => secondTerminalEvents.length === 1);
+  assert.equal(secondTerminalEvents[0].type, "terminal_output");
+  secondStream.abandon();
 
   const mixedFamilyEntries = [
     {
@@ -7298,86 +6818,6 @@ await mountedWebrtcBridge.attach(
 );
 mountedInputListener("webrtc-mounted-input\n");
 assert.deepEqual(mountedWebrtcInputs, ["webrtc-mounted-input\n"]);
-
-globalThis.window = {
-  location: { origin: "http://127.0.0.1:41821" },
-  setTimeout,
-  clearTimeout
-};
-try {
-  const mountedRealWebrtcDataChannel = createFakeDataChannel();
-  installAutoHelloAck(mountedRealWebrtcDataChannel, localWebrtcBootstrapFixture.grant_secret);
-  const mountedRealWebrtcBridgeClient = createWebrtcDaemonClient({
-    bootstrap: localWebrtcBootstrapFixture,
-    peerConnectionFactory: () => createFakePeerConnection(mountedRealWebrtcDataChannel),
-    fetchImpl: async () => ({
-      ok: true,
-      json: async () => ({
-        payload: {
-          local_webrtc_answer: {
-            grant_id: "grant-test",
-            answer: { type: "answer", sdp: "answer-sdp" }
-          }
-        }
-      })
-    })
-  });
-  let mountedRealWebrtcWritePromise;
-  const mountedRealWebrtcDataPlane = {
-    sessionId: activeHubSessionId,
-    writeInput(data) {
-      mountedRealWebrtcWritePromise = mountedRealWebrtcBridgeClient.request({
-        type: "send_input",
-        session_id: activeHubSessionId,
-        data
-      });
-      return mountedRealWebrtcWritePromise;
-    },
-    subscribeOutput() {
-      return { unsubscribe() {} };
-    },
-    detach() {}
-  };
-  let mountedRealWebrtcInputListener;
-  const mountedRealWebrtcBridge = new DefaultTerminalViewBridge(() => ({
-    mount() {},
-    onInput(listener) {
-      mountedRealWebrtcInputListener = listener;
-      return { unsubscribe() {} };
-    },
-    write() {},
-    resize() {},
-    focus() {},
-    destroy() {}
-  }));
-  await mountedRealWebrtcBridge.mount(
-    { dataset: {} },
-    { sessionId: activeHubSessionId, renderer: "restty" }
-  );
-  await mountedRealWebrtcBridge.attach(
-    { sessionId: activeHubSessionId, renderer: "restty" },
-    mountedRealWebrtcDataPlane
-  );
-  mountedRealWebrtcInputListener("webrtc-mounted-input\n");
-  const mountedRealWebrtcInputRequest = await waitForEncryptedRequest(
-    mountedRealWebrtcDataChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    (request) => request.type === "send_input" && request.data === "webrtc-mounted-input\n"
-  );
-  assert.deepEqual(mountedRealWebrtcInputRequest, {
-    type: "send_input",
-    session_id: activeHubSessionId,
-    data: "webrtc-mounted-input\n"
-  });
-  await emitChunkedTestResponse(mountedRealWebrtcDataChannel,
-    localWebrtcBootstrapFixture.grant_secret,
-    { kind: "events", events: [] }
-  );
-  await mountedRealWebrtcWritePromise;
-  await mountedRealWebrtcBridge.detach({ sessionId: activeHubSessionId, renderer: "restty" });
-} finally {
-  globalThis.window = originalWindow;
-}
 
 const realTransport = createHubTransport({ bridge });
 const realFrames = [];
@@ -8544,7 +7984,7 @@ const outdatedConformanceDiagnostic = compatibilityDiagnosticsFromFrame({
   }
 })[0];
 assert.equal(outdatedConformanceDiagnostic.title, "Hub conformance fixture mismatch");
-assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 46/);
+assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 48/);
 
 const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -8571,12 +8011,11 @@ assert.deepEqual(requiredDaemonFeatures, [
   "terminal_readback",
   "plugin_surface_render",
   "plugin_surface_action",
-  "mode_gated_input",
   "webrtc_terminal_adapter",
   "terminal_subscription_closed",
   "package_event_subscriptions"
 ]);
-assert.equal(minimumConformanceFixtureRevision, 46);
+assert.equal(minimumConformanceFixtureRevision, 48);
 assert.equal(minimumDaemonProtocolVersion, 1);
 assert.equal(compatibleDescriptorDiagnostics.length, 1);
 assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
@@ -8592,7 +8031,7 @@ const protocolSixHubStatusRecord = {
     protocol: "botster-hub-daemon-v1",
     protocol_version: 6,
     features: [...requiredDaemonFeatures],
-    conformance_fixture_revision: 46
+    conformance_fixture_revision: 48
   }
 };
 const protocolSixDiagnostics = compatibilityDiagnosticsFromFrame({
@@ -8610,7 +8049,7 @@ assert.match(protocolSixDiagnostics[0].detail, /Protocol botster-hub-daemon-v1 v
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /mismatch/i.test(diagnostic.title)), false);
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /unsupported_feature/.test(JSON.stringify(diagnostic))), false);
 assert.equal(minimumDaemonProtocolVersion, 1);
-assert.equal(minimumConformanceFixtureRevision, 46);
+assert.equal(minimumConformanceFixtureRevision, 48);
 
 // Pre-envelope conformance revisions fail closed under the current revision floor.
 const preGhostsnpDiagnostics = compatibilityDiagnosticsFromFrame({
@@ -8788,1086 +8227,19 @@ assert.match(
   /Package configuration failed field: pipeline_mode: select_option_unknown: invalid-mode/
 );
 
-const terminalDataPlane = createHubTerminalDataPlane({
-  bridge,
-  sessionId: activeHubSessionId
-});
-const terminalInstalls = bindGhostsnpInstaller(terminalDataPlane);
-const terminalOutput = [];
-const terminalStatuses = [];
-const terminalStatusSubscription = terminalDataPlane.subscribeStatus((status) => terminalStatuses.push(status));
-const terminalSubscription = terminalDataPlane.subscribeOutput((data) => terminalOutput.push(data));
-await waitFor(() => outputsIncludeText(terminalOutput, "botster-web-production-ready"));
-await terminalDataPlane.writeInput("ping\n");
-await terminalDataPlane.resize(24, 80);
-const detachRequestsBeforeListenerClose = bridgeRequests.filter((request) => request.type === "detach").length;
-terminalSubscription.unsubscribe();
-assert.equal(
-  bridgeRequests.filter((request) => request.type === "detach").length,
-  detachRequestsBeforeListenerClose
-);
-assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
-await terminalDataPlane.detach();
-terminalStatusSubscription.unsubscribe();
-assert.equal(bridgeTerminalStreams.some((stream) => stream.sessionId === activeHubSessionId), true);
-assert.equal(bridgeRequests.some((request) => request.type === "send_input" && request.data === "ping\n"), true);
-assert.equal(bridgeRequests.some((request) => request.type === "resize" && request.rows === 24 && request.cols === 80), true);
-assert.equal(
-  bridgeRequests.filter((request) => request.type === "detach").length,
-  detachRequestsBeforeListenerClose
-);
-assert.equal(bridgeRequests.some((request) => request.type === "read_mode_flags"), true);
-assert.equal(bridgeTerminalStreams.filter((stream) => stream.unsubscribed === true).length, 1);
-assert.equal(terminalInstalls.length >= 1, true);
-assert.equal(terminalInstalls[0].byteLength, ghostsnpFixtureBytes);
-assert.deepEqual(terminalOutput.map(outputText), [
-  "botster-web-production-ready\r\n"
-]);
-assert.equal(outputsIncludeText(terminalOutput, "botster-web-production-ready"), true);
-assert.equal(terminalStatuses.some((status) => status.state === "attached" && status.message.includes("incremental snapshot")), true);
-
+// The data plane gates frames on hydration and places the latest resize before queued input.
 {
-  const detachRequests = [];
-  const plane = createHubTerminalDataPlane({
-    sessionId: "last-listener-one-detach",
-    subscriptionId: "last-listener-one-detach-sub",
-    bridge: {
-      async request(request) {
-        if (request.type === "detach") {
-          detachRequests.push({ ...request, source: "request" });
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(sessionId, subscriptionId) {
-        return {
-          unsubscribe() {
-            detachRequests.push({
-              type: "detach",
-              session_id: sessionId,
-              subscription_id: subscriptionId,
-              source: "stream"
-            });
-          },
-          abandon() {}
-        };
-      }
-    }
-  });
-  const output = plane.subscribeOutput(() => undefined);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  output.unsubscribe();
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  assert.deepEqual(
-    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [{ type: "detach", subscription_id: "last-listener-one-detach-sub", source: "request" }]
-  );
-  const statuses = [];
-  plane.subscribeStatus((status) => statuses.push(status));
-  const statusCountBeforeDetach = statuses.length;
-  await plane.detach();
-  await plane.detach();
-  assert.deepEqual(
-    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [{ type: "detach", subscription_id: "last-listener-one-detach-sub", source: "request" }]
-  );
-  assert.equal(statuses.length, statusCountBeforeDetach);
-}
-
-{
-  // Two admitted generations on one plane and subscription_id each send Detach.
-  const detachRequests = [];
-  let streamCount = 0;
-  const subscriptionId = "two-generation-sub";
-  const plane = createHubTerminalDataPlane({
-    sessionId: "two-generation-one-detach-each",
-    subscriptionId,
-    bridge: {
-      async request(request) {
-        if (request.type === "detach") {
-          detachRequests.push({ ...request, source: "request" });
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(sessionId, nextSubscriptionId) {
-        streamCount += 1;
-        return {
-          abandon() {},
-          unsubscribe() {
-            detachRequests.push({
-              type: "detach",
-              session_id: sessionId,
-              subscription_id: nextSubscriptionId,
-              source: "stream"
-            });
-          }
-        };
-      }
-    }
-  });
-  const first = plane.subscribeOutput(() => undefined);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  first.unsubscribe();
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  const second = plane.subscribeOutput(() => undefined);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  second.unsubscribe();
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  assert.equal(streamCount, 2);
-  assert.deepEqual(
-    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [
-      { type: "detach", subscription_id: subscriptionId, source: "request" },
-      { type: "detach", subscription_id: subscriptionId, source: "request" }
-    ]
-  );
-  await plane.detach();
-  await plane.detach();
-  assert.equal(detachRequests.length, 2);
-}
-
-{
-  const detachRequests = [];
-  const sessionId = "bridge-unmount-one-detach";
-  const subscriptionId = "bridge-unmount-one-detach-sub";
-  const plane = createHubTerminalDataPlane({
-    sessionId,
-    subscriptionId,
-    bridge: {
-      async request(request) {
-        if (request.type === "detach") {
-          detachRequests.push({ ...request, source: "request" });
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(nextSessionId, nextSubscriptionId) {
-        return {
-          unsubscribe() {
-            detachRequests.push({
-              type: "detach",
-              session_id: nextSessionId,
-              subscription_id: nextSubscriptionId,
-              source: "stream"
-            });
-          },
-          abandon() {}
-        };
-      }
-    }
-  });
-  const viewBridge = new DefaultTerminalViewBridge(() => ({
-    mount() {},
-    attachDataPlane(dataPlane) {
-      return dataPlane.subscribeOutput(() => undefined);
-    },
-    onInput() {
-      return { unsubscribe() {} };
-    },
-    write() {},
-    resize() {},
-    focus() {},
-    destroy() {}
-  }));
-  const descriptor = { sessionId, renderer: "restty" };
-  await viewBridge.mount(
-    {
-      dataset: {},
-      childNodes: [],
-      appendChild() {
-        return undefined;
-      },
-      remove() {
-        return undefined;
-      },
-      querySelector() {
-        return null;
-      }
-    },
-    descriptor
-  );
-  await viewBridge.attach(descriptor, plane);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  await viewBridge.unmount(descriptor);
-  for (let i = 0; i < 4; i += 1) await flushMicrotasks();
-  assert.deepEqual(
-    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [{ type: "detach", subscription_id: subscriptionId, source: "request" }]
-  );
-}
-
-{
-  const detachRequests = [];
-  const sessionId = "bridge-unmount-reject-cleanup";
-  const subscriptionId = "bridge-unmount-reject-cleanup-sub";
-  let outputUnsubscribed = false;
-  let destroyCount = 0;
-  const plane = createHubTerminalDataPlane({
-    sessionId,
-    subscriptionId,
-    bridge: {
-      async request(request) {
-        if (request.type === "detach") {
-          detachRequests.push({ ...request, source: "request" });
-          throw new Error("detach transport lost");
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(nextSessionId, nextSubscriptionId) {
-        return {
-          unsubscribe() {
-            detachRequests.push({
-              type: "detach",
-              session_id: nextSessionId,
-              subscription_id: nextSubscriptionId,
-              source: "stream"
-            });
-          },
-          abandon() {}
-        };
-      }
-    }
-  });
-  const viewBridge = new DefaultTerminalViewBridge(() => ({
-    mount() {},
-    attachDataPlane(dataPlane) {
-      const subscription = dataPlane.subscribeOutput(() => undefined);
-      return {
-        unsubscribe() {
-          outputUnsubscribed = true;
-          subscription.unsubscribe();
-        }
-      };
-    },
-    onInput() {
-      return { unsubscribe() {} };
-    },
-    write() {},
-    resize() {},
-    focus() {},
-    destroy() {
-      destroyCount += 1;
-    }
-  }));
-  const descriptor = { sessionId, renderer: "restty" };
-  const container = {
-    dataset: {},
-    childNodes: [],
-    appendChild() {
-      return undefined;
-    },
-    remove() {
-      return undefined;
-    },
-    querySelector() {
-      return null;
-    }
-  };
-  await viewBridge.mount(container, descriptor);
-  await viewBridge.attach(descriptor, plane);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  await assert.rejects(viewBridge.unmount(descriptor), /detach transport lost/);
-  for (let i = 0; i < 4; i += 1) await flushMicrotasks();
-  assert.equal(outputUnsubscribed, true);
-  assert.equal(destroyCount, 1);
-  assert.deepEqual(
-    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [{ type: "detach", subscription_id: subscriptionId, source: "request" }]
-  );
-  await viewBridge.unmount(descriptor);
-  assert.equal(destroyCount, 1);
-  assert.equal(detachRequests.length, 1);
-}
-
-{
-  const detachRequests = [];
-  const sessionId = "bridge-unmount-destroy-reject";
-  const firstSubscriptionId = "bridge-unmount-destroy-reject-sub";
-  const laterSubscriptionId = "bridge-unmount-destroy-reject-later-sub";
-  let rendererGeneration = 0;
-  let firstDestroyCount = 0;
-  let laterDestroyCount = 0;
-  function makePlane(subscriptionId) {
-    return createHubTerminalDataPlane({
-      sessionId,
-      subscriptionId,
-      bridge: {
-        async request(request) {
-          if (request.type === "detach") {
-            detachRequests.push({ ...request, source: "request", subscription_id: subscriptionId });
-            throw new Error("detach transport lost");
-          }
-          return { kind: "events", events: [] };
-        },
-        streamTerminal(nextSessionId, nextSubscriptionId) {
-          return {
-            unsubscribe() {
-              detachRequests.push({
-                type: "detach",
-                session_id: nextSessionId,
-                subscription_id: nextSubscriptionId,
-                source: "stream"
-              });
-            },
-            abandon() {}
-          };
-        }
-      }
-    });
-  }
-  function makeContainer() {
-    return {
-      dataset: {},
-      childNodes: [],
-      appendChild() {
-        return undefined;
-      },
-      remove() {
-        return undefined;
-      },
-      querySelector() {
-        return null;
-      }
-    };
-  }
-  const viewBridge = new DefaultTerminalViewBridge(() => {
-    const generation = rendererGeneration;
-    rendererGeneration += 1;
-    return {
-      mount() {},
-      attachDataPlane(dataPlane) {
-        return dataPlane.subscribeOutput(() => undefined);
-      },
-      onInput() {
-        return { unsubscribe() {} };
-      },
-      write() {},
-      resize() {},
-      focus() {},
-      async destroy() {
-        if (generation === 0) {
-          firstDestroyCount += 1;
-          throw new Error("renderer destroy failed");
-        }
-        laterDestroyCount += 1;
-      }
-    };
-  });
-  const descriptor = { sessionId, renderer: "restty" };
-  const firstPlane = makePlane(firstSubscriptionId);
-  await viewBridge.mount(makeContainer(), descriptor);
-  await viewBridge.attach(descriptor, firstPlane);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  await assert.rejects(viewBridge.unmount(descriptor), /detach transport lost/);
-  await viewBridge.unmount(descriptor);
-  assert.equal(firstDestroyCount, 1);
-  assert.deepEqual(
-    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [{ type: "detach", subscription_id: firstSubscriptionId, source: "request" }]
-  );
-  const laterPlane = makePlane(laterSubscriptionId);
-  await viewBridge.mount(makeContainer(), descriptor);
-  await viewBridge.attach(descriptor, laterPlane);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  await assert.rejects(viewBridge.unmount(descriptor), /detach transport lost/);
-  assert.equal(laterDestroyCount, 1);
-  assert.equal(firstDestroyCount, 1);
-  assert.deepEqual(
-    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [
-      { type: "detach", subscription_id: firstSubscriptionId, source: "request" },
-      { type: "detach", subscription_id: laterSubscriptionId, source: "request" }
-    ]
-  );
-}
-
-{
-  // In-flight snapshot hold + public detach: exactly one Detach for the held id.
-  const detachRequests = [];
-  const subscriptionId = "inflight-hold-one-detach-sub";
-  let releaseHold = () => undefined;
-  const hold = new Promise((resolve) => {
-    releaseHold = resolve;
-  });
-  let streamAbandoned = 0;
-  let streamUnsubscribed = 0;
-  let readerCancelCount = 0;
-  const plane = createHubTerminalDataPlane({
-    sessionId: "inflight-hold-one-detach",
-    subscriptionId,
-    testHooks: {
-      beforeSnapshotInstall: () => hold
-    },
-    bridge: {
-      async request(request) {
-        if (request.type === "detach") {
-          detachRequests.push({ ...request, source: "request" });
-        }
-        if (request.type === "read_mode_flags") {
-          return {
-            kind: "read_mode_flags",
-            mode_flags: testModeFlags("inflight-hold-one-detach"),
-            events: []
-          };
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(sessionId, nextSubscriptionId, onEvent) {
-        queueMicrotask(() => {
-          onEvent({
-            type: "attach_state",
-            session_id: sessionId,
-            subscription_id: nextSubscriptionId,
-            state: "attaching"
-          });
-          onEvent({
-            type: "snapshot",
-            session_id: sessionId,
-            subscription_id: nextSubscriptionId,
-            payload_base64: ghostsnpFixturePayloadBase64,
-            payload_encoding: "base64",
-            bytes: ghostsnpFixtureBytes
-          });
-        });
-        return {
-          abandon() {
-            streamAbandoned += 1;
-          },
-          unsubscribe() {
-            streamUnsubscribed += 1;
-            detachRequests.push({
-              type: "detach",
-              session_id: sessionId,
-              subscription_id: nextSubscriptionId,
-              source: "stream"
-            });
-          }
-        };
-      }
-    }
-  });
-  plane.bindIncrementalSnapshotReader(() => ({
-    read() {
-      return "ready";
-    },
-    cancel() {
-      readerCancelCount += 1;
-    }
-  }));
-  plane.subscribeOutput(() => undefined);
-  for (let i = 0; i < 20; i += 1) await flushMicrotasks();
-  await plane.detach();
-  releaseHold();
-  for (let i = 0; i < 20; i += 1) await flushMicrotasks();
-  await plane.detach();
-  assert.deepEqual(
-    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [{ type: "detach", subscription_id: subscriptionId, source: "request" }]
-  );
-  assert.equal(streamUnsubscribed, 0);
-  assert.equal(streamAbandoned >= 1, true);
-  assert.equal(readerCancelCount >= 1, true);
-}
-
-{
-  // Stale attach abort + public detach share one Detach owner.
-  const detachRequests = [];
-  const subscriptionId = "stale-attach-one-detach-sub";
-  let releaseHold = () => undefined;
-  const hold = new Promise((resolve) => {
-    releaseHold = resolve;
-  });
-  const plane = createHubTerminalDataPlane({
-    sessionId: "stale-attach-one-detach",
-    subscriptionId,
-    testHooks: {
-      beforeAttachAcquire: () => hold
-    },
-    bridge: {
-      async request(request) {
-        if (request.type === "detach") {
-          detachRequests.push({ ...request, source: "request" });
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(sessionId, nextSubscriptionId) {
-        return {
-          abandon() {},
-          unsubscribe() {
-            detachRequests.push({
-              type: "detach",
-              session_id: sessionId,
-              subscription_id: nextSubscriptionId,
-              source: "stream"
-            });
-          }
-        };
-      }
-    }
-  });
-  plane.subscribeOutput(() => undefined);
-  for (let i = 0; i < 4; i += 1) await flushMicrotasks();
-  await plane.detach();
-  releaseHold();
-  for (let i = 0; i < 12; i += 1) await flushMicrotasks();
-  await plane.detach();
-  assert.deepEqual(
-    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [{ type: "detach", subscription_id: subscriptionId, source: "request" }]
-  );
-}
-
-{
-  // subscribeOutput after public detach must not send a second Detach for the same id.
-  const detachRequests = [];
-  const subscriptionId = "no-resurrect-detach-sub";
-  const plane = createHubTerminalDataPlane({
-    sessionId: "no-resurrect-detach",
-    subscriptionId,
-    bridge: {
-      async request(request) {
-        if (request.type === "detach") {
-          detachRequests.push({ ...request, source: "request" });
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(sessionId, nextSubscriptionId) {
-        return {
-          abandon() {},
-          unsubscribe() {
-            detachRequests.push({
-              type: "detach",
-              session_id: sessionId,
-              subscription_id: nextSubscriptionId,
-              source: "stream"
-            });
-          }
-        };
-      }
-    }
-  });
-  plane.subscribeOutput(() => undefined);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  await plane.detach();
-  plane.subscribeOutput(() => undefined);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  await plane.detach();
-  assert.deepEqual(
-    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [{ type: "detach", subscription_id: subscriptionId, source: "request" }]
-  );
-}
-
-{
-  // Remount uses a new subscription id and one Detach per id.
-  const detachRequests = [];
-  const firstSubscriptionId = "remount-first-sub";
-  const secondSubscriptionId = "remount-second-sub";
-  function makeRemountPlane(subscriptionId) {
-    return createHubTerminalDataPlane({
-      sessionId: "remount-new-sub",
-      subscriptionId,
-      bridge: {
-        async request(request) {
-          if (request.type === "detach") {
-            detachRequests.push({ ...request, source: "request" });
-          }
-          return { kind: "events", events: [] };
-        },
-        streamTerminal() {
-          return { abandon() {}, unsubscribe() {} };
-        }
-      }
-    });
-  }
-  const first = makeRemountPlane(firstSubscriptionId);
-  first.subscribeOutput(() => undefined);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  await first.detach();
-  const second = makeRemountPlane(secondSubscriptionId);
-  second.subscribeOutput(() => undefined);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  await second.detach();
-  assert.notEqual(firstSubscriptionId, secondSubscriptionId);
-  assert.deepEqual(
-    detachRequests.map((entry) => ({ type: entry.type, subscription_id: entry.subscription_id, source: entry.source })),
-    [
-      { type: "detach", subscription_id: firstSubscriptionId, source: "request" },
-      { type: "detach", subscription_id: secondSubscriptionId, source: "request" }
-    ]
-  );
-}
-
-{
-  // Never-resolving Detach hang: same Promise.race path as production, shortened bound.
-  // Sibling progress uses the same bridge; only the target Detach hangs.
-  const sharedRequests = [];
-  const sessionId = "detach-hang-bound";
-  const subscriptionId = "detach-hang-bound-sub";
-  const siblingSessionId = "detach-hang-sibling";
-  const siblingSubscriptionId = "detach-hang-sibling-sub";
-  let hangDetachAttempts = 0;
-  let readerCancelCount = 0;
-  let destroyCount = 0;
-  const siblingOutput = [];
-  const sharedBridge = {
-    async request(request) {
-      sharedRequests.push({ ...request });
-      if (request.type === "detach" && request.session_id === sessionId) {
-        hangDetachAttempts += 1;
-        return new Promise(() => undefined);
-      }
-      if (request.type === "read_screen" && request.session_id === siblingSessionId) {
-        return {
-          kind: "read_screen",
-          read_screen: { session_id: siblingSessionId, text: "sibling-alive" },
-          events: []
-        };
-      }
-      return { kind: "events", events: [] };
-    },
-    streamTerminal(nextSessionId, nextSubscriptionId, onEvent) {
-      if (nextSessionId === siblingSessionId && typeof onEvent === "function") {
-        queueMicrotask(() => {
-          onEvent(liveOutputEvent(nextSessionId, nextSubscriptionId, "sibling-live\r\n"));
-        });
-      }
-      return { abandon() {}, unsubscribe() {} };
-    }
-  };
-  const plane = createHubTerminalDataPlane({
-    sessionId,
-    subscriptionId,
-    testHooks: {
-      detachRequestBoundMs: 25
-    },
-    bridge: sharedBridge
-  });
-  plane.bindIncrementalSnapshotReader(() => ({
-    read() {
-      return "ready";
-    },
-    cancel() {
-      readerCancelCount += 1;
-    }
-  }));
-  const siblingPlane = createHubTerminalDataPlane({
-    sessionId: siblingSessionId,
-    subscriptionId: siblingSubscriptionId,
-    bridge: sharedBridge
-  });
-  siblingPlane.subscribeOutput((data) => siblingOutput.push(data));
-  const viewBridge = new DefaultTerminalViewBridge(() => ({
-    mount() {},
-    attachDataPlane(dataPlane) {
-      return dataPlane.subscribeOutput(() => undefined);
-    },
-    onInput() {
-      return { unsubscribe() {} };
-    },
-    write() {},
-    resize() {},
-    focus() {},
-    destroy() {
-      destroyCount += 1;
-    }
-  }));
-  const descriptor = { sessionId, renderer: "restty" };
-  await viewBridge.mount(
-    {
-      dataset: {},
-      childNodes: [],
-      appendChild() {
-        return undefined;
-      },
-      remove() {
-        return undefined;
-      },
-      querySelector() {
-        return null;
-      }
-    },
-    descriptor
-  );
-  await viewBridge.attach(descriptor, plane);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  const startedAt = Date.now();
-  await assert.rejects(viewBridge.unmount(descriptor), /detach request exceeded 25ms bound/);
-  const elapsedMs = Date.now() - startedAt;
-  assert.equal(elapsedMs < 125, true, `unmount hung for ${elapsedMs}ms`);
-  assert.equal(hangDetachAttempts, 1);
-  assert.equal(destroyCount, 1);
-  assert.equal(readerCancelCount >= 1, true);
-  const siblingScreen = await siblingPlane.readScreen();
-  assert.equal(siblingScreen?.text, "sibling-alive");
-  await viewBridge.unmount(descriptor);
-  assert.equal(hangDetachAttempts, 1);
-  assert.equal(
-    sharedRequests.filter((request) => request.type === "detach" && request.session_id === sessionId).length,
-    1
-  );
-  assert.equal(
-    sharedRequests.filter((request) => request.type === "detach" && request.session_id === siblingSessionId).length,
-    0
-  );
-  assert.equal(
-    sharedRequests.some((request) => request.type === "shutdown_session"),
-    false
-  );
-}
-
-const readbackRequests = [];
-const readScreenResponses = [
-  { session_id: activeHubSessionId, text: "hub-owned-screen\r\n" },
-  null,
-  undefined,
-  { session_id: "replacement-session", text: "wrong screen\r\n" }
-];
-const captureSnapshotResponses = [
-  { session_id: activeHubSessionId, rows: 24, cols: 80, payload_format: null, payload_bytes: 512 },
-  { session_id: activeHubSessionId, rows: 30, cols: 100, payload_bytes: 0 },
-  null,
-  undefined,
-  { session_id: "replacement-session", rows: 24, cols: 80, payload_bytes: 512 }
-];
-const readbackOutput = [];
-const readbackDataPlane = createHubTerminalDataPlane({
-  sessionId: activeHubSessionId,
-  bridge: {
-    async request(request) {
-      if (request.type === "list_sessions") {
-        return {
-          kind: "sessions",
-          sessions: [{ session_id: activeHubSessionId, lifecycle: "running" }],
-          events: []
-        };
-      }
-      readbackRequests.push(request);
-      if (request.type === "read_screen") {
-        const read_screen = readScreenResponses.shift();
-        return read_screen === undefined ? { kind: "read_screen", events: [] } : { kind: "read_screen", read_screen, events: [] };
-      }
-      if (request.type === "capture_snapshot") {
-        const capture_snapshot = captureSnapshotResponses.shift();
-        return capture_snapshot === undefined
-          ? { kind: "capture_snapshot", events: [] }
-          : { kind: "capture_snapshot", capture_snapshot, events: [] };
-      }
-      return { kind: "events", events: [] };
-    },
-    streamTerminal() {
-      return { unsubscribe() {} };
-    }
-  }
-});
-readbackDataPlane.subscribeOutput((data) => readbackOutput.push(data));
-await flushMicrotasks();
-assert.deepEqual(await readbackDataPlane.readScreen(), {
-  session_id: activeHubSessionId,
-  text: "hub-owned-screen\r\n"
-});
-assert.deepEqual(await readbackDataPlane.captureSnapshot(), {
-  session_id: activeHubSessionId,
-  rows: 24,
-  cols: 80,
-  payload_format: null,
-  payload_bytes: 512
-});
-assert.equal(await readbackDataPlane.readScreen(), undefined);
-assert.deepEqual(await readbackDataPlane.captureSnapshot(), {
-  session_id: activeHubSessionId,
-  rows: 30,
-  cols: 100,
-  payload_bytes: 0
-});
-assert.equal(await readbackDataPlane.readScreen(), undefined);
-assert.equal(await readbackDataPlane.captureSnapshot(), undefined);
-assert.equal(await readbackDataPlane.readScreen(), undefined);
-assert.equal(await readbackDataPlane.captureSnapshot(), undefined);
-assert.equal(await readbackDataPlane.captureSnapshot(), undefined);
-assert.deepEqual(readbackRequests, [
-  { type: "read_screen", session_id: activeHubSessionId },
-  { type: "capture_snapshot", session_id: activeHubSessionId },
-  { type: "read_screen", session_id: activeHubSessionId },
-  { type: "capture_snapshot", session_id: activeHubSessionId },
-  { type: "read_screen", session_id: activeHubSessionId },
-  { type: "capture_snapshot", session_id: activeHubSessionId },
-  { type: "read_screen", session_id: activeHubSessionId },
-  { type: "capture_snapshot", session_id: activeHubSessionId },
-  { type: "capture_snapshot", session_id: activeHubSessionId }
-]);
-assert.deepEqual(readbackOutput, []);
-
-for (const readbackType of ["read_screen", "capture_snapshot"]) {
-  let resolveReadback;
-  const staleDataPlane = createHubTerminalDataPlane({
-    sessionId: activeHubSessionId,
-    bridge: {
-      async request(request) {
-        if (request.type === readbackType) {
-          return new Promise((resolve) => {
-            resolveReadback = resolve;
-          });
-        }
-        if (request.type === "list_sessions") {
-          return {
-            kind: "sessions",
-            sessions: [{ session_id: activeHubSessionId, lifecycle: "running" }],
-            events: []
-          };
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal() {
-        return { unsubscribe() {} };
-      }
-    }
-  });
-  const pendingReadback = readbackType === "read_screen"
-    ? staleDataPlane.readScreen()
-    : staleDataPlane.captureSnapshot();
-  await flushMicrotasks();
-  await staleDataPlane.detach();
-  const replacementSubscription = staleDataPlane.subscribeOutput(() => undefined);
-  await flushMicrotasks();
-  resolveReadback(readbackType === "read_screen"
-    ? {
-        kind: "read_screen",
-        read_screen: { session_id: activeHubSessionId, text: "late screen\r\n" },
-        events: []
-      }
-    : {
-        kind: "capture_snapshot",
-        capture_snapshot: { session_id: activeHubSessionId, rows: 24, cols: 80, payload_bytes: 512 },
-        events: []
-      });
-  assert.equal(await pendingReadback, undefined, "late reply from a previous attachment must be discarded after re-subscribe");
-  replacementSubscription.unsubscribe();
-}
-
-for (const [events, readScreenText, expectedLive] of [
-  [lateAttachHistoryConformanceFixture.history_then_live, lateAttachHistoryConformanceFixture.read_screen_text, ["live-after-attach\r\n"]],
-  [lateAttachHistoryConformanceFixture.no_history_then_live, lateAttachHistoryConformanceFixture.no_history_read_screen_text, ["live-without-history\r\n"]]
-]) {
-  const sessionId = events[0].session_id;
-  const subscriptionId = events[0].subscription_id;
-  const fixtureOutput = [];
-  const fixtureTimeline = [];
-  const fixtureInstalls = [];
-  const streamEvents = events;
-  const fixtureDataPlane = createHubTerminalDataPlane({
-    sessionId,
-    subscriptionId,
-    bridge: {
-      async request(request) {
-        if (request.type === "list_sessions") {
-          return {
-            kind: "sessions",
-            sessions: [{ session_id: sessionId, lifecycle: "running" }],
-            events: []
-          };
-        }
-        if (request.type === "read_mode_flags") {
-          return {
-            kind: "read_mode_flags",
-            mode_flags: testModeFlags(sessionId),
-            events: []
-          };
-        }
-        if (request.type === "read_screen") {
-          return {
-            kind: "read_screen",
-            read_screen: { session_id: sessionId, text: readScreenText },
-            events: []
-          };
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(nextSessionId, nextSubscriptionId, onEvent) {
-        assert.equal(nextSessionId, sessionId);
-        assert.equal(nextSubscriptionId, subscriptionId);
-        streamEvents.forEach(onEvent);
-        return { unsubscribe() {} };
-      }
-    }
-  });
-  const streamSnapshotCount = streamEvents.filter((event) => event.type === "snapshot").length;
-  fixtureDataPlane.bindIncrementalSnapshotReader(() => {
-    let frame = 0;
-    return {
-      read(bytes) {
-        fixtureInstalls.push(Uint8Array.from(bytes));
-        frame += 1;
-        if (frame === 1) return "ready";
-        if (frame === streamSnapshotCount) return "finish";
-        return "page";
-      },
-      cancel() {}
-    };
-  });
-  fixtureDataPlane.subscribeStatus((status) => {
-    fixtureTimeline.push(`status:${status.state}:${status.message}`);
-  });
-  fixtureDataPlane.subscribeOutput((data) => {
-    fixtureOutput.push(data);
-    fixtureTimeline.push(`output:${outputText(data)}`);
-  });
-  await waitFor(() => fixtureOutput.length === expectedLive.length);
-  assert.deepEqual(fixtureOutput.map(outputText), expectedLive);
-  assert.equal(fixtureInstalls.length, streamEvents.filter((event) => event.type === "snapshot").length);
-  assert.equal(fixtureInstalls[0].byteLength > 0, true);
-
-  const attachingIndex = fixtureTimeline.findIndex((entry) => entry.startsWith("status:attaching:"));
-  const restoredIndex = fixtureTimeline.findIndex((entry) => entry.includes("snapshot READY"));
-  const protocolAttachedIndex = fixtureTimeline.findIndex((entry) =>
-    entry.startsWith("status:attached:")
-  );
-  const liveOutputIndex = fixtureTimeline.findIndex((entry) => entry === `output:${expectedLive.at(-1)}`);
-  assert.equal(attachingIndex >= 0, true);
-  assert.equal(restoredIndex > attachingIndex, true);
-  assert.equal(protocolAttachedIndex > restoredIndex, true);
-  assert.equal(liveOutputIndex > protocolAttachedIndex, true);
-  // The snapshot reader restores history. The output listener receives only live bytes.
-  assert.equal(outputsIncludeText(fixtureOutput, "history-before-live"), false);
-}
-
-// A snapshot frame that the Restty reader rejects fails closed.
-const invalidSnapshotStatuses = [];
-const invalidSnapshotOutput = [];
-const invalidSnapshotDataPlane = createHubTerminalDataPlane({
-  sessionId: "invalid-snapshot-session",
-  subscriptionId: "invalid-snapshot-subscription",
-  bridge: {
-    async request() {
-      return { kind: "events", events: [] };
-    },
-    streamTerminal(sessionId, subscriptionId, onEvent) {
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-      onEvent({
-        type: "snapshot",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        payload_base64: "AP9HVFkB",
-        payload_encoding: "base64",
-        bytes: 6
-      });
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-      onEvent(liveOutputEvent(sessionId, subscriptionId, "should-not-flush\r\n"));
-      return { unsubscribe() {} };
-    }
-  }
-});
-invalidSnapshotDataPlane.bindIncrementalSnapshotReader(() => ({
-  read() {
-    throw new Error("Restty rejected the snapshot READY frame.");
-  },
-  cancel() {}
-}));
-invalidSnapshotDataPlane.subscribeStatus((status) => invalidSnapshotStatuses.push(status));
-invalidSnapshotDataPlane.subscribeOutput((data) => invalidSnapshotOutput.push(data));
-await waitFor(() => invalidSnapshotStatuses.some((status) => status.state === "failed"));
-assert.deepEqual(invalidSnapshotOutput, []);
-assert.equal(invalidSnapshotStatuses.some((status) => /Restty rejected/i.test(status.message)), true);
-
-// Buffer live until GHOSTSNP FINISH. ReadModeFlags stays in the background.
-const delayedHydrationOutput = [];
-const delayedHydrationInstalls = [];
-let delayedHydrationEvent;
-const delayedHydrationDataPlane = createHubTerminalDataPlane({
-  sessionId: "delayed-hydration-session",
-  subscriptionId: "delayed-hydration-subscription",
-  bridge: {
-    async request(request) {
-      if (request.type === "list_sessions") {
-        return {
-          kind: "sessions",
-          sessions: [{ session_id: "delayed-hydration-session", lifecycle: "running" }],
-          events: []
-        };
-      }
-      if (request.type === "read_mode_flags") {
-        return { kind: "read_mode_flags", mode_flags: testModeFlags("delayed-hydration-session"), events: [] };
-      }
-      if (request.type === "read_screen") {
-        return {
-          kind: "read_screen",
-          read_screen: { session_id: "delayed-hydration-session", text: "visible-screen\r\n" },
-          events: []
-        };
-      }
-      return { kind: "events", events: [] };
-    },
-    streamTerminal(sessionId, subscriptionId, onEvent) {
-      delayedHydrationEvent = onEvent;
-      return { unsubscribe() {} };
-    }
-  }
-});
-bindGhostsnpInstaller(delayedHydrationDataPlane, delayedHydrationInstalls);
-delayedHydrationDataPlane.subscribeOutput((data) => delayedHydrationOutput.push(data));
-await waitFor(() => typeof delayedHydrationEvent === "function");
-await delayedHydrationEvent({
-  type: "attach_state",
-  session_id: "delayed-hydration-session",
-  subscription_id: "delayed-hydration-subscription",
-  state: "attaching"
-});
-await delayedHydrationEvent({
-  type: "snapshot",
-  session_id: "delayed-hydration-session",
-  subscription_id: "delayed-hydration-subscription",
-  payload_base64: ghostsnpFixturePayloadBase64,
-  payload_encoding: "base64",
-  bytes: ghostsnpFixtureBytes
-});
-await delayedHydrationEvent(liveOutputEvent("delayed-hydration-session", "delayed-hydration-subscription", "live-one\r\n"));
-await delayedHydrationEvent(liveOutputEvent("delayed-hydration-session", "delayed-hydration-subscription", "live-two\r\n"));
-assert.deepEqual(delayedHydrationOutput, []);
-assert.equal(delayedHydrationInstalls.length, 1);
-await delayedHydrationEvent({
-  type: "snapshot",
-  session_id: "delayed-hydration-session",
-  subscription_id: "delayed-hydration-subscription",
-  payload_base64: Buffer.from("finish").toString("base64"),
-  payload_encoding: "base64",
-  bytes: 6
-});
-assert.deepEqual(delayedHydrationOutput, []);
-assert.equal(delayedHydrationInstalls.length, 2);
-await delayedHydrationEvent({
-  type: "attach_state",
-  session_id: "delayed-hydration-session",
-  subscription_id: "delayed-hydration-subscription",
-  state: "attached"
-});
-await waitFor(() => delayedHydrationOutput.length === 2);
-assert.deepEqual(delayedHydrationOutput.map(outputText), ["live-one\r\n", "live-two\r\n"]);
-
-// Attach readiness serializes the attach batch, GHOSTSNP install, live output, and resize.
-{
-  const sessionId = "ordered-attach-session";
-  const subscriptionId = "ordered-attach-subscription";
+  const sessionId = "dedicated-data-plane-session";
+  const subscriptionId = "dedicated-data-plane-subscription";
+  const frames = [];
   const requests = [];
-  const outputs = [];
-  const timeline = [];
   let terminalEvent;
-  let resolveAttachReady;
-  let releaseSnapshotInstall;
-  let markSnapshotInstallStarted;
-  const attachReady = new Promise((resolve) => {
-    resolveAttachReady = resolve;
-  });
-  const snapshotInstallGate = new Promise((resolve) => {
-    releaseSnapshotInstall = resolve;
-  });
-  const snapshotInstallStarted = new Promise((resolve) => {
-    markSnapshotInstallStarted = resolve;
-  });
-
-  const dataPlane = createHubTerminalDataPlane({
+  const plane = createHubTerminalDataPlane({
     sessionId,
     subscriptionId,
     bridge: {
       async request(request) {
-        requests.push({ ...request });
+        requests.push(request);
         if (request.type === "read_mode_flags") {
           return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
         }
@@ -9881,1209 +8253,61 @@ assert.deepEqual(delayedHydrationOutput.map(outputText), ["live-one\r\n", "live-
         assert.equal(nextSubscriptionId, subscriptionId);
         terminalEvent = onEvent;
         return {
-          ready: attachReady,
+          ready: Promise.resolve(),
+          sendFrame(frame) {
+            frames.push(new Uint8Array(frame));
+            return Promise.resolve();
+          },
           abandon() {},
           unsubscribe() {}
         };
       }
     }
   });
-  dataPlane.bindIncrementalSnapshotReader(() => {
-    let frame = 0;
-    return {
-      async read(bytes) {
-        assert.equal(bytes.byteLength, ghostsnpFixtureBytes);
-        frame += 1;
-        if (frame === 2) return "finish";
-        timeline.push("snapshot-install-start");
-        markSnapshotInstallStarted();
-        await snapshotInstallGate;
-        timeline.push("snapshot-install-complete");
-        return "ready";
-      },
-      cancel() {}
-    };
-  });
-  const outputSubscription = dataPlane.subscribeOutput((data) => {
-    const text = outputText(data);
-    outputs.push(text);
-    timeline.push(`output:${text.trim()}`);
-  });
-  await waitFor(() => typeof terminalEvent === "function");
-
-  const resize = dataPlane.resize(33, 111);
+  bindGhostsnpInstaller(plane);
+  plane.subscribeOutput(() => undefined);
+  await waitForTestCondition(() => typeof terminalEvent === "function");
+  const input = plane.writeInput("typed-after-resize");
+  const resize = plane.resize(33, 111);
   await flushMicrotasks();
-  assert.equal(requests.some((request) => request.type === "resize"), false);
-
-  const deliverAttachBatch = (async () => {
-    await terminalEvent({
-      type: "attach_state",
-      session_id: sessionId,
-      subscription_id: subscriptionId,
-      state: "attaching"
-    });
-    await terminalEvent({
-      type: "snapshot",
-      session_id: sessionId,
-      subscription_id: subscriptionId,
-      payload_base64: ghostsnpFixturePayloadBase64,
-      payload_encoding: "base64",
-      bytes: ghostsnpFixtureBytes
-    });
-    await terminalEvent({
-      type: "snapshot",
-      session_id: sessionId,
-      subscription_id: subscriptionId,
-      payload_base64: ghostsnpFixturePayloadBase64,
-      payload_encoding: "base64",
-      bytes: ghostsnpFixtureBytes
-    });
-    await terminalEvent({
-      type: "attach_state",
-      session_id: sessionId,
-      subscription_id: subscriptionId,
-      state: "attached"
-    });
-    await terminalEvent(liveOutputEvent(sessionId, subscriptionId, "ordered-live-one\r\n"));
-    await terminalEvent(liveOutputEvent(sessionId, subscriptionId, "ordered-live-two\r\n"));
-    resolveAttachReady();
-  })();
-
-  await snapshotInstallStarted;
-  assert.deepEqual(outputs, []);
-  assert.equal(requests.some((request) => request.type === "resize"), false);
-  releaseSnapshotInstall();
-  await deliverAttachBatch;
-  await waitFor(() => requests.some((request) => request.type === "resize"));
-  await resize;
-
-  assert.deepEqual(outputs, ["ordered-live-one\r\n", "ordered-live-two\r\n"]);
-  assert.deepEqual(
-    requests.find((request) => request.type === "resize"),
-    { type: "resize", session_id: sessionId, rows: 33, cols: 111 }
-  );
-  assert.deepEqual(timeline, [
-    "snapshot-install-start",
-    "snapshot-install-complete",
-    "output:ordered-live-one",
-    "output:ordered-live-two"
-  ]);
-  outputSubscription.unsubscribe();
-}
-
-// Incremental attach keeps READY visible while it holds live output, input, and resize.
-{
-  const sessionId = "incremental-barrier-session";
-  const subscriptionId = "incremental-barrier-subscription";
-  const requests = [];
-  const outputs = [];
-  const statuses = [];
-  const frames = [];
-  let terminalEvent;
-  let frame = 0;
-  let readers = 0;
-  const dataPlane = createHubTerminalDataPlane({
-    sessionId,
-    subscriptionId,
-    bridge: {
-      async request(request) {
-        requests.push({ ...request });
-        if (request.type === "read_mode_flags") {
-          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
-        }
-        if (request.type === "read_screen") {
-          return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
-        }
-        if (request.type === "mode_gated_input") {
-          return {
-            kind: "mode_gated_input",
-            mode_gated_input: {
-              ...testModeFlags(sessionId),
-              admitted: true,
-              bytes_written: request.data.length,
-              error_kind: null
-            },
-            events: []
-          };
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(nextSessionId, nextSubscriptionId, onEvent) {
-        assert.equal(nextSessionId, sessionId);
-        assert.equal(nextSubscriptionId, subscriptionId);
-        terminalEvent = onEvent;
-        return { unsubscribe() {}, abandon() {} };
-      }
-    }
-  });
-  dataPlane.bindIncrementalSnapshotReader(() => {
-    readers += 1;
-    return {
-      read(bytes) {
-        frames.push([...bytes]);
-        frame += 1;
-        if (frame === 1) return "ready";
-        if (frame === 4) return "finish";
-        return "page";
-      },
-      cancel() {}
-    };
-  });
-  dataPlane.subscribeStatus((status) => statuses.push({ ...status }));
-  dataPlane.subscribeOutput((bytes) => outputs.push(outputText(bytes)));
-  await waitFor(() => typeof terminalEvent === "function");
-
-  await terminalEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-  const firstInput = dataPlane.writeInput("input-one");
-  const modeInput = dataPlane.writeModeGatedInput({ encode: () => "mode-input" });
-  const secondInput = dataPlane.writeInput("input-two");
-  const firstResize = dataPlane.resize(30, 100);
-  const secondResize = dataPlane.resize(40, 120);
-  await terminalEvent({
-    type: "snapshot",
-    session_id: sessionId,
-    subscription_id: subscriptionId,
-    payload_base64: Buffer.from([1]).toString("base64"),
-    payload_encoding: "base64",
-    bytes: 1
-  });
-  await terminalEvent(liveOutputEvent(sessionId, subscriptionId, "live-after-barrier"));
-  assert.equal(statuses.at(-1).state, "attaching");
-  assert.equal(statuses.at(-1).message.includes("snapshot READY"), true);
-
-  for (const value of [2, 3]) {
-    await terminalEvent({
-      type: "snapshot",
-      session_id: sessionId,
-      subscription_id: subscriptionId,
-      payload_base64: Buffer.from([value]).toString("base64"),
-      payload_encoding: "base64",
-      bytes: 1
-    });
-  }
-  assert.deepEqual(
-    requests.filter(
-      (request) => request.type === "resize" || request.type === "send_input" || request.type === "mode_gated_input"
-    ),
-    []
-  );
-  assert.deepEqual(outputs, []);
-
-  await terminalEvent({
-    type: "snapshot",
-    session_id: sessionId,
-    subscription_id: subscriptionId,
-    payload_base64: Buffer.from([4]).toString("base64"),
-    payload_encoding: "base64",
-    bytes: 1
-  });
-  assert.deepEqual(frames, [[1], [2], [3], [4]]);
-  assert.deepEqual(
-    requests.filter(
-      (request) => request.type === "resize" || request.type === "send_input" || request.type === "mode_gated_input"
-    ),
-    []
-  );
-  await terminalEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-  await waitFor(() => requests.some((request) => request.type === "resize"));
-  await Promise.all([firstResize, secondResize]);
-  assert.deepEqual(
-    requests.filter((request) => request.type === "resize"),
-    [{ type: "resize", session_id: sessionId, rows: 40, cols: 120 }]
-  );
-  await Promise.all([firstInput, modeInput, secondInput]);
-  assert.deepEqual(
-    requests.filter((request) => request.type === "send_input").map((request) => request.data),
-    ["input-one", "input-two"]
-  );
-  assert.deepEqual(
-    requests
-      .filter((request) => request.type === "send_input" || request.type === "mode_gated_input")
-      .map((request) => request.data),
-    ["input-one", "mode-input", "input-two"]
-  );
-  assert.deepEqual(outputs, ["live-after-barrier"]);
-  assert.equal(statuses.at(-1).state, "attached");
-  assert.equal(readers, 1);
-}
-
-// A post-READY history failure keeps the terminal usable and releases the attach barrier.
-{
-  const sessionId = "incremental-degraded-session";
-  const subscriptionId = "incremental-degraded-subscription";
-  const requests = [];
-  const outputs = [];
-  const statuses = [];
-  let terminalEvent;
-  let cancelled = 0;
-  let frame = 0;
-  const dataPlane = createHubTerminalDataPlane({
-    sessionId,
-    subscriptionId,
-    bridge: {
-      async request(request) {
-        requests.push({ ...request });
-        if (request.type === "read_mode_flags") {
-          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
-        }
-        if (request.type === "read_screen") {
-          return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(_sessionId, _subscriptionId, onEvent) {
-        terminalEvent = onEvent;
-        return { unsubscribe() {}, abandon() {} };
-      }
-    }
-  });
-  dataPlane.bindIncrementalSnapshotReader(() => ({
-    read() {
-      frame += 1;
-      return frame === 1 ? "ready" : "page";
-    },
-    cancel() {
-      cancelled += 1;
-    }
-  }));
-  dataPlane.subscribeStatus((status) => statuses.push({ ...status }));
-  dataPlane.subscribeOutput((bytes) => outputs.push(outputText(bytes)));
-  await waitFor(() => typeof terminalEvent === "function");
-  await terminalEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-  await terminalEvent({
-    type: "snapshot",
-    session_id: sessionId,
-    subscription_id: subscriptionId,
-    payload_base64: Buffer.from([1]).toString("base64"),
-    payload_encoding: "base64",
-    bytes: 1
-  });
-  await terminalEvent({
-    type: "snapshot",
-    session_id: sessionId,
-    subscription_id: subscriptionId,
-    payload_base64: Buffer.from([2]).toString("base64"),
-    payload_encoding: "base64",
-    bytes: 1
-  });
-  const input = dataPlane.writeInput("degraded-input");
-  const resize = dataPlane.resize(44, 132);
+  assert.equal(frames.length, 0);
+  await terminalEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
+  await terminalEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
   await terminalEvent({
     type: "attach_state",
     session_id: sessionId,
     subscription_id: subscriptionId,
-    state: "snapshot_history_incomplete"
+    state: "attached"
   });
-  assert.equal(cancelled, 1);
-  assert.equal(statuses.at(-1).state, "attaching");
-  assert.equal(requests.some((request) => request.type === "resize" || request.type === "send_input"), false);
-  await terminalEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-  await resize;
-  await input;
-  await terminalEvent(liveOutputEvent(sessionId, subscriptionId, "degraded-live"));
-  assert.deepEqual(outputs, ["degraded-live"]);
-  assert.equal(statuses.at(-1).state, "attached");
-  assert.equal(statuses.at(-1).message.includes("incomplete snapshot history"), true);
-  assert.deepEqual(
-    requests.filter((request) => request.type === "resize"),
-    [{ type: "resize", session_id: sessionId, rows: 44, cols: 132 }]
-  );
-  assert.deepEqual(
-    requests.filter((request) => request.type === "send_input").map((request) => request.data),
-    ["degraded-input"]
-  );
-}
+  await Promise.all([input, resize]);
+  assert.deepEqual(frames.slice(0, 2).map((frame) => frame[1]), [3, 1]);
 
-// Subscription cancellation releases queued Web input and cancels the Restty reader.
-{
-  const requests = [];
-  let cancelled = 0;
-  const dataPlane = createHubTerminalDataPlane({
-    sessionId: "incremental-cancel-session",
-    subscriptionId: "incremental-cancel-subscription",
-    bridge: {
-      async request(request) {
-        requests.push({ ...request });
-        return { kind: "events", events: [] };
-      },
-      streamTerminal() {
-        return { unsubscribe() {}, abandon() {} };
-      }
-    }
+  await plane.writeModeGatedInput({ encode: () => "mouse-bytes" });
+  assert.equal(frames.at(-1)[1], 2);
+  await terminalEvent({
+    type: "input_result",
+    subscription_id: subscriptionId,
+    kind: "mode_gated_input",
+    admitted: false,
+    bytes_written: 0,
+    mode_generation: 9,
+    mode_revision: 10,
+    mode_flags: {
+      kitty_enabled: false,
+      cursor_visible: true,
+      bracketed_paste: false,
+      mouse_mode: 9,
+      alt_screen: false,
+      focus_reporting: false,
+      application_cursor: false
+    },
+    rejection: "stale_mode"
   });
-  dataPlane.bindIncrementalSnapshotReader(() => ({
-    read() {
-      return "ready";
-    },
-    cancel() {
-      cancelled += 1;
-    }
-  }));
-  const subscription = dataPlane.subscribeOutput(() => undefined);
-  const queuedInput = dataPlane.writeInput("must-not-send");
-  await flushMicrotasks();
-  subscription.unsubscribe();
-  await queuedInput;
-  assert.equal(cancelled, 1);
-  assert.equal(requests.some((request) => request.type === "send_input"), false);
-}
-
-let staleAutomaticStreamCount = 0;
-let staleAutomaticEvent;
-const staleAutomaticOutput = [];
-const staleAutomaticInstalls = [];
-const staleAutomaticDataPlane = createHubTerminalDataPlane({
-  sessionId: "stale-automatic-session",
-  subscriptionId: "stale-automatic-subscription",
-  bridge: {
-    async request(request) {
-      if (request.type === "list_sessions") {
-        return {
-          kind: "sessions",
-          sessions: [{ session_id: "stale-automatic-session", lifecycle: "running" }],
-          events: []
-        };
-      }
-      if (request.type === "read_mode_flags") {
-        return {
-          kind: "read_mode_flags",
-          mode_flags: testModeFlags("stale-automatic-session", { mode_revision: staleAutomaticStreamCount }),
-          events: []
-        };
-      }
-      if (request.type === "read_screen") {
-        return {
-          kind: "read_screen",
-          read_screen: { session_id: "stale-automatic-session", text: "" },
-          events: []
-        };
-      }
-      return { kind: "events", events: [] };
-    },
-    streamTerminal(sessionId, subscriptionId, onEvent) {
-      staleAutomaticStreamCount += 1;
-      staleAutomaticEvent = onEvent;
-      return { unsubscribe() {} };
-    }
-  }
-});
-bindGhostsnpInstaller(staleAutomaticDataPlane, staleAutomaticInstalls);
-const staleAutomaticFirstSubscription = staleAutomaticDataPlane.subscribeOutput((data) => staleAutomaticOutput.push(data));
-await waitFor(() => typeof staleAutomaticEvent === "function");
-const firstStaleAutomaticEvent = staleAutomaticEvent;
-await firstStaleAutomaticEvent({
-  type: "attach_state",
-  session_id: "stale-automatic-session",
-  subscription_id: "stale-automatic-subscription",
-  state: "attaching"
-});
-await firstStaleAutomaticEvent({
-  type: "snapshot",
-  session_id: "stale-automatic-session",
-  subscription_id: "stale-automatic-subscription",
-  payload_base64: ghostsnpFixturePayloadBase64,
-  payload_encoding: "base64",
-  bytes: ghostsnpFixtureBytes
-});
-await firstStaleAutomaticEvent(
-  liveOutputEvent("stale-automatic-session", "stale-automatic-subscription", "stale-live\r\n")
-);
-assert.deepEqual(staleAutomaticOutput, []);
-staleAutomaticFirstSubscription.unsubscribe();
-const staleAutomaticSecondSubscription = staleAutomaticDataPlane.subscribeOutput((data) => staleAutomaticOutput.push(data));
-await waitFor(() => staleAutomaticStreamCount === 2 && staleAutomaticEvent !== firstStaleAutomaticEvent);
-await staleAutomaticEvent({
-  type: "attach_state",
-  session_id: "stale-automatic-session",
-  subscription_id: "stale-automatic-subscription",
-  state: "attaching"
-});
-await staleAutomaticEvent({
-  type: "snapshot",
-  session_id: "stale-automatic-session",
-  subscription_id: "stale-automatic-subscription",
-  payload_base64: ghostsnpFixturePayloadBase64,
-  payload_encoding: "base64",
-  bytes: ghostsnpFixtureBytes
-});
-await staleAutomaticEvent(opaqueFinishSnapshotEvent("stale-automatic-session", "stale-automatic-subscription"));
-await staleAutomaticEvent({
-  type: "attach_state",
-  session_id: "stale-automatic-session",
-  subscription_id: "stale-automatic-subscription",
-  state: "attached"
-});
-await firstStaleAutomaticEvent(
-  liveOutputEvent("stale-automatic-session", "stale-automatic-subscription", "stale-late\r\n")
-);
-await staleAutomaticEvent(
-  liveOutputEvent("stale-automatic-session", "stale-automatic-subscription", "current-live\r\n")
-);
-await waitFor(() => outputsIncludeText(staleAutomaticOutput, "current-live\r\n"));
-assert.deepEqual(staleAutomaticOutput.map(outputText), ["current-live\r\n"]);
-assert.equal(outputsIncludeText(staleAutomaticOutput, "stale-live\r\n"), false);
-assert.equal(outputsIncludeText(staleAutomaticOutput, "stale-late\r\n"), false);
-staleAutomaticSecondSubscription.unsubscribe();
-
-const reattachedTerminalOutput = [];
-const reattachedTerminalDataPlane = createHubTerminalDataPlane({
-  bridge,
-  sessionId: activeHubSessionId
-});
-bindGhostsnpInstaller(reattachedTerminalDataPlane);
-const reattachedTerminalSubscription = reattachedTerminalDataPlane.subscribeOutput((data) => reattachedTerminalOutput.push(data));
-await waitFor(() => outputsIncludeText(reattachedTerminalOutput, "botster-web-production-ready"));
-reattachedTerminalSubscription.unsubscribe();
-assert.equal(
-  bridgeTerminalStreams.filter((stream) => stream.sessionId === activeHubSessionId && stream.unsubscribed !== true).length,
-  2
-);
-assert.equal(
-  bridgeRequests.filter((request) => request.type === "list_sessions").length,
-  0
-);
-
-const byteOnlyTerminalStatuses = [];
-const byteOnlyTerminalOutput = [];
-const byteOnlyInstalls = [];
-const byteOnlyTerminalDataPlane = createHubTerminalDataPlane({
-  sessionId: activeHubSessionId,
-  bridge: {
-    async request(request) {
-      if (request.type === "list_sessions") {
-        return {
-          kind: "sessions",
-          sessions: [{ session_id: activeHubSessionId, lifecycle: "running" }],
-          events: []
-        };
-      }
-      if (request.type === "read_mode_flags") {
-        return {
-          kind: "read_mode_flags",
-          mode_flags: testModeFlags(activeHubSessionId),
-          events: []
-        };
-      }
-      if (request.type === "read_screen") {
-        return {
-          kind: "read_screen",
-          read_screen: { session_id: activeHubSessionId, text: "" },
-          events: []
-        };
-      }
-      return { kind: "events", events: [] };
-    },
-    streamTerminal(sessionId, subscriptionId, onEvent) {
-      onEvent({
-        type: "attach_state",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        state: "attaching"
-      });
-      onEvent({
-        type: "snapshot",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        payload_base64: ghostsnpFixturePayloadBase64,
-        payload_encoding: "base64",
-        bytes: ghostsnpFixtureBytes
-      });
-      onEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-      onEvent({
-        type: "attach_state",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        state: "attached"
-      });
-      onEvent(liveOutputEvent(sessionId, subscriptionId, "byte-only-live-output\r\n"));
-      return {
-        unsubscribe() {}
-      };
-    }
-  }
-});
-bindGhostsnpInstaller(byteOnlyTerminalDataPlane, byteOnlyInstalls);
-byteOnlyTerminalDataPlane.subscribeStatus((status) => byteOnlyTerminalStatuses.push(status));
-byteOnlyTerminalDataPlane.subscribeOutput((data) => byteOnlyTerminalOutput.push(data));
-await waitFor(() => outputsIncludeText(byteOnlyTerminalOutput, "byte-only-live-output"));
-assert.deepEqual(byteOnlyTerminalOutput.map(outputText), ["byte-only-live-output\r\n"]);
-assert.equal(byteOnlyInstalls.length, 2);
-assert.equal(
-  byteOnlyTerminalStatuses.some((status) => status.message.includes("snapshot READY")),
-  true
-);
-assert.equal(byteOnlyTerminalStatuses.some((status) => status.state === "live_only"), false);
-
-const delayedBridgeRequests = [];
-const delayedBridgeTerminalStreams = [];
-const delayedTerminalDataPlane = createHubTerminalDataPlane({
-  sessionId: activeHubSessionId,
-  bridge: {
-    async request(request) {
-      delayedBridgeRequests.push(request);
-      if (request.type === "read_mode_flags") {
-        return { kind: "read_mode_flags", mode_flags: testModeFlags(activeHubSessionId), events: [] };
-      }
-      if (request.type === "read_screen") {
-        return { kind: "read_screen", read_screen: { session_id: activeHubSessionId, text: "" }, events: [] };
-      }
-      return { kind: "events", events: [] };
-    },
-    streamTerminal(sessionId, subscriptionId, onEvent) {
-      delayedBridgeTerminalStreams.push({ sessionId, subscriptionId });
-      const ready = (async () => {
-        await onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-        await onEvent({
-          type: "snapshot",
-          session_id: sessionId,
-          subscription_id: subscriptionId,
-          payload_base64: ghostsnpFixturePayloadBase64,
-          payload_encoding: "base64",
-          bytes: ghostsnpFixtureBytes
-        });
-        await onEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-        await onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-        await onEvent(liveOutputEvent(sessionId, subscriptionId, "botster-web-production-ready-after-retry\r\n"));
-      })();
-      return {
-        ready,
-        abandon() {},
-        unsubscribe() {
-          delayedBridgeTerminalStreams.push({ sessionId, subscriptionId, unsubscribed: true });
-        }
-      };
-    }
-  }
-});
-bindGhostsnpInstaller(delayedTerminalDataPlane);
-const delayedOutput = [];
-const delayedStatuses = [];
-delayedTerminalDataPlane.subscribeStatus((status) => delayedStatuses.push(status));
-delayedTerminalDataPlane.subscribeOutput((data) => delayedOutput.push(data));
-const delayedResize = delayedTerminalDataPlane.resize(9, 34);
-await waitFor(() => outputsIncludeText(delayedOutput, "ready-after-retry"));
-await delayedResize;
-assert.equal(delayedStatuses.some((status) => status.state === "live_only"), false);
-assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize").length, 1);
-assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].rows, 9);
-assert.equal(delayedBridgeRequests.filter((request) => request.type === "resize")[0].cols, 34);
-assert.equal(delayedBridgeRequests.filter((request) => request.type === "list_sessions").length, 0);
-assert.equal(delayedBridgeTerminalStreams.length, 1);
-
-
-// Scrollback events must never be imported as Restty/GHOSTSNP state.
-const scrollbackInstalls = [];
-const scrollbackOutput = [];
-const scrollbackDataPlane = createHubTerminalDataPlane({
-  sessionId: "scrollback-session",
-  subscriptionId: "scrollback-sub",
-  bridge: {
-    async request(request) {
-      if (request.type === "read_mode_flags") {
-        return { kind: "read_mode_flags", mode_flags: testModeFlags("scrollback-session"), events: [] };
-      }
-      if (request.type === "read_screen") {
-        return { kind: "read_screen", read_screen: { session_id: "scrollback-session", text: "" }, events: [] };
-      }
-      return { kind: "events", events: [] };
-    },
-    streamTerminal(sessionId, subscriptionId, onEvent) {
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-      onEvent({
-        type: "scrollback",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        payload_base64: ghostsnpFixturePayloadBase64,
-        payload_encoding: "base64",
-        bytes: ghostsnpFixtureBytes
-      });
-      onEvent({
-        type: "snapshot",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        payload_base64: ghostsnpFixturePayloadBase64,
-        payload_encoding: "base64",
-        bytes: ghostsnpFixtureBytes
-      });
-      onEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-      onEvent(liveOutputEvent(sessionId, subscriptionId, "after-scrollback\r\n"));
-      return { unsubscribe() {} };
-    }
-  }
-});
-bindGhostsnpInstaller(scrollbackDataPlane, scrollbackInstalls);
-scrollbackDataPlane.subscribeOutput((data) => scrollbackOutput.push(data));
-await waitFor(() => outputsIncludeText(scrollbackOutput, "after-scrollback\r\n"));
-assert.equal(scrollbackInstalls.length, 2);
-assert.deepEqual(scrollbackOutput.map(outputText), ["after-scrollback\r\n"]);
-
-// ModeGatedInput stale path re-encodes semantic input; never pairs old bytes with fresh token.
-const modeGatedRequests = [];
-let modeGatedAttempt = 0;
-const modeGatedDataPlane = createHubTerminalDataPlane({
-  sessionId: "mode-gated-session",
-  subscriptionId: "mode-gated-sub",
-  bridge: {
-    async request(request) {
-      if (request.type === "read_mode_flags") {
-        return {
-          kind: "read_mode_flags",
-          mode_flags: testModeFlags("mode-gated-session", {
-            kitty_enabled: false,
-            mode_generation: 1,
-            mode_revision: 1
-          }),
-          events: []
-        };
-      }
-      if (request.type === "mode_gated_input") {
-        modeGatedRequests.push(request);
-        modeGatedAttempt += 1;
-        if (modeGatedAttempt === 1) {
-          return {
-            kind: "mode_gated_input",
-            mode_gated_input: {
-              session_id: "mode-gated-session",
-              admitted: false,
-              bytes_written: 0,
-              kitty_enabled: true,
-              cursor_visible: true,
-              bracketed_paste: false,
-              mouse_mode: 0,
-              alt_screen: false,
-              focus_reporting: false,
-              application_cursor: false,
-              mode_generation: 2,
-              mode_revision: 1,
-              error_kind: null
-            },
-            events: []
-          };
-        }
-        return {
-          kind: "mode_gated_input",
-          mode_gated_input: {
-            session_id: "mode-gated-session",
-            admitted: true,
-            bytes_written: request.data.length,
-            kitty_enabled: true,
-            cursor_visible: true,
-            bracketed_paste: false,
-            mouse_mode: 0,
-            alt_screen: false,
-            focus_reporting: false,
-            application_cursor: false,
-            mode_generation: 2,
-            mode_revision: 1,
-            error_kind: null
-          },
-          events: []
-        };
-      }
-      return { kind: "events", events: [] };
-    },
-    streamTerminal(sessionId, subscriptionId, onEvent) {
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-      onEvent({
-        type: "snapshot",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        payload_base64: ghostsnpFixturePayloadBase64,
-        payload_encoding: "base64",
-        bytes: ghostsnpFixtureBytes
-      });
-      onEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-      return { unsubscribe() {} };
-    }
-  }
-});
-bindGhostsnpInstaller(modeGatedDataPlane);
-modeGatedDataPlane.subscribeOutput(() => undefined);
-await waitFor(() => modeGatedRequests.length === 0 && true);
-// Wait until ReadModeFlags has been observed (hydration complete).
-await waitFor(() => {
-  // mode flags are requested during hydration before any ModeGatedInput
-  return true;
-});
-// Allow hydration microtasks to settle by waiting for a second tick after stream events.
-for (let i = 0; i < 10; i += 1) await flushMicrotasks();
-const bytesA = "bytes-under-mode-A";
-const bytesB = "bytes-under-mode-B";
-assert.notEqual(bytesA, bytesB);
-await modeGatedDataPlane.writeModeGatedInput({
-  encode(modes) {
-    return modes.kitty_enabled ? bytesB : bytesA;
-  }
-});
-assert.equal(modeGatedRequests.length, 2);
-assert.equal(modeGatedRequests[0].data, bytesA);
-assert.equal(modeGatedRequests[0].mode_generation, 1);
-assert.equal(modeGatedRequests[1].data, bytesB);
-assert.equal(modeGatedRequests[1].mode_generation, 2);
-assert.equal(modeGatedRequests.some((request) => request.data === bytesA && request.mode_generation === 2), false);
-
-// JSON-unsafe mode tokens fail closed (producer must emit ≤2^53-1; core#121).
-const unsafeTokenRequests = [];
-const unsafeTokenPlane = createHubTerminalDataPlane({
-  sessionId: "unsafe-token-session",
-  subscriptionId: "unsafe-token-sub",
-  bridge: {
-    async request(request) {
-      unsafeTokenRequests.push(request);
-      if (request.type === "read_mode_flags") {
-        return {
-          kind: "read_mode_flags",
-          mode_flags: testModeFlags("unsafe-token-session", {
-            mode_generation: 8402820136345385000,
-            mode_revision: 1
-          }),
-          events: []
-        };
-      }
-      return { kind: "events", events: [] };
-    },
-    streamTerminal(sessionId, subscriptionId, onEvent) {
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-      onEvent({
-        type: "snapshot",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        payload_base64: ghostsnpFixturePayloadBase64,
-        payload_encoding: "base64",
-        bytes: ghostsnpFixtureBytes
-      });
-      onEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-      return { unsubscribe() {} };
-    }
-  }
-});
-bindGhostsnpInstaller(unsafeTokenPlane);
-unsafeTokenPlane.subscribeOutput(() => undefined);
-for (let i = 0; i < 15; i += 1) await flushMicrotasks();
-let unsafeTokenError;
-try {
-  await unsafeTokenPlane.writeModeGatedInput({ encode: () => "unsafe-token-bytes" });
-} catch (error) {
-  unsafeTokenError = error;
-}
-assert.match(String(unsafeTokenError?.message ?? ""), /JSON-safe|2\^53/);
-assert.equal(unsafeTokenRequests.some((request) => request.type === "mode_gated_input"), false);
-assert.equal(unsafeTokenRequests.some((request) => request.type === "send_input"), false);
-
-
-// Request-race isolation matrix through DefaultTerminalViewBridge + two renderer instances.
-function isolationContainer() {
-  return {
-    dataset: {},
-    childNodes: [],
-    appendChild() {
-      return undefined;
-    },
-    remove() {
-      return undefined;
-    },
-    querySelector() {
-      return null;
-    }
-  };
-}
-
-async function isolationMatrixCase(boundary) {
-  let release = () => undefined;
-  const gate = new Promise((resolve) => {
-    release = resolve;
-  });
-  const hooks = {
-    beforeAttachAcquire: boundary === "attach" ? () => gate : undefined,
-    beforeSnapshotInstall: boundary === "snapshot" ? () => gate : undefined,
-    beforeReadModeFlags: boundary === "modes" ? () => gate : undefined,
-    beforeResize: boundary === "resize" ? () => gate : undefined,
-    beforeModeGatedInput: boundary === "mode_gated" ? () => gate : undefined,
-    beforeListenerDelivery: boundary === "listener" ? () => gate : undefined
-  };
-  const oldRequests = [];
-  const newRequests = [];
-  const oldBucket = { installs: [], outputs: [], dataset: [] };
-  const newBucket = { installs: [], outputs: [], dataset: [] };
-  const oldStream = { count: 0 };
-  const newStream = { count: 0 };
-  const oldSessionId = `iso-old-${boundary}`;
-  const newSessionId = `iso-new-${boundary}`;
-  const oldDesc = { sessionId: oldSessionId, renderer: "restty" };
-  const newDesc = { sessionId: newSessionId, renderer: "restty" };
-
-  function makeDaemonBridge(sessionId, requests, streamCounter) {
-    return {
-      async request(request) {
-        requests.push({ ...request });
-        if (request.type === "read_mode_flags") {
-          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
-        }
-        if (request.type === "mode_gated_input") {
-          return {
-            kind: "mode_gated_input",
-            mode_gated_input: {
-              session_id: sessionId,
-              admitted: true,
-              bytes_written: request.data.length,
-              kitty_enabled: false,
-              cursor_visible: true,
-              bracketed_paste: false,
-              mouse_mode: 0,
-              alt_screen: false,
-              focus_reporting: false,
-              application_cursor: false,
-              mode_generation: 1,
-              mode_revision: 1
-            },
-            events: []
-          };
-        }
-        if (request.type === "read_screen") {
-          return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(nextSessionId, subscriptionId, onEvent) {
-        streamCounter.count += 1;
-        queueMicrotask(() => {
-          onEvent({ type: "attach_state", session_id: nextSessionId, subscription_id: subscriptionId, state: "attaching" });
-          onEvent({
-            type: "snapshot",
-            session_id: nextSessionId,
-            subscription_id: subscriptionId,
-            payload_base64: ghostsnpFixturePayloadBase64,
-            payload_encoding: "base64",
-            bytes: ghostsnpFixtureBytes
-          });
-          onEvent({
-            type: "snapshot",
-            session_id: nextSessionId,
-            subscription_id: subscriptionId,
-            payload_base64: Buffer.from("finish").toString("base64"),
-            payload_encoding: "base64",
-            bytes: 6
-          });
-          onEvent({ type: "attach_state", session_id: nextSessionId, subscription_id: subscriptionId, state: "attached" });
-          onEvent(liveOutputEvent(nextSessionId, subscriptionId, `old-live-${boundary}\r\n`));
-        });
-        return { unsubscribe() {}, abandon() {} };
-      }
-    };
-  }
-
-  function createTrackingRenderer(bucket) {
-    return {
-      container: undefined,
-      mount(container) {
-        this.container = container;
-        container.dataset.terminalMount = "mounted";
-      },
-      attachDataPlane(dataPlane) {
-        dataPlane.bindIncrementalSnapshotReader?.(() => {
-          let frame = 0;
-          return {
-            read(bytes) {
-              bucket.installs.push(Uint8Array.from(bytes));
-              frame += 1;
-              return frame === 1 ? "ready" : "finish";
-            },
-            cancel() {}
-          };
-        });
-        return dataPlane.subscribeOutput((data) => {
-          bucket.outputs.push(data);
-          if (this.container?.dataset) {
-            this.container.dataset.terminalLastRenderedOutput = Buffer.from(data).toString("base64");
-            bucket.dataset.push(data);
-          }
-        });
-      },
-      onInput() {
-        return { unsubscribe() {} };
-      },
-      write(data) {
-        bucket.outputs.push(data);
-        if (this.container?.dataset) {
-          this.container.dataset.terminalLastRenderedOutput = Buffer.from(data).toString("base64");
-          bucket.dataset.push(data);
-        }
-      },
-      resize() {},
-      focus() {},
-      destroy() {
-        this.container = undefined;
-      }
-    };
-  }
-
-  const viewBridge = new DefaultTerminalViewBridge((descriptor) =>
-    createTrackingRenderer(descriptor.sessionId === oldSessionId ? oldBucket : newBucket)
-  );
-
-  const oldPlane = createHubTerminalDataPlane({
-    sessionId: oldSessionId,
-    subscriptionId: `${oldSessionId}-sub`,
-    testHooks: hooks,
-    bridge: makeDaemonBridge(oldSessionId, oldRequests, oldStream)
-  });
-  const newPlane = createHubTerminalDataPlane({
-    sessionId: newSessionId,
-    subscriptionId: `${newSessionId}-sub`,
-    bridge: makeDaemonBridge(newSessionId, newRequests, newStream)
-  });
-
-  const oldContainer = isolationContainer();
-  const newContainer = isolationContainer();
-
-  await viewBridge.mount(oldContainer, oldDesc);
-  await viewBridge.attach(oldDesc, oldPlane);
-
-  if (boundary === "resize") {
-    void viewBridge.resize(oldDesc, 12, 40);
-  } else if (boundary === "mode_gated") {
-    await waitFor(() => oldBucket.installs.length >= 1);
-    for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-    void oldPlane.writeModeGatedInput({ encode: () => "gated-bytes" }).catch(() => undefined);
-  }
-
-  for (let i = 0; i < 12; i += 1) await flushMicrotasks();
-
-  // Session switch on the real view bridge: unmount old, mount+attach new, then resume old work.
-  await viewBridge.unmount(oldDesc);
-  await viewBridge.mount(newContainer, newDesc);
-  await viewBridge.attach(newDesc, newPlane);
-  for (let i = 0; i < 15; i += 1) await flushMicrotasks();
-
-  const snapshot = {
-    oldRequests: oldRequests.map((request) => request.type),
-    newRequests: newRequests.map((request) => request.type),
-    oldInstalls: oldBucket.installs.length,
-    newInstalls: newBucket.installs.length,
-    oldOutputs: [...oldBucket.outputs],
-    newOutputs: [...newBucket.outputs],
-    oldDataset: [...oldBucket.dataset],
-    newDataset: [...newBucket.dataset],
-    oldStreams: oldStream.count,
-    newStreams: newStream.count,
-    newDatasetAttr: newContainer.dataset.terminalLastRenderedOutput
-  };
-
-  release();
-  for (let i = 0; i < 20; i += 1) await flushMicrotasks();
-
-  assert.deepEqual(
-    oldRequests.map((request) => request.type),
-    snapshot.oldRequests,
-    `${boundary}: no new old-session requests after resume`
-  );
-  assert.equal(oldBucket.installs.length, snapshot.oldInstalls, `${boundary}: no old Restty install after resume`);
-  assert.deepEqual(oldBucket.outputs, snapshot.oldOutputs, `${boundary}: no old output after resume`);
-  assert.deepEqual(oldBucket.dataset, snapshot.oldDataset, `${boundary}: no old dataset writes after resume`);
-  assert.equal(oldStream.count, snapshot.oldStreams, `${boundary}: no old subscription recreate`);
-
-  assert.deepEqual(
-    newRequests.map((request) => request.type),
-    snapshot.newRequests,
-    `${boundary}: resumed old work must not issue new-session requests`
-  );
-  assert.equal(newBucket.installs.length, snapshot.newInstalls, `${boundary}: no install into new renderer from old work`);
-  assert.deepEqual(newBucket.outputs, snapshot.newOutputs, `${boundary}: no flush into new renderer from old work`);
-  assert.deepEqual(newBucket.dataset, snapshot.newDataset, `${boundary}: no dataset write on new mount from old work`);
-  assert.equal(
-    newContainer.dataset.terminalLastRenderedOutput,
-    snapshot.newDatasetAttr,
-    `${boundary}: new mount dataset must not change from old work`
-  );
-
-  if (boundary === "attach" || boundary === "listener" || boundary === "snapshot") {
-    assert.equal(oldBucket.installs.length, 0, `${boundary}: must not install into old Restty after switch`);
-    assert.equal(outputsIncludeText(oldBucket.outputs, `old-live-${boundary}\r\n`), false);
-  }
-  if (boundary === "modes") {
-    // ReadModeFlags is background after FINISH. Stale completion must not
-    // create input or extra output; live bytes before the switch are valid.
-    assert.equal(snapshot.oldRequests.includes("mode_gated_input"), false);
-    assert.equal(oldRequests.some((request) => request.type === "mode_gated_input"), false);
-  }
-  if (boundary === "resize") {
-    assert.equal(snapshot.oldRequests.includes("resize"), false, "resize must not complete before switch");
-    assert.equal(oldRequests.some((request) => request.type === "resize"), false);
-  }
-  if (boundary === "mode_gated") {
-    assert.equal(snapshot.oldRequests.includes("mode_gated_input"), false);
-    assert.equal(oldRequests.some((request) => request.type === "mode_gated_input"), false);
-  }
-
-  await viewBridge.unmount(newDesc);
-}
-
-for (const boundary of ["attach", "snapshot", "modes", "resize", "mode_gated", "listener"]) {
-  await isolationMatrixCase(boundary);
-}
-
-// Core mouse_mode compact bitmask → Restty tracking bits.
-const {
-  mouseTrackingBitsFromCoreMode,
-  coreMouseTrackingEnabled,
-  CORE_MOUSE_NORMAL,
-  CORE_MOUSE_ANY,
-  CORE_MOUSE_BUTTON,
-  CORE_MOUSE_SGR
-} = requireRuntime("./botster/mouseMode.js");
-assert.equal(mouseTrackingBitsFromCoreMode(0), 0);
-assert.equal(coreMouseTrackingEnabled(0), false);
-assert.equal(mouseTrackingBitsFromCoreMode(CORE_MOUSE_NORMAL), 1 << 1);
-assert.equal(mouseTrackingBitsFromCoreMode(CORE_MOUSE_ANY), (1 << 1) | (1 << 2) | (1 << 3));
-assert.equal(mouseTrackingBitsFromCoreMode(CORE_MOUSE_BUTTON), (1 << 1) | (1 << 2));
-assert.equal(mouseTrackingBitsFromCoreMode(CORE_MOUSE_SGR), 1 << 5);
-// normal+SGR == 9 (authoritative Core/Hub mouse-on fixture value)
-assert.equal(mouseTrackingBitsFromCoreMode(9), (1 << 1) | (1 << 5));
-assert.equal(coreMouseTrackingEnabled(9), true);
-assert.equal(coreMouseTrackingEnabled(CORE_MOUSE_SGR), false);
-
-// Stale mouse 9→0 must not issue a second ModeGatedInput after re-encode under mouse_mode=0.
-{
-  const skippedRequests = [];
-  const plane = createHubTerminalDataPlane({
-    sessionId: "mouse-stale-9-to-0",
-    subscriptionId: "mouse-stale-sub",
-    bridge: {
-      async request(request) {
-        skippedRequests.push({ ...request });
-        if (request.type === "read_mode_flags") {
-          return {
-            kind: "read_mode_flags",
-            mode_flags: { ...testModeFlags("mouse-stale-9-to-0"), mouse_mode: 9, mode_generation: 1, mode_revision: 1 },
-            events: []
-          };
-        }
-        if (request.type === "mode_gated_input") {
-          return {
-            kind: "mode_gated_input",
-            mode_gated_input: {
-              session_id: "mouse-stale-9-to-0",
-              admitted: false,
-              error_kind: "stale_mode",
-              bytes_written: 0,
-              kitty_enabled: false,
-              cursor_visible: true,
-              bracketed_paste: false,
-              mouse_mode: 0,
-              alt_screen: false,
-              focus_reporting: false,
-              application_cursor: false,
-              mode_generation: 2,
-              mode_revision: 2
-            },
-            events: []
-          };
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(sessionId, subscriptionId, onEvent) {
-        onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-        onEvent({
-          type: "snapshot",
-          session_id: sessionId,
-          subscription_id: subscriptionId,
-          payload_base64: ghostsnpFixturePayloadBase64,
-          payload_encoding: "base64",
-          bytes: ghostsnpFixtureBytes
-        });
-        onEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-        onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-        return { unsubscribe() {}, abandon() {} };
-      }
-    }
-  });
-  bindGhostsnpInstaller(plane);
-  plane.subscribeOutput(() => undefined);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  // First encode under mouse_mode=9, stale reject carries mouse_mode=0, re-encode returns "".
-  await plane.writeModeGatedInput({
-    encode: (modes) => (coreMouseTrackingEnabled(modes.mouse_mode) ? "mouse-bytes" : "")
-  });
-  const gated = skippedRequests.filter((request) => request.type === "mode_gated_input");
-  assert.equal(gated.length, 1, `expected one mode_gated_input before skip-on-disable, got ${gated.length}`);
-  assert.equal(gated[0].data, "mouse-bytes");
-  await plane.detach();
-}
-
-// Cached mouse-off must refresh ModeFlags before discard so 0→9 becomes ModeGatedInput.
-{
-  const requests = [];
-  let modeReads = 0;
-  const plane = createHubTerminalDataPlane({
-    sessionId: "mouse-0-to-9",
-    subscriptionId: "mouse-0-to-9-sub",
-    bridge: {
-      async request(request) {
-        requests.push({ ...request });
-        if (request.type === "read_mode_flags") {
-          modeReads += 1;
-          return {
-            kind: "read_mode_flags",
-            mode_flags: {
-              ...testModeFlags("mouse-0-to-9"),
-              mouse_mode: modeReads === 1 ? 0 : 9,
-              mode_generation: modeReads,
-              mode_revision: modeReads
-            },
-            events: []
-          };
-        }
-        if (request.type === "mode_gated_input") {
-          return {
-            kind: "mode_gated_input",
-            mode_gated_input: {
-              session_id: "mouse-0-to-9",
-              admitted: true,
-              bytes_written: request.data.length,
-              kitty_enabled: false,
-              cursor_visible: true,
-              bracketed_paste: false,
-              mouse_mode: 9,
-              alt_screen: false,
-              focus_reporting: false,
-              application_cursor: false,
-              mode_generation: 2,
-              mode_revision: 2
-            },
-            events: []
-          };
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(sessionId, subscriptionId, onEvent) {
-        onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-        onEvent({
-          type: "snapshot",
-          session_id: sessionId,
-          subscription_id: subscriptionId,
-          payload_base64: ghostsnpFixturePayloadBase64,
-          payload_encoding: "base64",
-          bytes: ghostsnpFixtureBytes
-        });
-        onEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-        onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-        return { unsubscribe() {}, abandon() {} };
-      }
-    }
-  });
-  bindGhostsnpInstaller(plane);
-  plane.subscribeOutput(() => undefined);
-  for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-  await plane.writeModeGatedInput({
-    encode: (modes) => (coreMouseTrackingEnabled(modes.mouse_mode) ? "mouse-on-bytes" : "")
-  });
-  const gated = requests.filter((request) => request.type === "mode_gated_input");
-  assert.equal(modeReads >= 2, true, `expected mode refresh after empty encode, reads=${modeReads}`);
-  assert.equal(gated.length, 1, `expected ModeGatedInput after 0→9 refresh, got ${gated.length}`);
-  assert.equal(gated[0].data, "mouse-on-bytes");
+  assert.deepEqual(frames.slice(-2).map((frame) => frame[1]), [2, 2]);
+  const pasteStart = frames.length;
+  await plane.writeInput("p".repeat(70_000));
+  assert.deepEqual(frames.slice(pasteStart).map((frame) => frame[1]), [4, 5, 5, 6]);
+  assert.equal(requests.some((request) => ["send_input", "mode_gated_input", "resize"].includes(request.type)), false);
   await plane.detach();
 }
 
@@ -11266,6 +8490,7 @@ try {
       unmatchedWheelBytesShouldDrop,
       wheelDeltaPixels
     } = await vite.ssrLoadModule("/src/botster/mountScopedWheelReencoder.ts");
+    const { mouseTrackingBitsFromCoreMode } = await vite.ssrLoadModule("/src/botster/mouseMode.ts");
     const { createInputHandler } = await vite.ssrLoadModule("/src/vendor/restty/internal.js");
     const trackingOn = testModeFlags("wheel-pty", { mouse_mode: 9 });
     const trackingOff = testModeFlags("wheel-local", { mouse_mode: 0 });
@@ -11437,102 +8662,6 @@ try {
       assert.equal(encoder.accumulatorMutations, 1);
       assert.equal(first, second);
       assert.equal(countWheelReports(first), 1);
-    }
-
-    // W11. One forced stale ModeGatedInput reject calls encode twice for one wheel event.
-    {
-      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
-      const decision = encoder.consumeWheelEvent(wheelEvent(-20), metrics);
-      const requests = [];
-      let encodeCalls = 0;
-      const plane = createHubTerminalDataPlane({
-        sessionId: "wheel-stale-retry",
-        subscriptionId: "wheel-stale-sub",
-        bridge: {
-          async request(request) {
-            requests.push({ ...request });
-            if (request.type === "read_mode_flags") {
-              return {
-                kind: "read_mode_flags",
-                mode_flags: { ...testModeFlags("wheel-stale-retry", { mouse_mode: 9 }), mode_generation: 1, mode_revision: 1 },
-                events: []
-              };
-            }
-            if (request.type === "mode_gated_input") {
-              if (requests.filter((item) => item.type === "mode_gated_input").length === 1) {
-                return {
-                  kind: "mode_gated_input",
-                  mode_gated_input: {
-                    session_id: "wheel-stale-retry",
-                    admitted: false,
-                    error_kind: "stale_mode",
-                    bytes_written: 0,
-                    kitty_enabled: false,
-                    cursor_visible: true,
-                    bracketed_paste: false,
-                    mouse_mode: 9,
-                    alt_screen: false,
-                    focus_reporting: false,
-                    application_cursor: false,
-                    mode_generation: 2,
-                    mode_revision: 2
-                  },
-                  events: []
-                };
-              }
-              return {
-                kind: "mode_gated_input",
-                mode_gated_input: {
-                  session_id: "wheel-stale-retry",
-                  admitted: true,
-                  bytes_written: request.data.length,
-                  kitty_enabled: false,
-                  cursor_visible: true,
-                  bracketed_paste: false,
-                  mouse_mode: 9,
-                  alt_screen: false,
-                  focus_reporting: false,
-                  application_cursor: false,
-                  mode_generation: 2,
-                  mode_revision: 2
-                },
-                events: []
-              };
-            }
-            return { kind: "events", events: [] };
-          },
-          streamTerminal(sessionId, subscriptionId, onEvent) {
-            onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-            onEvent({
-              type: "snapshot",
-              session_id: sessionId,
-              subscription_id: subscriptionId,
-              payload_base64: ghostsnpFixturePayloadBase64,
-              payload_encoding: "base64",
-              bytes: ghostsnpFixtureBytes
-            });
-            onEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-            onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-            return { unsubscribe() {}, abandon() {} };
-          }
-        }
-      });
-      bindGhostsnpInstaller(plane);
-      plane.subscribeOutput(() => undefined);
-      for (let i = 0; i < 8; i += 1) await flushMicrotasks();
-      await plane.writeModeGatedInput({
-        encode(modes) {
-          encodeCalls += 1;
-          return encodeWheelDecision(decision, modes);
-        }
-      });
-      const gated = requests.filter((request) => request.type === "mode_gated_input");
-      assert.equal(encoder.accumulatorMutations, 1);
-      assert.equal(encodeCalls, 2);
-      assert.equal(gated.length, 2);
-      assert.equal(gated[0].data, gated[1].data);
-      assert.equal(countWheelReports(gated[0].data), 1);
-      await plane.detach();
     }
 
     // W12. Inactive local-scroll pixels must not enter a later PTY report.
@@ -17583,12 +14712,28 @@ function createFakeDataChannel() {
   };
 }
 
-function createFakePeerConnection(dataChannel) {
+function createFakePeerConnection(dataChannel, secret) {
+  const createdDataChannels = [];
+  let remoteDescriptionSet = false;
+  dataChannel.label = "botster-daemon";
+  dataChannel.options = undefined;
+  dataChannel.createdDataChannels = createdDataChannels;
   return {
     iceGatheringState: "complete",
     localDescription: { type: "offer", sdp: "offer-sdp", toJSON: () => ({ type: "offer", sdp: "offer-sdp" }) },
-    createDataChannel() {
-      return dataChannel;
+    createDataChannel(label, options) {
+      if (label === "botster-daemon" && createdDataChannels.length === 0) {
+        dataChannel.options = options;
+        createdDataChannels.push(dataChannel);
+        return dataChannel;
+      }
+      const channel = createFakeDataChannel();
+      channel.label = label;
+      channel.options = options;
+      installAutoHelloAck(channel, secret);
+      createdDataChannels.push(channel);
+      if (remoteDescriptionSet) queueMicrotask(() => channel.open());
+      return channel;
     },
     async createOffer() {
       return this.localDescription;
@@ -17597,7 +14742,8 @@ function createFakePeerConnection(dataChannel) {
       this.localDescription = description;
     },
     async setRemoteDescription() {
-      dataChannel.open();
+      remoteDescriptionSet = true;
+      for (const channel of createdDataChannels) channel.open();
     },
     close() {},
     addEventListener() {},
@@ -17619,7 +14765,7 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
         installAutoHelloAck(extra, bootstrap.grant_secret);
         dataChannels.push(extra);
       }
-      return createFakePeerConnection(dataChannels[nextDataChannel++]);
+      return createFakePeerConnection(dataChannels[nextDataChannel++], bootstrap.grant_secret);
     },
     fetchImpl: async () => ({
       ok: true,
@@ -17649,13 +14795,12 @@ function installAutoHelloAck(dataChannel, secret) {
         protocol: "botster-hub-daemon-v1",
         compatibility: {
           protocol: "botster-hub-daemon-v1",
-          protocol_version: 7,
+          protocol_version: 8,
           features: [
             "sessions",
             "terminal_readback",
             "plugin_surface_render",
             "plugin_surface_action",
-            "mode_gated_input",
             "webrtc_terminal_adapter",
             "terminal_subscription_closed",
             "package_event_subscriptions",
@@ -17663,7 +14808,7 @@ function installAutoHelloAck(dataChannel, secret) {
             "resize",
             "snapshot_delivery=ready_then_history"
           ],
-          conformance_fixture_revision: 46
+          conformance_fixture_revision: 48
         },
         terminal_compatibility: {
           protocol: "botster-terminal-v1",
@@ -17671,9 +14816,10 @@ function installAutoHelloAck(dataChannel, secret) {
           features: [
             "terminal_streaming",
             "resize",
-            "snapshot_delivery=ready_then_history"
+            "snapshot_delivery=ready_then_history",
+            "transport=duplex_binary"
           ],
-          conformance_fixture_revision: 1
+          conformance_fixture_revision: 2
         },
         diagnostics: []
       }, { messageId: `hello-ack-${dataChannel.helloSent.length}` });
@@ -17754,6 +14900,11 @@ async function encryptTestEnvelope(secret, payload) {
 }
 
 async function decryptTestEnvelope(secret, envelopeJson) {
+  const plaintext = await decryptTestEnvelopeBytes(secret, envelopeJson);
+  return JSON.parse(new TextDecoder().decode(plaintext));
+}
+
+async function decryptTestEnvelopeBytes(secret, envelopeJson) {
   const envelope = JSON.parse(envelopeJson);
   const key = await crypto.subtle.importKey(
     "raw",
@@ -17767,159 +14918,7 @@ async function decryptTestEnvelope(secret, envelopeJson) {
     key,
     base64ToArrayBuffer(envelope.ciphertext)
   );
-  return JSON.parse(new TextDecoder().decode(plaintext));
-}
-
-async function decryptSentRequests(dataChannel, secret) {
-  const requests = [];
-  for (const envelope of dataChannel.sent) {
-    requests.push(await decryptTestEnvelope(secret, envelope));
-  }
-  return requests;
-}
-
-async function serveWebrtcRequests(dataChannel, secret, prefix, seenIndexes) {
-  const answered = [];
-  for (let index = 0; index < dataChannel.sent.length; index += 1) {
-    if (seenIndexes.has(index)) continue;
-    const request = await decryptTestEnvelope(secret, dataChannel.sent[index]);
-    seenIndexes.add(index);
-    if (request.type === "detach") {
-      await emitChunkedTestResponse(
-        dataChannel,
-        secret,
-        { kind: "events", events: [] },
-        { messageId: `${prefix}-detach-${index}` }
-      );
-    } else if (request.type === "attach") {
-      await emitChunkedTestResponse(
-        dataChannel,
-        secret,
-        {
-          kind: "events",
-          events: [{
-            type: "attach_state",
-            session_id: request.session_id,
-            subscription_id: request.subscription_id,
-            state: "attaching"
-          }]
-        },
-        { messageId: `${prefix}-attach-${index}` }
-      );
-    } else if (request.type === "read_mode_flags") {
-      await emitChunkedTestResponse(
-        dataChannel,
-        secret,
-        {
-          kind: "read_mode_flags",
-          mode_flags: testModeFlags(request.session_id),
-          events: []
-        },
-        { messageId: `${prefix}-mode-${index}` }
-      );
-    } else if (request.type === "read_screen") {
-      await emitChunkedTestResponse(
-        dataChannel,
-        secret,
-        {
-          kind: "read_screen",
-          read_screen: { session_id: request.session_id, text: "" },
-          events: []
-        },
-        { messageId: `${prefix}-screen-${index}` }
-      );
-    } else {
-      await emitChunkedTestResponse(
-        dataChannel,
-        secret,
-        { kind: "events", events: [] },
-        { messageId: `${prefix}-other-${index}` }
-      );
-    }
-    answered.push(request);
-  }
-  return answered;
-}
-
-async function waitForAttachRequests(dataChannel, secret, sessionIds, options = {}) {
-  const needed = new Set(sessionIds);
-  const excludeSubscriptionIds = options.excludeSubscriptionIds ?? new Set();
-  const deadline = Date.now() + (options.timeoutMs ?? 5_000);
-  while (Date.now() < deadline) {
-    if (options.serve) {
-      await options.serve();
-    }
-    const requests = await decryptSentRequests(dataChannel, secret);
-    const attaches = requests.filter((request) => (
-      request.type === "attach" &&
-      needed.has(request.session_id) &&
-      !excludeSubscriptionIds.has(request.subscription_id)
-    ));
-    const foundSessions = new Set(attaches.map((request) => request.session_id));
-    if ([...needed].every((sessionId) => foundSessions.has(sessionId))) {
-      return attaches;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  const requests = await decryptSentRequests(dataChannel, secret);
-  throw new Error(
-    `timed out waiting for attach requests ${sessionIds.join(",")}: ${JSON.stringify(requests.map((request) => request.type))}`
-  );
-}
-
-async function completeRecoveredOverflowHydration(dataChannel, secret, attach, text, prefix) {
-  await emitChunkedTestResponse(
-    dataChannel,
-    secret,
-    {
-      type: "snapshot",
-      session_id: attach.session_id,
-      subscription_id: attach.subscription_id,
-      payload_base64: Buffer.from("ready").toString("base64"),
-      payload_encoding: "base64",
-      bytes: 5,
-      phase: "ready"
-    },
-    { messageId: `${prefix}-ready`, deliveryKind: "daemon_terminal_frame" }
-  );
-  await emitChunkedTestResponse(
-    dataChannel,
-    secret,
-    {
-      type: "snapshot",
-      session_id: attach.session_id,
-      subscription_id: attach.subscription_id,
-      payload_base64: Buffer.from("finish").toString("base64"),
-      payload_encoding: "base64",
-      bytes: 6,
-      phase: "finish"
-    },
-    { messageId: `${prefix}-finish`, deliveryKind: "daemon_terminal_frame" }
-  );
-  await emitChunkedTestResponse(
-    dataChannel,
-    secret,
-    {
-      type: "attach_state",
-      session_id: attach.session_id,
-      subscription_id: attach.subscription_id,
-      state: "attached"
-    },
-    { messageId: `${prefix}-attached`, deliveryKind: "daemon_terminal_frame" }
-  );
-  await emitChunkedTestResponse(
-    dataChannel,
-    secret,
-    {
-      type: "terminal_output",
-      session_id: attach.session_id,
-      subscription_id: attach.subscription_id,
-      payload_base64: Buffer.from(text).toString("base64"),
-      payload_encoding: "base64",
-      bytes: Buffer.byteLength(text)
-    },
-    { messageId: `${prefix}-live`, deliveryKind: "daemon_terminal_frame" }
-  );
+  return new Uint8Array(plaintext);
 }
 
 async function waitForEncryptedRequest(dataChannel, secret, predicate) {

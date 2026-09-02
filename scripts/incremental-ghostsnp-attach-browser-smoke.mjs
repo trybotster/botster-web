@@ -55,7 +55,8 @@ try {
     grid: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRenderGrid(),
     rows: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows(),
     statuses: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getStatuses(),
-    requests: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests()
+    requests: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests(),
+    frames: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames()
   }));
   if (!readyState.rows.some((row) => row.includes(readyPaintMarker))) {
     throw new Error(`READY did not paint before history delivery: ${JSON.stringify(readyState.rows)}`);
@@ -76,11 +77,11 @@ try {
 
   for (const pageFrame of snapshots.slice(1, -1)) {
     await deliverSnapshot(page, pageFrame);
-    const requests = await page.evaluate(() =>
-      globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests()
+    const frames = await page.evaluate(() =>
+      globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames()
     );
-    if (requests.some((request) => request.type === "resize" || request.type === "send_input")) {
-      throw new Error(`Web sent resize or input before FINISH: ${JSON.stringify(requests)}`);
+    if (frames.length > 0) {
+      throw new Error(`Web sent a binary frame before FINISH: ${JSON.stringify(frames)}`);
     }
   }
 
@@ -100,23 +101,23 @@ try {
   }
 
   await deliverSnapshot(page, snapshots.at(-1));
-  const finishRequests = await page.evaluate(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests()
+  const finishFrames = await page.evaluate(() =>
+    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames()
   );
-  if (finishRequests.some((request) => request.type === "resize" || request.type === "send_input")) {
-    throw new Error(`Web sent resize or input before attached: ${JSON.stringify(finishRequests)}`);
+  if (finishFrames.length > 0) {
+    throw new Error(`Web sent a binary frame before attached: ${JSON.stringify(finishFrames)}`);
   }
 
   await page.evaluate(() => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.deliverAttached());
   await page.evaluate(() => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.attached());
   await page.waitForFunction(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests().some(
-      (request) => request.type === "resize" && request.rows === 40 && request.cols === 120
+    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames().some(
+      (frame) => frame[1] === 3 && frame[4] === 0 && frame[5] === 40 && frame[6] === 0 && frame[7] === 120
     )
   );
   await page.waitForFunction(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests().filter(
-      (request) => request.type === "send_input"
+    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames().filter(
+      (frame) => frame[1] === 1
     ).length === 2
   );
   await page.waitForFunction(() =>
@@ -128,10 +129,12 @@ try {
   const finalState = await page.evaluate(() => ({
     rows: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows(),
     statuses: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getStatuses(),
-    requests: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests()
+    requests: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests(),
+    frames: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames()
   }));
-  const inputs = finalState.requests.filter((request) => request.type === "send_input");
-  if (inputs.map((request) => request.data).join("|") !== "queued-input-one|queued-input-two") {
+  const decoder = new TextDecoder();
+  const inputs = finalState.frames.filter((frame) => frame[1] === 1);
+  if (inputs.map((frame) => decoder.decode(Uint8Array.from(frame.slice(4)))).join("|") !== "queued-input-one|queued-input-two") {
     throw new Error(`Web changed queued input order: ${JSON.stringify(inputs)}`);
   }
   if (finalState.statuses.at(-1)?.state !== "attached") {
@@ -171,16 +174,17 @@ try {
   const degradedBeforeAttached = await degradedPage.evaluate(() => ({
     rows: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows(),
     statuses: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getStatuses(),
-    requests: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests()
+    requests: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests(),
+    frames: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames()
   }));
   if (degradedBeforeAttached.statuses.at(-1)?.state !== "attaching") {
     throw new Error(
       `Degraded history did not remain attaching before attached: ${JSON.stringify(degradedBeforeAttached.statuses)}`
     );
   }
-  if (degradedBeforeAttached.requests.some((request) => request.type === "resize" || request.type === "send_input")) {
+  if (degradedBeforeAttached.frames.length > 0) {
     throw new Error(
-      `Degraded history released resize or input before attached: ${JSON.stringify(degradedBeforeAttached.requests)}`
+      `Degraded history released a binary frame before attached: ${JSON.stringify(degradedBeforeAttached.frames)}`
     );
   }
   if (degradedBeforeAttached.rows.some((row) => row.includes("DEGRADED-LIVE"))) {
@@ -195,10 +199,10 @@ try {
   await degradedPage.waitForFunction(() => {
     const harness = globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__;
     return (
-      harness.getRequests().some((request) => request.type === "resize" && request.rows === 36 && request.cols === 110) &&
-      harness.getRequests().some(
-        (request) => request.type === "send_input" && request.data === "degraded-input"
+      harness.getSentFrames().some(
+        (frame) => frame[1] === 3 && frame[4] === 0 && frame[5] === 36 && frame[6] === 0 && frame[7] === 110
       ) &&
+      harness.getSentFrames().some((frame) => frame[1] === 1) &&
       harness.readViewportRows().some((row) => row.includes("DEGRADED-LIVE"))
     );
   });

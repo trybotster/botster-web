@@ -172,6 +172,14 @@ export function webRtcLifecycleDiagnostic(event: WebrtcDaemonLifecycleEvent): Co
         severity: "danger",
         source: "webrtc"
       };
+    case "terminal-data-channel-closed":
+      return {
+        id: `terminal-data-channel-${event.subscriptionId}`,
+        title: "Terminal DataChannel closed",
+        detail: "The terminal subscription channel closed. Web will request a fresh reservation.",
+        severity: "warning",
+        source: "webrtc"
+      };
     case "encrypted-stream-ready":
       return {
         id: "webrtc-encrypted-stream",

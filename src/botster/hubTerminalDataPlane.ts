@@ -6,6 +6,15 @@ import type {
   TerminalSnapshotReader,
   TerminalSubscription
 } from "./terminal";
+import {
+  encodeModeGatedInput,
+  encodePaste,
+  encodePasteAbort,
+  encodeResize,
+  encodeTerminalInput,
+  MAX_INPUT_DATA_BYTES,
+  type TerminalInputResult
+} from "@trybotster/terminal-protocol";
 import type {
   DaemonBridgeClient,
   DaemonTerminalStreamSubscription,
@@ -15,7 +24,6 @@ import { hubTerminalSubscriptionId } from "./hubTransport";
 import type {
   DaemonCaptureSnapshot,
   DaemonModeFlags,
-  DaemonModeGatedInputResult,
   DaemonReadScreen
 } from "./realHubDaemonDto";
 import {
@@ -96,7 +104,13 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private modeFlags: DaemonModeFlags | undefined;
   private incrementalSnapshotReaderFactory: (() => TerminalSnapshotReader) | undefined;
   private terminalEventQueue: Promise<void> = Promise.resolve();
-  private terminalInputQueue: Promise<void> = Promise.resolve();
+  private terminalFrameQueue: Promise<void> = Promise.resolve();
+  private readonly pendingModeGatedInputs: Array<{
+    semantic: ModeDependentTerminalInput;
+    encoded: string;
+    retried: boolean;
+  }> = [];
+  private nextPasteOperationId = 1;
   private snapshotRecoveries = 0;
   private readonly onWebrtcLifecycle?: (event: Event) => void;
 
@@ -115,6 +129,13 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         if (!detail?.type) return;
         if (detail.type === "data-channel-closed" || detail.type === "data-channel-error") {
           this.handleTransportLost();
+        } else if (
+          detail.type === "terminal-data-channel-closed" &&
+          detail.sessionId === this.sessionId &&
+          detail.subscriptionId === this.subscriptionId
+        ) {
+          this.handleTransportLost();
+          queueMicrotask(() => this.handleTransportRecovered());
         } else if (detail.type === "encrypted-stream-ready") {
           // Wait for HelloAck, not only the first encrypted send.
           this.handleTransportRecovered();
@@ -136,19 +157,37 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   writeInput(data: string): Promise<void> {
-    recordLiveHarnessTerminal("input", { data, path: "send_input" });
-    return this.enqueueTerminalInput(async (attachmentGeneration) => {
-      await this.options.bridge.request({
-        type: "send_input",
-        session_id: this.sessionId,
-        data
-      });
-      if (!this.isCurrentAttachment(attachmentGeneration)) return;
+    recordLiveHarnessTerminal("input", { data, path: "subscription_data_channel" });
+    return this.enqueueTerminalFrame(async () => {
+      const bytes = new TextEncoder().encode(data);
+      if (bytes.byteLength <= MAX_INPUT_DATA_BYTES) {
+        await this.sendTerminalFrame(encodeTerminalInput(bytes));
+        return;
+      }
+      const operationId = this.nextPasteOperationId++;
+      const modes = this.modeFlags ?? await this.refreshModeFlags(this.attachmentGeneration);
+      if (!modes) throw new Error("Authoritative mode flags are unavailable for terminal paste.");
+      let committed = false;
+      try {
+        for (const frame of encodePaste(
+          operationId,
+          modes.mode_generation,
+          modes.mode_revision,
+          bytes
+        )) {
+          await this.sendTerminalFrame(frame);
+        }
+        committed = true;
+      } finally {
+        if (!committed) {
+          await this.sendTerminalFrame(encodePasteAbort(operationId)).catch(() => undefined);
+        }
+      }
     });
   }
 
   writeModeGatedInput(semantic: ModeDependentTerminalInput): Promise<void> {
-    return this.enqueueTerminalInput((attachmentGeneration) =>
+    return this.enqueueTerminalFrame((attachmentGeneration) =>
       this.writeModeGatedInputAfterBarrier(semantic, attachmentGeneration)
     );
   }
@@ -220,75 +259,20 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         mouse_mode: modes.mouse_mode
       });
     }
-    const result = await this.sendModeGatedInput(encoded, modes, attachmentGeneration);
-    if (!this.isCurrentAttachment(attachmentGeneration)) return;
-    if (result?.admitted) {
-      recordLiveHarnessTerminal("mode_gated_input", {
-        admitted: true,
-        bytes: encoded,
-        mode_generation: modes.mode_generation,
-        mode_revision: modes.mode_revision
-      });
-      return;
-    }
-
-    if (!isStaleModeGatedReject(result)) {
-      recordLiveHarnessTerminal("mode_gated_input", {
-        admitted: false,
-        bytes: encoded,
-        error_kind: result?.error_kind ?? null
-      });
-      if (result && !result.admitted) {
-        throw new Error(
-          result.error_kind
-            ? `Mode-gated input rejected: ${result.error_kind}`
-            : "Mode-gated input was not admitted."
-        );
-      }
-      throw new Error("Mode-gated input response was missing.");
-    }
-
-    // Stale reject: refresh modes from result or ReadModeFlags, discard old bytes, re-encode once.
-    const staleResult = result;
-    const freshModes =
-      (staleResult ? modeFlagsFromGatedResult(staleResult) : undefined) ??
-      (await this.refreshModeFlags(attachmentGeneration));
-    if (!freshModes || !this.isCurrentAttachment(attachmentGeneration)) return;
-    this.modeFlags = freshModes;
-
-    const reencoded = semantic.encode(freshModes);
-    // Stale → fresh modes may disable the semantic event (e.g. mouse 9 → 0).
-    if (!reencoded) {
-      recordLiveHarnessTerminal("mode_gated_input_skipped", {
-        reason: "reencode_empty_under_fresh_modes",
-        discarded_bytes: encoded,
-        mode_generation: freshModes.mode_generation,
-        mode_revision: freshModes.mode_revision,
-        mouse_mode: freshModes.mouse_mode
-      });
-      return;
-    }
-    // Never pair stale bytes with a fresh token.
-    const retryResult = await this.sendModeGatedInput(reencoded, freshModes, attachmentGeneration);
-    if (!this.isCurrentAttachment(attachmentGeneration)) return;
-
+    await this.sendTerminalFrame(
+      encodeModeGatedInput(
+        modes.mode_generation,
+        modes.mode_revision,
+        new TextEncoder().encode(encoded)
+      )
+    );
+    this.pendingModeGatedInputs.push({ semantic, encoded, retried: false });
     recordLiveHarnessTerminal("mode_gated_input", {
-      admitted: Boolean(retryResult?.admitted),
-      bytes: reencoded,
-      reencoded: true,
-      discarded_bytes: encoded,
-      mode_generation: freshModes.mode_generation,
-      mode_revision: freshModes.mode_revision,
-      error_kind: retryResult?.error_kind ?? null
+      bytes: encoded,
+      mode_generation: modes.mode_generation,
+      mode_revision: modes.mode_revision,
+      path: "subscription_data_channel"
     });
-
-    if (!retryResult?.admitted) {
-      throw new Error(
-        retryResult?.error_kind
-          ? `Mode-gated input retry rejected: ${retryResult.error_kind}`
-          : "Mode-gated input retry was not admitted."
-      );
-    }
   }
 
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription {
@@ -341,10 +325,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     recordLiveHarnessTerminal("resize", { rows, columns });
     this.pendingResize = { rows, columns };
     await this.ensureAttached();
-    const hydration = this.hydration;
-    if (hydration?.completed) {
-      await this.flushPendingResizeBestEffort(hydration.generation);
-    }
+    await this.enqueueTerminalFrame(async () => undefined);
   }
 
   async readScreen(): Promise<DaemonReadScreen | undefined> {
@@ -518,7 +499,9 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.hydration?.resolveBarrier();
     this.hydration = undefined;
     this.terminalEventQueue = Promise.resolve();
-    this.terminalInputQueue = Promise.resolve();
+    this.terminalFrameQueue = Promise.resolve();
+    this.pendingModeGatedInputs.length = 0;
+    this.nextPasteOperationId = 1;
     this.restoredVisibleScreenGeneration = undefined;
     this.modeFlags = undefined;
   }
@@ -603,19 +586,20 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
   }
 
-  private enqueueTerminalInput(
+  private enqueueTerminalFrame(
     send: (attachmentGeneration: number) => Promise<void>
   ): Promise<void> {
-    const queued = this.terminalInputQueue.then(async () => {
+    const queued = this.terminalFrameQueue.then(async () => {
       await this.ensureAttached();
       const hydration = this.hydration;
       if (!hydration) return;
       const attachmentGeneration = hydration.generation;
       await hydration.barrier;
       if (!this.isCurrentAttachment(attachmentGeneration) || !hydration.completed) return;
+      await this.flushPendingResize(attachmentGeneration);
       await send(attachmentGeneration);
     });
-    this.terminalInputQueue = queued.catch(() => undefined);
+    this.terminalFrameQueue = queued.catch(() => undefined);
     return queued;
   }
 
@@ -670,7 +654,9 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.hydration?.resolveBarrier();
     this.hydration = undefined;
     this.terminalEventQueue = Promise.resolve();
-    this.terminalInputQueue = Promise.resolve();
+    this.terminalFrameQueue = Promise.resolve();
+    this.pendingModeGatedInputs.length = 0;
+    this.nextPasteOperationId = 1;
     this.restoredVisibleScreenGeneration = undefined;
     this.modeFlags = undefined;
   }
@@ -753,12 +739,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       return;
     }
 
-    await this.options.bridge.request({
-      type: "resize",
-      session_id: this.sessionId,
-      rows: resize.rows,
-      cols: resize.columns
-    });
+    await this.sendTerminalFrame(encodeResize(resize.rows, resize.columns));
   }
 
   private async flushPendingResizeBestEffort(attachmentGeneration: number): Promise<void> {
@@ -777,12 +758,20 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       return;
     }
 
-    if (event.session_id !== this.sessionId || event.subscription_id !== this.subscriptionId) {
+    if (
+      event.subscription_id !== this.subscriptionId ||
+      (event.type !== "input_result" && event.session_id !== this.sessionId)
+    ) {
       return;
     }
 
     await this.testHooks?.beforeListenerDelivery?.();
     if (!this.isCurrentAttachment(attachmentGeneration)) {
+      return;
+    }
+
+    if (event.type === "input_result") {
+      await this.handleInputResult(event, attachmentGeneration);
       return;
     }
 
@@ -1017,7 +1006,6 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         this.modeFlags = modes;
       }
     });
-    void this.flushPendingResizeBestEffort(attachmentGeneration);
     void this.options.bridge
       .request({
         type: "read_screen",
@@ -1145,25 +1133,46 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return modeFlags;
   }
 
-  private async sendModeGatedInput(
-    data: string,
-    modes: DaemonModeFlags,
+  private async sendTerminalFrame(frame: Uint8Array): Promise<void> {
+    const stream = this.streamSubscription;
+    if (!stream?.sendFrame) {
+      throw new Error(`Terminal stream does not expose the dedicated binary sender for ${this.sessionId}.`);
+    }
+    await stream.sendFrame(frame);
+  }
+
+  private async handleInputResult(
+    result: TerminalInputResult,
     attachmentGeneration: number
-  ): Promise<DaemonModeGatedInputResult | undefined> {
-    if (!this.isCurrentAttachment(attachmentGeneration)) {
-      return undefined;
-    }
-    const response = await this.options.bridge.request({
-      type: "mode_gated_input",
+  ): Promise<void> {
+    this.modeFlags = {
       session_id: this.sessionId,
-      data,
-      mode_generation: modes.mode_generation,
-      mode_revision: modes.mode_revision
+      ...result.mode_flags,
+      mode_generation: result.mode_generation,
+      mode_revision: result.mode_revision
+    };
+    recordLiveHarnessTerminal("input_result", result);
+    if (result.kind !== "mode_gated_input") return;
+    const pending = this.pendingModeGatedInputs.shift();
+    if (!pending || result.admitted || result.rejection !== "stale_mode" || pending.retried) return;
+    const encoded = pending.semantic.encode(this.modeFlags);
+    if (!encoded || !this.isCurrentAttachment(attachmentGeneration)) return;
+    pending.retried = true;
+    await this.sendTerminalFrame(
+      encodeModeGatedInput(
+        this.modeFlags.mode_generation,
+        this.modeFlags.mode_revision,
+        new TextEncoder().encode(encoded)
+      )
+    );
+    this.pendingModeGatedInputs.push({ ...pending, encoded });
+    recordLiveHarnessTerminal("mode_gated_input", {
+      bytes: encoded,
+      reencoded: true,
+      discarded_bytes: pending.encoded,
+      mode_generation: this.modeFlags.mode_generation,
+      mode_revision: this.modeFlags.mode_revision
     });
-    if (!this.isCurrentAttachment(attachmentGeneration)) {
-      return undefined;
-    }
-    return response.mode_gated_input ?? undefined;
   }
 
   private emitOutput(data: TerminalOutput, kind: "output"): void {
@@ -1271,32 +1280,6 @@ function base64ToBytes(payloadBase64: string): Uint8Array {
 
 function isJsonSafeModeToken(modes: DaemonModeFlags): boolean {
   return Number.isSafeInteger(modes.mode_generation) && Number.isSafeInteger(modes.mode_revision);
-}
-
-function isStaleModeGatedReject(result: DaemonModeGatedInputResult | undefined): boolean {
-  if (!result || result.admitted) return false;
-  if (result.bytes_written !== 0) return false;
-  // Worker stale token reject: admitted=false, error_kind omitted, fresh modes present.
-  if (result.error_kind == null || result.error_kind === "stale" || result.error_kind === "stale_mode") {
-    return typeof result.mode_generation === "number" && typeof result.mode_revision === "number";
-  }
-  return false;
-}
-
-function modeFlagsFromGatedResult(result: DaemonModeGatedInputResult): DaemonModeFlags | undefined {
-  if (!result.session_id) return undefined;
-  return {
-    session_id: result.session_id,
-    kitty_enabled: result.kitty_enabled,
-    cursor_visible: result.cursor_visible,
-    bracketed_paste: result.bracketed_paste,
-    mouse_mode: result.mouse_mode,
-    alt_screen: result.alt_screen,
-    focus_reporting: result.focus_reporting,
-    application_cursor: result.application_cursor,
-    mode_generation: result.mode_generation,
-    mode_revision: result.mode_revision
-  };
 }
 
 function isLostSnapshotProgress(message: string): boolean {

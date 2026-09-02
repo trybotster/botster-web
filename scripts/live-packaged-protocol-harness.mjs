@@ -429,16 +429,16 @@ try {
     });
   }
 
-  // Mounted keyboard must use ModeGatedInput (JSON-safe tokens from core#121).
-  const modeGatedBeforeEcho = await daemonRequestCount(page, { type: "mode_gated_input" });
+  // Mounted keyboard must use the Core binary mode-gated frame on its subscription channel.
+  const modeGatedBeforeEcho = await terminalTelemetryCount(page, "mode_gated_input");
   await typeThroughMountedTerminal(page, `${echoProbe}\n`);
   await waitForTerminalOutput(page, `botster-web-production-echo:${echoProbe}`);
   await waitForTerminalRendererWrite(page, `botster-web-production-echo:${echoProbe}`);
   await proveByteFaithfulLiveTerminal(page);
-  const modeGatedAfterEcho = await daemonRequestCount(page, { type: "mode_gated_input" });
+  const modeGatedAfterEcho = await terminalTelemetryCount(page, "mode_gated_input");
   if (modeGatedAfterEcho <= modeGatedBeforeEcho) {
     throw new Error(
-      `expected mode_gated_input for mounted echo ${echoProbe}, observed delta ${modeGatedAfterEcho - modeGatedBeforeEcho}`
+      `expected a binary mode_gated_input for mounted echo ${echoProbe}, observed delta ${modeGatedAfterEcho - modeGatedBeforeEcho}`
     );
   }
   const fallbackSeen = await page.evaluate(() =>
@@ -476,11 +476,6 @@ try {
   await waitForTerminalAttachState(page, ["attached"]);
 
   const requestedResize = await latestTerminalResize(page);
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "resize", rows: requestedResize.rows, cols: requestedResize.columns },
-    "resize request"
-  );
   await waitForResizeProof(page, requestedResize);
 
   // Production-path terminal oracles required by Review: mouse, palette, zero OSC replies,
@@ -6150,7 +6145,6 @@ async function assertCurrentHubCompatibilityAndSchema(page) {
     "terminal_readback",
     "plugin_surface_render",
     "plugin_surface_action",
-    "mode_gated_input",
     "webrtc_terminal_adapter",
     "terminal_subscription_closed"
   ];
@@ -6907,24 +6901,15 @@ async function proveHydrationBuffersUntilGhostsnpInstall(page) {
     );
   });
 
-  const holdInputResponse = await page.evaluate(async ({ sessionId }) => {
-    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
-    if (!control?.request) {
-      return { error: { message: "transportControl.request unavailable" } };
+  await page.evaluate(() => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    if (!harness?.terminalControl?.writeInput) {
+      throw new Error("terminalControl.writeInput unavailable");
     }
-    try {
-      return await control.request({
-        type: "send_input",
-        session_id: sessionId,
-        data: "botster-web-production-bytes-hold\n"
-      });
-    } catch (error) {
-      return { error: { message: error instanceof Error ? error.message : String(error) } };
-    }
-  }, { sessionId: productionSessionId });
-  if (holdInputResponse.error || holdInputResponse.kind === "error") {
-    throw new Error(`hydration hold input failed: ${JSON.stringify(holdInputResponse)}`);
-  }
+    harness.holdInputPromise = harness.terminalControl.writeInput(
+      "botster-web-production-bytes-hold\n"
+    );
+  });
   const flushedEarly = {
     output: await countExactTerminalKind(page, "output", hydrateHoldBytes),
     renderer_write: await countExactTerminalKind(page, "renderer_write", hydrateHoldBytes)
@@ -6938,6 +6923,7 @@ async function proveHydrationBuffersUntilGhostsnpInstall(page) {
   await page.evaluate(() => {
     globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.releaseSnapshotInstall?.();
   });
+  await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.holdInputPromise);
 
   await waitForDaemonTerminalOutputBytes(page, hydrateHoldBytes, "hydration hold");
 
@@ -7114,11 +7100,7 @@ async function proveLiveTerminalAfterAttach(page, probe) {
     throw new Error("production attach still requested Drain");
   }
   await callTerminalControl(page, "writeInput", `${probe}\n`);
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "send_input", data: `${probe}\n` },
-    `post-attach live input ${probe}`
-  );
+  await waitForTerminalInputTelemetry(page, "input", `${probe}\n`, `post-attach live input ${probe}`);
   await waitForTerminalOutput(page, `botster-web-production-echo:${probe}`);
   await waitForTerminalRendererWrite(page, `botster-web-production-echo:${probe}`);
 }
@@ -7156,7 +7138,7 @@ async function proveMountedMouseModeGatedInput(page) {
       .at(-1);
     return modeEntry?.payload ?? null;
   });
-  const before = await daemonRequestCount(page, { type: "mode_gated_input" });
+  const before = await terminalTelemetryCount(page, "mode_gated_input");
   // Real Playwright pointer path (synthetic PointerEvent trips setPointerCapture).
   const canvas = page.locator(".terminal-view-container canvas").first();
   await canvas.waitFor({ state: "visible", timeout: 10_000 });
@@ -7169,13 +7151,13 @@ async function proveMountedMouseModeGatedInput(page) {
   await page.mouse.up();
   await page.waitForFunction(
     ({ beforeCount }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
-        (entry) => entry.kind === "daemon_request" && entry.payload?.type === "mode_gated_input"
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+        (entry) => entry.kind === "mode_gated_input"
       ).length > beforeCount,
     { beforeCount: before },
     { timeout: 8_000 }
   ).catch(async (error) => {
-    const after = await daemonRequestCount(page, { type: "mode_gated_input" });
+    const after = await terminalTelemetryCount(page, "mode_gated_input");
     const telemetry = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).slice(-12)
     );
@@ -7183,7 +7165,7 @@ async function proveMountedMouseModeGatedInput(page) {
       `mouse DECSET 1000/1006 path did not produce mode_gated_input (before=${before} after=${after} modes=${JSON.stringify(modes)}): ${error.message}; telemetry=${JSON.stringify(telemetry)}`
     );
   });
-  const after = await daemonRequestCount(page, { type: "mode_gated_input" });
+  const after = await terminalTelemetryCount(page, "mode_gated_input");
   if (after <= before) {
     throw new Error(`expected mode_gated_input after enabled mouse; delta=${after - before}`);
   }
@@ -7210,8 +7192,8 @@ async function proveZeroBrowserOscColorReplies(page) {
 
   // Stimulus: feed OSC color queries through the renderer write path (as PTY output).
   // readOnly + suppressQueryReplies must keep replies off the PTY input sink.
-  const before = await daemonRequestCount(page, { type: "mode_gated_input" });
-  const beforeSend = await daemonRequestCount(page, { type: "send_input" });
+  const before = await terminalTelemetryCount(page, "mode_gated_input");
+  const beforeSend = await terminalTelemetryCount(page, "input");
   await page.evaluate(() => {
     const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
     // Directly exercise Restty write path if exposed via last renderer write sink.
@@ -8679,6 +8661,29 @@ async function daemonRequestCount(page, criteria) {
       }).length,
     { expectedCriteria: criteria }
   );
+}
+
+async function terminalTelemetryCount(page, kind) {
+  return page.evaluate(
+    ({ expectedKind }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+        (entry) => entry.kind === expectedKind
+      ).length,
+    { expectedKind: kind }
+  );
+}
+
+async function waitForTerminalInputTelemetry(page, kind, data, label) {
+  await page.waitForFunction(
+    ({ expectedKind, expectedData }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
+        (entry) => entry.kind === expectedKind && entry.payload?.data === expectedData
+      ),
+    { expectedKind: kind, expectedData: data },
+    { timeout: 45_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for ${label}: ${error.message}`);
+  });
 }
 
 async function waitForDaemonRequestCount(page, criteria, expectedCount, label) {

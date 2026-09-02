@@ -90,8 +90,13 @@ export interface DaemonBridgeClient {
  * `unsubscribe` stops delivery and best-effort detaches; detach rejections must not throw.
  */
 export interface DaemonTerminalStreamSubscription {
-  /** Resolves after Web delivers the attach response. */
+  /** Resolves after the reserved channel accepts its encrypted Hello. */
   ready: Promise<void>;
+  /** Send one complete Core terminal input frame on this subscription channel. */
+  sendFrame?(frame: Uint8Array): Promise<void>;
+  readonly generation?: number;
+  readonly peerGeneration?: number;
+  readonly label?: string;
   unsubscribe(): void;
   /** Stop local frame delivery only — no detach request. Used when the data channel is already dead. */
   abandon(): void;

@@ -12,6 +12,7 @@ import type {
   DaemonLocalWebrtcDeliveryKind,
   DaemonRequest,
   DaemonResponse,
+  DaemonTerminalReservation,
   JsonValue
 } from "./realHubDaemonDto";
 import type { DaemonBridgeClient, TerminalStreamEvent } from "./hubTransport";
@@ -50,6 +51,7 @@ export type WebrtcDaemonLifecycleEvent =
   | { type: "data-channel-closed" }
   | { type: "data-channel-error" }
   | { type: "encrypted-stream-ready"; requestType: string }
+  | { type: "terminal-data-channel-closed"; sessionId: string; subscriptionId: string; generation: number }
   | { type: "hello-ack"; hostCompatible: boolean; terminalCompatible: boolean; detail: string };
 
 export const webRtcDaemonLifecycleEventName = "botster:webrtc-daemon-lifecycle";
@@ -72,6 +74,33 @@ type TerminalStreamListener = {
   coreGeneration: number;
   closed: boolean;
   onEvent(event: TerminalStreamEvent): void | Promise<void>;
+};
+
+type TerminalChannelAssembly = {
+  messageId: string;
+  chunkCount: number;
+  totalBytes: number;
+  nextIndex: number;
+  payloads: string[];
+  receivedBytes: number;
+  timeout: number;
+};
+
+type TerminalChannelBinding = {
+  listener: TerminalStreamListener;
+  channel: RTCDataChannel;
+  peerGeneration: number;
+  transportGeneration: number;
+  generation: number;
+  label: string;
+  closed: boolean;
+  admitted: boolean;
+  outboundCounter: number;
+  completedMessageIds: Set<string>;
+  assembly?: TerminalChannelAssembly;
+  resolveReady(): void;
+  rejectReady(error: unknown): void;
+  expiryTimeout: number;
 };
 
 /** Test/live-harness switch: skip production assembly-timeout cleanup so ablation goes red. */
@@ -245,6 +274,7 @@ export const localWebrtcResponseChunkLimits = Object.freeze({
 });
 
 const requestTimeoutMs = localWebrtcResponseChunkLimits.requestTimeoutMs;
+const terminalChunkPayloadBytes = 12_288;
 
 function createRequestIdGenerator(prefix: string) {
   let counter = 0;
@@ -330,6 +360,7 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
         transport.removeTerminalStreamListener(listener);
       };
 
+      let binding: TerminalChannelBinding | undefined;
       const ready = transport
         .request({ type: "attach", session_id: sessionId, subscription_id: subscriptionId })
         .then(async (response) => {
@@ -337,25 +368,14 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
           if (response.error) {
             throw webrtcFailure("data-plane", response.error.message);
           }
-          const events = response.events ?? [];
-          for (const event of events) {
-            if (isForbiddenAttachResponseEvent(event)) {
-              throw webrtcFailure(
-                "data-plane",
-                `attach response contained a terminal body: ${event.type}`
-              );
-            }
-            if (event.type !== "attach_state") {
-              continue;
-            }
-            recordLiveHarnessEvent("daemon_terminal_event", event);
-            await onEvent({
-              type: "attach_state",
-              session_id: event.session_id,
-              subscription_id: event.subscription_id,
-              state: event.state === "attach_failed" ? "attach_failed" : "attaching"
-            });
+          const reservation = response.terminal_reservation;
+          if (response.kind !== "terminal_reservation" || !reservation) {
+            throw webrtcFailure("data-plane", "attach response did not include a terminal reservation");
           }
+          if (reservation.session_id !== sessionId || reservation.subscription_id !== subscriptionId) {
+            throw webrtcFailure("data-plane", "terminal reservation identity did not match Attach");
+          }
+          binding = await transport.openTerminalChannel(listener, reservation);
         })
         .catch((error: unknown) => {
           recordLiveHarnessEvent("terminal_stream_error", {
@@ -368,11 +388,21 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
 
       return {
         ready,
+        sendFrame: async (frame: Uint8Array) => {
+          await ready;
+          if (!binding) throw webrtcFailure("transport", "terminal subscription channel is unavailable");
+          await transport.sendTerminalFrame(binding, frame);
+        },
+        get generation() { return binding?.generation; },
+        get peerGeneration() { return binding?.peerGeneration; },
+        get label() { return binding?.label; },
         abandon: () => {
           stopDelivery();
+          if (binding) transport.closeTerminalChannel(binding);
         },
         unsubscribe: () => {
           stopDelivery();
+          if (binding) transport.closeTerminalChannel(binding);
           void transport
             .request({ type: "detach", session_id: sessionId, subscription_id: subscriptionId })
             .catch((error: unknown) => {
@@ -403,6 +433,7 @@ class WebrtcDaemonTransport {
   private readonly entitySubscriptions = new Set<EntitySubscription>();
   private readonly packageEventHolders = new Set<PackageEventHolder>();
   private readonly terminalStreamListeners = new Set<TerminalStreamListener>();
+  private readonly terminalChannels = new Set<TerminalChannelBinding>();
   private readonly subscriptionGenerations = new Map<string, number>();
   private helloPromise: Promise<DaemonHelloAck> | undefined;
   private peerConnection: RTCPeerConnection | undefined;
@@ -478,6 +509,221 @@ class WebrtcDaemonTransport {
   removeTerminalStreamListener(listener: TerminalStreamListener): void {
     listener.closed = true;
     this.terminalStreamListeners.delete(listener);
+  }
+
+  async openTerminalChannel(
+    listener: TerminalStreamListener,
+    reservation: DaemonTerminalReservation
+  ): Promise<TerminalChannelBinding> {
+    const peerConnection = this.peerConnection;
+    const key = this.cryptoKey;
+    if (!peerConnection || !key || this.dataChannel?.readyState !== "open") {
+      throw webrtcFailure("transport", "terminal reservation arrived without an open control peer");
+    }
+    const transportGeneration = this.peerGeneration;
+    let channel: RTCDataChannel;
+    try {
+      channel = peerConnection.createDataChannel(reservation.label, { ordered: true });
+    } catch (error) {
+      throw webrtcFailure("transport", `terminal DataChannel creation failed: ${errorMessage(error)}`);
+    }
+    listener.peerGeneration = reservation.peer_generation;
+    listener.coreGeneration = reservation.generation;
+    let binding!: TerminalChannelBinding;
+    const ready = new Promise<void>((resolve, reject) => {
+      binding = {
+        listener,
+        channel,
+        peerGeneration: reservation.peer_generation,
+        transportGeneration,
+        generation: reservation.generation,
+        label: reservation.label,
+        closed: false,
+        admitted: false,
+        outboundCounter: 0,
+        completedMessageIds: new Set(),
+        resolveReady: resolve,
+        rejectReady: reject,
+        expiryTimeout: window.setTimeout(() => {
+          const error = webrtcFailure("data-plane", "terminal reservation expired before admission");
+          binding.rejectReady(error);
+          this.closeTerminalChannel(binding);
+        }, Math.max(1, reservation.expires_in_seconds) * 1_000)
+      };
+    });
+    this.terminalChannels.add(binding);
+    let messageQueue = Promise.resolve();
+    channel.addEventListener("message", (event) => {
+      if (binding.closed) return;
+      messageQueue = messageQueue
+        .then(() => this.handleTerminalChannelMessage(binding, event.data))
+        .catch((error: unknown) => {
+          binding.rejectReady(error);
+          this.closeTerminalChannel(binding, true);
+        });
+    });
+    channel.addEventListener("close", () => this.closeTerminalChannel(binding, true));
+    channel.addEventListener("error", () => this.closeTerminalChannel(binding, true));
+    try {
+      await waitForDataChannelOpen(channel);
+      if (binding.closed || transportGeneration !== this.peerGeneration) {
+        throw webrtcFailure("transport", "terminal DataChannel opened for a stale reservation");
+      }
+      const hello: DaemonHello = {
+        protocol: hostHelloProtocol,
+        compatibility: hostCompatibilityRequirement,
+        terminal_compatibility: terminalCompatibilityRequirement
+      };
+      channel.send(JSON.stringify(await encryptJsonPayload(key, hello)));
+      await ready;
+      return binding;
+    } catch (error) {
+      binding.rejectReady(error);
+      this.closeTerminalChannel(binding);
+      throw error;
+    }
+  }
+
+  async sendTerminalFrame(binding: TerminalChannelBinding, frame: Uint8Array): Promise<void> {
+    const key = this.cryptoKey;
+    if (binding.closed || !binding.admitted || !key || binding.channel.readyState !== "open") {
+      throw webrtcFailure("transport", "terminal subscription channel is not ready");
+    }
+    const envelopeJson = JSON.stringify(await encryptBytesPayload(key, frame));
+    const totalBytes = utf8ByteLength(envelopeJson);
+    const chunkCount = Math.ceil(totalBytes / terminalChunkPayloadBytes);
+    const messageId = `${binding.peerGeneration}:${binding.generation}:${++binding.outboundCounter}`;
+    recordLiveHarnessEvent("terminal_data_channel_send", {
+      label: binding.label,
+      generation: binding.generation,
+      peer_generation: binding.peerGeneration,
+      message_id: messageId,
+      chunk_count: chunkCount,
+      total_bytes: totalBytes,
+      frame_kind: frame[1] ?? null
+    });
+    for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+      if (binding.closed || binding.channel.readyState !== "open") {
+        throw webrtcFailure("transport", "terminal subscription channel closed during send");
+      }
+      const payload = envelopeJson.slice(
+        chunkIndex * terminalChunkPayloadBytes,
+        (chunkIndex + 1) * terminalChunkPayloadBytes
+      );
+      const chunk: DaemonLocalWebrtcDeliveryChunk = {
+        version: 2,
+        delivery_kind: "daemon_terminal_frame",
+        message_id: messageId,
+        chunk_index: chunkIndex,
+        chunk_count: chunkCount,
+        total_bytes: totalBytes,
+        payload
+      };
+      const serialized = JSON.stringify(chunk);
+      if (utf8ByteLength(serialized) >= localWebrtcResponseChunkLimits.maximumFrameBytesExclusive) {
+        throw webrtcFailure("data-plane", "terminal delivery chunk exceeds the transport limit");
+      }
+      binding.channel.send(serialized);
+    }
+  }
+
+  closeTerminalChannel(binding: TerminalChannelBinding, remote = false): void {
+    if (binding.closed) return;
+    binding.closed = true;
+    window.clearTimeout(binding.expiryTimeout);
+    if (binding.assembly) window.clearTimeout(binding.assembly.timeout);
+    binding.listener.closed = true;
+    this.terminalChannels.delete(binding);
+    this.terminalStreamListeners.delete(binding.listener);
+    if (binding.channel.readyState !== "closed") binding.channel.close?.();
+    if (remote && binding.admitted) {
+      this.emitLifecycle({
+        type: "terminal-data-channel-closed",
+        sessionId: binding.listener.sessionId,
+        subscriptionId: binding.listener.subscriptionId,
+        generation: binding.generation
+      });
+    }
+  }
+
+  private async handleTerminalChannelMessage(binding: TerminalChannelBinding, data: unknown): Promise<void> {
+    if (typeof data !== "string" || utf8ByteLength(data) >= localWebrtcResponseChunkLimits.maximumFrameBytesExclusive) {
+      throw webrtcFailure("data-plane", "terminal DataChannel delivery must be a bounded string chunk");
+    }
+    const chunk = parseDeliveryChunk(data);
+    if (binding.admitted && chunk.delivery_kind !== "daemon_terminal_frame") {
+      throw webrtcFailure("data-plane", "bound terminal channel received a non-terminal delivery");
+    }
+    if (binding.completedMessageIds.has(chunk.message_id)) {
+      throw webrtcFailure("data-plane", "terminal channel reused a completed message id");
+    }
+    let assembly = binding.assembly;
+    if (!assembly) {
+      if (chunk.chunk_index !== 0) throw webrtcFailure("data-plane", "terminal delivery did not start at chunk zero");
+      assembly = binding.assembly = {
+        messageId: chunk.message_id,
+        chunkCount: chunk.chunk_count,
+        totalBytes: chunk.total_bytes,
+        nextIndex: 0,
+        payloads: [],
+        receivedBytes: 0,
+        timeout: window.setTimeout(() => {
+          if (!binding.closed) {
+            binding.rejectReady(webrtcFailure("data-plane", "terminal delivery assembly timed out"));
+            this.closeTerminalChannel(binding, true);
+          }
+        }, requestTimeoutMs)
+      };
+    }
+    if (
+      assembly.messageId !== chunk.message_id ||
+      assembly.chunkCount !== chunk.chunk_count ||
+      assembly.totalBytes !== chunk.total_bytes ||
+      chunk.chunk_index !== assembly.nextIndex
+    ) {
+      throw webrtcFailure("data-plane", "terminal delivery chunk order or metadata was invalid");
+    }
+    assembly.payloads.push(chunk.payload);
+    assembly.receivedBytes += utf8ByteLength(chunk.payload);
+    if (assembly.receivedBytes > assembly.totalBytes) {
+      throw webrtcFailure("data-plane", "terminal delivery exceeded the declared total bytes");
+    }
+    assembly.nextIndex += 1;
+    if (assembly.nextIndex !== assembly.chunkCount) return;
+    if (assembly.receivedBytes !== assembly.totalBytes) {
+      throw webrtcFailure("data-plane", "terminal delivery bytes did not match the declared total");
+    }
+    window.clearTimeout(assembly.timeout);
+    binding.assembly = undefined;
+    if (binding.completedMessageIds.size >= localWebrtcResponseChunkLimits.maximumCompletedMessageIds) {
+      const oldestMessageId = binding.completedMessageIds.values().next().value as string;
+      binding.completedMessageIds.delete(oldestMessageId);
+    }
+    binding.completedMessageIds.add(assembly.messageId);
+    const key = this.cryptoKey;
+    if (!key) throw webrtcFailure("encryption", "terminal response key is unavailable");
+    const payload = await decryptDaemonPayload(key, assembly.payloads.join(""));
+    if (!binding.admitted) {
+      const ack = payload as DaemonHelloAck;
+      if (!ack || ack.protocol !== hostHelloProtocol || !isTerminalCompatibilityAccepted(ack.terminal_compatibility)) {
+        throw webrtcFailure("data-plane", "terminal DataChannel Hello was rejected");
+      }
+      binding.admitted = true;
+      window.clearTimeout(binding.expiryTimeout);
+      binding.resolveReady();
+      recordLiveHarnessEvent("terminal_data_channel", {
+        state: "ready",
+        label: binding.label,
+        generation: binding.generation,
+        peer_generation: binding.peerGeneration
+      });
+      return;
+    }
+    const event = parseTerminalEvent(payload);
+    const sessionMatches = event.type === "input_result" || event.session_id === binding.listener.sessionId;
+    if (!sessionMatches || event.subscription_id !== binding.listener.subscriptionId || binding.listener.closed) return;
+    recordLiveHarnessEvent("daemon_terminal_event", event);
+    await binding.listener.onEvent(event);
   }
 
   private async sendEncrypted<T extends DaemonResponse | DaemonHelloAck>(
@@ -1195,6 +1441,9 @@ class WebrtcDaemonTransport {
     this.terminalDeliveryBacklog = 0;
     const dataChannel = this.dataChannel;
     const peerConnection = this.peerConnection;
+    for (const binding of [...this.terminalChannels]) {
+      this.closeTerminalChannel(binding);
+    }
     this.dataChannel = undefined;
     this.peerConnection = undefined;
     this.connectPromise = undefined;
@@ -1364,17 +1613,18 @@ class WebrtcDaemonTransport {
       return;
     }
     const event = parseTerminalEvent(payload);
+    const eventSessionId = event.type === "input_result" ? undefined : event.session_id;
     const listeners = [...this.terminalStreamListeners].filter(
       (listener) =>
         !listener.closed &&
-        listener.sessionId === event.session_id &&
+        (eventSessionId === undefined || listener.sessionId === eventSessionId) &&
         listener.subscriptionId === event.subscription_id
     );
     if (listeners.length === 0) {
       recordLiveHarnessEvent("webrtc_terminal_frame_discarded", {
         reason: "stale_generation_or_subscription",
         generation,
-        session_id: event.session_id,
+        session_id: eventSessionId ?? null,
         subscription_id: event.subscription_id,
         type: event.type
       });
@@ -1664,6 +1914,20 @@ async function encryptJsonPayload(key: CryptoKey, payload: unknown): Promise<Aes
   };
 }
 
+async function encryptBytesPayload(key: CryptoKey, payload: Uint8Array): Promise<AesGcmEnvelope> {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(nonce) },
+    key,
+    toArrayBuffer(payload)
+  );
+  return {
+    nonce: base64Encode(nonce),
+    ciphertext: base64Encode(new Uint8Array(ciphertext)),
+    version: 1
+  };
+}
+
 function parseTerminalEvent(value: unknown): TerminalEvent {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw webrtcFailure("data-plane", "terminal frame must be a JSON object");
@@ -1673,7 +1937,8 @@ function parseTerminalEvent(value: unknown): TerminalEvent {
     type !== "snapshot" &&
     type !== "terminal_output" &&
     type !== "process_exit" &&
-    type !== "attach_state"
+    type !== "attach_state" &&
+    type !== "input_result"
   ) {
     throw webrtcFailure("data-plane", `unsupported terminal frame type ${String(type)}`);
   }
@@ -1688,18 +1953,6 @@ function isTerminalBodyEvent(event: DaemonEvent): boolean {
     event.type === "attach_state" ||
     event.type === "scrollback"
   );
-}
-
-function isForbiddenAttachResponseEvent(event: DaemonEvent): boolean {
-  if (
-    event.type === "snapshot" ||
-    event.type === "terminal_output" ||
-    event.type === "process_exit" ||
-    event.type === "scrollback"
-  ) {
-    return true;
-  }
-  return event.type === "attach_state" && event.state !== "attaching" && event.state !== "attach_failed";
 }
 
 function isTerminalCompatibilityAccepted(
