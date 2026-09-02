@@ -1132,7 +1132,7 @@ is independent of every wall-clock value.
 | G6 | The validator rejects a record missing any required member, missing an arm, carrying one arm only, carrying a threshold field, or carrying any `paint_oracle` other than `cdp_screencast` | unit assertions in `src/App.test.mjs` |
 | G7 | Byte fidelity holds in both arms: the probe marker echoed by the PTY appears intact | harness assertion per repetition |
 | G8 | The only asserted ordering holds in every repetition: `t_key` precedes `t_pty`, `t_key` precedes the probe's paint change, and paint-ready precedes paint-settled. No ordering between `t_pty` and `t_paint` is asserted, because §6.3.1 shows the mechanism does not guarantee one under `host_watcher` | harness assertion per repetition |
-| G9 | No terminal delivery queue overflow occurs during the package-event burst | reuse the existing overflow check at `scripts/live-packaged-protocol-harness.mjs:1906` |
+| G9 | No terminal subscription channel closes during the package-event burst | reuse the terminal close check in `scripts/live-packaged-protocol-harness.mjs` |
 | G10 | Package events never enter the terminal adapter path in the modular arm | reuse the existing check at `scripts/live-packaged-protocol-harness.mjs:1923` |
 | G11 | Arm teardown is proven live: recorded Hub and worker pids are gone and the arm socket path is absent after stop | harness assertion per arm |
 | G12 | Both checkouts are clean and at the recorded revisions before the capture starts | harness precondition, fails closed |

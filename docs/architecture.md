@@ -15,7 +15,11 @@
 
 ## Production transport
 
-Installed package runtime uses one ordered WebRTC data channel. The first encrypted send after AES-GCM is `DaemonHello` with independent host and Core terminal compatibility. Generated `DaemonLocalWebrtcDeliveryChunk` frames multiplex correlated daemon responses, unsolicited entity frames, Core `daemon_terminal_frame`s, and host `daemon_event`s. Encrypted payloads remain generated `DaemonRequest`, `DaemonResponse`, `DaemonHello`/`DaemonHelloAck`, `DaemonEntityFrame`, Core `TerminalEvent`, or host `DaemonEvent` DTOs.
+Installed package runtime uses one ordered WebRTC control DataChannel and one ordered DataChannel for each terminal subscription. The first encrypted control-channel send after AES-GCM is `DaemonHello` with independent host and Core terminal compatibility. Control-channel `DaemonLocalWebrtcDeliveryChunk` frames carry correlated daemon responses, unsolicited entity frames, and host `daemon_event`s. The control channel rejects `daemon_terminal_frame` deliveries.
+
+Web sends `Attach` on the control channel. Hub returns a terminal reservation with an opaque label, a subscription generation, and a peer generation. Web then creates one ordered DataChannel with that exact label. Web sends an encrypted `DaemonHello` on the new channel and waits for `DaemonHelloAck`. The admitted channel carries only Core binary input frames and version 2 `daemon_terminal_frame` delivery chunks. Each chunk records `message_id`, `chunk_index`, `chunk_count`, and `total_bytes`. Web encrypts each complete Core frame before it splits the envelope into chunks.
+
+Encrypted payloads remain generated `DaemonRequest`, `DaemonResponse`, `DaemonHello`/`DaemonHelloAck`, `DaemonEntityFrame`, Core `TerminalEvent`, or host `DaemonEvent` DTOs.
 
 Session state uses a held entity subscription and canonical family `session`:
 
@@ -27,15 +31,15 @@ Session state uses a held entity subscription and canonical family `session`:
 
 There is no HTTP daemon client, SSE terminal stream, polling, `list_sessions` hydration, or lifecycle-event projection fallback.
 
-Terminal data stays outside `HubControlFrame`. After Hello, the WebRTC client attaches and consumes Core terminal frames. The Hub terminal data plane imports authoritative GHOSTSNP Snapshot bytes into Restty (H0–H5), buffers live output across install, reads mode flags for ModeGatedInput, and never imports Scrollback as renderer state. ReadScreen is an optional supplement only. Restty mounts as a pure renderer (`readOnly`) and does not answer OSC color queries in the browser. A lost PAGE starts a fresh attach on a new decoder. `terminal_subscription_closed` arrives only as `daemon_event`.
+Terminal data stays outside `HubControlFrame` and outside the shared control DataChannel. After terminal-channel admission, the Hub terminal data plane imports authoritative GHOSTSNP Snapshot bytes into Restty (H0–H5), buffers live output across install, reads mode flags for ModeGatedInput, and never imports Scrollback as renderer state. ReadScreen is an optional supplement only. Restty mounts as a pure renderer (`readOnly`) and does not answer OSC color queries in the browser. A lost PAGE starts a fresh Attach with a new reservation and decoder. `terminal_subscription_closed` arrives only as a control-channel `daemon_event`.
 
-Package events stay on the Hub host-control plane. Hello requires `package_event_subscriptions`. The route-owned connection holds one `subscribe_events` per admitted `DaemonPackage.notice_reactions` descriptor. Owner and name come from the descriptor. A session-scoped descriptor subscribes with the viewed session subject and sends no subscription when no session is viewed. Delivery is unsolicited `daemon_event` (`package_event` / `event_gap`) and never enters the terminal delivery queue. Web calls `resolveNoticeText` from `@trybotster/ui-contract@0.3.3` and maps declared severity onto Ionic toast colour (`info` to `medium`, `warning` to `warning`, `error` to `danger`). Declared `ttl_ms` is clamped to 1,000 through 60,000 milliseconds. `event_gap` records a connection diagnostic and leaves entity state unchanged. Durable package state remains package-entity driven. Reconnect issues a fresh subscription id and does not replay notices.
+Package events stay on the Hub host-control plane. Hello requires `package_event_subscriptions`. The route-owned connection holds one `subscribe_events` per admitted `DaemonPackage.notice_reactions` descriptor. Owner and name come from the descriptor. A session-scoped descriptor subscribes with the viewed session subject and sends no subscription when no session is viewed. Delivery is unsolicited `daemon_event` (`package_event` / `event_gap`) and never enters terminal channel state. Web calls `resolveNoticeText` from `@trybotster/ui-contract@0.3.3` and maps declared severity onto Ionic toast colour (`info` to `medium`, `warning` to `warning`, `error` to `danger`). Declared `ttl_ms` is clamped to 1,000 through 60,000 milliseconds. `event_gap` records a connection diagnostic and leaves entity state unchanged. Durable package state remains package-entity driven. Reconnect issues a fresh subscription id and does not replay notices.
 
 Published Web event-plane budgets:
 
 | Budget | Value | Source |
 | --- | --- | --- |
-| Terminal delivery backlog | 16 frames | `localWebrtcResponseChunkLimits.maximumTerminalDeliveryBacklog` |
+| Terminal delivery assembly | 1 message per terminal channel | `TerminalChannelBinding.assembly` |
 | Host request round-trip | 10,000 ms | `localWebrtcResponseChunkLimits.requestTimeoutMs` |
 | Entity reconciliation deadline | 15,000 ms | live packaged harness standing wait ceiling |
 | Terminal echo round-trip deadline | 15,000 ms | live packaged harness standing wait ceiling |

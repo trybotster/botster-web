@@ -43,6 +43,8 @@ Web removed the control request paths for `send_input`, `mode_gated_input`, and 
 
 - `README.md`
 - `docs/architecture.md`
+- `docs/plans/capture-the-debug-runtime-terminal-regression-baseline.md`
+- `docs/plans/consume-transient-package-events-through-hub-control-plane.md`
 - `docs/plans/one-binary-datachannel-per-terminal-subscription.md`
 - `docs/reports/implement-one-binary-datachannel-per-terminal-subscription.md`
 - `package.json`
@@ -126,6 +128,23 @@ The isolated real-Hub lane proved these facts:
 - Exit and Detach closed the second subscription.
 
 The caller-owned lane repeated the same transfer and reconnect proof. The keep-alive pass preserved the caller-owned session. The explicit exit pass then closed the session.
+
+## Verify correction
+
+Verify confirmed the runtime change and returned one documentation defect. Web documentation still described terminal delivery on the shared control DataChannel.
+
+The correction now documents these facts:
+
+- The installed runtime has one ordered control DataChannel and one ordered DataChannel for each terminal subscription.
+- Web creates a terminal channel only from the Hub reservation label and generation.
+- Each terminal channel completes its own encrypted Hello before it carries Core frames.
+- The control channel rejects `daemon_terminal_frame` deliveries.
+- Terminal delivery uses version 2 chunks after encryption.
+- Each terminal channel holds at most one in-progress delivery assembly.
+
+The correction also removed the deleted terminal backlog budget from two Web plan documents. The architecture assertions now reject that old budget and require the current transport contract.
+
+After this correction, `npm test`, `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` passed. Lint reported the same five existing Fast Refresh warnings.
 
 ## Unverified behavior and residual risk
 
