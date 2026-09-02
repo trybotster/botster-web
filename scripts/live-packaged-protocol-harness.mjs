@@ -1865,6 +1865,11 @@ async function exercisePackageEvents(page, { forceGap }) {
       (entry) => entry.kind === "package_event_notice"
     ).length
   );
+  const terminalClosesBeforeFlood = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+      (entry) => entry.kind === "terminal_data_channel" && entry.payload?.state === "closed"
+    ).length
+  );
   const controlStarted = Date.now();
   const controlPromise = sendDaemonRequest(join(webrtcDataDir, "botster-hub.sock"), { type: "status" });
   await emitPackageEventFixtureAction(page, packageEventsBurstAction, { count: floodCount });
@@ -1917,13 +1922,13 @@ async function exercisePackageEvents(page, { forceGap }) {
     throw new Error(`terminal echo exceeded 15000ms during flood: ${error.message}`);
   });
   const floodMs = Date.now() - floodStarted;
-  const overflow = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) =>
-      String(entry.payload?.message ?? entry.message ?? "").includes("terminal delivery queue overflow")
-    )
+  const terminalClosesAfterFlood = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+      (entry) => entry.kind === "terminal_data_channel" && entry.payload?.state === "closed"
+    ).length
   );
-  if (overflow) {
-    throw new Error("event flood overflowed the terminal delivery backlog");
+  if (terminalClosesAfterFlood !== terminalClosesBeforeFlood) {
+    throw new Error("package-event flood closed the terminal subscription channel");
   }
   const eventKinds = await page.evaluate(() => {
     const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
@@ -1945,6 +1950,7 @@ async function exercisePackageEvents(page, { forceGap }) {
     emitted: floodCount,
     received_events: receivedEvents,
     received_notices: receivedNotices,
+    terminal_channel_closes: terminalClosesAfterFlood - terminalClosesBeforeFlood,
     subscription_id: subscriptionId
   })}`);
 }

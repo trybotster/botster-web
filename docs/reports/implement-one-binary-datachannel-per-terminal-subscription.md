@@ -146,6 +146,14 @@ The correction also removed the deleted terminal backlog budget from two Web pla
 
 After this correction, `npm test`, `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` passed. Lint reported the same five existing Fast Refresh warnings.
 
+Verify pass 2 found one dead package-events assertion. The flood lane still scanned for the deleted terminal delivery queue overflow message. The scan could never fail after the cold cut.
+
+The lane now records the number of closed terminal subscription channels before the package-event flood. It compares that number after terminal echo recovery. The lane fails if the flood closes the terminal subscription channel. The reported flood budgets include the close-count delta.
+
+The plan gate G9 now names this implemented close guard. Source assertions require the guard and reject the deleted overflow strings.
+
+After this correction, `npm test`, `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` passed. The package-events live lane remains unrun because its broad startup path stops on the out-of-scope entity DataChannel contract recorded above.
+
 ## Unverified behavior and residual risk
 
 The generated protocol drift check passed. The generated file uses protocol 8 and conformance revision 48.
