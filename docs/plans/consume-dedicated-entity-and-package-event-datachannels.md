@@ -6,7 +6,7 @@ Target repository: `botster-web` (`trybotster/botster-web`)
 Target id: `tgt_40abcf71ccf049f4ac0c99953a799869`
 Base ref: `main` at `6dc32b3` (clean tracked worktree, `.gitignore` intact, no colon in the worktree path).
 
-Plan revision 1 (2026-09-02).
+Plan revision 2 (2026-09-02). Revision 2 adds the reconnect repair that the human folded from superseded ticket `ticket_1788396308_856047`.
 
 ## 1. Repository routing and context loaded
 
@@ -44,6 +44,13 @@ Targeted atomic notes (each title verified against the vault filename):
 - [[a page reload is not a reconnect]]
 - [[reused browser transports replay the live hub mode]]
 - [[in-flight cancel needs one Web Detach owner]]
+- [[Core terminal subscription ownership is session, subscription, and generation]]
+- [[Core ClientWorker bind requires a live attach generation]]
+- [[Web paints GHOSTSNP READY while attach remains Attaching]]
+- [[incremental GHOSTSNP clients defer resize and input until FINISH and attached]]
+- [[canceling incremental attach aborts the decoder and sends Detach]]
+- [[terminal webrtc failure records do not prove peer runtime teardown]]
+- [[a regression test must be shown to go red with the fix reverted]]
 - [[Hub ultimate WebRTC close failure sacrifices every peer on the dedicated runtime]]
 - [[botster web dto field names must match authoritative rust serde structs]]
 - [[a ui contract import line change costs one test line in each generic client]]
@@ -52,7 +59,7 @@ Repository context read in `botster-web` at `6dc32b3`: `README.md`, `docs/archit
 
 Authoritative producer context read outside the target repository, for contract facts only: `botster-hub` `main` at `080ca9a` (`docs/client-protocol.md` section "Dedicated entity and package-event channels", `docs/plans/give-entity-and-package-event-subscriptions-dedicated-datachannels.md`, `src/admission/reservations.rs`, `src/admission/connection_budget.rs`, `src/daemon/control/entities.rs`, `src/daemon/control/events.rs`, `src/daemon/control/connection.rs`, `src/daemon/owner_loop.rs`, `src/transport/webrtc/subscription_channel.rs`, `src/transport/webrtc/peer.rs` tests) and the installed package `@trybotster/hub-test-support@0.1.43` (`metadata.json`: protocol 8, conformance revision 48, `daemon-protocol.ts` sha256 `33c0c27941c0e9751342cfdbeb53d27bb4a1225e5ce7f4be280d9f0dc11ad7f3`).
 
-Open sibling tickets checked. The only open `botster-web` ticket in the project is this one. Open Hub siblings (`ticket_1788313897_932611`, `ticket_1788206393_323469`, `ticket_1787600679_990088`, `ticket_1787600691_401181`), Core siblings (`ticket_1788112223_631570`, `ticket_1787894967_973951`), and the TUI consumer (`ticket_1787603674_865638`) do not change the subscription reservation contract this plan consumes. Prior terminal work in this repository (`ticket_1787600676_914408`, merged at `fa074f8` through `6dc32b3`) is the binding scheme this plan follows.
+Open sibling tickets checked again after the fold. Recovery ticket `ticket_1788396308_856047` and run `run_1788396326_651208` were cancelled and closed as superseded. They produced no mergeable implementation. The parent branch already contains their snapshot-hold correction at `1fcba42`. Unit-race ticket `ticket_1788405063_986655` owns the unrelated intermittent `event subscription returned entity_subscribed` test race. Open Hub, Core, and TUI siblings do not change this ticket's contract.
 
 Dependencies on this ticket, all closed: `ticket_1787600682_233928` (Hub source), `ticket_1787600676_914408` (Web terminal channel), `ticket_1788282899_502914` (published 0.1.43). No new dependency is required.
 
@@ -112,12 +119,18 @@ In scope, in `botster-web` only:
 11. Migrate `src/App.test.mjs` fixtures that emit entity frames and package events on the fake control channel to emit them on the created entity and event channels, and add the checks in section 8.
 12. Extend the live packaged harness: reservation and label fidelity for entity and event channels, one-document reconnect for entity and event subscriptions, and the saturation lane in section 8.
 13. Update `docs/architecture.md` and `README.md` transport descriptions. Package and revision claims stay at 0.1.43 / protocol 8 / revision 48; the vendored `daemon-protocol.ts` already matches (drift check passes against the installed 0.1.43).
+14. Preserve commit `1fcba42`: do not wait for `attach_state=attached` while the harness holds READY snapshot handling on the same ordered terminal channel. Core queues input until attach completes.
+15. Diagnose the rotating terminal reconnect echo failure against Hub `bb1a330543bc06888f894edd5f40a0f867753a12`. Correlate the first failing assertion with the exact subscription id, reservation generation, peer generation, terminal channel lifecycle, control response, and Hub log window.
+16. Repair the confirmed Web reconnect defect. Preserve exact session, subscription, and generation identity. Preserve one Detach owner for public cancel, last-listener close, and stale attach abort.
+17. Keep a terminal Attach failure isolated from the control peer, sibling terminal channels, entity subscriptions, and package-event holders. Add direct Attach-timeout proof for that blast radius.
+18. Cover Attach, HelloAck, terminal events, terminal close, Detach, entity subscriptions, package-event subscriptions, and control response binding in the late-message matrix and deterministic tests.
+19. Add production-class deterministic proof and a red-on-revert control for the confirmed failure. Do not use a fallback, a longer timeout, or a weaker terminal positive control as the repair.
 
 Explicitly out of scope:
 
 - Any fallback that carries entity frames or package events on the control channel. The cut is cold.
 - Per-subscription SDP renegotiation and any pre-created channel pool.
-- Terminal channel behavior; it landed in `ticket_1787600676_914408` and is reused, not changed.
+- Any terminal protocol fallback, per-subscription SDP renegotiation, channel pool, or timeout inflation. The folded scope can change Web terminal reconnect ownership and teardown only when evidence confirms the defect.
 - Any change in `botster-hub` or `botster-core`, and any package pin change. Both coordinates this ticket needs are already installed.
 - Product reactions, package owners, event names, or entity families in generic Web code.
 - Unix transport, TUI, or Hub official gate changes. Hub open siblings own those.
@@ -159,13 +172,14 @@ Changed:
 - `src/botster/webrtcDaemonClient.ts` — reservation read in `startEntitySubscription` and `startPackageEventSubscription`; a shared reserved-channel opener generalized from `openTerminalChannel` (label, ordered, Hello, ack, expiry bound, stale checks, per-binding assembly); entity and event bindings with class-specific delivery routing; close and forget by generation; control-channel rejection of entity and package-event deliveries; `resetPeerState` closing all classes; harness events and transport control.
 - `src/botster/connectionDiagnostics.ts` — diagnostic kinds for reservation missing, channel rejected, channel expired, channel closed.
 - `src/botster/hubTransport.ts` — contract comments; no projection change.
+- `src/botster/hubTerminalDataPlane.ts` — the confirmed reconnect, generation fence, hydration, Detach, or event-queue repair.
 - `src/botster/realHubDaemonDto.ts` — `DaemonSubscriptionReservation` re-export if the existing pattern requires it.
 - `src/App.test.mjs` — fake peer and channel helpers already auto-ack Hellos on created channels; entity and event fixtures move to created channels; new checks in section 8.
 - `scripts/live-packaged-protocol-harness.mjs`, `scripts/live-packaged-protocol-helpers.mjs` — reservation, label fidelity, one-document reconnect, and saturation oracles.
 - `docs/architecture.md`, `README.md` — transport description; budgets table gains the per-channel entity and event assembly rows.
 - `docs/plans/consume-dedicated-entity-and-package-event-datachannels.md` (this plan), `docs/reports/implement-consume-dedicated-entity-and-package-event-datachannels.md` (Implement report).
 
-Not changed: `src/botster/hubTerminalDataPlane.ts`, `src/botster/TerminalViewHost.tsx`, `src/vendor/restty/**`, `src/app/**` routing and chrome, `src/botster/generated/daemon-protocol.ts`, `package.json`, `package-lock.json`, the local package server.
+Not changed: `src/botster/TerminalViewHost.tsx`, `src/vendor/restty/**`, `src/app/**` routing and chrome, `src/botster/generated/daemon-protocol.ts`, `package.json`, `package-lock.json`, the local package server.
 
 ## 7. Risks
 
@@ -176,6 +190,9 @@ Not changed: `src/botster/hubTerminalDataPlane.ts`, `src/botster/TerminalViewHos
 5. **Harness oracle drift.** Reconnect, membership-gap, and flood lanes read `webrtc_entity_subscription`, `webrtc_entity_frame_assembly`, and `daemon_event` events. Mitigation: those event families keep their names and payloads and gain a `label`; new `subscription_data_channel` events are separate families per [[adding harness event families changes every mixed family oracle]].
 6. **Saturation lane workload identity.** The existing flood lane sends its mid-flood control request over the Unix socket, which proves Hub progress but not the browser control DataChannel. Mitigation: section 8 requires the control probe through the browser's control channel and keeps the Unix probe as a second observation.
 7. **Channel budget.** Entity-options demand and multiple notice descriptors could approach 32 channels on busy routes. Mitigation: refcounted holders already collapse duplicates; a capacity error is a visible diagnostic, and Implement records the peak channel count from the harness.
+8. **Rotating reconnect failure.** A retry can hide a stale owner or unresolved hydration barrier. Mitigation: identify the first lifecycle divergence and add a deterministic red-on-revert control before the repair.
+9. **Sibling sacrifice.** A terminal Attach timeout can reset the shared peer and every subscription. Mitigation: add direct production-path proof that the failed terminal owner cannot close healthy siblings.
+10. **False live proof.** Separate green commands can miss an integrated race. Mitigation: require three consecutive full live lanes and one complete package-event lane against the same pinned Hub binaries.
 
 ## 8. Acceptance checks and tests
 
@@ -210,6 +227,17 @@ Live production-path proof, against a real Hub built from `main` at `080ca9a`:
 
 Downstream proof required by the charter: the packaged-browser and live-hub lanes above are the browser-consumer conformance evidence. Record the exact `botster-hub` commit, the installed `@trybotster/hub-test-support` metadata, and the peak subscription channel count in the Implement report.
 
+Folded reconnect acceptance, all required:
+
+- `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` pass at one stable commit. The unrelated exact unit-race message follows ticket `ticket_1788405063_986655`; any other failure blocks.
+- All repository browser smokes pass: `smoke:browser-runtime`, `smoke:mounted-terminal-keyboard`, `smoke:ghostsnp-grid`, and `smoke:incremental-ghostsnp-attach`.
+- A deterministic test drives the production `createHubTerminalDataPlane` and `createWebrtcDaemonClient` handles through the confirmed failure. The test proves recovered hydration, queued input delivery, exact identity, and one Detach owner.
+- The red-on-revert control fails at the named assertion when the production repair is absent. It must not fail only at a later echo timeout.
+- A direct terminal Attach-timeout test proves that the control peer, one sibling terminal channel, one entity subscription, and one package-event holder remain usable.
+- `npm run smoke:live-packaged-protocol` passes three consecutive times against Hub `bb1a330543bc06888f894edd5f40a0f867753a12` with Core `48a437032791e678010254708259568ce4ad02bf`.
+- `npm run smoke:package-events` passes against the same binaries. Each applicable lane keeps entity, event, reconnect, terminal echo, gap, saturation, and peak-channel assertions.
+- The report records exact commands, Web commit, Hub commit, Core commit, fixture metadata, and the red-on-revert result. A page reload does not count as reconnect proof.
+
 ## 9. Runtime-teardown lenses
 
 `teardown_class_applies`: yes. The ticket creates per-subscription WebRTC channels for entity and package-event routes, each with its own admission, expiry, close, and retirement, and it moves durable subscription delivery onto those channels.
@@ -237,6 +265,15 @@ Downstream proof required by the charter: the packaged-browser and live-hub lane
 `ownership_identity`: every durable row is keyed by subscription id, Hub-minted generation, and peer generation; the reserved label is the channel identity. A reused subscription id under a later generation or peer generation never matches an older binding. A delayed close for one binding must never close or resubscribe a binding owned by a later generation or peer. Owner sweeps cover both close-first and message-first orders.
 
 `sibling_fail_closed_policy`: on successful close of one subscription channel, the peer, the control channel, terminal channels, and sibling subscription channels keep working. On ultimate close failure of one channel, Web forgets it locally and continues; it must not tear down the peer. Peer-level failure remains Hub's bounded policy per [[Hub ultimate WebRTC close failure sacrifices every peer on the dedicated runtime]]. Unit check 15 covers sibling survival; the flood lane covers overflow close isolation.
+
+Revision 2 extends the teardown lenses to the folded terminal repair:
+
+- Isolation: one terminal binding owns one session id, subscription id, Hub generation, peer generation, label, hydration barrier, and event queue. A failure of that binding does not close healthy siblings.
+- Bounds: Attach, HelloAck, message assembly, Detach, and local close keep finite bounds. A best-effort Detach cannot serialize a fresh Attach beyond its bound.
+- Late messages: an Attach response, HelloAck, terminal event, terminal close, `terminal_subscription_closed`, Detach response, entity response, event response, or generic control response must match its current peer and owner identity. A stale message cannot revive, close, or rebind a newer owner.
+- Production path: the live proof drives the compiled browser bundle through control Attach, reserved terminal channel creation, encrypted Hello, HelloAck, READY hydration, attached state, input, output, close, Detach, reconnect, and idle cleanup.
+- Ownership identity: terminal close handling matches the Hub generation as well as the session and subscription ids. Owner sweeps cover close-first and message-first order.
+- Sibling policy: a failed terminal Attach or unadmitted terminal close affects only that terminal owner. The control peer, sibling terminals, entity subscriptions, and package-event holders continue.
 
 ## 10. Vault gaps worth capturing
 
