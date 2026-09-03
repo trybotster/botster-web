@@ -7064,26 +7064,9 @@ async function proveHydrationBuffersUntilGhostsnpInstall(page) {
     throw new Error(`timed out waiting for snapshot_install_held: ${error.message}`);
   });
 
-  // Core queues host input until incremental attach completes. Wait for the
-  // Core attached frame so Unix send_input hits the live PTY, not the queue.
-  await page.waitForFunction(
-    ({ subscriptionId }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
-        const event = entry.payload;
-        return (
-          entry.kind === "daemon_terminal_event" &&
-          event?.type === "attach_state" &&
-          event.state === "attached" &&
-          event.subscription_id === subscriptionId
-        );
-      }),
-    { subscriptionId: hold.subscription_id },
-    { timeout: 20_000 }
-  ).catch((error) => {
-    throw new Error(
-      `timed out waiting for Core attached during snapshot install hold: ${error.message}`
-    );
-  });
+  // The ready snapshot and the later attached event use the same ordered
+  // channel. The held snapshot blocks that event. Core queues this input until
+  // incremental attach completes, so send it while snapshot install is held.
 
   await page.evaluate(() => {
     const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;

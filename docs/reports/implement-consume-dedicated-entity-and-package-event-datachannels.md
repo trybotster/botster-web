@@ -8,7 +8,8 @@
 - Run: `run_1788371419_225012`
 - Implement step: `run_step_1788372638_857183`
 - Approved plan: `docs/plans/consume-dedicated-entity-and-package-event-datachannels.md`
-- Producer used for live proof: `botster-hub` commit `080ca9ae31ffc7b3dfd2a255b6eaa08c15bfc4fe`
+- Initial producer used for live proof: `botster-hub` commit `080ca9ae31ffc7b3dfd2a255b6eaa08c15bfc4fe`
+- Resumed producer used for live proof: `botster-hub` commit `bb1a330543bc06888f894edd5f40a0f867753a12`
 - Installed contract fixture: `@trybotster/hub-test-support@0.1.43`, protocol 8, conformance revision 48, DTO SHA-256 `33c0c27941c0e9751342cfdbeb53d27bb4a1225e5ce7f4be280d9f0dc11ad7f3`
 
 ## Guidance applied
@@ -92,9 +93,11 @@ The implementation used the Hub repository only to build the approved producer c
 
 ## Cross-repository dependency
 
-The pipeline dependency is `dependency_1788375748_957592`: this ticket depends on Hub ticket `ticket_1788313897_932611`.
+The closed pipeline dependency is `dependency_1788375748_957592`: this ticket depends on Hub ticket `ticket_1788313897_932611`.
 
 Human answer `question_1788375688_896668` requires this dependency. The answer says that Hub `080ca9a` predates inbound reassembly for the mandatory version 2 `daemon_terminal_frame` chunks that Web main sends. It forbids a raw-envelope fallback and forbids a waiver for either terminal echo assertion.
+
+Hub ticket `ticket_1788313897_932611` merged at `bb1a330543bc06888f894edd5f40a0f867753a12`. The resumed full lane exposed a later Web terminal reconnect failure. Agent answer `question_1788396042_879149` assigns that failure to `botster-web` and requires a separate ticket. This ticket now depends on Web ticket `ticket_1788396308_856047` through dependency `dependency_1788396319_338718`. Its run is `run_1788396326_651208`.
 
 ## Deviations from the approved plan
 
@@ -102,7 +105,8 @@ Human answer `question_1788375688_896668` requires this dependency. The answer s
 - `src/botster/realHubDaemonDto.ts` and `scripts/live-packaged-protocol-helpers.mjs` did not need changes for the reasons in the file list.
 - The live harness now waits for an attached terminal before it starts the intentional reconnect. This avoids changing the test target during an in-flight attach.
 - The harness terminal-frame oracle now reads the existing `terminal_data_channel_receive` event. The old `webrtc_terminal_frame_assembly` name had no producer.
-- Review and gate submission are deferred. The human answer requires the Implement step to remain parked until the Hub dependency merges.
+- The resumed harness removes an impossible wait for `attach_state=attached` while it holds a READY snapshot on the same ordered terminal DataChannel. Core queues input until attach completes. The later attached event cannot pass the held snapshot.
+- Review and gate submission are deferred. Agent answer `question_1788396042_879149` requires the Implement step to remain parked until the Web recovery ticket merges.
 
 ## Tests and downstream proof
 
@@ -118,6 +122,8 @@ Passed:
 - `npm run smoke:incremental-ghostsnp-attach`
 - `npm run smoke:package-events:gap` against Hub `080ca9a`
 - `npm run smoke:entity-options-reactive` against Hub `080ca9a`
+- Resumed `npm test`
+- Resumed `npm run smoke:package-events` against Hub `bb1a330543bc06888f894edd5f40a0f867753a12`; terminal controls pass and `peak_subscription_channels` is 4
 - `node --check scripts/live-packaged-protocol-harness.mjs`
 - `git diff --check`
 
@@ -125,13 +131,15 @@ The unit suite proves no channel before the reservation response, exact label us
 
 The live gap lane proves `event_gap` delivery on the dedicated package-event channel. The live entity-options lane proves two demand-scoped entity families on dedicated channels and proves release. The reconnect evidence shows fresh labels and fresh subscription IDs for `session` and `session_type` on the surviving document.
 
-Blocked until the dependency merges:
+The merged Hub commit resolves the original version 2 terminal input failure. The full lane reaches later terminal reconnect checks.
 
-- `npm run smoke:live-packaged-protocol` reaches the terminal positive control and times out on `botster-web-production-echo:botster-web-production-attach-probe-0`.
-- `npm run smoke:package-events` passes package-event admission, delivery, and reconnect, then times out on the terminal echo `botster-web-production-echo:package-events-flood`.
+Blocked on Web recovery ticket `ticket_1788396308_856047`:
+
+- Before the harness repair, two `npm run smoke:live-packaged-protocol` runs timed out at the impossible attached-state wait during the held READY snapshot.
+- After the harness repair, full live runs progressed beyond that wait but timed out at rotating later terminal echo probes. The observed probes include `botster-web-production-attach-probe-1` and `keys`.
 - `npm run smoke:workspaces-lifecycle` cannot run because no `BOTSTER_WORKSPACES_PACKAGE_PATH` is available in this run.
 
-The failed package-event lane did not reach its final peak-channel log. The peak subscription channel count is therefore not verified. The resumed run must record it.
+The package-event lane now reaches its final peak-channel log. It reports `peak_subscription_channels: 4`.
 
 ## Runtime teardown lenses
 
@@ -143,10 +151,10 @@ The failed package-event lane did not reach its final peak-channel log. The peak
 
 ## Unverified behavior and residual risk
 
-- The two required terminal echo positive controls do not pass with Hub `080ca9a`. This blocks Review by human decision.
-- The package-event flood lane does not yet provide a passing terminal-progress result or a measured peak subscription channel count.
+- The full live lane does not pass all later terminal reconnect echo checks with Hub `bb1a330543bc06888f894edd5f40a0f867753a12`.
+- The separate Web recovery ticket owns the production terminal reconnect diagnosis and repair. This ticket must not change production terminal-channel behavior.
 - The named workspaces lifecycle lane needs a routed `botster-workspaces` package path.
-- After Hub ticket `ticket_1788313897_932611` merges, this branch must rebase on current Web main. Both exact live lanes must pass against the merged Hub commit before Review.
+- After Web ticket `ticket_1788396308_856047` merges, this branch must rebase on current Web main. Both exact live lanes must pass against Hub `bb1a330543bc06888f894edd5f40a0f867753a12` before Review.
 
 ## Missing vault guidance and durable capture
 
@@ -157,11 +165,12 @@ The implementation found these durable guidance candidates:
 - Subscription-channel telemetry needs a peak-count oracle before later positive controls can fail.
 - Same-peer remote close proof must acknowledge the old unsubscribe before it expects the replacement subscribe.
 - Harness assertions must name an event that production code emits.
+- A harness must not wait for a later event while it holds an earlier message handler on the same ordered DataChannel.
 
 No vault note was written during this parked Implement step. Existing notes already constrain the channel, reconnect, saturation, and teardown behavior. Verify should capture only guidance that remains true after the merged Hub proof.
 
 ## Assumptions
 
-- Hub commit `080ca9a` and `@trybotster/hub-test-support@0.1.43` are the approved producer and fixture pins for this Implement attempt.
+- Hub commit `bb1a330543bc06888f894edd5f40a0f867753a12` and `@trybotster/hub-test-support@0.1.43` are the current producer and fixture pins.
 - Merge policy is direct, so a PR link is not required before the parked state.
-- No acceptance check is waived. The run resumes only after the registered Hub dependency merges.
+- No acceptance check is waived. The run resumes only after the registered Web recovery dependency merges.
