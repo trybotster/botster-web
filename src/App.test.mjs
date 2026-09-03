@@ -5832,17 +5832,14 @@ try {
     (event) => siblingPackageEvents.push(event)
   );
   await waitForTestCondition(() => eventSiblingChannels[0].sent.length === 2);
-  await emitChunkedTestResponse(
+  await emitMappedSubscriptionResponsesInWireOrder(
     eventSiblingChannels[0],
     localWebrtcBootstrapFixture.grant_secret,
-    { kind: "entity_subscribed", events: [], diagnostics: [] },
-    { messageId: "sibling-entity-subscribed" }
-  );
-  await emitChunkedTestResponse(
-    eventSiblingChannels[0],
-    localWebrtcBootstrapFixture.grant_secret,
-    { kind: "event_subscribed", events: [], diagnostics: [] },
-    { messageId: "sibling-event-subscribed" }
+    {
+      subscribe_entities: { kind: "entity_subscribed", events: [], diagnostics: [] },
+      subscribe_events: { kind: "event_subscribed", events: [], diagnostics: [] }
+    },
+    "sibling-subscription"
   );
   await siblingEvents.ready;
   await emitChunkedTestResponse(
@@ -15607,6 +15604,32 @@ async function emitChunkedTestResponse(dataChannel, secret, response, options = 
     }
   }
   return chunks;
+}
+
+async function emitMappedSubscriptionResponsesInWireOrder(
+  dataChannel,
+  secret,
+  responsesByRequestType,
+  messageIdPrefix
+) {
+  const requests = [];
+  for (const [wireIndex, envelope] of (dataChannel.sent ?? []).entries()) {
+    const request = await decryptTestEnvelope(secret, envelope);
+    if (request.type in responsesByRequestType) {
+      requests.push({ request, wireIndex });
+    }
+  }
+  if (requests.length !== Object.keys(responsesByRequestType).length) {
+    throw new Error("Missing mapped subscription request in decrypted wire order.");
+  }
+  for (const { request, wireIndex } of requests) {
+    await emitChunkedTestResponse(
+      dataChannel,
+      secret,
+      responsesByRequestType[request.type],
+      { messageId: `${messageIdPrefix}-${wireIndex}-${request.type}` }
+    );
+  }
 }
 
 async function chunkedTestResponse(secret, response, options = {}) {
