@@ -621,11 +621,33 @@ try {
     diagnosticMessage += `\nterminal proof notes:\n${JSON.stringify(proofNotes)}`;
   }
   if (harnessState && !error.compactLifecycleEvidence) {
+    const terminalLifecycleTail = [
+      ...(harnessState.events ?? []),
+      ...(harnessState.terminal ?? [])
+    ].filter((entry) =>
+      entry.kind === "webrtc_lifecycle" ||
+      entry.kind === "terminal_data_channel" ||
+      entry.kind === "terminal_stream_error" ||
+      entry.kind === "daemon_request" ||
+      entry.kind === "webrtc_response_assembly" ||
+      entry.kind === "attach" ||
+      entry.kind === "attach_state" ||
+      entry.kind === "transport_lost" ||
+      entry.kind === "transport_recovered" ||
+      entry.kind === "attach_failed" ||
+      entry.kind === "terminal_attach_timeout" ||
+      entry.kind === "stale_control_response" ||
+      entry.kind === "before_input" ||
+      entry.kind === "input" ||
+      entry.kind === "mode_gated_input" ||
+      entry.kind === "mode_gated_input_failed" ||
+      entry.kind === "input_result"
+    ).slice(-120);
+    diagnosticMessage += `\nterminal lifecycle tail:\n${JSON.stringify(terminalLifecycleTail, null, 2)}`;
     const terminalStreamEvents = harnessState.events?.filter((entry) => entry.kind.startsWith("terminal_stream_")) ?? [];
     if (terminalStreamEvents.length > 0) {
-      diagnosticMessage += `\nterminal stream events:\n${JSON.stringify(terminalStreamEvents, null, 2)}`;
+      diagnosticMessage += `\nterminal stream events:\n${JSON.stringify(terminalStreamEvents.slice(-120), null, 2)}`;
     }
-    diagnosticMessage += `\nharness state:\n${JSON.stringify(harnessState, null, 2)}`;
   }
   const browserFailureMessage = browserFailureSummary({ consoleEvents, pageErrors, responseErrors });
   if (browserFailureMessage) {
@@ -834,7 +856,13 @@ async function typeThroughMountedTerminal(page, data) {
   await callTerminalControl(page, "focus");
   const canvas = page.locator(".terminal-view-container canvas").first();
   await canvas.click();
-  await new Promise((r) => setTimeout(r, 100));
+  await page.waitForFunction(
+    () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
+    undefined,
+    { timeout: 5_000 }
+  ).catch((error) => {
+    throw new Error(`mounted terminal did not focus the Restty textarea: ${error.message}`);
+  });
   // Prefer key events so Restty key encoding + ModeGatedInput semantic path run.
   // insertText alone can skip keydown and leave a stale mouse semantic from click.
   await page.keyboard.type(data, { delay: 10 });
@@ -2533,7 +2561,6 @@ async function assertSelectedAppSurfaceRendered(page, target) {
     if (sharedHubDriverMode) {
       await assertWorkspacesNodeIds(page, [
         "botster-workspaces-app",
-        "botster-workspaces-toolbar",
         "botster-workspaces-list"
       ], "shared-Hub driver");
       await assertNoUnsupportedWorkspacesNodes(page);
@@ -2546,7 +2573,6 @@ async function assertSelectedAppSurfaceRendered(page, target) {
         : "direct-load";
     await assertWorkspacesNodeIds(page, [
       "botster-workspaces-app",
-      "botster-workspaces-toolbar",
       "botster-workspaces-list"
     ], stage);
     await assertNoUnsupportedWorkspacesNodes(page);
@@ -2819,7 +2845,8 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
     actionId: targetActionId,
     nodeId: targetNodeId,
     kind: "submit",
-    values: { workspace_id: workspace.workspace_id, target_id: spawnCase.target_id },
+    values: { target_id: spawnCase.target_id },
+    payload: { workspace_id: workspace.workspace_id },
     sinceIndex: targetSince,
     label: `${spawnCase.case_id} target-first form request`
   });
@@ -7202,11 +7229,31 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
       session_id: floodSessionId,
       command: "yes write-budget-stall"
     });
+    let releaseHeldTerminalOutput;
+    let reportHeldTerminalOutput;
+    const heldTerminalOutput = new Promise((resolve) => {
+      releaseHeldTerminalOutput = resolve;
+    });
+    const heldTerminalOutputSeen = new Promise((resolve) => {
+      reportHeldTerminalOutput = resolve;
+    });
     const stream = control.streamTerminal(floodSessionId, floodSubscriptionId, (event) => {
       events.push(event);
+      if (event.type === "terminal_output") {
+        reportHeldTerminalOutput();
+        return heldTerminalOutput;
+      }
     });
     await stream.ready;
     const deadline = Date.now() + 20_000;
+    await Promise.race([
+      heldTerminalOutputSeen,
+      new Promise((resolve) => setTimeout(resolve, 5_000))
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    // The close event uses the same ordered channel as terminal output. Release the
+    // held output before this proof waits for the later close event.
+    releaseHeldTerminalOutput();
     while (Date.now() < deadline) {
       const closed = events.find((event) =>
         event.type === "terminal_subscription_closed" &&
@@ -7216,11 +7263,19 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
       );
       if (closed) {
         const status = await control.request({ type: "status" });
+        const cleanup = await control.request({
+          type: "shutdown_session",
+          session_id: floodSessionId
+        });
         stream.abandon();
+        if (cleanup.error) {
+          return { ok: false, reason: "slow-client session cleanup failed", cleanup };
+        }
         return {
           ok: true,
           closed,
           statusKind: status.kind,
+          cleanupKind: cleanup.kind,
           siblingSessionId: liveSessionId
         };
       }

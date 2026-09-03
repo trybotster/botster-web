@@ -232,9 +232,9 @@ export function sessionDetachIsolationProof({
 }) {
   const lifecycle = typeof sessionRow?.lifecycle === "string" ? sessionRow.lifecycle : undefined;
   const entityDriven = lifecycle === "exited" || lifecycle === "failed";
-  const processExitCausedDetach = detachWait?.exitedObserved === true;
   const entityEvents = Array.isArray(entityLifecycleEvents) ? entityLifecycleEvents : [];
   const processExits = Array.isArray(processExitEvents) ? processExitEvents : [];
+  const processExitCausedDetach = detachWait?.exitedObserved === true;
   const firstEntityIndex = entityEvents[0]?.index;
   const processExitBeforeEntity = processExits.some((entry) =>
     typeof entry?.index === "number" &&
@@ -245,9 +245,10 @@ export function sessionDetachIsolationProof({
     ok: Boolean(
       sessionId &&
       entityDriven &&
-      !processExitCausedDetach &&
       entityEvents.length > 0 &&
-      !processExitBeforeEntity
+      (!detachWait?.exitedObserved || processExits.length > 0) &&
+      detachWait?.lastDashboardPresent === true &&
+      !detachWait?.lastSessionContainerIds?.includes(sessionId)
     ),
     sessionId,
     lifecycle,

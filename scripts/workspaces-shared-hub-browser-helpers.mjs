@@ -144,32 +144,51 @@ export function assertSharedHubSpawnSubmission(spawnCase, workspace, captured) {
   if (typeof request.request_id !== "string" || request.request_id.length === 0) {
     throw new Error(`${spawnCase.case_id} submit request omitted request_id: ${JSON.stringify(captured)}`);
   }
-  const expected = {
-    target_id: spawnCase.target_id,
-    workspace_id: workspace.workspace_id,
+  const expectedValues = {
     branch: spawnCase.branch,
     session_type_id: spawnCase.session_type_id,
     prompt: spawnCase.prompt ?? "",
     ticket_id: spawnCase.ticket_id ?? ""
   };
-  const actual = request.values ?? {};
-  for (const [field, value] of Object.entries(expected)) {
-    if (actual[field] !== value) {
+  const actualValues = request.values ?? {};
+  for (const [field, value] of Object.entries(expectedValues)) {
+    if (actualValues[field] !== value) {
       throw new Error(
         `${spawnCase.case_id} renderer-collected submit values changed ${field}: ` +
-        `expected=${JSON.stringify(value)} actual=${JSON.stringify(actual[field])}; ` +
-        `values=${JSON.stringify(actual)}`
+        `expected=${JSON.stringify(value)} actual=${JSON.stringify(actualValues[field])}; ` +
+        `values=${JSON.stringify(actualValues)}`
       );
     }
   }
-  const unexpected = Object.keys(actual).filter((field) => !(field in expected));
-  if (unexpected.length > 0) {
+  const unexpectedValues = Object.keys(actualValues).filter((field) => !(field in expectedValues));
+  if (unexpectedValues.length > 0) {
     throw new Error(
       `${spawnCase.case_id} renderer-collected submit values carried unexpected fields ` +
-      `${JSON.stringify(unexpected)}; values=${JSON.stringify(actual)}`
+      `${JSON.stringify(unexpectedValues)}; values=${JSON.stringify(actualValues)}`
     );
   }
-  return { request_id: request.request_id, values: actual };
+  const expectedPayload = {
+    workspace_id: workspace.workspace_id,
+    target_id: spawnCase.target_id
+  };
+  const actualPayload = request.payload ?? {};
+  for (const [field, value] of Object.entries(expectedPayload)) {
+    if (actualPayload[field] !== value) {
+      throw new Error(
+        `${spawnCase.case_id} renderer-collected submit payload changed ${field}: ` +
+        `expected=${JSON.stringify(value)} actual=${JSON.stringify(actualPayload[field])}; ` +
+        `payload=${JSON.stringify(actualPayload)}`
+      );
+    }
+  }
+  const unexpectedPayload = Object.keys(actualPayload).filter((field) => !(field in expectedPayload));
+  if (unexpectedPayload.length > 0) {
+    throw new Error(
+      `${spawnCase.case_id} renderer-collected submit payload carried unexpected fields ` +
+      `${JSON.stringify(unexpectedPayload)}; payload=${JSON.stringify(actualPayload)}`
+    );
+  }
+  return { request_id: request.request_id, values: actualValues, payload: actualPayload };
 }
 
 export function assertSharedHubSpawnResult(spawnCase, hubResult) {

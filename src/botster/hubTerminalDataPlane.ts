@@ -109,6 +109,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     semantic: ModeDependentTerminalInput;
     encoded: string;
     retried: boolean;
+    resolve: () => void;
   }> = [];
   private nextPasteOperationId = 1;
   private snapshotRecoveries = 0;
@@ -259,20 +260,31 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         mouse_mode: modes.mouse_mode
       });
     }
-    await this.sendTerminalFrame(
-      encodeModeGatedInput(
-        modes.mode_generation,
-        modes.mode_revision,
-        new TextEncoder().encode(encoded)
-      )
-    );
-    this.pendingModeGatedInputs.push({ semantic, encoded, retried: false });
+    let resolveInputResult!: () => void;
+    const inputResult = new Promise<void>((resolve) => {
+      resolveInputResult = resolve;
+    });
+    const pending = { semantic, encoded, retried: false, resolve: resolveInputResult };
+    this.pendingModeGatedInputs.push(pending);
+    try {
+      await this.sendTerminalFrame(
+        encodeModeGatedInput(
+          modes.mode_generation,
+          modes.mode_revision,
+          new TextEncoder().encode(encoded)
+        )
+      );
+    } catch (error) {
+      this.removePendingModeGatedInput(pending);
+      throw error;
+    }
     recordLiveHarnessTerminal("mode_gated_input", {
       bytes: encoded,
       mode_generation: modes.mode_generation,
       mode_revision: modes.mode_revision,
       path: "subscription_data_channel"
     });
+    await inputResult;
   }
 
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription {
@@ -500,7 +512,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.hydration = undefined;
     this.terminalEventQueue = Promise.resolve();
     this.terminalFrameQueue = Promise.resolve();
-    this.pendingModeGatedInputs.length = 0;
+    this.clearPendingModeGatedInputs();
     this.nextPasteOperationId = 1;
     this.restoredVisibleScreenGeneration = undefined;
     this.modeFlags = undefined;
@@ -655,7 +667,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.hydration = undefined;
     this.terminalEventQueue = Promise.resolve();
     this.terminalFrameQueue = Promise.resolve();
-    this.pendingModeGatedInputs.length = 0;
+    this.clearPendingModeGatedInputs();
     this.nextPasteOperationId = 1;
     this.restoredVisibleScreenGeneration = undefined;
     this.modeFlags = undefined;
@@ -1153,19 +1165,34 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     };
     recordLiveHarnessTerminal("input_result", result);
     if (result.kind !== "mode_gated_input") return;
-    const pending = this.pendingModeGatedInputs.shift();
-    if (!pending || result.admitted || result.rejection !== "stale_mode" || pending.retried) return;
+    const pending = this.pendingModeGatedInputs[0];
+    if (!pending) return;
+    if (result.admitted || result.rejection !== "stale_mode" || pending.retried) {
+      this.pendingModeGatedInputs.shift();
+      pending.resolve();
+      return;
+    }
     const encoded = pending.semantic.encode(this.modeFlags);
-    if (!encoded || !this.isCurrentAttachment(attachmentGeneration)) return;
+    if (!encoded || !this.isCurrentAttachment(attachmentGeneration)) {
+      this.pendingModeGatedInputs.shift();
+      pending.resolve();
+      return;
+    }
     pending.retried = true;
-    await this.sendTerminalFrame(
-      encodeModeGatedInput(
-        this.modeFlags.mode_generation,
-        this.modeFlags.mode_revision,
-        new TextEncoder().encode(encoded)
-      )
-    );
-    this.pendingModeGatedInputs.push({ ...pending, encoded });
+    pending.encoded = encoded;
+    try {
+      await this.sendTerminalFrame(
+        encodeModeGatedInput(
+          this.modeFlags.mode_generation,
+          this.modeFlags.mode_revision,
+          new TextEncoder().encode(encoded)
+        )
+      );
+    } catch (error) {
+      this.pendingModeGatedInputs.shift();
+      pending.resolve();
+      throw error;
+    }
     recordLiveHarnessTerminal("mode_gated_input", {
       bytes: encoded,
       reencoded: true,
@@ -1173,6 +1200,16 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       mode_generation: this.modeFlags.mode_generation,
       mode_revision: this.modeFlags.mode_revision
     });
+  }
+
+  private removePendingModeGatedInput(pending: (typeof this.pendingModeGatedInputs)[number]): void {
+    const index = this.pendingModeGatedInputs.indexOf(pending);
+    if (index >= 0) this.pendingModeGatedInputs.splice(index, 1);
+    pending.resolve();
+  }
+
+  private clearPendingModeGatedInputs(): void {
+    for (const pending of this.pendingModeGatedInputs.splice(0)) pending.resolve();
   }
 
   private emitOutput(data: TerminalOutput, kind: "output"): void {

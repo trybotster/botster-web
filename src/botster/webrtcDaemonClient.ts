@@ -70,6 +70,7 @@ type PendingRequest = {
   generation: number;
   requestType: string;
   kind: PendingKind;
+  request: DaemonRequest | DaemonHello;
   messageId?: string;
   resolve(response: DaemonResponse | DaemonHelloAck): void;
   reject(error: unknown): void;
@@ -702,9 +703,10 @@ class WebrtcDaemonTransport {
     binding.rejectReady(webrtcFailure("transport", "terminal subscription channel closed"));
     window.clearTimeout(binding.expiryTimeout);
     if (binding.assembly) window.clearTimeout(binding.assembly.timeout);
-    binding.listener.closed = true;
     this.terminalChannels.delete(binding);
-    this.terminalStreamListeners.delete(binding.listener);
+    if (!remote || !binding.admitted) {
+      this.removeTerminalStreamListener(binding.listener);
+    }
     if (binding.channel.readyState !== "closed") binding.channel.close?.();
     if (remote && binding.admitted) {
       this.emitLifecycle({
@@ -1138,12 +1140,19 @@ class WebrtcDaemonTransport {
       const generation = this.peerGeneration;
       const timeout = window.setTimeout(() => {
         const error = webrtcFailure("data-plane", `local WebRTC request timed out: ${requestType}`);
-        if (kind === "hello" || requestType === "attach") {
+        if (kind === "hello") {
           this.failPeerGeneration(generation, error);
           return;
         }
         const index = this.pendingRequests.indexOf(pending);
         if (index >= 0) this.pendingRequests.splice(index, 1);
+        if (requestType === "attach") {
+          recordLiveHarnessEvent("terminal_attach_timeout", {
+            generation,
+            session_id: "session_id" in plaintext ? plaintext.session_id : null,
+            subscription_id: "subscription_id" in plaintext ? plaintext.subscription_id : null
+          });
+        }
         pending.reject(error);
       }, requestTimeoutMs);
 
@@ -1151,6 +1160,7 @@ class WebrtcDaemonTransport {
         generation,
         requestType,
         kind,
+        request: plaintext,
         resolve: (response) => {
           window.clearTimeout(timeout);
           resolve(parse(response));
@@ -1586,9 +1596,6 @@ class WebrtcDaemonTransport {
       const pending = chunk.delivery_kind === "daemon_response"
         ? this.pendingRequests.find((entry) => entry.generation === generation && entry.messageId === undefined)
         : undefined;
-      if (chunk.delivery_kind === "daemon_response" && !pending) {
-        throw webrtcFailure("data-plane", "local WebRTC daemon response chunk has no pending request");
-      }
       if (this.responseAssemblies.size >= localWebrtcResponseChunkLimits.maximumConcurrentAssemblies) {
         throw webrtcFailure("data-plane", "local WebRTC response assembly limit exceeded");
       }
@@ -1612,13 +1619,25 @@ class WebrtcDaemonTransport {
         startedAt,
         timeout: window.setTimeout(() => {
           if (!applyAssemblyTimeoutCleanup) return;
-          this.failPeerGeneration(
-            generation,
-            webrtcFailure(
-              "data-plane",
-              `local WebRTC ${chunk.delivery_kind} assembly timed out${pending ? `: ${pending.requestType}` : ""}`
-            )
+          const error = webrtcFailure(
+            "data-plane",
+            `local WebRTC ${chunk.delivery_kind} assembly timed out${pending ? `: ${pending.requestType}` : ""}`
           );
+          if (pending?.requestType === "attach") {
+            const timedAssembly = this.responseAssemblies.get(chunk.message_id);
+            if (timedAssembly && timedAssembly === assembly) {
+              this.releaseAssembly(chunk.message_id, timedAssembly);
+            }
+            const pendingIndex = this.pendingRequests.indexOf(pending);
+            if (pendingIndex >= 0) this.pendingRequests.splice(pendingIndex, 1);
+            pending.reject(error);
+            recordLiveHarnessEvent("terminal_attach_response_timeout", {
+              generation,
+              message_id: chunk.message_id
+            });
+            return;
+          }
+          this.failPeerGeneration(generation, error);
         }, requestTimeoutMs)
       };
       this.responseAssemblies.set(chunk.message_id, assembly);
@@ -1690,8 +1709,28 @@ class WebrtcDaemonTransport {
       return;
     }
 
-    const pending = assembly.pending;
+    let pending = assembly.pending;
+    if (pending && !pendingMatchesResponse(pending, payload)) {
+      pending.messageId = undefined;
+      pending = undefined;
+    }
+    pending ??= this.pendingRequests.find(
+      (entry) =>
+        entry.generation === generation &&
+        entry.messageId === undefined &&
+        pendingMatchesResponse(entry, payload)
+    );
     if (!pending) {
+      if (isStaleTerminalReservationResponse(payload)) {
+        recordLiveHarnessEvent("stale_control_response", {
+          response_kind: payload.kind,
+          session_id: payload.terminal_reservation?.session_id ?? null,
+          subscription_id: payload.terminal_reservation?.subscription_id ?? null,
+          generation: payload.terminal_reservation?.generation ?? null,
+          peer_generation: payload.terminal_reservation?.peer_generation ?? null
+        });
+        return;
+      }
       throw webrtcFailure("data-plane", "local WebRTC daemon response assembly lost its pending request");
     }
     const pendingIndex = this.pendingRequests.indexOf(pending);
@@ -2049,7 +2088,11 @@ class WebrtcDaemonTransport {
         return;
       }
       for (const listener of listeners) {
-        await listener.onEvent(event);
+        try {
+          await listener.onEvent(event);
+        } finally {
+          this.removeTerminalStreamListener(listener);
+        }
       }
       return;
     }
@@ -2334,6 +2377,37 @@ function parseTerminalEvent(value: unknown): TerminalEvent {
     throw webrtcFailure("data-plane", `unsupported terminal frame type ${String(type)}`);
   }
   return value as TerminalEvent;
+}
+
+function pendingMatchesResponse(pending: PendingRequest, value: unknown): boolean {
+  if (pending.kind === "hello") {
+    return Boolean(value && typeof value === "object" && "protocol" in value && "compatibility" in value);
+  }
+  if (pending.requestType !== "attach") {
+    return !isStaleTerminalReservationResponse(value);
+  }
+  if (
+    !isStaleTerminalReservationResponse(value) ||
+    !("type" in pending.request) ||
+    pending.request.type !== "attach"
+  ) {
+    return false;
+  }
+  const reservation = value.terminal_reservation;
+  return Boolean(
+    reservation &&
+    reservation.session_id === pending.request.session_id &&
+    reservation.subscription_id === pending.request.subscription_id
+  );
+}
+
+function isStaleTerminalReservationResponse(value: unknown): value is DaemonResponse {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    "kind" in value &&
+    value.kind === "terminal_reservation"
+  );
 }
 
 function isTerminalBodyEvent(event: DaemonEvent): boolean {

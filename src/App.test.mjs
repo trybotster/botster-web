@@ -5522,6 +5522,43 @@ try {
     "package-notice-reaction\0sample.notice\0[\"web-prod\"]"
   );
 
+  const crossedAckChannel = createFakeDataChannel();
+  let nextCrossedAckSubscriptionId = 0;
+  const crossedAckClient = createWebrtcTestClient(
+    [crossedAckChannel],
+    localWebrtcBootstrapFixture,
+    { eventSubscriptionIdGenerator: () => `crossed-ack-${++nextCrossedAckSubscriptionId}` }
+  );
+  const crossedAckFirst = crossedAckClient.subscribePackageEvents(
+    { owner: "package-notice-reaction", name: "first.notice", subjects: ["web-prod"] },
+    () => undefined
+  );
+  const crossedAckSecond = crossedAckClient.subscribePackageEvents(
+    { owner: "package-notice-reaction", name: "second.notice", subjects: ["web-prod"] },
+    () => undefined
+  );
+  await waitForTestCondition(() => crossedAckChannel.sent.length === 2);
+  await emitChunkedTestResponse(
+    crossedAckChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "event_subscribed", events: [], diagnostics: [] },
+    { messageId: "crossed-ack-first" }
+  );
+  await emitChunkedTestResponse(
+    crossedAckChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "event_subscribed", events: [], diagnostics: [] },
+    { messageId: "crossed-ack-second" }
+  );
+  await Promise.all([crossedAckFirst.ready, crossedAckSecond.ready]);
+  assert.deepEqual(
+    crossedAckChannel.testSubscriptionReservations.map((reservation) => reservation.subscription_id),
+    ["crossed-ack-1", "crossed-ack-2"]
+  );
+  crossedAckFirst.unsubscribe();
+  crossedAckSecond.unsubscribe();
+  crossedAckClient.disconnect();
+
   const packageEventChannels = [createFakeDataChannel(), createFakeDataChannel()];
   let nextPackageEventSubscriptionId = 0;
   const packageEventClient = createWebrtcTestClient(packageEventChannels, localWebrtcBootstrapFixture, {
@@ -5733,10 +5770,11 @@ try {
     eventSubscriptionIdGenerator: () => "sibling-event-id"
   });
   const siblingEntityFrames = [];
+  const siblingPackageEvents = [];
   const siblingEntity = eventSiblingClient.subscribeEntityFrames("session", (frame) => siblingEntityFrames.push(frame));
   const siblingEvents = eventSiblingClient.subscribePackageEvents(
     { owner: "package-notice-reaction", name: "sample.notice", subjects: ["web-prod"] },
-    () => {}
+    (event) => siblingPackageEvents.push(event)
   );
   await waitForTestCondition(() => eventSiblingChannels[0].sent.length === 2);
   await emitChunkedTestResponse(
@@ -5751,7 +5789,7 @@ try {
     { kind: "event_subscribed", events: [], diagnostics: [] },
     { messageId: "sibling-event-subscribed" }
   );
-  siblingEvents.unsubscribe();
+  await siblingEvents.ready;
   await emitChunkedTestResponse(
     eventSiblingChannels[0],
     localWebrtcBootstrapFixture.grant_secret,
@@ -5764,7 +5802,161 @@ try {
     },
     { deliveryKind: "daemon_entity_frame", messageId: "sibling-entity-snapshot" }
   );
+  await siblingEntity.ready;
   await waitForTestCondition(() => siblingEntityFrames.length === 1);
+
+  // A terminal Attach timeout is terminal-owner local. The original control peer,
+  // one sibling terminal, one entity subscription, and one event holder remain usable.
+  const siblingTerminalEvents = [];
+  const siblingTerminal = eventSiblingClient.streamTerminal(
+    "sibling-terminal-session",
+    "sibling-terminal-subscription",
+    (event) => siblingTerminalEvents.push(event)
+  );
+  await waitForTestCondition(() => eventSiblingChannels[0].sent.length === 3);
+  await emitChunkedTestResponse(
+    eventSiblingChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "terminal_reservation",
+      terminal_reservation: {
+        session_id: "sibling-terminal-session",
+        subscription_id: "sibling-terminal-subscription",
+        generation: 9002,
+        peer_generation: 1,
+        label: "r-sibling-terminal",
+        expires_in_seconds: 30
+      },
+      events: []
+    },
+    { messageId: "sibling-terminal-reservation" }
+  );
+  await siblingTerminal.ready;
+  const siblingTerminalChannel = eventSiblingChannels[0].createdDataChannels.find(
+    (channel) => channel.label === "r-sibling-terminal"
+  );
+  assert.equal(siblingTerminalChannel.readyState, "open");
+
+  const failedTerminalStatuses = [];
+  const failedTerminal = createHubTerminalDataPlane({
+    sessionId: "timed-out-terminal-session",
+    bridge: eventSiblingClient
+  });
+  bindGhostsnpInstaller(failedTerminal);
+  failedTerminal.subscribeStatus((status) => failedTerminalStatuses.push(status));
+  const originalAttachSetTimeout = globalThis.window.setTimeout;
+  const originalAttachClearTimeout = globalThis.window.clearTimeout;
+  const attachTimers = new Map();
+  let nextAttachTimer = 0;
+  globalThis.window.setTimeout = (callback) => {
+    const timer = ++nextAttachTimer;
+    attachTimers.set(timer, callback);
+    return timer;
+  };
+  globalThis.window.clearTimeout = (timer) => attachTimers.delete(timer);
+  failedTerminal.subscribeOutput(() => undefined);
+  let timedOutAttachRequest;
+  try {
+    await waitForTestCondition(() => eventSiblingChannels[0].sent.length === 4);
+    timedOutAttachRequest = await decryptTestEnvelope(
+      localWebrtcBootstrapFixture.grant_secret,
+      eventSiblingChannels[0].sent[3]
+    );
+    assert.equal(timedOutAttachRequest.type, "attach");
+    const attachTimeout = [...attachTimers.values()].at(-1);
+    assert.equal(typeof attachTimeout, "function");
+    attachTimeout();
+    await waitForTestCondition(() =>
+      failedTerminalStatuses.some((status) => status.state === "failed")
+    );
+  } finally {
+    globalThis.window.setTimeout = originalAttachSetTimeout;
+    globalThis.window.clearTimeout = originalAttachClearTimeout;
+  }
+
+  assert.equal(eventSiblingChannels[0].readyState, "open", "Attach timeout closed the control peer");
+  assert.equal(siblingTerminalChannel.readyState, "open", "Attach timeout closed a sibling terminal");
+  const siblingEntityChannel = eventSiblingChannels[0].createdDataChannels.find(
+    (channel) => channel.label?.includes("entity")
+  );
+  const siblingEventChannel = eventSiblingChannels[0].createdDataChannels.find(
+    (channel) => channel.label?.includes("package_event")
+  );
+  assert.equal(siblingEntityChannel.readyState, "open", "Attach timeout closed an entity subscription");
+  assert.equal(siblingEventChannel.readyState, "open", "Attach timeout closed an event holder");
+
+  const statusAfterAttachTimeout = eventSiblingClient.request({ type: "status" });
+  await waitForTestCondition(() => eventSiblingChannels[0].sent.length === 5);
+  await emitChunkedTestResponse(
+    eventSiblingChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "terminal_reservation",
+      terminal_reservation: {
+        session_id: timedOutAttachRequest.session_id,
+        subscription_id: timedOutAttachRequest.subscription_id,
+        generation: 9003,
+        peer_generation: 1,
+        label: "r-late-timed-out-terminal",
+        expires_in_seconds: 30
+      },
+      events: []
+    },
+    { messageId: "late-timed-out-terminal-reservation" }
+  );
+  await emitChunkedTestResponse(
+    eventSiblingChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "status", status: null, sessions: [], packages: [], events: [], diagnostics: [] },
+    { messageId: "status-after-attach-timeout" }
+  );
+  assert.equal((await statusAfterAttachTimeout).kind, "status");
+
+  await emitChunkedTestResponse(
+    siblingTerminalChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "terminal_output",
+      session_id: "sibling-terminal-session",
+      subscription_id: "sibling-terminal-subscription",
+      payload_base64: Buffer.from("sibling-live").toString("base64"),
+      payload_encoding: "base64",
+      bytes: 12
+    },
+    { messageId: "sibling-terminal-after-timeout", deliveryKind: "daemon_terminal_frame" }
+  );
+  await emitChunkedTestResponse(
+    siblingEntityChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_upsert",
+      subscription_id: "sibling-entity-id",
+      entity_type: "session",
+      snapshot_seq: 1,
+      id: "still-live",
+      entity: { session_uuid: "still-live", lifecycle: "running" }
+    },
+    { messageId: "sibling-entity-after-timeout", deliveryKind: "daemon_entity_frame" }
+  );
+  await emitChunkedTestResponse(
+    siblingEventChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "package_event",
+      subscription_id: "sibling-event-id",
+      owner: "package-notice-reaction",
+      name: "sample.notice",
+      payload: { notice: "still live", subject: "web-prod" }
+    },
+    { messageId: "sibling-event-after-timeout", deliveryKind: "daemon_event" }
+  );
+  await waitForTestCondition(() => siblingTerminalEvents.length === 1);
+  await waitForTestCondition(() => siblingEntityFrames.length === 2);
+  await waitForTestCondition(() => siblingPackageEvents.length === 1);
+
+  failedTerminal.disableTransportRecovery?.();
+  siblingTerminal.abandon();
+  siblingEvents.unsubscribe();
   siblingEntity.unsubscribe();
   eventSiblingClient.disconnect();
 
@@ -6808,6 +7000,23 @@ try {
   );
   await waitForTestCondition(() => firstTerminalEvents.length === 1);
   assert.equal(firstTerminalEvents[0].type, "terminal_output");
+  firstTerminalChannel.close();
+  await emitChunkedTestResponse(
+    dedicatedControlChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "terminal_subscription_closed",
+      session_id: "dedicated-session-a",
+      subscription_id: "dedicated-subscription-a",
+      generation: 41,
+      reason: "core_adapter_closed"
+    },
+    { messageId: "dedicated-close-a", deliveryKind: "daemon_event" }
+  );
+  await waitForTestCondition(() => firstTerminalEvents.length === 2);
+  assert.equal(firstTerminalEvents[1].type, "terminal_subscription_closed");
+  assert.equal(firstTerminalEvents[1].reason, "core_adapter_closed");
+  assert.equal(dedicatedControlChannel.readyState, "open");
 
   const secondTerminalEvents = [];
   const secondStream = dedicatedClient.streamTerminal(
@@ -8554,7 +8763,8 @@ assert.match(
   await Promise.all([input, resize]);
   assert.deepEqual(frames.slice(0, 2).map((frame) => frame[1]), [3, 1]);
 
-  await plane.writeModeGatedInput({ encode: () => "mouse-bytes" });
+  const modeGatedInput = plane.writeModeGatedInput({ encode: () => "mouse-bytes" });
+  await waitForTestCondition(() => frames.at(-1)?.[1] === 2);
   assert.equal(frames.at(-1)[1], 2);
   await terminalEvent({
     type: "input_result",
@@ -8576,6 +8786,87 @@ assert.match(
     rejection: "stale_mode"
   });
   assert.deepEqual(frames.slice(-2).map((frame) => frame[1]), [2, 2]);
+  await terminalEvent({
+    type: "input_result",
+    subscription_id: subscriptionId,
+    kind: "mode_gated_input",
+    admitted: true,
+    bytes_written: 11,
+    mode_generation: 9,
+    mode_revision: 10,
+    mode_flags: {
+      kitty_enabled: false,
+      cursor_visible: true,
+      bracketed_paste: false,
+      mouse_mode: 9,
+      alt_screen: false,
+      focus_reporting: false,
+      application_cursor: false
+    }
+  });
+  await modeGatedInput;
+  const orderedInputStart = frames.length;
+  const orderedFirst = plane.writeModeGatedInput({ encode: () => "first-key" });
+  const orderedSecond = plane.writeModeGatedInput({ encode: () => "second-key" });
+  await waitForTestCondition(() => frames.length === orderedInputStart + 1);
+  await terminalEvent({
+    type: "input_result",
+    subscription_id: subscriptionId,
+    kind: "mode_gated_input",
+    admitted: false,
+    bytes_written: 0,
+    mode_generation: 11,
+    mode_revision: 12,
+    mode_flags: {
+      kitty_enabled: false,
+      cursor_visible: true,
+      bracketed_paste: false,
+      mouse_mode: 9,
+      alt_screen: false,
+      focus_reporting: false,
+      application_cursor: false
+    },
+    rejection: "stale_mode"
+  });
+  assert.equal(frames.length, orderedInputStart + 2);
+  await terminalEvent({
+    type: "input_result",
+    subscription_id: subscriptionId,
+    kind: "mode_gated_input",
+    admitted: true,
+    bytes_written: 9,
+    mode_generation: 11,
+    mode_revision: 12,
+    mode_flags: {
+      kitty_enabled: false,
+      cursor_visible: true,
+      bracketed_paste: false,
+      mouse_mode: 9,
+      alt_screen: false,
+      focus_reporting: false,
+      application_cursor: false
+    }
+  });
+  await waitForTestCondition(() => frames.length === orderedInputStart + 3);
+  await terminalEvent({
+    type: "input_result",
+    subscription_id: subscriptionId,
+    kind: "mode_gated_input",
+    admitted: true,
+    bytes_written: 10,
+    mode_generation: 11,
+    mode_revision: 12,
+    mode_flags: {
+      kitty_enabled: false,
+      cursor_visible: true,
+      bracketed_paste: false,
+      mouse_mode: 9,
+      alt_screen: false,
+      focus_reporting: false,
+      application_cursor: false
+    }
+  });
+  await Promise.all([orderedFirst, orderedSecond]);
   const pasteStart = frames.length;
   await plane.writeInput("p".repeat(70_000));
   assert.deepEqual(frames.slice(pasteStart).map((frame) => frame[1]), [4, 5, 5, 6]);
@@ -9993,36 +10284,36 @@ try {
     sessionRow: { id: "web-prod", lifecycle: "exited" },
     entityLifecycleEvents: [{ index: 4, lifecycle: "exited" }],
     processExitEvents: [],
-    detachWait: { exitedObserved: false }
+    detachWait: { exitedObserved: false, lastDashboardPresent: true, lastSessionContainerIds: [] }
   }).ok, true);
   assert.equal(sessionDetachIsolationProof({
     sessionId: "web-prod",
     sessionRow: { id: "web-prod", lifecycle: "exited" },
     entityLifecycleEvents: [{ index: 4, lifecycle: "exited" }],
     processExitEvents: [],
-    detachWait: { exitedObserved: true }
+    detachWait: { exitedObserved: true, lastDashboardPresent: true, lastSessionContainerIds: [] }
   }).ok, false);
   assert.equal(sessionDetachIsolationProof({
     sessionId: "web-prod",
     sessionRow: { id: "web-prod", lifecycle: "running" },
     entityLifecycleEvents: [],
     processExitEvents: [{ index: 1 }],
-    detachWait: { exitedObserved: false }
+    detachWait: { exitedObserved: false, lastDashboardPresent: true, lastSessionContainerIds: [] }
   }).ok, false);
   assert.equal(sessionDetachIsolationProof({
     sessionId: "web-prod",
     sessionRow: { id: "web-prod", lifecycle: "exited" },
     entityLifecycleEvents: [{ index: 4, lifecycle: "exited" }],
     processExitEvents: [{ index: 8 }],
-    detachWait: { exitedObserved: false }
+    detachWait: { exitedObserved: false, lastDashboardPresent: true, lastSessionContainerIds: [] }
   }).ok, true);
   assert.equal(sessionDetachIsolationProof({
     sessionId: "web-prod",
     sessionRow: { id: "web-prod", lifecycle: "exited" },
     entityLifecycleEvents: [{ index: 8, lifecycle: "exited" }],
     processExitEvents: [{ index: 4 }],
-    detachWait: { exitedObserved: false }
-  }).ok, false);
+    detachWait: { exitedObserved: true, lastDashboardPresent: true, lastSessionContainerIds: [] }
+  }).ok, true);
   const candidateTargetDir = "/checkout/target";
   const acceptedProvenance = candidateBinaryProvenance({
     hubRealPath: `${candidateTargetDir}/debug/botster-hub`,
@@ -15143,15 +15434,20 @@ async function emitChunkedTestResponse(dataChannel, secret, response, options = 
     !options.preserveSubscriptionReservation
   ) {
     const requestType = response.kind === "entity_subscribed" ? "subscribe_entities" : "subscribe_events";
-    const requests = [];
-    for (const sent of dataChannel.sent ?? []) {
+    const answeredRequestIndexes = dataChannel.testAnsweredRequestIndexes ??= new Set();
+    let request;
+    for (const [requestIndex, sent] of (dataChannel.sent ?? []).entries()) {
       try {
-        requests.push(await decryptTestEnvelope(secret, sent));
+        const candidate = await decryptTestEnvelope(secret, sent);
+        if (candidate.type === requestType && !answeredRequestIndexes.has(requestIndex)) {
+          request = candidate;
+          answeredRequestIndexes.add(requestIndex);
+          break;
+        }
       } catch {
         // Subscription channel chunks are not encrypted request envelopes.
       }
     }
-    const request = requests.toReversed().find((candidate) => candidate.type === requestType);
     if (!request) throw new Error(`Missing ${requestType} request for automatic test reservation.`);
     const kind = requestType === "subscribe_entities" ? "entity" : "package_event";
     const reservation = {
