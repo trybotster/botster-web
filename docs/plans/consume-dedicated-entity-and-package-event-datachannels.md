@@ -145,7 +145,7 @@ Dependencies, all closed and satisfied at plan time:
 - `ticket_1788282899_502914` (`@trybotster/hub-test-support@0.1.43` published; installed here after `npm install`, metadata protocol 8 / revision 48).
 - `ticket_1787600676_914408` (Web terminal channel binding scheme; merged at `fa074f8` through `6dc32b3`).
 
-No dependency is added. Web verifies against `botster-hub` built from `main` at `080ca9a` and records that commit in the Implement report. The Hub official gate against merged Web belongs to Hub's open integration ticket, not to this run.
+No dependency is added. Web verifies against exact `botster-hub` commit `bb1a330543bc06888f894edd5f40a0f867753a12`, with locked Core `48a437032791e678010254708259568ce4ad02bf`, and records both commits in the Implement report.
 
 ## 5. Assumptions and unknowns
 
@@ -216,7 +216,7 @@ Unit and component checks in `src/App.test.mjs`:
 14. `armDropNextInboundEntityFrame` still drops exactly one matching delta on the channel path and records `webrtc_entity_frame_harness_drop`.
 15. Two sibling entity subscriptions keep independent channels; closing one leaves the other delivering, and a terminal binding is unaffected by either.
 
-Live production-path proof, against a real Hub built from `main` at `080ca9a`:
+Live production-path proof uses a real Hub built from exact commit `bb1a330543bc06888f894edd5f40a0f867753a12`:
 
 - `npm run smoke:live-packaged-protocol` proves, through the compiled production bundle, that the session entity subscription returns a reservation, Web creates the labeled channel, Hub admits it, and the authoritative snapshot and deltas arrive on that channel while the control channel carries no entity frames.
 - `npm run smoke:package-events` proves the package-event reservation and channel, `subjects: [viewedSessionId]`, notice delivery, and `npm run smoke:package-events:gap` proves `event_gap` on the event channel with the isolated Hub child in test mode.
@@ -230,7 +230,7 @@ Downstream proof required by the charter: the packaged-browser and live-hub lane
 Folded reconnect acceptance, all required:
 
 - `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` pass at one stable commit. The unrelated exact unit-race message follows ticket `ticket_1788405063_986655`; any other failure blocks.
-- All repository browser smokes pass: `smoke:browser-runtime`, `smoke:mounted-terminal-keyboard`, `smoke:ghostsnp-grid`, and `smoke:incremental-ghostsnp-attach`.
+- Every repository browser smoke in `package.json` passes: `smoke:browser-runtime`, `smoke:live-packaged-protocol`, `smoke:workspaces-compat`, `smoke:workspaces-lifecycle`, `smoke:workspaces-shared-hub-browser`, `smoke:live-packaged-protocol:shared-session`, `smoke:live-packaged-protocol:caller-repeatability`, `smoke:live-packaged-protocol:durable`, `smoke:plugin-contract-matrix`, `smoke:plugin-payload-contract`, `smoke:entity-options-reactive`, `smoke:package-events`, `smoke:package-events:gap`, `smoke:mounted-terminal-keyboard`, `smoke:mounted-terminal-wheel-scrollback`, `smoke:ghostsnp-grid`, and `smoke:incremental-ghostsnp-attach`. Required package paths and shared-session inputs must be routed before these gates; a missing input is not a waiver.
 - A deterministic test drives the production `createHubTerminalDataPlane` and `createWebrtcDaemonClient` handles through the confirmed failure. The test proves recovered hydration, queued input delivery, exact identity, and one Detach owner.
 - The red-on-revert control fails at the named assertion when the production repair is absent. It must not fail only at a later echo timeout.
 - A direct terminal Attach-timeout test proves that the control peer, one sibling terminal channel, one entity subscription, and one package-event holder remain usable.
