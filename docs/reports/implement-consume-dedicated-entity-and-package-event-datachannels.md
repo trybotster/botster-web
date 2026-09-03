@@ -6,7 +6,7 @@
 - Target ID: `tgt_40abcf71ccf049f4ac0c99953a799869`
 - Ticket: `ticket_1787600684_892051`
 - Run: `run_1788371419_225012`
-- Implement step: `run_step_1788414155_817576`
+- Implement step: `run_step_1788418465_351488`
 - Approved plan artifact: `artifact_1788406311_802077`
 - Approved plan commit: `a0f7dbb85353b2b4d20a3504bd9c3481d769ed2a`
 - Dedicated channel commit: `c5cff604298da4bbfd09cadc7ab4021604bdff59`
@@ -15,6 +15,7 @@
 - Review repair commit: `c407dc3`
 - Stalled hydration repair commit: `a51bcee`
 - Final Web proof commit: `4096753`
+- Mixed subscription fixture repair commit: `971fc74`
 - Hub proof commit: `bb1a330543bc06888f894edd5f40a0f867753a12`
 - Core lock revision: `48a437032791e678010254708259568ce4ad02bf`
 - Contract fixture: `@trybotster/hub-test-support@0.1.43`
@@ -122,6 +123,8 @@ Web retries stalled hydration once with a new subscription. Web preserves queued
 
 The production entry point remains `hubTransport`. Its subscription methods now use the reserved channel path in `WebrtcDaemonTransport`.
 
+The mixed entity/event test fixture decrypts concurrent subscription requests and emits mapped responses in wire order. Production FIFO handling did not change.
+
 ## Ownership boundaries
 
 All source changes are in `botster-web`. Web owns browser transport, browser lifecycle, browser diagnostics, Web tests, and browser harnesses.
@@ -166,15 +169,18 @@ Human answer `question_1788415993_793492` removed Workspaces lifecycle from this
 
 ## Tests and downstream proof
 
-These repository checks pass at Web commit `4096753`:
+These repository checks pass at fixture repair commit `971fc74`:
 
-- `npm test`
+- `npm test`, 20 consecutive times
 - `npm run typecheck`
 - `npm run lint`
+- `git diff --check`
+
+These build and script checks pass at Web proof commit `4096753`:
+
 - `npm run build`
 - `node --check scripts/live-packaged-protocol-harness.mjs`
 - `node --check scripts/workspaces-shared-hub-browser-helpers.mjs`
-- `git diff --check`
 
 Lint reports five existing Fast Refresh warnings. Build reports the existing bundle size warning.
 
@@ -206,6 +212,8 @@ The unit suite proves Attach timeout isolation. The peer, sibling terminal, enti
 
 The crossed-ack test starts two package-event requests. The fake responder returns reservations by request type and decrypted wire order.
 
+Twenty consecutive `npm test` runs pass after the mixed entity/event fixture repair at `971fc74`.
+
 The ordered input test proves that a second key waits until the first stale retry is admitted.
 
 The Attach operator-error test proves that the same control peer serves a status request after the terminal rejection.
@@ -217,6 +225,7 @@ Red-on-revert proof produced these failures:
 - The old latest-request fake responder failed the automatic reservation wait.
 - Without the review repair, the Attach operator-error test fails with `daemon response assembly lost its pending request`.
 - Without the hydration progress bound, the stalled hydration test times out before Web creates the recovery stream.
+- The old fixed mixed-response order failed twice in five Verify runs with `event subscription returned entity_subscribed`.
 
 ## Runtime teardown lenses
 
