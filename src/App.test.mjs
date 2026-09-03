@@ -2822,6 +2822,23 @@ assert.doesNotMatch(liveProtocolHarnessScript, /if \(sharedSessionMode\) \{\s*co
 assert.match(liveProtocolHarnessScript, /live-shared-session-terminal-lane/);
 assert.match(liveProtocolHarnessScript, /live-shared-session-keep-alive-passed/);
 assert.match(liveProtocolHarnessScript, /async function proveInFlightAttachCancellation/);
+assert.match(liveProtocolHarnessScript, /async function proveAlternateScreenExit/);
+assert.match(liveProtocolHarnessScript, /await proveAlternateScreenExit\(page, productionSessionId\)/);
+assert.match(
+  liveProtocolHarnessScript.slice(
+    liveProtocolHarnessScript.indexOf("await proveRapidAlternateScreenReattach"),
+    liveProtocolHarnessScript.indexOf("live-shared-session-keep-alive-passed")
+  ),
+  /proveAlternateScreenExit/
+);
+assert.match(
+  liveProtocolHarnessScript.slice(
+    liveProtocolHarnessScript.indexOf("async function proveInFlightAttachCancellation"),
+    liveProtocolHarnessScript.indexOf("async function proveSharedSessionExit")
+  ),
+  /chronology/
+);
+assert.match(productionSessionScriptSource(), /botster-web-production-alt-exit/);
 assert.doesNotMatch(
   liveProtocolHarnessScript.slice(
     liveProtocolHarnessScript.indexOf("async function proveInFlightAttachCancellation"),
@@ -9005,6 +9022,7 @@ assert.match(liveProtocolHarnessScript, /armSnapshotInstallHold|snapshot_install
 assert.match(liveProtocolHarnessScript, /entry\.kind !== "renderer_write"/);
 assert.match(hubTerminalDataPlane, /holdLiveSnapshotInstallIfArmed|armSnapshotInstallHold/);
 assert.match(productionSessionScriptSource(), /1000h|1006h/);
+assert.match(productionSessionScriptSource(), /1049l/);
 
 assert.equal(
   decodeDaemonByteEnvelope(ghostsnpFixturePayloadBase64, "base64", ghostsnpFixtureBytes).byteLength,

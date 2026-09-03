@@ -506,6 +506,7 @@ try {
   await provePaletteProjectionAfterOsc(page, productionSessionId);
   await proveRetainedHistoryAfterEcho(page, echoProbe);
   await proveRapidAlternateScreenReattach(page, productionSessionId);
+  await proveAlternateScreenExit(page, productionSessionId);
   if (sharedSessionMode) {
     await proveInFlightAttachCancellation(page, productionSessionId);
   }
@@ -8080,6 +8081,133 @@ async function assertNoSuppliedSessionShutdown(page, sessionId) {
   }
 }
 
+function summarizeScreenForAltExit(screen) {
+  const text = typeof screen?.text === "string" ? screen.text : null;
+  return {
+    session_id: typeof screen?.session_id === "string" ? screen.session_id : null,
+    text_length: text?.length ?? 0,
+    has_keys_echo: Boolean(text?.includes("botster-web-production-echo:keys")),
+    has_alt_exited: Boolean(text?.includes("botster-web-production-alt-exited")),
+    sample: text ? text.slice(0, 240) : null
+  };
+}
+
+async function proveAlternateScreenExit(page, sessionId) {
+  const beforeFlags = await readDirectTerminalModeFlags(page, sessionId);
+  if (beforeFlags.alt_screen !== true) {
+    throw new Error(
+      `alternate-screen exit expected alt_screen true before exit: ${JSON.stringify(beforeFlags)}`
+    );
+  }
+
+  const beforeScreen = await callTerminalControl(page, "readScreen");
+  const finalRowMatch = typeof beforeScreen?.text === "string"
+    ? beforeScreen.text.match(/((?:alt-\d{2}-[A-Za-z0-9]+)-final-row-\d+)/)
+    : null;
+  if (!finalRowMatch) {
+    throw new Error(
+      `alternate-screen exit missing last-cycle -final-row- marker: ${JSON.stringify(beforeScreen)}`
+    );
+  }
+  const finalRowMarker = finalRowMatch[1];
+
+  await callTerminalControl(page, "writeInput", "\nbotster-web-production-alt-exit\n");
+  await waitForTerminalRendererWrite(page, "botster-web-production-alt-exited");
+
+  const flagsDeadline = Date.now() + 15_000;
+  let afterFlags = beforeFlags;
+  while (Date.now() < flagsDeadline) {
+    afterFlags = await readDirectTerminalModeFlags(page, sessionId);
+    if (afterFlags.alt_screen === false) break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  if (afterFlags.alt_screen !== false) {
+    throw new Error(
+      `alternate-screen exit expected alt_screen false after exit: ${JSON.stringify(afterFlags)}`
+    );
+  }
+
+  const screenDeadline = Date.now() + 15_000;
+  let afterScreen = beforeScreen;
+  while (Date.now() < screenDeadline) {
+    afterScreen = await callTerminalControl(page, "readScreen");
+    const text = typeof afterScreen?.text === "string" ? afterScreen.text : "";
+    if (!text.includes(finalRowMarker) && text.includes("botster-web-production-alt-exited")) {
+      break;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  const afterText = typeof afterScreen?.text === "string" ? afterScreen.text : "";
+  if (afterText.includes(finalRowMarker)) {
+    throw new Error(
+      `alternate-screen exit still shows last-cycle marker ${finalRowMarker}: ${JSON.stringify(afterScreen)}`
+    );
+  }
+  if (!afterText.includes("botster-web-production-alt-exited")) {
+    throw new Error(
+      `alternate-screen exit missing primary-screen echo botster-web-production-alt-exited: ${JSON.stringify(afterScreen)}`
+    );
+  }
+
+  const note = {
+    session_id: sessionId,
+    before_alt_screen: beforeFlags.alt_screen,
+    after_alt_screen: afterFlags.alt_screen,
+    before_mode_generation: beforeFlags.mode_generation,
+    after_mode_generation: afterFlags.mode_generation,
+    last_alt_final_row: finalRowMarker,
+    keys_echo_visible_after_exit: afterText.includes("botster-web-production-echo:keys"),
+    before_screen: summarizeScreenForAltExit(beforeScreen),
+    after_screen: summarizeScreenForAltExit(afterScreen)
+  };
+  recordProofNote("alternate_screen_exit", note);
+  return note;
+}
+
+async function collectHeldCancelChronology(page, { subscriptionId, generation, holdIndex }) {
+  return page.evaluate(({ expectedSubscriptionId, expectedGeneration, fromIndex }) => {
+    const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    const terminalRecords = [];
+    for (let index = Math.max(fromIndex, 0); index < terminal.length; index += 1) {
+      const entry = terminal[index];
+      const payload = entry?.payload ?? {};
+      if (
+        payload.subscription_id === expectedSubscriptionId ||
+        payload.generation === expectedGeneration
+      ) {
+        terminalRecords.push({
+          kind: entry.kind,
+          subscription_id: payload.subscription_id ?? null,
+          generation: payload.generation ?? null,
+          index
+        });
+      }
+    }
+    const detachRecords = [];
+    for (let index = 0; index < events.length; index += 1) {
+      const entry = events[index];
+      if (
+        entry?.kind === "daemon_request" &&
+        entry.payload?.type === "detach" &&
+        entry.payload?.subscription_id === expectedSubscriptionId
+      ) {
+        detachRecords.push({
+          kind: entry.kind,
+          type: entry.payload.type,
+          subscription_id: entry.payload.subscription_id,
+          index
+        });
+      }
+    }
+    return { terminal: terminalRecords, detach: detachRecords };
+  }, {
+    expectedSubscriptionId: subscriptionId,
+    expectedGeneration: generation,
+    fromIndex: holdIndex
+  });
+}
+
 async function proveInFlightAttachCancellation(page, sessionId) {
   const ablate = process.env.BOTSTER_LIVE_ABLATE_CANCEL_DETACH === "1";
   if (await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).count() > 0) {
@@ -8147,6 +8275,14 @@ async function proveInFlightAttachCancellation(page, sessionId) {
       });
     }
 
+    const holdIndex = await page.evaluate(({ subscriptionId }) => {
+      const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+      return terminal.findLastIndex((entry) =>
+        entry.kind === "snapshot_install_held" &&
+        entry.payload?.subscription_id === subscriptionId
+      );
+    }, { subscriptionId: hold.subscription_id });
+
     const detachBefore = await page.evaluate(({ subscriptionId }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) =>
         entry.kind === "daemon_request" &&
@@ -8187,9 +8323,14 @@ async function proveInFlightAttachCancellation(page, sessionId) {
         ).length
       };
     }, { subscriptionId: hold.subscription_id, expectedSessionId: sessionId, detachBefore });
+    const chronology = await collectHeldCancelChronology(page, {
+      subscriptionId: hold.subscription_id,
+      generation: hold.generation,
+      holdIndex
+    });
     if (detachEvidence.detach_count !== 1) {
       throw new Error(
-        `expected exactly one detach for held subscription ${hold.subscription_id}, got ${detachEvidence.detach_count}`
+        `expected exactly one detach for held subscription ${hold.subscription_id}, got ${detachEvidence.detach_count}; chronology=${JSON.stringify(chronology)}`
       );
     }
     if (detachEvidence.shutdown_count !== 0) {
@@ -8241,7 +8382,12 @@ async function proveInFlightAttachCancellation(page, sessionId) {
       old_subscription_id: hold.subscription_id,
       new_subscription_id: newSubscriptionId,
       held_generation: hold.generation,
-      detach_count: detachEvidence.detach_count
+      detach_count: detachEvidence.detach_count,
+      chronology: await collectHeldCancelChronology(page, {
+        subscriptionId: hold.subscription_id,
+        generation: hold.generation,
+        holdIndex
+      })
     };
     console.log(`live-shared-session-cancel-passed ${JSON.stringify(marker)}`);
     recordProofNote("in_flight_attach_cancellation", marker);
