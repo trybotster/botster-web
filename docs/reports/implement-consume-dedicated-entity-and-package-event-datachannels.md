@@ -6,13 +6,15 @@
 - Target ID: `tgt_40abcf71ccf049f4ac0c99953a799869`
 - Ticket: `ticket_1787600684_892051`
 - Run: `run_1788371419_225012`
-- Implement step: `run_step_1788406705_146720`
+- Implement step: `run_step_1788414155_817576`
 - Approved plan artifact: `artifact_1788406311_802077`
 - Approved plan commit: `a0f7dbb85353b2b4d20a3504bd9c3481d769ed2a`
 - Dedicated channel commit: `c5cff604298da4bbfd09cadc7ab4021604bdff59`
 - Snapshot hold commit: `1fcba421b90b32db8c1a419709d6f7c7f8b69cd6`
 - Reconnect and ordering commit: `4e9e0c8`
 - Review repair commit: `c407dc3`
+- Stalled hydration repair commit: `a51bcee`
+- Final Web proof commit: `4096753`
 - Hub proof commit: `bb1a330543bc06888f894edd5f40a0f867753a12`
 - Core lock revision: `48a437032791e678010254708259568ce4ad02bf`
 - Contract fixture: `@trybotster/hub-test-support@0.1.43`
@@ -114,6 +116,10 @@ Web keeps a terminal listener after an admitted remote channel closes. Web remov
 
 Mode-gated terminal input now waits for its matching `input_result`. A stale retry stays at the queue head.
 
+An admitted terminal channel can stop before hydration completes. Web now applies the existing 10-second transport bound to hydration progress.
+
+Web retries stalled hydration once with a new subscription. Web preserves queued frame order and sends queued input only after the new hydration completes.
+
 The production entry point remains `hubTransport`. Its subscription methods now use the reserved channel path in `WebrtcDaemonTransport`.
 
 ## Ownership boundaries
@@ -124,7 +130,7 @@ No Hub, Core, TUI, Lua plugin, generated protocol, terminal renderer, or applica
 
 The proof used a clean Hub checkout in `/private/tmp`. The proof did not edit Hub or Core.
 
-The workspaces proof used clean upstream commit `4903ed00c7fb5b9715657f798c0b04f26fb75781`. The proof did not edit Workspaces.
+The final Workspaces check used clean current main `e267871052b7bf6d81e3aad547ee7480a79001a0`. The proof did not edit Workspaces.
 
 ## Cross-repository dependencies
 
@@ -152,9 +158,15 @@ Human answer `question_1788411367_609003` made a gate scope correction. The fina
 
 The same answer removed `smoke:live-packaged-protocol:durable` from this intermediate Web gate. The durable assertion was not changed.
 
+Verify returned the run because rapid terminal reattach could stop after `attaching`. Web now retries one stalled hydration and preserves queued input.
+
+The live proof follows the new subscription only after it observes the timeout, recovery, new Attach, and snapshot installation. The terminal echo remains required.
+
+Human answer `question_1788415993_793492` removed Workspaces lifecycle from this intermediate gate. Current Workspaces main cannot load on the pinned Hub.
+
 ## Tests and downstream proof
 
-These repository checks pass on the final source:
+These repository checks pass at Web commit `4096753`:
 
 - `npm test`
 - `npm run typecheck`
@@ -166,7 +178,7 @@ These repository checks pass on the final source:
 
 Lint reports five existing Fast Refresh warnings. Build reports the existing bundle size warning.
 
-These Hub-free browser smokes pass:
+These Hub-free browser smokes pass at Web commit `a51bcee`. Commit `4096753` changes only the full live proof:
 
 - `npm run smoke:browser-runtime`
 - `npm run smoke:mounted-terminal-keyboard`
@@ -174,17 +186,17 @@ These Hub-free browser smokes pass:
 - `npm run smoke:ghostsnp-grid`
 - `npm run smoke:incremental-ghostsnp-attach`
 
-These pinned Hub browser smokes pass:
+These pinned Hub browser smokes pass at Web commit `4096753` against Hub `bb1a330` and Core `48a437`:
 
 - `npm run smoke:live-packaged-protocol`, three consecutive times
 - `npm run smoke:package-events`
 - `npm run smoke:package-events:gap`
 - `npm run smoke:entity-options-reactive`
 - `npm run smoke:plugin-contract-matrix`
-- `npm run smoke:workspaces-lifecycle`
-- `npm run smoke:workspaces-shared-hub-browser`
 
-The three full live runs passed after the stress session gained bounded cleanup. Later edits only corrected workspaces assertions.
+The three consecutive full live runs passed after the final transport and proof changes. Each run passed all 20 rapid reattach cycles.
+
+One pre-final run exercised the new recovery path. Web replaced a stalled subscription, reached `attached`, and preserved the queued terminal input.
 
 The package-event lane reported `peak_subscription_channels: 4`. It kept terminal, control, entity, event, and saturation checks.
 
@@ -192,7 +204,7 @@ The unit suite proves reservation order, exact labels, class checks, reconnect, 
 
 The unit suite proves Attach timeout isolation. The peer, sibling terminal, entity subscription, and package-event subscription survive.
 
-The crossed-ack test starts two package-event requests. The fake responder returns reservations by request type and request order.
+The crossed-ack test starts two package-event requests. The fake responder returns reservations by request type and decrypted wire order.
 
 The ordered input test proves that a second key waits until the first stale retry is admitted.
 
@@ -204,11 +216,12 @@ Red-on-revert proof produced these failures:
 - The old mode-gated input path failed the ordered retry condition.
 - The old latest-request fake responder failed the automatic reservation wait.
 - Without the review repair, the Attach operator-error test fails with `daemon response assembly lost its pending request`.
+- Without the hydration progress bound, the stalled hydration test times out before Web creates the recovery stream.
 
 ## Runtime teardown lenses
 
 - Isolation: An Attach failure does not close a sibling channel or the control peer.
-- Bounds: Reservation expiry and assembly use finite timers. Stress sessions stop after their proof.
+- Bounds: Reservation, assembly, Detach, and hydration progress use finite timers. Stress sessions stop after their proof.
 - Late messages: Exact identity rejects stale Attach responses. Stale generations cannot revive a binding.
 - Ownership: One listener owns each exact terminal subscription. Web removes it after the ordered close reason.
 - Sweep: Peer reset clears the bindings and assembly state for that peer generation.
@@ -223,7 +236,13 @@ Human answer `question_1788411367_609003` assigned that Hub persistence contract
 
 `smoke:plugin-payload-contract` returns a rejected fixture action on Hub `bb1a330`. The corrected Web gate does not require that external lane.
 
-Two `smoke:workspaces-compat` runs passed all workspaces checks, then failed at different later terminal stages. The corrected gate requires lifecycle proof.
+Two earlier `smoke:workspaces-compat` runs passed the Workspaces checks, then failed at later terminal stages. They are not final gate evidence.
+
+`smoke:workspaces-lifecycle` fails before Web runs with current Workspaces main `e267871` and Hub `bb1a330`.
+
+Hub reports `hub lua plugin load error: runtime error: rejected_invalid`. Human answer `question_1788415993_793492` transferred this mismatch to final integration.
+
+The answer forbids pinning Workspaces `4903ed0`. The answer also forbids changing the Workspaces assertion or creating a child run from this Web run.
 
 The Hub provenance reports a clean checkout and the exact lock revision. It does not contain a build receipt.
 
@@ -239,6 +258,6 @@ No new vault note was necessary. This report records the temporary smoke finding
 
 The Hub and Core hashes are the required producer pins for this Web run.
 
-Upstream Workspaces commit `4903ed0` is the stable package input. Remote `main` resolved to that commit during verification.
+Current Workspaces `origin/main` resolved to `e267871052b7bf6d81e3aad547ee7480a79001a0` during final verification.
 
 The final integration ticket will decide the Hub durability contract and the complete cross-repository matrix.
