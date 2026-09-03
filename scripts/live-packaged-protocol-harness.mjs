@@ -7668,7 +7668,7 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
     await openSessionTerminal(page, sessionId);
     await waitForTerminalSession(page, sessionId);
 
-    const attachment = await page.waitForFunction(
+    const initialAttachment = await page.waitForFunction(
       ({ previousAttachCount, fromIndex }) => {
         const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
         const attaches = terminal.filter((entry) => entry.kind === "attach");
@@ -7686,14 +7686,65 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
       { timeout: 30_000 }
     ).then((handle) => handle.jsonValue());
 
-    await page.waitForFunction(
-      ({ subscriptionId }) =>
-        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
-          (entry) => entry.kind === "ghostsnp_install" && entry.payload?.subscription_id === subscriptionId
-        ),
-      { subscriptionId: attachment.subscriptionId },
+    const attachment = await page.waitForFunction(
+      ({ fromIndex }) => {
+        const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+        const attaches = terminal
+          .map((entry, index) => ({ entry, index }))
+          .filter(({ entry, index }) => index >= fromIndex && entry.kind === "attach")
+          .toReversed();
+        for (const { entry, index: attachIndex } of attaches) {
+          const subscriptionId = entry.payload?.subscription_id;
+          if (typeof subscriptionId !== "string") continue;
+          const installed = terminal.some(
+            (candidate, index) =>
+              index > attachIndex &&
+              candidate.kind === "ghostsnp_install" &&
+              candidate.payload?.subscription_id === subscriptionId
+          );
+          if (installed) return { subscriptionId, attachIndex };
+        }
+        return null;
+      },
+      { fromIndex: before.terminalLength },
       { timeout: 30_000 }
-    );
+    ).then((handle) => handle.jsonValue());
+
+    if (attachment.subscriptionId !== initialAttachment.subscriptionId) {
+      const recovered = await page.evaluate(
+        ({ initialSubscriptionId, recoveredSubscriptionId, fromIndex }) => {
+          const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+          return {
+            timedOut: terminal.some(
+              (entry, index) =>
+                index >= fromIndex &&
+                entry.kind === "hydration_progress_timeout" &&
+                entry.payload?.subscription_id === initialSubscriptionId
+            ),
+            restarted: terminal.some(
+              (entry, index) =>
+                index >= fromIndex &&
+                entry.kind === "snapshot_lost_recover" &&
+                entry.payload?.previous_subscription_id === initialSubscriptionId
+            ),
+            attached: terminal.some(
+              (entry, index) =>
+                index >= fromIndex &&
+                entry.kind === "attach" &&
+                entry.payload?.subscription_id === recoveredSubscriptionId
+            )
+          };
+        },
+        {
+          initialSubscriptionId: initialAttachment.subscriptionId,
+          recoveredSubscriptionId: attachment.subscriptionId,
+          fromIndex: before.terminalLength
+        }
+      );
+      if (!recovered.timedOut || !recovered.restarted || !recovered.attached) {
+        throw new Error(`alternate-screen hydration recovery was incomplete: ${JSON.stringify(recovered)}`);
+      }
+    }
 
     const liveMarker = `${marker}-live`;
     await typeThroughMountedTerminal(page, `echo ${liveMarker}\n`);
@@ -7770,7 +7821,9 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
     cycles.push({
       cycle,
       marker,
+      initial_subscription_id: initialAttachment.subscriptionId,
       subscription_id: attachment.subscriptionId,
+      hydration_recovered: attachment.subscriptionId !== initialAttachment.subscriptionId,
       install_before_first_write: true,
       final_row_present: true
     });
