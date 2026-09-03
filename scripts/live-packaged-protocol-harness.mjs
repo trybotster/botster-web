@@ -6121,6 +6121,7 @@ async function proveExternalSessionLifecycle(page) {
     "externally spawned session upsert"
   );
   if (durableStateMode) {
+    await openDiagnosticsView(page);
     const diagnostics = page.getByTestId(HOST_CHROME.diagnosticsViewTestId);
     await diagnostics.waitFor();
     const sessionsPanel = diagnostics.locator(".entity-family-panel").filter({

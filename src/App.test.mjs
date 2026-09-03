@@ -2845,6 +2845,13 @@ assert.doesNotMatch(liveProtocolHarnessScript, /if \(sharedSessionMode\) \{\s*co
 assert.match(liveProtocolHarnessScript, /live-shared-session-terminal-lane/);
 assert.match(liveProtocolHarnessScript, /live-shared-session-keep-alive-passed/);
 assert.match(liveProtocolHarnessScript, /async function proveInFlightAttachCancellation/);
+assert.match(
+  liveProtocolHarnessScript.slice(
+    liveProtocolHarnessScript.indexOf("async function proveExternalSessionLifecycle"),
+    liveProtocolHarnessScript.indexOf("async function assertDurableSeededSessionsVisible")
+  ),
+  /if \(durableStateMode\) \{\s*await openDiagnosticsView\(page\);/
+);
 assert.match(liveProtocolHarnessScript, /async function proveAlternateScreenExit/);
 assert.match(liveProtocolHarnessScript, /await proveAlternateScreenExit\(page, productionSessionId\)/);
 assert.match(liveProtocolHarnessScript, /classifyAltExitRendererWrites/);
