@@ -54,6 +54,8 @@ export interface HubTerminalDataPlaneTestHooks {
   beforeListenerDelivery?: () => Promise<void> | void;
   /** Test-only shorter race for the public Detach hang bound. */
   detachRequestBoundMs?: number;
+  /** Test-only shorter bound for admitted terminal hydration progress. */
+  hydrationProgressBoundMs?: number;
 }
 
 interface ScreenHydration {
@@ -66,6 +68,8 @@ interface ScreenHydration {
   historyIncomplete: boolean;
   attachedReceived: boolean;
   completed: boolean;
+  retryQueuedFrames: boolean;
+  progressTimeout?: ReturnType<typeof setTimeout>;
   reader?: TerminalSnapshotReader;
   resolveBarrier(): void;
   barrier: Promise<void>;
@@ -508,6 +512,9 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       });
       this.hydration.reader.cancel();
     }
+    if (this.hydration?.progressTimeout !== undefined) {
+      clearTimeout(this.hydration.progressTimeout);
+    }
     this.hydration?.resolveBarrier();
     this.hydration = undefined;
     this.terminalEventQueue = Promise.resolve();
@@ -596,20 +603,29 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       await streamSubscription.ready;
       if (!this.isCurrentAttachment(attachmentGeneration)) return;
     }
+    const hydration = this.hydration;
+    if (hydration?.generation === attachmentGeneration && !hydration.completed) {
+      this.armHydrationProgressBound(hydration);
+    }
   }
 
   private enqueueTerminalFrame(
     send: (attachmentGeneration: number) => Promise<void>
   ): Promise<void> {
     const queued = this.terminalFrameQueue.then(async () => {
-      await this.ensureAttached();
-      const hydration = this.hydration;
-      if (!hydration) return;
-      const attachmentGeneration = hydration.generation;
-      await hydration.barrier;
-      if (!this.isCurrentAttachment(attachmentGeneration) || !hydration.completed) return;
-      await this.flushPendingResize(attachmentGeneration);
-      await send(attachmentGeneration);
+      while (!this.detached && this.listeners.size > 0) {
+        await this.ensureAttached();
+        const hydration = this.hydration;
+        if (!hydration) return;
+        const attachmentGeneration = hydration.generation;
+        await hydration.barrier;
+        if (this.isCurrentAttachment(attachmentGeneration) && hydration.completed) {
+          await this.flushPendingResize(attachmentGeneration);
+          await send(attachmentGeneration);
+          return;
+        }
+        if (!hydration.retryQueuedFrames) return;
+      }
     });
     this.terminalFrameQueue = queued.catch(() => undefined);
     return queued;
@@ -629,7 +645,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return delivery;
   }
 
-  private closeStream(): void {
+  private closeStream(preserveTerminalFrameQueue = false): void {
     const stream = this.streamSubscription;
     const subscriptionId = this.subscriptionId;
     const generation = this.hydration?.generation ?? this.attachmentGeneration;
@@ -663,10 +679,15 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       });
       this.hydration.reader.cancel();
     }
+    if (this.hydration?.progressTimeout !== undefined) {
+      clearTimeout(this.hydration.progressTimeout);
+    }
     this.hydration?.resolveBarrier();
     this.hydration = undefined;
     this.terminalEventQueue = Promise.resolve();
-    this.terminalFrameQueue = Promise.resolve();
+    if (!preserveTerminalFrameQueue) {
+      this.terminalFrameQueue = Promise.resolve();
+    }
     this.clearPendingModeGatedInputs();
     this.nextPasteOperationId = 1;
     this.restoredVisibleScreenGeneration = undefined;
@@ -918,6 +939,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       historyIncomplete: false,
       attachedReceived: false,
       completed: false,
+      retryQueuedFrames: false,
       reader: this.incrementalSnapshotReaderFactory?.(),
       resolveBarrier: () => undefined,
       barrier: Promise.resolve()
@@ -975,6 +997,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       subscription_id: this.subscriptionId
     });
 
+    this.armHydrationProgressBound(hydration);
+
     if (hydration.attachedReceived) {
       await this.completeIncrementalHydration(hydration);
     }
@@ -994,6 +1018,10 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
 
     hydration.completed = true;
+    if (hydration.progressTimeout !== undefined) {
+      clearTimeout(hydration.progressTimeout);
+      hydration.progressTimeout = undefined;
+    }
     this.emitStatus({
       state: "attached",
       message: hydration.historyIncomplete
@@ -1039,6 +1067,10 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private failHydration(hydration: ScreenHydration, message: string): void {
     if (this.hydration !== hydration) return;
     hydration.completed = true;
+    if (hydration.progressTimeout !== undefined) {
+      clearTimeout(hydration.progressTimeout);
+      hydration.progressTimeout = undefined;
+    }
     hydration.resolveBarrier();
     this.emitStatus({
       state: "failed",
@@ -1055,13 +1087,18 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       return;
     }
     this.snapshotRecoveries += 1;
+    hydration.retryQueuedFrames = true;
+    if (hydration.progressTimeout !== undefined) {
+      clearTimeout(hydration.progressTimeout);
+      hydration.progressTimeout = undefined;
+    }
     const previousSubscriptionId = this.subscriptionId;
     recordLiveHarnessTerminal("snapshot_lost_recover", {
       message,
       previous_subscription_id: previousSubscriptionId
     });
     hydration.reader?.cancel();
-    this.closeStream();
+    this.closeStream(true);
     this.subscriptionId = createTerminalSubscriptionId();
     this.emitStatus({
       state: "attaching",
@@ -1073,6 +1110,28 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         message: error instanceof Error ? error.message : "Fresh terminal attach failed."
       });
     });
+  }
+
+  private armHydrationProgressBound(hydration: ScreenHydration): void {
+    if (this.hydration !== hydration || hydration.completed) return;
+    if (hydration.progressTimeout !== undefined) {
+      clearTimeout(hydration.progressTimeout);
+    }
+    const boundMs = this.testHooks?.hydrationProgressBoundMs
+      ?? localWebrtcResponseChunkLimits.requestTimeoutMs;
+    hydration.progressTimeout = setTimeout(() => {
+      hydration.progressTimeout = undefined;
+      if (this.hydration !== hydration || hydration.completed) return;
+      const message = `Terminal snapshot attach made no progress within ${boundMs}ms.`;
+      recordLiveHarnessTerminal("hydration_progress_timeout", {
+        generation: hydration.generation,
+        subscription_id: this.subscriptionId,
+        ready_received: hydration.readyReceived,
+        finish_received: hydration.finishReceived,
+        attached_received: hydration.attachedReceived
+      });
+      this.recoverLostSnapshot(hydration, message);
+    }, boundMs);
   }
 
   private bufferHydratingOutput(data: Uint8Array, hydration: ScreenHydration): void {

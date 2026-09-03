@@ -5538,6 +5538,11 @@ try {
     () => undefined
   );
   await waitForTestCondition(() => crossedAckChannel.sent.length === 2);
+  const crossedAckRequestOrder = await Promise.all(
+    crossedAckChannel.sent.map((envelope) =>
+      decryptTestEnvelope(localWebrtcBootstrapFixture.grant_secret, envelope)
+    )
+  );
   await emitChunkedTestResponse(
     crossedAckChannel,
     localWebrtcBootstrapFixture.grant_secret,
@@ -5553,7 +5558,7 @@ try {
   await Promise.all([crossedAckFirst.ready, crossedAckSecond.ready]);
   assert.deepEqual(
     crossedAckChannel.testSubscriptionReservations.map((reservation) => reservation.subscription_id),
-    ["crossed-ack-1", "crossed-ack-2"]
+    crossedAckRequestOrder.map((request) => request.subscription_id)
   );
   crossedAckFirst.unsubscribe();
   crossedAckSecond.unsubscribe();
@@ -8921,6 +8926,64 @@ assert.match(
   await plane.writeInput("p".repeat(70_000));
   assert.deepEqual(frames.slice(pasteStart).map((frame) => frame[1]), [4, 5, 5, 6]);
   assert.equal(requests.some((request) => ["send_input", "mode_gated_input", "resize"].includes(request.type)), false);
+  await plane.detach();
+}
+
+// A terminal channel that stops after snapshot READY must reattach once and keep queued input.
+{
+  const sessionId = "stalled-hydration-recovery-session";
+  const streams = [];
+  const detachRequests = [];
+  const plane = createHubTerminalDataPlane({
+    sessionId,
+    testHooks: { hydrationProgressBoundMs: 20 },
+    bridge: {
+      async request(request) {
+        if (request.type === "detach") detachRequests.push(request);
+        if (request.type === "read_mode_flags") {
+          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
+        }
+        if (request.type === "read_screen") {
+          return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal(nextSessionId, subscriptionId, onEvent) {
+        assert.equal(nextSessionId, sessionId);
+        const stream = { subscriptionId, onEvent, frames: [] };
+        streams.push(stream);
+        return {
+          ready: Promise.resolve(),
+          sendFrame(frame) {
+            stream.frames.push(new Uint8Array(frame));
+            return Promise.resolve();
+          },
+          abandon() {},
+          unsubscribe() {}
+        };
+      }
+    }
+  });
+  bindGhostsnpInstaller(plane);
+  plane.subscribeOutput(() => undefined);
+  await waitForTestCondition(() => streams.length === 1);
+  await streams[0].onEvent(opaqueFinishSnapshotEvent(sessionId, streams[0].subscriptionId));
+  const queuedInput = plane.writeInput("queued-across-hydration-recovery");
+  await waitForTestCondition(() => streams.length === 2);
+  assert.notEqual(streams[1].subscriptionId, streams[0].subscriptionId);
+  assert.equal(streams[0].frames.length, 0);
+  await streams[1].onEvent(opaqueFinishSnapshotEvent(sessionId, streams[1].subscriptionId));
+  await streams[1].onEvent(opaqueFinishSnapshotEvent(sessionId, streams[1].subscriptionId));
+  await streams[1].onEvent({
+    type: "attach_state",
+    session_id: sessionId,
+    subscription_id: streams[1].subscriptionId,
+    state: "attached"
+  });
+  await queuedInput;
+  assert.deepEqual(streams[1].frames.map((frame) => frame[1]), [1]);
+  assert.equal(detachRequests.length, 1);
+  assert.equal(detachRequests[0].subscription_id, streams[0].subscriptionId);
   await plane.detach();
 }
 
