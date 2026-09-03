@@ -9019,6 +9019,110 @@ assert.match(
   await plane.detach();
 }
 
+function createStalledHydrationCancelFixture(sessionId) {
+  const streams = [];
+  const detachRequests = [];
+  const harness = { terminal: [], ablateCancelDetach: false };
+  globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = harness;
+  const plane = createHubTerminalDataPlane({
+    sessionId,
+    testHooks: { hydrationProgressBoundMs: 20 },
+    bridge: {
+      async request(request) {
+        if (request.type === "detach") detachRequests.push(request);
+        if (request.type === "read_mode_flags") {
+          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
+        }
+        if (request.type === "read_screen") {
+          return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
+        }
+        return { kind: "events", events: [] };
+      },
+      streamTerminal(nextSessionId, subscriptionId, onEvent) {
+        assert.equal(nextSessionId, sessionId);
+        const stream = { subscriptionId, onEvent, frames: [] };
+        streams.push(stream);
+        return {
+          ready: Promise.resolve(),
+          sendFrame(frame) {
+            stream.frames.push(new Uint8Array(frame));
+            return Promise.resolve();
+          },
+          abandon() {},
+          unsubscribe() {}
+        };
+      }
+    }
+  });
+  bindGhostsnpInstaller(plane);
+  return { plane, streams, detachRequests, harness };
+}
+
+function harnessKinds(harness, subscriptionId) {
+  return (harness.terminal ?? [])
+    .filter((entry) => entry.payload?.subscription_id === subscriptionId || entry.payload?.generation != null)
+    .map((entry) => entry.kind);
+}
+
+{
+  const previousHarness = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  const sessionId = "public-detach-positive-control-session";
+  try {
+    const { plane, streams, detachRequests } = createStalledHydrationCancelFixture(sessionId);
+    plane.subscribeOutput(() => undefined);
+    await waitForTestCondition(() => streams.length === 1);
+    await streams[0].onEvent(opaqueFinishSnapshotEvent(sessionId, streams[0].subscriptionId));
+    await waitForTestCondition(() =>
+      (globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
+        (entry) => entry.kind === "ghostsnp_install" && entry.payload?.progress === "ready"
+      )
+    );
+    await plane.detach();
+    assert.equal(detachRequests.length, 1);
+    assert.equal(detachRequests[0].subscription_id, streams[0].subscriptionId);
+    assert.equal(streams.length, 1);
+  } finally {
+    if (previousHarness === undefined) {
+      delete globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    } else {
+      globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = previousHarness;
+    }
+  }
+}
+
+{
+  const previousHarness = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  const sessionId = "ablated-cancel-stalled-hydration-session";
+  try {
+    const { plane, streams, detachRequests, harness } = createStalledHydrationCancelFixture(sessionId);
+    plane.subscribeOutput(() => undefined);
+    await waitForTestCondition(() => streams.length === 1);
+    await streams[0].onEvent(opaqueFinishSnapshotEvent(sessionId, streams[0].subscriptionId));
+    await waitForTestCondition(() =>
+      harness.terminal.some(
+        (entry) => entry.kind === "ghostsnp_install" && entry.payload?.progress === "ready"
+      )
+    );
+    harness.ablateCancelDetach = true;
+    await plane.detach();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const heldId = streams[0].subscriptionId;
+    const kinds = harnessKinds(harness, heldId);
+    assert.equal(detachRequests.length, 0, `ablated cancel emitted detach: ${JSON.stringify(detachRequests)}`);
+    assert.equal(streams.length, 1, `ablated cancel recovered a second stream: ${streams.length}`);
+    assert.equal(kinds.includes("cancel_detach_ablated"), true, `missing cancel_detach_ablated: ${JSON.stringify(harness.terminal)}`);
+    assert.equal(kinds.includes("reader_cancel"), true, `missing reader_cancel: ${JSON.stringify(harness.terminal)}`);
+    assert.equal(kinds.includes("hydration_progress_timeout"), false, `hydration bound fired after ablated cancel: ${JSON.stringify(harness.terminal)}`);
+    assert.equal(kinds.includes("snapshot_lost_recover"), false, `snapshot recovery ran after ablated cancel: ${JSON.stringify(harness.terminal)}`);
+  } finally {
+    if (previousHarness === undefined) {
+      delete globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    } else {
+      globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = previousHarness;
+    }
+  }
+}
+
 // Mouse grid must track resize (not hard-coded 80x24).
 assert.match(resttyRenderer, /ptyTransport\.currentGrid\(\)/);
 assert.match(resttyRenderer, /measuredGrid\?\.columns/);

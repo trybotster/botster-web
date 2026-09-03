@@ -375,21 +375,24 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.detached = true;
     this.transportLost = false;
     const heldSubscriptionId = this.subscriptionId;
-    if (liveHarness()?.ablateCancelDetach === true) {
+    const heldGeneration = this.hydration?.generation ?? this.attachmentGeneration;
+    const ablateCancelDetach = liveHarness()?.ablateCancelDetach === true;
+    if (ablateCancelDetach) {
       recordLiveHarnessTerminal("cancel_detach_ablated", {
         sessionId: this.sessionId,
         subscription_id: heldSubscriptionId
       });
-      this.listeners.clear();
-      this.statusListeners.clear();
-      this.uninstallLifecycleListener();
-      return;
     }
-    const heldGeneration = this.hydration?.generation ?? this.attachmentGeneration;
     this.closeStreamWithoutDetachRequest();
     this.listeners.clear();
     this.statusListeners.clear();
     this.uninstallLifecycleListener();
+    if (ablateCancelDetach) {
+      // Skip only the Detach request. Mark the once-owner so later closeStream()
+      // paths cannot satisfy the cancel oracle for this held subscription.
+      this.detachSentFor = { subscriptionId: heldSubscriptionId, generation: heldGeneration };
+      return;
+    }
     // One Detach owner for the held subscription generation. Public cancel also
     // blocks later Detach for this subscription id even after generation bump.
     await this.sendDetachRequestOnce(heldSubscriptionId, heldGeneration);

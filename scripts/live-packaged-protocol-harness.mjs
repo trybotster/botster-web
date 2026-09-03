@@ -8165,7 +8165,7 @@ async function proveAlternateScreenExit(page, sessionId) {
 }
 
 async function collectHeldCancelChronology(page, { subscriptionId, generation, holdIndex }) {
-  return page.evaluate(({ expectedSubscriptionId, expectedGeneration, fromIndex }) => {
+  return page.evaluate(({ expectedSubscriptionId, fromIndex }) => {
     const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
     const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
     const terminalRecords = [];
@@ -8174,11 +8174,11 @@ async function collectHeldCancelChronology(page, { subscriptionId, generation, h
       const payload = entry?.payload ?? {};
       if (
         payload.subscription_id === expectedSubscriptionId ||
-        payload.generation === expectedGeneration
+        payload.previous_subscription_id === expectedSubscriptionId
       ) {
         terminalRecords.push({
           kind: entry.kind,
-          subscription_id: payload.subscription_id ?? null,
+          subscription_id: payload.subscription_id ?? payload.previous_subscription_id ?? null,
           generation: payload.generation ?? null,
           index
         });
