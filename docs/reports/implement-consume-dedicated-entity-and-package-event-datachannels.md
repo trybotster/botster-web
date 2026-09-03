@@ -6,15 +6,21 @@
 - Target ID: `tgt_40abcf71ccf049f4ac0c99953a799869`
 - Ticket: `ticket_1787600684_892051`
 - Run: `run_1788371419_225012`
-- Implement step: `run_step_1788372638_857183`
-- Approved plan: `docs/plans/consume-dedicated-entity-and-package-event-datachannels.md`
-- Initial producer used for live proof: `botster-hub` commit `080ca9ae31ffc7b3dfd2a255b6eaa08c15bfc4fe`
-- Resumed producer used for live proof: `botster-hub` commit `bb1a330543bc06888f894edd5f40a0f867753a12`
-- Installed contract fixture: `@trybotster/hub-test-support@0.1.43`, protocol 8, conformance revision 48, DTO SHA-256 `33c0c27941c0e9751342cfdbeb53d27bb4a1225e5ce7f4be280d9f0dc11ad7f3`
+- Implement step: `run_step_1788406705_146720`
+- Approved plan artifact: `artifact_1788406311_802077`
+- Approved plan commit: `a0f7dbb85353b2b4d20a3504bd9c3481d769ed2a`
+- Dedicated channel commit: `c5cff604298da4bbfd09cadc7ab4021604bdff59`
+- Snapshot hold commit: `1fcba421b90b32db8c1a419709d6f7c7f8b69cd6`
+- Reconnect and ordering commit: `4e9e0c8`
+- Hub proof commit: `bb1a330543bc06888f894edd5f40a0f867753a12`
+- Core lock revision: `48a437032791e678010254708259568ce4ad02bf`
+- Contract fixture: `@trybotster/hub-test-support@0.1.43`
+
+The pipeline uses direct merge. A pull request is not required.
 
 ## Guidance applied
 
-Repository and workflow playbooks:
+The implementation used these playbooks:
 
 - [[implementer-playbook]]
 - [[botster-implementer-playbook]]
@@ -22,7 +28,7 @@ Repository and workflow playbooks:
 - [[project-pipelines-playbook]]
 - [[botster runtime teardown lenses]]
 
-Architecture and code notes:
+The implementation used these architecture and code notes:
 
 - [[botster-architecture]]
 - [[cli-patterns]]
@@ -51,10 +57,12 @@ Architecture and code notes:
 - [[in-flight cancel needs one Web Detach owner]]
 - [[Hub ultimate WebRTC close failure sacrifices every peer on the dedicated runtime]]
 - [[botster web dto field names must match authoritative rust serde structs]]
-- [[a ui contract import line change costs one test line in each generic client]]
 - [[adding harness event families changes every mixed family oracle]]
+- [[Web detaches the mounted terminal when the session entity is exited]]
 
-Workflow notes:
+The last note states that `process_exit` is a valid first detach signal. The entity exit path must also detach without that signal.
+
+The implementation used these workflow notes:
 
 - [[implementation artifacts must match actual git state]]
 - [[implement gate must verify committed work and pr link before review]]
@@ -64,113 +72,166 @@ Workflow notes:
 
 ## Files changed
 
-- `src/botster/webrtcDaemonClient.ts`
-- `src/botster/connectionDiagnostics.ts`
-- `src/botster/hubTransport.ts`
-- `src/App.test.mjs`
-- `scripts/live-packaged-protocol-harness.mjs`
-- `docs/architecture.md`
-- `README.md`
-- `docs/reports/implement-consume-dedicated-entity-and-package-event-datachannels.md`
+The complete ticket changed these files:
 
-`src/botster/realHubDaemonDto.ts` did not need a change. Its existing wildcard export exposes `DaemonSubscriptionReservation`. `scripts/live-packaged-protocol-helpers.mjs` did not need a change because the new reconnect and saturation oracles use existing page-harness data.
+- `README.md`
+- `docs/architecture.md`
+- `docs/reports/implement-consume-dedicated-entity-and-package-event-datachannels.md`
+- `scripts/live-packaged-protocol-harness.mjs`
+- `scripts/live-packaged-protocol-helpers.mjs`
+- `scripts/workspaces-shared-hub-browser-helpers.mjs`
+- `src/App.test.mjs`
+- `src/botster/connectionDiagnostics.ts`
+- `src/botster/hubTerminalDataPlane.ts`
+- `src/botster/hubTransport.ts`
+- `src/botster/webrtcDaemonClient.ts`
+
+`src/botster/realHubDaemonDto.ts` already exports `DaemonSubscriptionReservation`. It did not need a change.
 
 ## Implementation result
 
-Web now reads the entity or package-event reservation from the control response. It then creates one ordered DataChannel with the exact Hub label. It sends an encrypted host Hello and waits for `DaemonHelloAck` before it accepts data.
+Web requests each entity or package-event subscription on the control channel. Web creates an ordered channel only after Hub admits the reservation.
 
-Each binding owns its label, Hub reservation generation, peer generation, subscription ID, expiry timer, assembly state, and completed message IDs. Entity channels accept only `daemon_entity_frame`. Package-event channels accept only `daemon_event` with `package_event` or `event_gap`. The control channel rejects both data-plane classes.
+Web uses the exact label and generation from Hub. Web sends the encrypted Hello before it accepts data.
 
-Unsubscribe closes and forgets the local channel before it sends the control request. Admission failure, expiry, peer loss, and remote close also retire the binding. A current admitted remote close starts one fresh subscription with a new ID and reservation. A stale close cannot affect the replacement. Peer reset closes terminal, entity, and event bindings for that peer generation.
+Entity channels accept only `daemon_entity_frame`. Package-event channels accept only `daemon_event` with `package_event` or `event_gap`.
 
-The production entry point is unchanged. `hubTransport` still calls `subscribeEntityFrames` and `subscribePackageEvents`. Those methods now use the reservation, admission, and class-specific channel paths in `WebrtcDaemonTransport`.
+The control channel rejects both data classes. The implementation has no shared-channel fallback and no pre-created channel pool.
+
+Each binding owns its reservation, label, peer generation, subscription identity, timer, assembly state, and completed message identifiers.
+
+Web closes stale bindings by generation. Unsubscribe closes the local binding before Web sends the control request.
+
+Attach request timeouts now reject only that Attach. They do not close the peer, entity channels, package-event channels, or sibling terminals.
+
+A late terminal reservation cannot consume a later control response. Web compares the exact session and subscription identity.
+
+Web keeps a terminal listener after an admitted remote channel closes. Web removes it after `terminal_subscription_closed` arrives.
+
+Mode-gated terminal input now waits for its matching `input_result`. A stale retry stays at the queue head.
+
+The production entry point remains `hubTransport`. Its subscription methods now use the reserved channel path in `WebrtcDaemonTransport`.
 
 ## Ownership boundaries
 
-All changes are in `botster-web`. They cover the browser transport, browser diagnostics, repository-owned tests, the packaged browser harness, and Web documentation. No Hub, Core, TUI, plugin, Lua, generated protocol, terminal renderer, or application-route source changed.
+All source changes are in `botster-web`. Web owns browser transport, browser lifecycle, browser diagnostics, Web tests, and browser harnesses.
 
-The implementation used the Hub repository only to build the approved producer commit in `/private/tmp` for read-only contract proof. It did not edit that repository.
+No Hub, Core, TUI, Lua plugin, generated protocol, terminal renderer, or application route source changed.
 
-## Cross-repository dependency
+The proof used a clean Hub checkout in `/private/tmp`. The proof did not edit Hub or Core.
 
-The closed pipeline dependency is `dependency_1788375748_957592`: this ticket depends on Hub ticket `ticket_1788313897_932611`.
+The workspaces proof used clean upstream commit `4903ed00c7fb5b9715657f798c0b04f26fb75781`. The proof did not edit Workspaces.
 
-Human answer `question_1788375688_896668` requires this dependency. The answer says that Hub `080ca9a` predates inbound reassembly for the mandatory version 2 `daemon_terminal_frame` chunks that Web main sends. It forbids a raw-envelope fallback and forbids a waiver for either terminal echo assertion.
+## Cross-repository dependencies
 
-Hub ticket `ticket_1788313897_932611` merged at `bb1a330543bc06888f894edd5f40a0f867753a12`. The resumed full lane exposed a later Web terminal reconnect failure. Agent answer `question_1788396042_879149` assigns that failure to `botster-web` and requires a separate ticket. This ticket now depends on Web ticket `ticket_1788396308_856047` through dependency `dependency_1788396319_338718`. Its run is `run_1788396326_651208`.
+All registered dependencies are closed. Hub ticket `ticket_1788313897_932611` supplied Hub commit `bb1a330` and Core revision `48a437`.
+
+The parent run absorbed Web child ticket `ticket_1788396308_856047`. The pipeline cancelled that child before this implementation resumed.
+
+No new Hub or Workspaces child ticket was created. Human answer `question_1788411367_609003` forbids those child tickets in this run.
 
 ## Deviations from the approved plan
 
-- The terminal reserved-channel opener remains unchanged. A temporary mechanical generalization was reverted. The entity and package-event classes share their own reserved-channel helper. This keeps the terminal path outside the surgical change.
-- `src/botster/realHubDaemonDto.ts` and `scripts/live-packaged-protocol-helpers.mjs` did not need changes for the reasons in the file list.
-- The live harness now waits for an attached terminal before it starts the intentional reconnect. This avoids changing the test target during an in-flight attach.
-- The harness terminal-frame oracle now reads the existing `terminal_data_channel_receive` event. The old `webrtc_terminal_frame_assembly` name had no producer.
-- The resumed harness removes an impossible wait for `attach_state=attached` while it holds a READY snapshot on the same ordered terminal DataChannel. Core queues input until attach completes. The later attached event cannot pass the held snapshot.
-- Review and gate submission are deferred. Agent answer `question_1788396042_879149` requires the Implement step to remain parked until the Web recovery ticket merges.
+The ticket received a consolidation revision after Plan Review. The revision absorbed `ticket_1788405063_986655`.
+
+The fake responder now answers the first unanswered decrypted request with the required type. Production FIFO behavior did not change.
+
+The reconnect repair changed terminal Attach isolation and mode-gated input ordering. It did not add a fallback or increase a timeout.
+
+The detach oracle now accepts `process_exit` before the entity exit. This change follows the exact vault note.
+
+The live harness now stops the stress session after the slow-client proof. This change bounds CPU and output work.
+
+The workspaces smoke assertions now match the renderer contract. Dynamic fields stay in `values`. Static identity stays in `payload`.
+
+Human answer `question_1788411367_609003` made a gate scope correction. The final integration ticket owns the full cross-repository smoke matrix.
+
+The same answer removed `smoke:live-packaged-protocol:durable` from this intermediate Web gate. The durable assertion was not changed.
 
 ## Tests and downstream proof
 
-Passed:
+These repository checks pass on the final source:
 
 - `npm test`
-- `npm run lint` with five existing Fast Refresh warnings and no errors
 - `npm run typecheck`
-- `npm run build` with the existing bundle-size warning
-- `npm run smoke:browser-runtime`
-- `npm run smoke:mounted-terminal-keyboard`
-- `npm run smoke:ghostsnp-grid`
-- `npm run smoke:incremental-ghostsnp-attach`
-- `npm run smoke:package-events:gap` against Hub `080ca9a`
-- `npm run smoke:entity-options-reactive` against Hub `080ca9a`
-- Resumed `npm test`
-- Resumed `npm run smoke:package-events` against Hub `bb1a330543bc06888f894edd5f40a0f867753a12`; terminal controls pass and `peak_subscription_channels` is 4
+- `npm run lint`
+- `npm run build`
 - `node --check scripts/live-packaged-protocol-harness.mjs`
+- `node --check scripts/workspaces-shared-hub-browser-helpers.mjs`
 - `git diff --check`
 
-The unit suite proves no channel before the reservation response, exact label use, ordered creation, encrypted Hello admission, missing-reservation failure, expiry, late release, class and identity checks, remote close resubscribe on the same peer, unsubscribe ordering, peer reconnect, and control-channel rejection.
+Lint reports five existing Fast Refresh warnings. Build reports the existing bundle size warning.
 
-The live gap lane proves `event_gap` delivery on the dedicated package-event channel. The live entity-options lane proves two demand-scoped entity families on dedicated channels and proves release. The reconnect evidence shows fresh labels and fresh subscription IDs for `session` and `session_type` on the surviving document.
+These Hub-free browser smokes pass:
 
-The merged Hub commit resolves the original version 2 terminal input failure. The full lane reaches later terminal reconnect checks.
+- `npm run smoke:browser-runtime`
+- `npm run smoke:mounted-terminal-keyboard`
+- `npm run smoke:mounted-terminal-wheel-scrollback`
+- `npm run smoke:ghostsnp-grid`
+- `npm run smoke:incremental-ghostsnp-attach`
 
-Blocked on Web recovery ticket `ticket_1788396308_856047`:
+These pinned Hub browser smokes pass:
 
-- Before the harness repair, two `npm run smoke:live-packaged-protocol` runs timed out at the impossible attached-state wait during the held READY snapshot.
-- After the harness repair, full live runs progressed beyond that wait but timed out at rotating later terminal echo probes. The observed probes include `botster-web-production-attach-probe-1` and `keys`.
-- `npm run smoke:workspaces-lifecycle` cannot run because no `BOTSTER_WORKSPACES_PACKAGE_PATH` is available in this run.
+- `npm run smoke:live-packaged-protocol`, three consecutive times
+- `npm run smoke:package-events`
+- `npm run smoke:package-events:gap`
+- `npm run smoke:entity-options-reactive`
+- `npm run smoke:plugin-contract-matrix`
+- `npm run smoke:workspaces-lifecycle`
+- `npm run smoke:workspaces-shared-hub-browser`
 
-The package-event lane now reaches its final peak-channel log. It reports `peak_subscription_channels: 4`.
+The three full live runs passed after the stress session gained bounded cleanup. Later edits only corrected workspaces assertions.
+
+The package-event lane reported `peak_subscription_channels: 4`. It kept terminal, control, entity, event, and saturation checks.
+
+The unit suite proves reservation order, exact labels, class checks, reconnect, stale open, open timeout, and control rejection.
+
+The unit suite proves Attach timeout isolation. The peer, sibling terminal, entity subscription, and package-event subscription survive.
+
+The crossed-ack test starts two package-event requests. The fake responder returns reservations by request type and request order.
+
+The ordered input test proves that a second key waits until the first stale retry is admitted.
+
+Red-on-revert proof produced these failures:
+
+- The old Attach failure path closed the control peer during the direct Attach timeout test.
+- The old mode-gated input path failed the ordered retry condition.
+- The old latest-request fake responder failed the automatic reservation wait.
 
 ## Runtime teardown lenses
 
-- Isolation: one entity or event binding owns one reservation and one assembly. Local or remote retirement does not close a sibling channel, terminal channel, control channel, or peer.
-- Bounds: reservation expiry and message assembly use finite timers. Local close does not wait for a Hub response. Control unsubscribe uses the existing request timeout.
-- Late messages: stale reservation responses do not create a channel. Late acks cannot revive a forgotten binding. Stale peer generations, subscription IDs, entity types, owner/name pairs, and delivery kinds are rejected or discarded.
-- Sweep: peer reset closes all bindings for that peer generation and clears their assembly state. A current remote close can start only one guarded replacement.
-- Production path: the packaged browser proof uses `hubTransport` through the compiled bundle and a real Hub. The passing gap and entity-options lanes prove the new channel path. The two required terminal positive controls remain mandatory after the Hub dependency merges.
+- Isolation: An Attach failure does not close a sibling channel or the control peer.
+- Bounds: Reservation expiry and assembly use finite timers. Stress sessions stop after their proof.
+- Late messages: Exact identity rejects stale Attach responses. Stale generations cannot revive a binding.
+- Ownership: One listener owns each exact terminal subscription. Web removes it after the ordered close reason.
+- Sweep: Peer reset clears the bindings and assembly state for that peer generation.
+- Sibling policy: A channel failure does not sacrifice siblings unless the full peer fails.
+- Production proof: The compiled browser bundle passed the pinned live lanes through `hubTransport`.
 
 ## Unverified behavior and residual risk
 
-- The full live lane does not pass all later terminal reconnect echo checks with Hub `bb1a330543bc06888f894edd5f40a0f867753a12`.
-- The separate Web recovery ticket owns the production terminal reconnect diagnosis and repair. This ticket must not change production terminal-channel behavior.
-- The named workspaces lifecycle lane needs a routed `botster-workspaces` package path.
-- After Web ticket `ticket_1788396308_856047` merges, this branch must rebase on current Web main. Both exact live lanes must pass against Hub `bb1a330543bc06888f894edd5f40a0f867753a12` before Review.
+`smoke:live-packaged-protocol:durable` fails against Hub `bb1a330`. Hub reloads with `state_source=loaded` and `session_count=0`.
+
+Human answer `question_1788411367_609003` assigned that Hub persistence contract to the final integration ticket. This Web run did not change the assertion.
+
+`smoke:plugin-payload-contract` returns a rejected fixture action on Hub `bb1a330`. The corrected Web gate does not require that external lane.
+
+Two `smoke:workspaces-compat` runs passed all workspaces checks, then failed at different later terminal stages. The corrected gate requires lifecycle proof.
+
+The Hub provenance reports a clean checkout and the exact lock revision. It does not contain a build receipt.
 
 ## Missing vault guidance and durable capture
 
-The implementation found these durable guidance candidates:
+No required vault guidance was missing for the implemented path.
 
-- A browser must wait for a stable terminal attachment before a harness intentionally closes the control peer.
-- A package-event saturation proof must use the browser control channel and the Unix socket as separate observations.
-- Subscription-channel telemetry needs a peak-count oracle before later positive controls can fail.
-- Same-peer remote close proof must acknowledge the old unsubscribe before it expects the replacement subscribe.
-- Harness assertions must name an event that production code emits.
-- A harness must not wait for a later event while it holds an earlier message handler on the same ordered DataChannel.
+The exact detach note resolved the only convention conflict. It permits `process_exit` as the first detach signal.
 
-No vault note was written during this parked Implement step. Existing notes already constrain the channel, reconnect, saturation, and teardown behavior. Verify should capture only guidance that remains true after the merged Hub proof.
+No new vault note was necessary. This report records the temporary smoke findings and the human gate correction.
 
 ## Assumptions
 
-- Hub commit `bb1a330543bc06888f894edd5f40a0f867753a12` and `@trybotster/hub-test-support@0.1.43` are the current producer and fixture pins.
-- Merge policy is direct, so a PR link is not required before the parked state.
-- No acceptance check is waived. The run resumes only after the registered Web recovery dependency merges.
+The Hub and Core hashes are the required producer pins for this Web run.
+
+Upstream Workspaces commit `4903ed0` is the stable package input. Remote `main` resolved to that commit during verification.
+
+The final integration ticket will decide the Hub durability contract and the complete cross-repository matrix.
