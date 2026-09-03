@@ -5764,6 +5764,56 @@ try {
   assert.equal(openTimeoutChannels[0].createdDataChannels.length, 2);
   openTimeoutClient.disconnect();
 
+  // An Attach operator error rejects only that terminal owner. The shared control
+  // peer must still bind its next response and remain usable.
+  const attachOperatorErrorChannels = [createFakeDataChannel()];
+  const attachOperatorErrorClient = createWebrtcTestClient(
+    attachOperatorErrorChannels,
+    localWebrtcBootstrapFixture
+  );
+  const attachOperatorErrorStream = attachOperatorErrorClient.streamTerminal(
+    "missing-terminal-session",
+    "missing-terminal-subscription",
+    () => {}
+  );
+  const attachOperatorErrorFailure = assert.rejects(
+    attachOperatorErrorStream.ready,
+    /Terminal session was not found/
+  );
+  await waitForTestCondition(() => attachOperatorErrorChannels[0].sent.length === 1);
+  await emitChunkedTestResponse(
+    attachOperatorErrorChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "operator_error",
+      error: {
+        code: "session_not_found",
+        request_id: "missing-terminal-attach",
+        operation: "attach",
+        message: "Terminal session was not found"
+      },
+      events: []
+    },
+    { messageId: "missing-terminal-attach-error" }
+  );
+  await attachOperatorErrorFailure;
+  assert.equal(
+    attachOperatorErrorChannels[0].readyState,
+    "open",
+    "Attach operator error closed the control peer"
+  );
+  const statusAfterAttachOperatorError = attachOperatorErrorClient.request({ type: "status" });
+  await waitForTestCondition(() => attachOperatorErrorChannels[0].sent.length === 2);
+  await emitChunkedTestResponse(
+    attachOperatorErrorChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { kind: "status", status: null, sessions: [], packages: [], events: [], diagnostics: [] },
+    { messageId: "status-after-attach-operator-error" }
+  );
+  assert.equal((await statusAfterAttachOperatorError).kind, "status");
+  attachOperatorErrorStream.abandon();
+  attachOperatorErrorClient.disconnect();
+
   const eventSiblingChannels = [createFakeDataChannel()];
   const eventSiblingClient = createWebrtcTestClient(eventSiblingChannels, localWebrtcBootstrapFixture, {
     entitySubscriptionIdGenerator: () => "sibling-entity-id",

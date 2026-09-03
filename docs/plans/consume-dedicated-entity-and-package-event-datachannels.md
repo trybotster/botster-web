@@ -10,7 +10,7 @@ Plan revision 2 (2026-09-02). Revision 2 adds the reconnect repair that the huma
 
 ## 1. Repository routing and context loaded
 
-Target resolution: the run and ticket carry `tgt_40abcf71ccf049f4ac0c99953a799869`. The Hub spawn-target list maps that id to `/Users/jasonconigliari/Projects/botster-web`, repository `trybotster/botster-web`. The ambient worktree is a checkout of that repository, so the routing is consistent, but the target id is the authority.
+Target resolution: the run and ticket carry `tgt_40abcf71ccf049f4ac0c99953a799869`. The Hub routing map identifies repository `trybotster/botster-web`. The run worktree is a checkout of that repository, but the target id is the authority.
 
 Repository charter: [[botster-web-playbook]].
 

@@ -2386,18 +2386,27 @@ function pendingMatchesResponse(pending: PendingRequest, value: unknown): boolea
   if (pending.requestType !== "attach") {
     return !isStaleTerminalReservationResponse(value);
   }
-  if (
-    !isStaleTerminalReservationResponse(value) ||
-    !("type" in pending.request) ||
-    pending.request.type !== "attach"
-  ) {
+  if (!("type" in pending.request) || pending.request.type !== "attach") {
     return false;
   }
+  if (isOperatorErrorResponse(value)) return true;
+  if (!isStaleTerminalReservationResponse(value)) return false;
   const reservation = value.terminal_reservation;
   return Boolean(
     reservation &&
     reservation.session_id === pending.request.session_id &&
     reservation.subscription_id === pending.request.subscription_id
+  );
+}
+
+function isOperatorErrorResponse(value: unknown): value is DaemonResponse {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    "kind" in value &&
+    value.kind === "operator_error" &&
+    "error" in value &&
+    value.error
   );
 }
 
