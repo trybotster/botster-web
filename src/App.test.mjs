@@ -2792,6 +2792,24 @@ try {
   await rm(mismatchedProtocolRoot, { recursive: true, force: true });
 }
 assert.equal(
+  packageJson.scripts["smoke:react-singleton"],
+  "npm run build && node scripts/check-react-singleton-bundle.mjs"
+);
+assert.match(
+  packageJson.scripts["smoke:browser-runtime"],
+  /check-react-singleton-bundle\.mjs && node scripts\/browser-runtime-smoke\.mjs/
+);
+{
+  const viteConfig = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+  const reactSingletonCheckScript = await readFile(
+    new URL("../scripts/check-react-singleton-bundle.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.match(viteConfig, /dedupe:\s*\[\s*"react",\s*"react-dom"\s*\]/);
+  assert.match(reactSingletonCheckScript, /\.useMemo=function/);
+  assert.match(reactSingletonCheckScript, /useMemoWrappers !== 1/);
+}
+assert.equal(
   packageJson.scripts["smoke:live-packaged-protocol"],
   "npm run build && node scripts/live-packaged-protocol-harness.mjs"
 );

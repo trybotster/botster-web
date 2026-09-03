@@ -148,9 +148,12 @@ Explicitly out of scope:
 - `scripts/live-packaged-protocol-helpers.mjs`: new `botster-web-production-alt-exit` arm.
 - `src/App.test.mjs`: two new plane tests; source guards for `1049l`, `proveAlternateScreenExit`, and the chronology field; guard regex adjustments only if the narrowed branch shape requires.
 - `README.md`: line 106 and one sentence in the shared-session section.
+- `vite.config.ts`: `resolve.dedupe: ["react", "react-dom"]` (accepted deviation `question_1788471014_552139`; production bundle otherwise ships two React copies and the live lane dies at `useMemo`).
+- `scripts/check-react-singleton-bundle.mjs`: production-build smoke that requires exactly one `.useMemo=function` wrapper.
+- `package.json`: `smoke:react-singleton`; `smoke:browser-runtime` runs that check after build.
 - `docs/plans/make-cancel-detach-ablation-fail-at-the-cancel-oracle.md`, `docs/reports/make-cancel-detach-ablation-fail-at-the-cancel-oracle-implement.md`.
 
-Not touched: `scripts/live-shared-session-coordinator.mjs`, `src/botster/webrtcDaemonClient.ts`, `src/botster/terminal.ts`, `package.json`, generated DTOs, pins.
+Not touched: `scripts/live-shared-session-coordinator.mjs`, `src/botster/webrtcDaemonClient.ts`, `src/botster/terminal.ts`, generated DTOs, pins.
 
 ## 10. Risks
 
@@ -181,26 +184,27 @@ Deterministic gates at the final commit, in order:
 2. `npm run lint` (existing Fast Refresh warnings allowed; zero errors)
 3. `npm test` (protocol drift check plus `src/App.test.mjs` with the new plane tests and source guards)
 4. `npm run build`
-5. Red-on-revert for the ablated-cancel test: restore the early return, run `npm test`, record the failing assertion and location (`detach` count `1`, streams `2`), restore, and show `git diff --exit-code` for `src/botster/hubTerminalDataPlane.ts`.
+5. `npm run smoke:react-singleton` (fails with two `.useMemo=function` wrappers when `resolve.dedupe` is removed; passes with one wrapper after dedupe).
+6. Red-on-revert for the ablated-cancel test: restore the early return, run `npm test`, record the failing assertion and location (`detach` count `1`; hydration timeout record is the second independent oracle; stream count stays `1` because `attachToAuthoritativeSession` returns when listeners are empty), restore, and show `git diff --exit-code` for `src/botster/hubTerminalDataPlane.ts`.
 
 Live reproduction before the plane fix (attribution, required):
 
-6. Commit order: (a) harness chronology and alternate-screen exit, (b) plane ablation fix. Run step 8 at commit (a) so the reproduction prints the chronology with the unchanged plane.
-7. Rebuild the parent Hub worktree at `4d558e9`; record the Hub commit and the Core lock SHA. Record `uptime`. Remove lane-owned orphans by the `botster-web-shared-session-*` data directory and the `north-star-shared` session id.
-8. Run `BOTSTER_HUB_BIN=... BOTSTER_SESSION_WORKER_BIN=... npm run smoke:live-packaged-protocol:shared-session` at commit (a). Required: the ablation driver prints `live-shared-session-cancel-passed` whose chronology contains, in order for the held id, `cancel_detach_ablated`, `hydration_progress_timeout`, `snapshot_lost_recover`, `reader_cancel`, and one `daemon_request` `detach`; the coordinator throws `cancel ablation stayed green`. If the outcome differs, apply R6.
+7. Commit order: (a) harness chronology and alternate-screen exit, (a2) Vite React `resolve.dedupe` plus `smoke:react-singleton` so the browser can boot, (b) plane ablation fix. Run step 9 at commit (a2) so the reproduction prints the chronology with the unchanged plane.
+8. Rebuild the parent Hub worktree at `4d558e9`; record the Hub commit and the Core lock SHA. Record `uptime`. Remove lane-owned orphans by the `botster-web-shared-session-*` data directory and the `north-star-shared` session id.
+9. Run `BOTSTER_HUB_BIN=... BOTSTER_SESSION_WORKER_BIN=... npm run smoke:live-packaged-protocol:shared-session` at commit (a2). Required: the ablation driver prints `live-shared-session-cancel-passed` whose chronology contains, in order for the held id, `cancel_detach_ablated`, `hydration_progress_timeout`, `snapshot_lost_recover`, `reader_cancel`, and one `daemon_request` `detach`; the coordinator throws `cancel ablation stayed green`. If the outcome differs, apply R6.
 
 Live proof after the fix (one focused integration proof, required):
 
-9. Record `uptime` and clean orphans again.
-10. Run the same coordinator command at the final commit. Required: exit 0 and all of:
+10. Record `uptime` and clean orphans again.
+11. Run the same coordinator command at the final commit. Required: exit 0 and all of:
     - `live-shared-session-cancel-ablation-passed` with `first_failure` matching `expected exactly one detach for held subscription ..., got 0`, after `session-type-live-proof`, `new-session-picker-live-proof`, and `live-shared-session-terminal-lane`, without `live-shared-session-cancel-passed` or `live-shared-session-keep-alive-passed` in that pass, and with a chronology that shows `cancel_detach_ablated` and `reader_cancel` and no `hydration_progress_timeout`, `snapshot_lost_recover`, or `detach` for the held id.
     - Two keep-alive passes, each printing `live-shared-session-terminal-lane`, the `alternate_screen_exit` proof note with `alt_screen` true then false, `live-shared-session-cancel-passed` with `detach_count: 1`, and `live-shared-session-keep-alive-passed` for `north-star-shared`, with the in-page DataChannel reconnect proof inside the terminal lane.
     - One exit pass printing `live-shared-session-exit-passed` with `process_exit=true`.
     - `live-shared-session-coordinator-passed` with `keep_alive_runs=2`, `cancel_ablation=true`, `exit_pass=true`.
     - No `workspaces-shared-hub-browser-summary`, no IsolatedHub completion string, no `shutdown_session` for the shared session.
-11. Between the second keep-alive pass and the exit pass, read the session with a Hub `read_mode_flags` request from the coordinator host or record the second pass's post-exit mode flags: `alt_screen` must be false when the pass ends. This is the state the TUI `ghostty-shared` leg inherits.
-12. The live result commit must equal the final commit. Any later change to the data plane, WebRTC client, terminal bridge, harness, or helpers invalidates it.
-13. Record `uptime` after, Hub commit, Core lock SHA, and pins (`@trybotster/hub-test-support@0.1.43`, `@trybotster/terminal-protocol@0.3.0`).
+12. Between the second keep-alive pass and the exit pass, read the session with a Hub `read_mode_flags` request from the coordinator host or record the second pass's post-exit mode flags: `alt_screen` must be false when the pass ends. This is the state the TUI `ghostty-shared` leg inherits.
+13. The live result commit must equal the final commit. Any later change to the data plane, WebRTC client, terminal bridge, harness, helpers, or Vite React resolution invalidates it.
+14. Record `uptime` after, Hub commit, Core lock SHA, and pins (`@trybotster/hub-test-support@0.1.43`, `@trybotster/terminal-protocol@0.3.0`).
 
 Downstream proof: the parent integration ticket reruns the complete matrix, including TUI `ghostty-shared`, after this merge. This run does not execute the parent matrix.
 
