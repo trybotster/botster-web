@@ -59,6 +59,8 @@ export const HOST_CHROME = Object.freeze({
   settingsBackButtonName: "Back",
   checkForUpdatesButtonName: "Check for updates",
   sessionsHeadingName: "Sessions",
+  endedSessionsTestId: "dashboard-ended-sessions",
+  endedSessionsHeadingName: "Ended sessions",
   hubHeadingName: "Hub",
   newSessionModalTitle: "New session",
   newSessionSubmitName: "Start session",
@@ -333,7 +335,7 @@ export const HOST_CHROME_CONTRACTS = Object.freeze([
     id: "dashboard-view",
     harnessUse: "openHomeView / openSessionTerminal / detach destination",
     render: "DashboardView",
-    constants: ["dashboardTestId", "sessionsHeadingName"],
+    constants: ["dashboardTestId", "sessionsHeadingName", "endedSessionsTestId", "endedSessionsHeadingName"],
     class: "host-chrome"
   }),
   Object.freeze({
@@ -529,6 +531,17 @@ export function assertCallerOwnedSharedSessionContract(environment = process.env
     );
   }
   return { mode: true, ...env };
+}
+
+export function classifyAltExitRendererWrites(decodedWrites) {
+  const joined = Array.isArray(decodedWrites)
+    ? decodedWrites.map((write) => String(write ?? "")).join("")
+    : String(decodedWrites ?? "");
+  if (joined.includes("botster-web-production-alt-exited")) return "exited";
+  if (joined.includes("botster-web-production-echo:botster-web-production-alt-exit")) {
+    return "producer_lacks_alt_exit";
+  }
+  return "pending";
 }
 
 export function productionSessionScriptSource() {

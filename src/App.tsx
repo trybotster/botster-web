@@ -23,7 +23,7 @@ import { isMountedSessionRoute } from "./botster/terminalSession";
 
 import { AppsRouteView } from "./app/AppsRouteView";
 import { DashboardView } from "./app/dashboard";
-import { currentDashboardSessions } from "./app/dashboardSessions";
+import { currentDashboardSessions, endedDashboardSessions } from "./app/dashboardSessions";
 import {
   type HubEntityLoadKey,
   replayHubStatusOnLifecycleEvent
@@ -215,6 +215,7 @@ export default function App() {
   const spawnTargets = [...runtimeClient.entities.list("botster-web.spawn_target")].sort(compareSpawnTargetRows);
   const sessionTypeRecords = runtimeClient.entities.list("session_type");
   const sessions = currentDashboardSessions(runtimeClient.entities.list("session"));
+  const endedSessions = endedDashboardSessions(runtimeClient.entities.list("session"));
 
   const pluginRoutes = usePluginRouteState({
     runtimeClient,
@@ -357,6 +358,7 @@ export default function App() {
       {activeView === "dashboard" ? (
         <DashboardView
           sessions={sessions}
+          endedSessions={endedSessions}
           sessionLoadStatus={entityLoadStatus.session}
           stoppingSessionIds={sessionControl.stoppingSessionIds}
           onOpenSession={openSession}

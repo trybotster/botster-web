@@ -36,6 +36,7 @@ import {
   callerOwnedSharedSessionEnv,
   DEFAULT_SHARED_SESSION_ID,
   productionSessionScriptSource,
+  classifyAltExitRendererWrites,
   assertPackageReused,
   assertWorkspacesLifecycleStateOwnership,
   assertWorkspacesStateOwnership,
@@ -1104,6 +1105,9 @@ assert.match(appFeatureSources.join("\n"), /export function useSessionEntityDeta
 assert.match(appFeatureSources.join("\n"), /sessionEntityRequiresDetach\(sessionRecordForRoute\(entities, sessionId\)\)/);
 assert.match(appShell, /from "\.\/app\/dashboardSessions"/);
 assert.match(appFeatureSources.join("\n"), /lifecycle_class === "current"/);
+assert.match(appFeatureSources.join("\n"), /lifecycle_class === "ended"/);
+assert.match(appFeatureSources.join("\n"), /export function endedDashboardSessions/);
+assert.match(appShell, /endedDashboardSessions\(/);
 assert.doesNotMatch(appShell, /export function appRouteFromPathname/);
 assert.doesNotMatch(appShell, /export function DashboardView/);
 assert.doesNotMatch(appShell, /export function SessionTypeAdvancedOptions/);
@@ -1155,6 +1159,7 @@ assert.match(appShell, /useProductionHubConnection\(\{/);
 assert.match(appFeatureSources.join("\n"), /pullProductionEntity\("session", \{ family: "session" \}\)/);
 assert.match(appShell, /currentDashboardSessions\(runtimeClient\.entities\.list\("session"\)\)/);
 assert.match(appShell, /<DashboardView[\s\S]*sessions=\{sessions\}/);
+assert.match(appShell, /endedSessions=\{endedSessions\}/);
 assert.match(appShell, /sessions=\{sessions\}/);
 assert.match(appShell, /main=\{main\}/);
 assert.match(appFeatureSources.join("\n"), /<WorkbenchNav[\s\S]*onNavigate=\{navigateToView\}/);
@@ -2842,6 +2847,21 @@ assert.match(liveProtocolHarnessScript, /live-shared-session-keep-alive-passed/)
 assert.match(liveProtocolHarnessScript, /async function proveInFlightAttachCancellation/);
 assert.match(liveProtocolHarnessScript, /async function proveAlternateScreenExit/);
 assert.match(liveProtocolHarnessScript, /await proveAlternateScreenExit\(page, productionSessionId\)/);
+assert.match(liveProtocolHarnessScript, /classifyAltExitRendererWrites/);
+assert.match(
+  liveProtocolHarnessScript.slice(
+    liveProtocolHarnessScript.indexOf("async function proveAlternateScreenExit"),
+    liveProtocolHarnessScript.indexOf("recordProofNote(\"alternate_screen_exit\"")
+  ),
+  /producer contract mismatch/
+);
+assert.match(
+  liveProtocolHarnessScript.slice(
+    liveProtocolHarnessScript.indexOf("async function proveAlternateScreenExit"),
+    liveProtocolHarnessScript.indexOf("recordProofNote(\"alternate_screen_exit\"")
+  ),
+  /producer_lacks_alt_exit/
+);
 assert.match(
   liveProtocolHarnessScript.slice(
     liveProtocolHarnessScript.indexOf("await proveRapidAlternateScreenReattach"),
@@ -2857,6 +2877,19 @@ assert.match(
   /chronology/
 );
 assert.match(productionSessionScriptSource(), /botster-web-production-alt-exit/);
+assert.equal(classifyAltExitRendererWrites(["botster-web-production-alt-exited"]), "exited");
+assert.equal(
+  classifyAltExitRendererWrites(["botster-web-production-echo:botster-web-production-alt-exit"]),
+  "producer_lacks_alt_exit"
+);
+assert.equal(classifyAltExitRendererWrites(["botster-web-production-echo:keys"]), "pending");
+assert.equal(
+  classifyAltExitRendererWrites([
+    "botster-web-production-echo:botster-web-production-alt-exit",
+    "botster-web-production-alt-exited"
+  ]),
+  "exited"
+);
 assert.doesNotMatch(
   liveProtocolHarnessScript.slice(
     liveProtocolHarnessScript.indexOf("async function proveInFlightAttachCancellation"),
@@ -9728,7 +9761,7 @@ try {
     DashboardView,
     SessionListItem
   } = dashboardModule;
-  const { currentDashboardSessions } = await vite.ssrLoadModule("/src/app/dashboardSessions.ts");
+  const { currentDashboardSessions, endedDashboardSessions } = await vite.ssrLoadModule("/src/app/dashboardSessions.ts");
   const { stopSessionAction } = await vite.ssrLoadModule("/src/app/sessionActions.ts");
   const {
     entitySubscriptionErrorFromFrame
@@ -9844,6 +9877,31 @@ try {
   );
   assert.equal(
     currentDashboardSessions([{ id: "ended-only", lifecycle_class: "ended" }]).length,
+    0
+  );
+  const mixedDashboardSessions = [
+    { id: "current-a", lifecycle_class: "current" },
+    { id: "ended-b", lifecycle_class: "ended" },
+    { id: "indeterminate-c", lifecycle_class: "indeterminate" },
+    { id: "ended-d", lifecycle_class: "ended" },
+    { id: "missing-class" },
+    { id: "exited-but-current", lifecycle: "exited", lifecycle_class: "current" },
+    { id: "registry-exited", registry_state: "exited" }
+  ];
+  assert.deepEqual(
+    endedDashboardSessions(mixedDashboardSessions).map((row) => row.id),
+    ["ended-b", "ended-d"]
+  );
+  assert.equal(
+    endedDashboardSessions([{ id: "current-only", lifecycle_class: "current" }]).length,
+    0
+  );
+  assert.equal(
+    endedDashboardSessions([{ id: "exited-but-current", lifecycle: "exited", lifecycle_class: "current" }]).length,
+    0
+  );
+  assert.equal(
+    endedDashboardSessions([{ id: "registry-exited", registry_state: "exited" }]).length,
     0
   );
 
@@ -10158,6 +10216,24 @@ try {
   );
   assert.match(contradictorySessionListItem, />indeterminate</);
   assert.doesNotMatch(contradictorySessionListItem, />Open</);
+  const endedSessionListItem = renderToStaticMarkup(
+    createElement(SessionListItem, {
+      session: {
+        id: "ended-session",
+        session_uuid: "ended-session",
+        lifecycle: "exited",
+        lifecycle_class: "ended"
+      },
+      stopping: false,
+      showActions: false,
+      onOpen: () => {},
+      onStop: () => {}
+    })
+  );
+  assert.match(endedSessionListItem, />ended</);
+  assert.doesNotMatch(endedSessionListItem, /<ion-item button="">/);
+  assert.doesNotMatch(endedSessionListItem, /Session options for/);
+  assert.doesNotMatch(endedSessionListItem, />Stop session</);
   assert.equal(entityFamilyRecordLimit, 4);
 
   // --- Authoritative Hub identity and update availability ---------------------
@@ -10509,8 +10585,75 @@ try {
   assert.equal(markupContainsTestId(dashboardMarkup, HOST_CHROME.dashboardTestId), true);
   assert.match(dashboardMarkup, new RegExp(`data-testid="${HOST_CHROME.dashboardTestId}"`));
   assert.match(dashboardMarkup, new RegExp(`>${HOST_CHROME.sessionsHeadingName}<`));
+  assert.equal(markupContainsTestId(dashboardMarkup, HOST_CHROME.endedSessionsTestId), false);
+  assert.doesNotMatch(dashboardMarkup, new RegExp(`>${HOST_CHROME.endedSessionsHeadingName}<`));
   assert.match(dashboardMarkup, /<ion-item button="">/);
   assert.match(dashboardMarkup, /aria-label="Session options for web-prod"/);
+  const dashboardWithEndedMarkup = renderToStaticMarkup(
+    createElement(DashboardView, {
+      sessions: [{
+        id: "web-prod",
+        session_uuid: "web-prod",
+        registry_state: "active",
+        lifecycle: "running",
+        lifecycle_class: "current"
+      }],
+      endedSessions: [
+        {
+          id: "botster-web-durable-exited-1",
+          session_uuid: "botster-web-durable-exited-1",
+          lifecycle: "exited",
+          lifecycle_class: "ended"
+        },
+        {
+          id: "botster-web-durable-exited-2",
+          session_uuid: "botster-web-durable-exited-2",
+          lifecycle: "exited",
+          lifecycle_class: "ended"
+        }
+      ],
+      sessionLoadStatus: "loaded",
+      stoppingSessionIds: new Set(),
+      onOpenSession: () => {},
+      onStopSession: () => {},
+      onNavigateToApps: () => {},
+      onNavigateToSpawnPoints: () => {}
+    })
+  );
+  assert.match(dashboardWithEndedMarkup, /<ion-badge color="medium">1<\/ion-badge>/);
+  assert.match(dashboardWithEndedMarkup, /<ion-badge color="medium">2<\/ion-badge>/);
+  assert.equal(markupContainsTestId(dashboardWithEndedMarkup, HOST_CHROME.endedSessionsTestId), true);
+  assert.match(dashboardWithEndedMarkup, new RegExp(`>${HOST_CHROME.endedSessionsHeadingName}<`));
+  assert.match(dashboardWithEndedMarkup, /aria-label="Ended sessions"/);
+  assert.match(dashboardWithEndedMarkup, />botster-web-durable-exited-1</);
+  assert.match(dashboardWithEndedMarkup, />botster-web-durable-exited-2</);
+  assert.match(dashboardWithEndedMarkup, />ended</);
+  assert.doesNotMatch(
+    dashboardWithEndedMarkup,
+    /aria-label="Session options for botster-web-durable-exited-1"/
+  );
+  assert.doesNotMatch(
+    dashboardWithEndedMarkup,
+    /aria-label="Session options for botster-web-durable-exited-2"/
+  );
+  const endedSectionMarkup = dashboardWithEndedMarkup.slice(
+    dashboardWithEndedMarkup.indexOf(`data-testid="${HOST_CHROME.endedSessionsTestId}"`)
+  );
+  assert.doesNotMatch(endedSectionMarkup, /<ion-item button="">/);
+  const emptyDashboardMarkup = renderToStaticMarkup(
+    createElement(DashboardView, {
+      sessions: [],
+      endedSessions: [],
+      sessionLoadStatus: "loaded",
+      stoppingSessionIds: new Set(),
+      onOpenSession: () => {},
+      onStopSession: () => {},
+      onNavigateToApps: () => {},
+      onNavigateToSpawnPoints: () => {}
+    })
+  );
+  assert.match(emptyDashboardMarkup, /No sessions yet/);
+  assert.equal(markupContainsTestId(emptyDashboardMarkup, HOST_CHROME.endedSessionsTestId), false);
   assert.equal(
     isTerminalDetached({
       sessionContainerIds: extractTerminalSessionIdsFromMarkup(dashboardMarkup),
@@ -10697,6 +10840,12 @@ try {
     /worker command is not the locked command/
   );
   markHostChromeContract("terminal-detached");
+  assert.equal(HOST_CHROME.endedSessionsTestId, "dashboard-ended-sessions");
+  assert.equal(HOST_CHROME.endedSessionsHeadingName, "Ended sessions");
+  assert.deepEqual(
+    HOST_CHROME_CONTRACTS.find((entry) => entry.id === "dashboard-view")?.constants,
+    ["dashboardTestId", "sessionsHeadingName", "endedSessionsTestId", "endedSessionsHeadingName"]
+  );
   markHostChromeContract("dashboard-view");
 
   // settings-back

@@ -82,7 +82,7 @@ BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
 npm run smoke:live-packaged-protocol:durable
 ```
 
-This mode creates its own temporary data directory, installs and enables the package through Hub, seeds five exited sessions through daemon requests, restarts Hub on the same directory, and then runs the normal browser proof. It cannot be combined with `BOTSTER_LIVE_DATA_DIR`, because seeded mode owns the directory it populates.
+This mode creates its own temporary data directory, installs and enables the package through Hub, seeds five exited sessions through daemon requests, restarts Hub on the same directory, and then runs the normal browser proof. It cannot be combined with `BOTSTER_LIVE_DATA_DIR`, because seeded mode owns the directory it populates. Home renders Hub-authored `lifecycle_class=ended` rows in a separate Ended sessions section. Web does not infer lifecycle from `lifecycle` or `registry_state`. The durable lane asserts those seeded rows in `dashboard-ended-sessions`, not in the current Sessions list.
 
 When `BOTSTER_LIVE_DATA_DIR` is supplied directly without seeded mode, the harness owns only its spawned Hub process: it reuses installed enabled packages, records the Web package version and working-directory provenance available through public Hub contracts, compares the served hashed assets with the local `dist` build, never removes packages or sessions, never edits persistence files, and never deletes the caller-owned directory. The Settings proof toggles remote browser access through the real package action and restores the caller's original boolean value before continuing. Current Hub `resolve_app_launch` supports terminal apps only, so Web package reuse is explicitly classified as having no publicly exposed resolved working directory rather than being reported as an exact path match.
 
@@ -105,6 +105,24 @@ npm run smoke:live-packaged-protocol:shared-session
 ```
 
 Each keep-alive pass must print `live-shared-session-terminal-lane`, `live-shared-session-cancel-passed`, and `live-shared-session-keep-alive-passed` for the same session id. Each keep-alive pass returns the producer to the primary screen before it prints the keep-alive marker. The exit pass must print `live-shared-session-exit-passed`. Page reload is not reconnect on this lane; reconnect proof closes the DataChannel on the surviving document. `BOTSTER_LIVE_ABLATE_CANCEL_DETACH=1` skips only the production `detach` request for the held subscription and marks the once-owner. It does not skip the reader cancel or stream close, so the cancel oracle is the first failure.
+
+A caller-owned coordinator must spawn the shared session with a producer that implements this command contract. The canonical script is `productionSessionScriptSource()` in `scripts/live-packaged-protocol-helpers.mjs`. Print it with:
+
+```bash
+node --input-type=module -e 'import { productionSessionScriptSource } from "./scripts/live-packaged-protocol-helpers.mjs"; process.stdout.write(productionSessionScriptSource() + "\n")'
+```
+
+Required producer commands:
+
+- `botster-web-production-size` — echo `botster-web-production-size:<rows>x<cols>`
+- `botster-web-production-exit` — echo `botster-web-production-exiting` and exit 0
+- `botster-web-production-bytes-lead|rest|ctrl|hold|ablate` — emit the matching byte sequences
+- `botster-web-production-mouse-on` — enable DECSET 1000 and 1006
+- `botster-web-production-alt-redraw:<marker>` — enter the alternate screen and paint the marker rows
+- `botster-web-production-alt-exit` — leave the alternate screen (`ESC[?1049l`) and echo `botster-web-production-alt-exited`
+- unmatched lines — echo `botster-web-production-echo:<line>`
+
+If a supplied producer answers `botster-web-production-alt-exit` with the fallthrough echo, the keep-alive lane fails with a producer-contract mismatch instead of waiting for primary-screen history.
 
 The plugin contract checks use the same production WebRTC harness. They prove
 Hub-projected package navigation through a visible sidebar control and route

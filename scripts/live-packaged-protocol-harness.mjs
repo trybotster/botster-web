@@ -36,6 +36,7 @@ import {
   packageEnsureDecision,
   reconnectGenerationEvidence,
   assertCallerOwnedSharedSessionContract,
+  classifyAltExitRendererWrites,
   productionSessionScriptSource,
   workspacesLifecycleAbsenceResult,
   workspacesLifecycleDomResult,
@@ -6145,6 +6146,14 @@ async function proveExternalSessionLifecycle(page) {
     { kind: "hub_frame", family: "session", id: sessionId, lifecycle: "exited" },
     "external session exit patch"
   );
+  if (durableStateMode) {
+    const endedSection = page.getByTestId(HOST_CHROME.endedSessionsTestId);
+    await endedSection.getByText(sessionId, { exact: true }).waitFor({ state: "visible" });
+    const currentList = page.getByTestId(HOST_CHROME.dashboardTestId).locator('ion-list[aria-label="Sessions"]');
+    if (await currentList.getByText(sessionId, { exact: true }).count() !== 0) {
+      throw new Error(`durable external session ${sessionId} remained in current Sessions after exit`);
+    }
+  }
   const removeResponse = await sendDaemonRequest(socketPath, {
     type: "remove_session",
     session_id: sessionId
@@ -6161,9 +6170,23 @@ async function proveExternalSessionLifecycle(page) {
 }
 
 async function assertDurableSeededSessionsVisible(page) {
-  const dashboard = page.getByTestId(HOST_CHROME.dashboardTestId);
+  const endedSection = page.getByTestId(HOST_CHROME.endedSessionsTestId);
+  const currentList = page.getByTestId(HOST_CHROME.dashboardTestId).locator('ion-list[aria-label="Sessions"]');
   for (const sessionId of durableSeedSessionIds) {
-    await dashboard.getByText(sessionId, { exact: true }).waitFor({ state: "visible" });
+    await waitForHarnessEvent(
+      page,
+      {
+        kind: "hub_frame",
+        family: "session",
+        id: sessionId,
+        lifecycle_class: "ended"
+      },
+      `durable seeded session ${sessionId} lifecycle_class ended`
+    );
+    await endedSection.getByText(sessionId, { exact: true }).waitFor({ state: "visible" });
+    if (await currentList.getByText(sessionId, { exact: true }).count() !== 0) {
+      throw new Error(`durable seeded session ${sessionId} appeared in current Sessions`);
+    }
   }
 }
 
@@ -8112,7 +8135,35 @@ async function proveAlternateScreenExit(page, sessionId) {
   const finalRowMarker = finalRowMatch[1];
 
   await callTerminalControl(page, "writeInput", "\nbotster-web-production-alt-exit\n");
-  await waitForTerminalRendererWrite(page, "botster-web-production-alt-exited");
+  const altExitDeadline = Date.now() + 45_000;
+  let altExitClassification = "pending";
+  while (Date.now() < altExitDeadline) {
+    const decodedWrites = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).flatMap((entry) => {
+        if (entry.kind !== "renderer_write") return [];
+        const encoded = entry.payload?.payload_bytes_base64;
+        if (typeof encoded !== "string") return [];
+        try {
+          return [new TextDecoder().decode(
+            Uint8Array.from(globalThis.atob(encoded), (char) => char.charCodeAt(0))
+          )];
+        } catch {
+          return [];
+        }
+      })
+    );
+    altExitClassification = classifyAltExitRendererWrites(decodedWrites);
+    if (altExitClassification === "exited") break;
+    if (altExitClassification === "producer_lacks_alt_exit") {
+      throw new Error(
+        "alternate-screen exit producer contract mismatch: the supplied session producer answered botster-web-production-alt-exit with the fallthrough echo and did not leave the alternate screen; caller-owned producers must implement the README producer command contract"
+      );
+    }
+    await page.waitForTimeout(100);
+  }
+  if (altExitClassification !== "exited") {
+    throw new Error("timed out waiting for mounted terminal renderer write botster-web-production-alt-exited");
+  }
 
   const flagsDeadline = Date.now() + 15_000;
   let afterFlags = beforeFlags;

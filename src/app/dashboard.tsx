@@ -1,4 +1,4 @@
-/** Home dashboard: Hub-authoritative current sessions only. */
+/** Home dashboard: Hub-authoritative current sessions, plus ended rows when Hub lists them. */
 
 import { IonBadge, IonButton, IonIcon, IonItem, IonLabel, IonList } from "@ionic/react";
 import { cubeOutline, serverOutline } from "ionicons/icons";
@@ -15,12 +15,14 @@ export function SessionListItem({
   session,
   stopping,
   onOpen,
-  onStop
+  onStop,
+  showActions = true
 }: {
   session: Record<string, unknown>;
   stopping: boolean;
   onOpen: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
+  showActions?: boolean;
 }) {
   const sessionId = String(session.id);
   const attachable = isAttachableSession(session);
@@ -36,12 +38,14 @@ export function SessionListItem({
         <h2>{sessionTitle}</h2>
         <p>{sessionDisplayStatus(session)}</p>
       </IonLabel>
-      <SessionActionsMenu
-        sessionId={sessionId}
-        sessionTitle={sessionTitle}
-        stopping={stopping}
-        onStop={() => onStop(sessionId)}
-      />
+      {showActions ? (
+        <SessionActionsMenu
+          sessionId={sessionId}
+          sessionTitle={sessionTitle}
+          stopping={stopping}
+          onStop={() => onStop(sessionId)}
+        />
+      ) : null}
     </IonItem>
   );
 }
@@ -53,6 +57,7 @@ export function SessionListItem({
  */
 export function DashboardView({
   sessions,
+  endedSessions = [],
   sessionLoadStatus,
   stoppingSessionIds,
   onOpenSession,
@@ -61,6 +66,7 @@ export function DashboardView({
   onNavigateToSpawnPoints
 }: {
   sessions: Record<string, unknown>[];
+  endedSessions?: Record<string, unknown>[];
   sessionLoadStatus: HubEntityLoadStatus;
   stoppingSessionIds: ReadonlySet<string>;
   onOpenSession: (sessionId: string) => void;
@@ -109,6 +115,32 @@ export function DashboardView({
           </div>
         )}
       </section>
+      {endedSessions.length > 0 ? (
+        <section
+          className="workflow-section home-sessions"
+          aria-labelledby="ended-sessions-heading"
+          data-testid="dashboard-ended-sessions"
+        >
+          <div className="section-heading">
+            <div>
+              <h2 id="ended-sessions-heading">Ended sessions</h2>
+            </div>
+            <IonBadge color="medium">{endedSessions.length}</IonBadge>
+          </div>
+          <IonList lines="full" aria-label="Ended sessions">
+            {endedSessions.map((session) => (
+              <SessionListItem
+                key={String(session.id)}
+                session={session}
+                stopping={stoppingSessionIds.has(String(session.id))}
+                showActions={false}
+                onOpen={onOpenSession}
+                onStop={onStopSession}
+              />
+            ))}
+          </IonList>
+        </section>
+      ) : null}
       <div className="home-shortcuts" aria-label="Set up Botster">
         <button type="button" onClick={onNavigateToApps}>
           <IonIcon icon={cubeOutline} aria-hidden="true" />
