@@ -214,8 +214,9 @@ export default function App() {
   const availablePackages = runtimeClient.entities.list("botster-web.available_package");
   const spawnTargets = [...runtimeClient.entities.list("botster-web.spawn_target")].sort(compareSpawnTargetRows);
   const sessionTypeRecords = runtimeClient.entities.list("session_type");
-  const sessions = currentDashboardSessions(runtimeClient.entities.list("session"));
-  const endedSessions = endedDashboardSessions(runtimeClient.entities.list("session"));
+  const sessionRecords = runtimeClient.entities.list("session");
+  const sessions = currentDashboardSessions(sessionRecords);
+  const endedSessions = endedDashboardSessions(sessionRecords);
 
   const pluginRoutes = usePluginRouteState({
     runtimeClient,
@@ -401,7 +402,7 @@ export default function App() {
           activeHubSettingsSection={activeHubSettingsSection}
           navigateToHubSettings={navigateToHubSettings}
           packages={packages}
-          sessions={sessions}
+          sessions={sessionRecords}
           spawnTargets={spawnTargets}
           sessionTypes={sessionTypeRecords}
           hubStatus={hubStatus}

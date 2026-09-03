@@ -87,7 +87,7 @@ In scope:
 
 1. Ended-session presentation path.
    - `src/app/dashboardSessions.ts`: add `endedDashboardSessions(sessions)` that keeps `lifecycle_class === "ended"` only. Keep `currentDashboardSessions` unchanged. Neither helper reads `lifecycle` or `registry_state`.
-   - `src/App.tsx`: compute `endedSessions` from the same session entity list and pass it to `DashboardView`.
+   - `src/App.tsx`: compute `endedSessions` from the same session entity list and pass it to `DashboardView`. Pass the unfiltered session entity list to `HubSettingsRouteView`, so Diagnostics "Loaded hub state" still includes Hub-authored ended rows for the durable cap check. Home remains the only current/ended split.
    - `src/app/dashboard.tsx`: `DashboardView` accepts `endedSessions`. Render a separate `Ended sessions` section below the current `Sessions` section, with its own heading id, `IonBadge` count, `IonList aria-label="Ended sessions"`, and `data-testid="dashboard-ended-sessions"`. Render the section only when at least one ended row exists. Reuse `SessionListItem`; ended rows already render `button={false}` and show the Hub-authored `ended` status. Hide `SessionActionsMenu` on ended rows, because Stop targets a running session (small prop on `SessionListItem`, `showActions`).
    - The current `Sessions` section keeps its rows, count, empty state, and load-error copy unchanged. Rows with `lifecycle_class=indeterminate` stay hidden from both sections (see assumptions).
    - `scripts/live-packaged-protocol-helpers.mjs`: add `HOST_CHROME.endedSessionsTestId = "dashboard-ended-sessions"` and `endedSessionsHeadingName = "Ended sessions"`. Add them to the `dashboard-view` host-chrome contract entry so the App test marks them.

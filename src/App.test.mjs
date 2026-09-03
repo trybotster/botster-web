@@ -1157,10 +1157,12 @@ assert.match(appShell, /dialogs=\{dialogs\}/);
 
 assert.match(appShell, /useProductionHubConnection\(\{/);
 assert.match(appFeatureSources.join("\n"), /pullProductionEntity\("session", \{ family: "session" \}\)/);
-assert.match(appShell, /currentDashboardSessions\(runtimeClient\.entities\.list\("session"\)\)/);
+assert.match(appShell, /currentDashboardSessions\(sessionRecords\)/);
+assert.match(appShell, /endedDashboardSessions\(sessionRecords\)/);
 assert.match(appShell, /<DashboardView[\s\S]*sessions=\{sessions\}/);
 assert.match(appShell, /endedSessions=\{endedSessions\}/);
 assert.match(appShell, /sessions=\{sessions\}/);
+assert.match(appShell, /<HubSettingsRouteView[\s\S]*sessions=\{sessionRecords\}/);
 assert.match(appShell, /main=\{main\}/);
 assert.match(appFeatureSources.join("\n"), /<WorkbenchNav[\s\S]*onNavigate=\{navigateToView\}/);
 assert.match(appFeatureSources.join("\n"), /<PluginNavigationShortcuts[\s\S]*onOpen=\{onOpenPackageNavigation\}/);
