@@ -12,6 +12,7 @@
 - Dedicated channel commit: `c5cff604298da4bbfd09cadc7ab4021604bdff59`
 - Snapshot hold commit: `1fcba421b90b32db8c1a419709d6f7c7f8b69cd6`
 - Reconnect and ordering commit: `4e9e0c8`
+- Review repair commit: `c407dc3`
 - Hub proof commit: `bb1a330543bc06888f894edd5f40a0f867753a12`
 - Core lock revision: `48a437032791e678010254708259568ce4ad02bf`
 - Contract fixture: `@trybotster/hub-test-support@0.1.43`
@@ -76,6 +77,7 @@ The complete ticket changed these files:
 
 - `README.md`
 - `docs/architecture.md`
+- `docs/plans/consume-dedicated-entity-and-package-event-datachannels.md`
 - `docs/reports/implement-consume-dedicated-entity-and-package-event-datachannels.md`
 - `scripts/live-packaged-protocol-harness.mjs`
 - `scripts/live-packaged-protocol-helpers.mjs`
@@ -103,6 +105,8 @@ Each binding owns its reservation, label, peer generation, subscription identity
 Web closes stale bindings by generation. Unsubscribe closes the local binding before Web sends the control request.
 
 Attach request timeouts now reject only that Attach. They do not close the peer, entity channels, package-event channels, or sibling terminals.
+
+Attach operator errors now reject only that Attach. The control peer remains available for the next request.
 
 A late terminal reservation cannot consume a later control response. Web compares the exact session and subscription identity.
 
@@ -192,11 +196,14 @@ The crossed-ack test starts two package-event requests. The fake responder retur
 
 The ordered input test proves that a second key waits until the first stale retry is admitted.
 
+The Attach operator-error test proves that the same control peer serves a status request after the terminal rejection.
+
 Red-on-revert proof produced these failures:
 
 - The old Attach failure path closed the control peer during the direct Attach timeout test.
 - The old mode-gated input path failed the ordered retry condition.
 - The old latest-request fake responder failed the automatic reservation wait.
+- Without the review repair, the Attach operator-error test fails with `daemon response assembly lost its pending request`.
 
 ## Runtime teardown lenses
 
