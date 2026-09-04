@@ -115,6 +115,26 @@ Red-on-revert:
 - First durable attempt without Diagnostics navigation timed out on `diagnostics-view` after terminal attach.
 - Second durable attempt with current-only Diagnostics rows timed out on `\d+ more records loaded\.`
 
+Review return (`review_1788480901_190453`) required two live negative controls. Both ran from restored HEAD `d470db1` against Hub `d7bd2c7` / Core `72d1c75`. Product files were restored after each run. `git status --short` was empty. `npm test` passed on the restored tree.
+
+Finding `finding_1788480901_772207` (current-only Home):
+
+- Temporary ablation: `DashboardView` `endedSessions={[]}` instead of `endedSessions={endedSessions}`. Diff: `src/App.tsx` 1 line.
+- `npm run smoke:live-packaged-protocol:durable` exited 1.
+- First failure: `locator.waitFor: Timeout 30000ms exceeded` waiting for `getByTestId('dashboard-ended-sessions').getByText('botster-web-durable-exited-1', { exact: true })` in `assertDurableSeededSessionsVisible` at harness line 6187.
+- Host load: before `3.39 4.16 7.96`, after `3.97 4.13 7.60`. Window `2026-09-04T00:16:51Z` to `00:18:15Z`.
+- Restored `src/App.tsx` to `endedSessions={endedSessions}`.
+
+Finding `finding_1788480902_692896` (deficient producer):
+
+- Temporary ablation: deleted the `*botster-web-production-alt-exit*` arm from `productionSessionScriptSource()` so unmatched `botster-web-production-alt-exit` uses the documented fallthrough echo. Diff: `scripts/live-packaged-protocol-helpers.mjs` 1 line.
+- Active mode: `smoke:live-packaged-protocol:shared-session` (caller-owned coordinator, session id `north-star-shared`). The first driver invocation set `BOTSTER_LIVE_ABLATE_CANCEL_DETACH=1`, but the driver entered `proveAlternateScreenExit` before the cancel oracle.
+- Pinned producer: Web helper `productionSessionScriptSource` at `d470db1` with that arm removed. Hub binary remained `d7bd2c7`.
+- `npm run smoke:live-packaged-protocol:shared-session` exited 1 after 84s including build. The driver threw `alternate-screen exit producer contract mismatch: the supplied session producer answered botster-web-production-alt-exit with the fallthrough echo and did not leave the alternate screen; caller-owned producers must implement the README producer command contract`. The generic 45s `timed out waiting for mounted terminal renderer write botster-web-production-alt-exited` string was absent. Rapid alt-screen reattach had already passed (`iterations:20`).
+- The coordinator then reported that cancel ablation did not fail first at the Detach oracle, because this first driver never reached cancel.
+- Host load: before `4.76 4.29 7.45`, after `6.13 4.77 7.32`. Window `2026-09-04T00:19:07Z` to `00:20:31Z`.
+- Restored the alt-exit arm.
+
 Live lanes at `c19229b` with Hub `d7bd2c7` and Core lock `72d1c75`. Host load before: `2.39 3.83 17.75`. After durable: `5.51 4.20 16.48`. After shared-session: `5.51 6.75 13.68`. After IsolatedHub: `7.28 6.93 13.01`.
 
 | Command | Exit | Result |
@@ -132,7 +152,7 @@ Downstream north-star `script/prove-north-star-shared-session` remains with `tic
 ## Unverified behavior or residual risk
 
 - This Web ticket did not rerun Hub `script/prove-north-star-shared-session` or TUI `ghostty-shared`. Those lanes belong to the integration ticket after merge.
-- A third live red that restores Home to current-only rendering after the green durable pass was not rerun. The durable harness now waits on `dashboard-ended-sessions`, and the earlier current-only Diagnostics run already failed closed.
+- Review findings `finding_1788480901_772207` and `finding_1788480902_692896` now have live negative-control evidence. The green durable and shared-session lanes were not rerun after those restored ablations; product source matches `d470db1` / live commit `c19229b`.
 - `indeterminate` rows stay hidden from both Home sections, as assumed.
 - Ended rows hide Stop. Review can restore the menu with the `showActions` prop.
 
