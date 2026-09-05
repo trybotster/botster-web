@@ -105,10 +105,12 @@ export function TerminalViewHost({
         });
         await bridge.attach(descriptor, terminalDataPlane);
         // Cleanup may have run during attach. Fence before installing anything cleanup
-        // would otherwise never remove; the status subscription above is released here too.
+        // would otherwise never remove. Release ownership before unsubscribing so a
+        // subscription is released exactly once by whichever owner reaches it first.
         if (cancelled) {
-          statusSubscription?.unsubscribe();
+          const released = statusSubscription;
           statusSubscription = undefined;
+          released?.unsubscribe();
           return;
         }
         inputOutcomeSubscription = bridge.subscribeInputOutcomes?.(descriptor, (outcome) => {
@@ -133,8 +135,14 @@ export function TerminalViewHost({
 
     return () => {
       cancelled = true;
-      statusSubscription?.unsubscribe();
-      inputOutcomeSubscription?.unsubscribe();
+      // Take each reference and clear it before releasing, so the fenced continuation and
+      // a reentrant cleanup cannot release the same subscription twice.
+      const releasedStatus = statusSubscription;
+      statusSubscription = undefined;
+      releasedStatus?.unsubscribe();
+      const releasedOutcomes = inputOutcomeSubscription;
+      inputOutcomeSubscription = undefined;
+      releasedOutcomes?.unsubscribe();
       uninstallLiveHarnessTerminalControls?.();
       if (mount) {
         void bridge.unmount(descriptor, mount).catch(() => undefined);
