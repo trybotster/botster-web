@@ -1,6 +1,6 @@
 # Web reconnect resilience
 
-Status: implementation checks pass on the corrected revision. Independent Codex review and publication remain pending.
+Status: implementation checks pass on the corrected revision. Root source and evidence review is complete for this Web repair. Publication is pending.
 
 The sections up to Hashes describe the first candidate `543d90e`. The Corrections section describes the reviewed corrections and their validation on `caa33d2`.
 
@@ -25,7 +25,7 @@ Astra identified five source hazards, all confirmed:
 `src/botster/webrtcDaemonClient.ts`:
 
 - One attempt identity. `startAttempt()` creates a `ConnectAttempt` whose `generation` is `++peerGeneration`, allocated before the first await. The attempt owns its promise, deadline timer, abort controller, and peer resources.
-- Ownership. `ownsAttempt()` is true only while the attempt is `currentAttempt`, its generation equals `peerGeneration`, and the client is not disconnected. `open()` checks ownership after every await. A superseded attempt throws a stale failure.
+- Ownership. `ownsAttempt()` is true only while the attempt is `currentAttempt`, its generation equals `peerGeneration`, and the client is not disconnected. `open()` checks ownership before shared publication and before each subsequent stage: after the bootstrap, after the key import, after the offer pair, after ICE gathering, after the signaling fetch and its body, after the remote description and channel open, and after the Hello. Paired operations such as `createOffer` with `setLocalDescription`, and `setRemoteDescription` with `waitForDataChannelOpen`, run between checks on the attempt's own peer and channel only. A superseded attempt throws a stale failure at the next check.
 - Publication. `open()` keeps the key, peer, and channel local until the ownership check, then publishes them. The peer listeners keep their identity checks.
 - Completion. `completeAttempt()` resets the retry counter and clears reconnect demand only after the authenticated Hello that `open()` awaited.
 - Failure by identity. `failAttempt()` settles once. An owning attempt captures reconnect demand before invalidation, resets shared peer state, closes its own resources, rejects its callers, and schedules recovery. A stale attempt closes only its own resources and rejects. A stale catch never clears a newer attempt's promise or timer.
@@ -81,7 +81,7 @@ The repaired client was restored and its SHA-256 matched.
 
 ## Failed iterations
 
-`failed-iterations/` preserves the eleven earlier runs with a README. All were test-file defects: channel indexed before async creation, missing admission snapshot, a split comment, a self-recursive wait helper from a bulk edit (six runs, out-of-memory), and a race on the second retry fire. Temporary trace lines were added to the client for diagnosis and removed; the client file was byte-identical before and after.
+`failed-iterations/` preserves runs 1 through 11 with a README. Runs 1 through 10 failed on test-file defects: channel indexed before async creation, missing admission snapshot, a split comment, a self-recursive wait helper from a bulk edit (six runs, out-of-memory), and a race on the second retry fire. Run 11 was the intermediate pass with diagnostic instrumentation still present. Run 12, recorded as `app-test-clean.log`, was the clean final validation after the instrumentation was removed. Temporary trace lines were added to the client for diagnosis and removed; the client file was byte-identical before and after.
 
 ## Hashes
 
@@ -105,7 +105,7 @@ The repaired client was restored and its SHA-256 matched.
 
 Optional-family replay after reconnect, paste, and Hub changes are outside this change.
 The tests use fake peers and channels; they do not exercise a real RTCPeerConnection or a live Hub.
-Independent review is pending.
+Root source and evidence review is complete for this Web repair; publication is pending.
 
 ## Corrections after review
 
