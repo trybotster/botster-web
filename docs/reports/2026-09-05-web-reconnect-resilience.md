@@ -144,6 +144,8 @@ Final checks on `caa33d2`: `npm test` exit 0, `npm run build` exit 0, `npm run l
 
 Negative control on `caa33d2`: the repaired client hash was recorded, the `13f89ba` client was restored, `node src/App.test.mjs` exited 1, and the repaired client was restored with a matching hash. This control failed at the source-text guard at `App.test.mjs:2053`, because the old client does not contain `captureReconnectDemand`. It ended before the reconnect scenarios and proves only that the guard rejects the old client. The behavioral retry-lifecycle control remains the earlier run in `evidence/web-reconnect/`.
 
+Behavioral control on the callback fence (root-authorized mutant): on the exact `c1fe995` source, only the post-`hello-ack` ownership check from `2a63bff` was removed (five lines, `mutant-hello-ack-ownership-check-removed.diff`). The client hash was recorded, `node src/App.test.mjs` ran once and exited 1, and the repair was restored with a matching hash. Scenarios (a) through (f) passed under the mutant. Scenario (g) failed at the callback cancellation assertion `no ready after a disconnecting hello-ack callback`: one `encrypted-stream-ready` event after `disconnect()`, expected none (`app-test-mutant-hello-ack-ownership-check-removed.log`). The failure is attributable to the removed check. This control covers that one fence only.
+
 Final source hashes on `caa33d2`:
 
 | File | SHA-256 |
@@ -167,3 +169,6 @@ Corrections evidence hashes:
 | `app-test-targeted-failure-1.log` (`b2f59cd`) | `0c1f01f6d2bd3497b857bc080928a7549877355bf99a6d56b0b2f98a3c3d5c63` |
 | `app-test-targeted-30456fc.log` | `95098aeb921eacb0731c39204661e56431ac42c9b73b0aa803b0927e329644a1` |
 | `app-test-targeted-6cab51d.log` | `6abd3fb36a29922344fa307a37606d57fdc508aff2b56a92472c017e8bd09633` |
+| `mutant-hello-ack-ownership-check-removed.diff` | `4d4f40393629430f0da880687a8cbcb6e99f750116a54dd27040b000ca013bb0` |
+| `app-test-mutant-hello-ack-ownership-check-removed.log` | `3b3f3b1da086314daf2d6885b8ef5ceafc46a1704c676589de74e91b379a7ea6` |
+| `client.sha256.before-mutant-hello-ack` | `a59ee92cde5fafe5b7eed2e480052aad7124241b4b1c7091b0dd65653e2d6988` |
