@@ -160,7 +160,7 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     message = inputMessage(host.element);
     assert.equal(message.getAttribute("data-terminal-input-outcome"), "unknown");
     assert.match(textOf(message), /Paste delivery unknown/);
-    assert.deepEqual(forwarded.map((entry) => entry.outcome), ["rejected", "partial", "admitted", "unknown"]);
+    assert.deepEqual(forwarded.map((entry) => entry.outcome), ["rejected", "partial", "rejected", "admitted", "unknown"]);
     assert.ok(forwarded.every((entry) => entry.sessionId === "outcomes"));
 
     // (v3) A replacement session starts without the previous session's message.
