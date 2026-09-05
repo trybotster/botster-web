@@ -112,19 +112,19 @@ export class BotsterTerminalPtyTransport implements PtyTransport {
    */
   async writePaste(text: string): Promise<TerminalInputOutcome> {
     // The clipboard is not encoded here: the paste owner bounds and encodes it once.
-    // `chars` is the UTF-16 length, a lower bound on the UTF-8 size.
+    // Only the UTF-16 length, a lower bound on the UTF-8 size, is reported before encoding.
     const chars = text.length;
     const dataPlane = this.dataPlane;
     if (!dataPlane) {
       this.options.record("paste_unsupported", { chars, reason: "no_data_plane" });
-      return { kind: "paste", outcome: "rejected", bytes: chars, reason: "unsupported", detail: "No terminal is attached; paste was not delivered." };
+      return { kind: "paste", outcome: "rejected", minimumBytes: chars, reason: "unsupported", detail: "No terminal is attached; paste was not delivered." };
     }
     if (!dataPlane.writePaste) {
       this.options.record("paste_unsupported", { chars, reason: "no_paste_owner", sessionId: dataPlane.sessionId });
       return {
         kind: "paste",
         outcome: "rejected",
-        bytes: chars,
+        minimumBytes: chars,
         reason: "unsupported",
         detail: "This terminal attachment does not support clipboard paste; paste was not delivered."
       };
@@ -135,7 +135,7 @@ export class BotsterTerminalPtyTransport implements PtyTransport {
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : String(error);
       this.options.record("paste_error", { chars, message: detail, sessionId: dataPlane.sessionId });
-      return { kind: "paste", outcome: "unknown", bytes: chars, reason: "error", detail: `Paste failed before an outcome was known: ${detail}` };
+      return { kind: "paste", outcome: "unknown", minimumBytes: chars, reason: "error", detail: `Paste failed before an outcome was known: ${detail}` };
     }
   }
 

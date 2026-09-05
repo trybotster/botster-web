@@ -7463,7 +7463,7 @@ async function proveMountedClipboardPaste(page) {
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
         .filter((entry) => entry.kind === "paste_outcome")
         .slice(beforeCount)
-        .some((entry) => entry.payload?.outcome === "admitted" && entry.payload?.bytes === bytes),
+        .some((entry) => entry.payload?.outcome === "admitted" && entry.payload?.requestedBytes === bytes && entry.payload?.deliveredBytes === bytes),
     { beforeCount: outcomesBefore, bytes: expectedBytes },
     { timeout: 45_000 }
   ).catch(async (error) => {

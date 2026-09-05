@@ -143,7 +143,7 @@ type MountedKeyboardHarness = {
   /** Explicit paste operations received by the fake data plane, byte-identical text. */
   pastes: string[];
   /** Outcomes reported to the view host; `unsupported` when the paste owner is disabled. */
-  pasteOutcomes: Array<{ sessionId: string; outcome: string; bytes: number; reason?: string }>;
+  pasteOutcomes: Array<{ sessionId: string; outcome: string; minimumBytes: number; requestedBytes?: number; deliveredBytes?: number; reason?: string }>;
   statuses: Array<{ sessionId: string; state: TerminalAttachmentStatus["state"] }>;
   terminal: Array<{ kind: string; payload: unknown }>;
   outputSubscribers: number;
@@ -232,7 +232,15 @@ const dataPlane: TerminalDataPlaneAttachment = {
           for (const listener of outputListeners) {
             listener(output);
           }
-          return { kind: "paste" as const, outcome: "admitted" as const, bytes, operationId: harness.pastes.length, detail: `Mounted smoke recorded ${bytes} bytes.` };
+          return {
+            kind: "paste" as const,
+            outcome: "admitted" as const,
+            minimumBytes: text.length,
+            requestedBytes: bytes,
+            deliveredBytes: bytes,
+            operationId: harness.pastes.length,
+            detail: `Mounted smoke recorded ${bytes} bytes.`
+          };
         }
       }
     : {}),
@@ -288,7 +296,9 @@ createRoot(rootElement).render(
       harness.pasteOutcomes.push({
         sessionId,
         outcome: outcome.outcome,
-        bytes: outcome.bytes,
+        minimumBytes: outcome.minimumBytes,
+        ...(outcome.requestedBytes !== undefined ? { requestedBytes: outcome.requestedBytes } : {}),
+        ...("deliveredBytes" in outcome ? { deliveredBytes: outcome.deliveredBytes } : {}),
         ...(outcome.outcome === "rejected" ? { reason: outcome.reason } : {})
       });
     }}

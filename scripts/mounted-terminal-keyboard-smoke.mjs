@@ -378,7 +378,7 @@ async function proveMountedClipboardPaste(page, browser, origin) {
     ({ expected }) => {
       const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
       return harness.pastes.length === 1 && harness.pastes[0] === expected &&
-        harness.pasteOutcomes.some((entry) => entry.outcome === "admitted" && entry.bytes === expected.length);
+        harness.pasteOutcomes.some((entry) => entry.outcome === "admitted" && entry.requestedBytes === expected.length && entry.deliveredBytes === expected.length);
     },
     { expected: largeText },
     { timeout: 15_000 }
@@ -398,7 +398,7 @@ async function proveMountedClipboardPaste(page, browser, origin) {
     ({ expected, expectedBytes }) => {
       const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
       return harness.pastes.length === 2 && harness.pastes[1] === expected &&
-        harness.pasteOutcomes.filter((entry) => entry.outcome === "admitted" && entry.bytes === expectedBytes).length === 1;
+        harness.pasteOutcomes.filter((entry) => entry.outcome === "admitted" && entry.requestedBytes === expectedBytes && entry.deliveredBytes === expectedBytes && entry.minimumBytes === expected.length).length === 1;
     },
     { expected: unicodeText, expectedBytes: unicodeBytes },
     { timeout: 15_000 }

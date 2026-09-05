@@ -58,6 +58,9 @@ export const MAX_QUEUED_PASTE_OPERATIONS = 16;
  */
 export const PASTE_RESULT_BOUND_MS = 8_000;
 
+/** Bound on a best-effort Abort send so an outcome never waits on a sender that never settles. */
+export const PASTE_ABORT_BOUND_MS = 1_000;
+
 /**
  * Optional hooks that pause ownership-creating async boundaries so isolation
  * tests can destroy or switch sessions mid-flight.
@@ -254,33 +257,38 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   private async writePasteOperation(text: string): Promise<TerminalInputOutcome> {
+    const minimumBytes = text.length;
     const rejected = (
       reason: string,
       detail: string,
-      bytes: number,
-      operationId?: number
-    ): TerminalInputOutcome => ({ kind: "paste", outcome: "rejected", bytes, operationId, reason, detail });
+      requestedBytes?: number
+    ): TerminalInputOutcome => ({
+      kind: "paste",
+      outcome: "rejected",
+      minimumBytes,
+      ...(requestedBytes !== undefined ? { requestedBytes } : {}),
+      reason,
+      detail
+    });
     // Every check that does not need the UTF-8 size runs before the single encoding, so an
     // oversized or refused clipboard string is never allocated as bytes.
     if (text.length === 0) {
-      return rejected("empty", "Clipboard paste was empty.", 0);
+      return rejected("empty", "Clipboard paste was empty.");
     }
     if (this.detached) {
-      return rejected("detached", "Terminal is detached; paste was not delivered.", text.length);
+      return rejected("detached", "Terminal is detached; paste was not delivered.");
     }
     if (this.queuedPasteOperations >= MAX_QUEUED_PASTE_OPERATIONS) {
       return rejected(
         "queue_bounds",
-        `Paste refused: ${this.queuedPasteOperations} paste operations are already queued.`,
-        text.length
+        `Paste refused: ${this.queuedPasteOperations} paste operations are already queued.`
       );
     }
     // UTF-16 units never exceed UTF-8 bytes: reject before encoding an oversized string.
     if (text.length > MAX_PASTE_BYTES) {
       return rejected(
         "too_large",
-        `Paste of at least ${text.length} bytes exceeds the ${MAX_PASTE_BYTES}-byte paste limit.`,
-        text.length
+        `Paste of at least ${text.length} bytes exceeds the ${MAX_PASTE_BYTES}-byte paste limit.`
       );
     }
     const data = new TextEncoder().encode(text);
@@ -301,13 +309,14 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     let outcome: TerminalInputOutcome | undefined;
     try {
       await this.enqueueTerminalFrame(async (attachmentGeneration) => {
-        outcome = await this.sendPasteTransaction(data, attachmentGeneration);
+        outcome = await this.sendPasteTransaction({ minimumBytes, requestedBytes: bytes }, data, attachmentGeneration);
       });
     } catch (error: unknown) {
       outcome ??= {
         kind: "paste",
         outcome: "cancelled",
-        bytes,
+        minimumBytes,
+        requestedBytes: bytes,
         detail: `Paste was not delivered: ${error instanceof Error ? error.message : String(error)}`
       };
     } finally {
@@ -317,26 +326,28 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return outcome ?? {
       kind: "paste",
       outcome: "cancelled",
-      bytes,
+      minimumBytes,
+      requestedBytes: bytes,
       detail: "Paste was cancelled before the terminal was attached."
     };
   }
 
   private async sendPasteTransaction(
+    sizes: { minimumBytes: number; requestedBytes: number },
     data: Uint8Array,
     attachmentGeneration: number
   ): Promise<TerminalInputOutcome> {
     const bytes = data.byteLength;
     const stream = this.streamSubscription;
     if (!stream?.sendFrame) {
-      return { kind: "paste", outcome: "cancelled", bytes, detail: "Terminal stream is not attached; paste was not delivered." };
+      return { kind: "paste", outcome: "cancelled", ...sizes, detail: "Terminal stream is not attached; paste was not delivered." };
     }
     let modes = this.modeFlags ?? await this.refreshModeFlags(attachmentGeneration);
     if (!modes || !this.isCurrentAttachment(attachmentGeneration)) {
       return {
         kind: "paste",
         outcome: modes ? "cancelled" : "rejected",
-        bytes,
+        ...sizes,
         ...(modes ? {} : { reason: "mode_unavailable" }),
         detail: modes
           ? "Terminal attachment changed before the paste started."
@@ -346,15 +357,21 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     const stillLive = () => this.isCurrentAttachment(attachmentGeneration) && this.streamSubscription === stream;
     const abortBestEffort = async (operationId: number) => {
       // Never send an abort on a recovered generation: only on the stream that carried Begin.
+      // The send is bounded so an outcome never waits on a sender that never settles.
       if (!stillLive()) return;
-      await stream.sendFrame!(encodePasteAbort(operationId)).catch(() => undefined);
+      let timer: number | undefined;
+      const bound = new Promise<void>((resolve) => {
+        timer = window.setTimeout(resolve, PASTE_ABORT_BOUND_MS);
+      });
+      await Promise.race([stream.sendFrame!(encodePasteAbort(operationId)).catch(() => undefined), bound]);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
     for (let attempt = 0; attempt < 2; attempt += 1) {
       if (!isJsonSafeModeToken(modes)) {
         return {
           kind: "paste",
           outcome: "rejected",
-          bytes,
+          ...sizes,
           reason: "mode_token",
           detail: "Mode freshness token is not JSON-safe; paste was not delivered."
         };
@@ -372,7 +389,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         for (const [index, frame] of frames.entries()) {
           if (!stillLive()) {
             await abortBestEffort(operationId);
-            return { kind: "paste", outcome: "cancelled", bytes, operationId, detail: "Terminal attachment changed; paste was cancelled before Commit." };
+            return { kind: "paste", outcome: "cancelled", ...sizes, operationId, detail: "Terminal attachment changed; paste was cancelled before Commit." };
           }
           try {
             await stream.sendFrame(frame);
@@ -381,7 +398,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
             return {
               kind: "paste",
               outcome: "cancelled",
-              bytes,
+              ...sizes,
               operationId,
               detail: `Paste frame ${index + 1} of ${frames.length} was not sent: ${error instanceof Error ? error.message : String(error)}`
             };
@@ -403,7 +420,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
           return {
             kind: "paste",
             outcome: "unknown",
-            bytes,
+            ...sizes,
             operationId,
             reason: "result_bound",
             detail: `No paste result within ${PASTE_RESULT_BOUND_MS} ms; an abort was attempted and delivery of ${bytes} bytes is unknown.`
@@ -413,22 +430,22 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
           return {
             kind: "paste",
             outcome: "unknown",
-            bytes,
+            ...sizes,
             operationId,
             reason: "stream_lost",
             detail: `Terminal stream was lost after Commit; delivery of ${bytes} bytes is unknown.`
           };
         }
         if (result.admitted) {
-          return { kind: "paste", outcome: "admitted", bytes: result.bytes_written, operationId, detail: `Paste delivered ${result.bytes_written} bytes.` };
+          return { kind: "paste", outcome: "admitted", ...sizes, deliveredBytes: result.bytes_written, operationId, detail: `Paste delivered ${result.bytes_written} of ${bytes} bytes.` };
         }
         if (result.rejection === "partial_write" || (!result.admitted && result.bytes_written > 0)) {
           // Authoritative partial delivery: Core reports the bytes that reached the PTY.
           return {
             kind: "paste",
             outcome: "partial",
-            bytes,
-            bytesWritten: result.bytes_written,
+            ...sizes,
+            deliveredBytes: result.bytes_written,
             operationId,
             detail: `Terminal delivered ${result.bytes_written} of ${bytes} bytes before the write stopped.`
           };
@@ -439,7 +456,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
           return {
             kind: "paste",
             outcome: "unknown",
-            bytes,
+            ...sizes,
             operationId,
             reason: "timeout",
             detail: `Terminal reported a timeout for the paste; delivery of ${bytes} bytes is unknown.`
@@ -455,7 +472,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         return {
           kind: "paste",
           outcome: "rejected",
-          bytes,
+          ...sizes,
           operationId,
           reason: result.rejection ?? "rejected",
           detail: `Paste rejected by the terminal: ${result.rejection ?? "rejected"}${result.bytes_written > 0 ? ` after ${result.bytes_written} bytes` : ""}.`
@@ -469,7 +486,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         recordLiveHarnessTerminal("paste_settled", { operation_id: operationId, committed });
       }
     }
-    return { kind: "paste", outcome: "rejected", bytes, reason: "stale_mode", detail: "Paste rejected: terminal modes changed twice." };
+    return { kind: "paste", outcome: "rejected", ...sizes, reason: "stale_mode", detail: "Paste rejected: terminal modes changed twice." };
   }
 
   private settlePendingPasteResults(): void {

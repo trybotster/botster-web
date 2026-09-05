@@ -223,12 +223,18 @@ function installLiveHarnessTerminalControls(
 }
 
 /** User-visible text for a non-admitted input outcome; the three cases stay distinct. */
+export function terminalInputSize(outcome: TerminalInputOutcome): string {
+  return outcome.requestedBytes !== undefined
+    ? `${outcome.requestedBytes} bytes`
+    : `at least ${outcome.minimumBytes} bytes`;
+}
+
 export function terminalInputMessage(outcome: TerminalInputOutcome): string {
   switch (outcome.outcome) {
     case "rejected":
       return `Paste rejected (${outcome.reason}): ${outcome.detail}`;
     case "partial":
-      return `Paste partially delivered (${outcome.bytesWritten} of ${outcome.bytes} bytes): ${outcome.detail}`;
+      return `Paste partially delivered (${outcome.deliveredBytes} of ${terminalInputSize(outcome)}): ${outcome.detail}`;
     case "cancelled":
       return `Paste cancelled before delivery: ${outcome.detail}`;
     case "unknown":

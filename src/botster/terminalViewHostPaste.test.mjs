@@ -131,7 +131,7 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     assert.equal(calls.subscribeInputOutcomes, 1, "outcome subscription installed once after attach");
     assert.equal(inputMessage(host.element), null, "no message before any outcome");
     await act(async () => {
-      emitOutcome({ kind: "paste", outcome: "rejected", bytes: 12, reason: "unsupported", detail: "This terminal attachment does not support clipboard paste; paste was not delivered." });
+      emitOutcome({ kind: "paste", outcome: "rejected", minimumBytes: 12, reason: "unsupported", detail: "This terminal attachment does not support clipboard paste; paste was not delivered." });
     });
     let message = inputMessage(host.element);
     assert.ok(message, "rejected outcome renders the input message");
@@ -141,17 +141,21 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     await settle();
     assert.ok(inputMessage(host.element), "the message persists across renders");
     await act(async () => {
-      emitOutcome({ kind: "paste", outcome: "partial", bytes: 12, bytesWritten: 3, operationId: 2, detail: "Terminal delivered 3 of 12 bytes before the write stopped." });
+      emitOutcome({ kind: "paste", outcome: "partial", minimumBytes: 10, requestedBytes: 12, deliveredBytes: 3, operationId: 2, detail: "Terminal delivered 3 of 12 bytes before the write stopped." });
     });
     message = inputMessage(host.element);
     assert.equal(message.getAttribute("data-terminal-input-outcome"), "partial");
     assert.match(textOf(message), /partially delivered \(3 of 12 bytes\)/);
     await act(async () => {
-      emitOutcome({ kind: "paste", outcome: "admitted", bytes: 12, operationId: 3, detail: "Paste delivered 12 bytes." });
+      emitOutcome({ kind: "paste", outcome: "rejected", minimumBytes: 7, reason: "too_large", detail: "Paste of at least 7 bytes exceeds the limit." });
+    });
+    assert.match(textOf(inputMessage(host.element)), /Paste rejected \(too_large\)/);
+    await act(async () => {
+      emitOutcome({ kind: "paste", outcome: "admitted", minimumBytes: 10, requestedBytes: 12, deliveredBytes: 12, operationId: 3, detail: "Paste delivered 12 of 12 bytes." });
     });
     assert.equal(inputMessage(host.element), null, "an admitted paste clears the message");
     await act(async () => {
-      emitOutcome({ kind: "paste", outcome: "unknown", bytes: 12, operationId: 4, reason: "timeout", detail: "Terminal reported a timeout for the paste; delivery of 12 bytes is unknown." });
+      emitOutcome({ kind: "paste", outcome: "unknown", minimumBytes: 10, requestedBytes: 12, operationId: 4, reason: "timeout", detail: "Terminal reported a timeout for the paste; delivery of 12 bytes is unknown." });
     });
     message = inputMessage(host.element);
     assert.equal(message.getAttribute("data-terminal-input-outcome"), "unknown");

@@ -43,21 +43,29 @@ export interface TerminalAttachmentStatus {
 
 /**
  * Outcome of one explicit terminal input operation. Paste is the first operation.
- * `bytes` is the operation's UTF-8 size when known; a transport-level unsupported
- * rejection reports the UTF-16 length as a lower bound because nothing was encoded.
- * - admitted: Core delivered the complete content.
+ *
+ * Sizes are never ambiguous: `minimumBytes` is the UTF-16 length, a cheap lower bound on
+ * the UTF-8 size that is always known; `requestedBytes` is the exact UTF-8 size and is
+ * present only once the content was encoded; `deliveredBytes` is Core's authoritative
+ * count of bytes that reached the PTY. No outcome allocates the clipboard to fill a size.
+ * - admitted: Core delivered the operation; deliveredBytes may equal requestedBytes.
  * - rejected: Core or Web refused before delivery; Core proves zero PTY bytes.
- * - partial: Core reports that delivery began and stopped; bytesWritten is authoritative.
+ * - partial: Core reports that delivery began and stopped after deliveredBytes.
  * - cancelled: Web stopped the operation before its Commit reached Core; zero PTY bytes.
  * - unknown: no authoritative result proves delivery either way (result bound reached,
  *   stream lost after Commit, or a Core timeout that may follow a completed write).
  */
+export interface TerminalInputSizes {
+  minimumBytes: number;
+  requestedBytes?: number;
+}
+
 export type TerminalInputOutcome =
-  | { kind: "paste"; outcome: "admitted"; bytes: number; operationId: number; detail: string }
-  | { kind: "paste"; outcome: "rejected"; bytes: number; operationId?: number; reason: string; detail: string }
-  | { kind: "paste"; outcome: "partial"; bytes: number; bytesWritten: number; operationId: number; detail: string }
-  | { kind: "paste"; outcome: "cancelled"; bytes: number; operationId?: number; detail: string }
-  | { kind: "paste"; outcome: "unknown"; bytes: number; operationId?: number; reason?: string; detail: string };
+  | (TerminalInputSizes & { kind: "paste"; outcome: "admitted"; deliveredBytes: number; operationId: number; detail: string })
+  | (TerminalInputSizes & { kind: "paste"; outcome: "rejected"; operationId?: number; reason: string; detail: string })
+  | (TerminalInputSizes & { kind: "paste"; outcome: "partial"; deliveredBytes: number; operationId: number; detail: string })
+  | (TerminalInputSizes & { kind: "paste"; outcome: "cancelled"; operationId?: number; detail: string })
+  | (TerminalInputSizes & { kind: "paste"; outcome: "unknown"; operationId?: number; reason?: string; detail: string });
 
 export interface TerminalDataPlaneAttachment {
   sessionId: string;
@@ -327,12 +335,20 @@ export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
   readonly pastes: string[] = [];
 
   async writePaste(text: string): Promise<TerminalInputOutcome> {
-    const bytes = new TextEncoder().encode(text).byteLength;
     if (this.detached) {
-      return { kind: "paste", outcome: "rejected", bytes, reason: "detached", detail: "Mock terminal data plane is detached." };
+      return { kind: "paste", outcome: "rejected", minimumBytes: text.length, reason: "detached", detail: "Mock terminal data plane is detached." };
     }
     this.pastes.push(text);
-    return { kind: "paste", outcome: "admitted", bytes, operationId: this.pastes.length, detail: "Mock paste recorded." };
+    const bytes = new TextEncoder().encode(text).byteLength;
+    return {
+      kind: "paste",
+      outcome: "admitted",
+      minimumBytes: text.length,
+      requestedBytes: bytes,
+      deliveredBytes: bytes,
+      operationId: this.pastes.length,
+      detail: "Mock paste recorded."
+    };
   }
 
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription {

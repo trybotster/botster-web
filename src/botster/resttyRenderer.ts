@@ -484,7 +484,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
         this.publishInputOutcome({
           kind: "paste",
           outcome: "rejected",
-          bytes: 0,
+          minimumBytes: 0,
           reason: "clipboard_unavailable",
           detail: `Clipboard could not be read: ${detail}`
         });

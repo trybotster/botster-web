@@ -290,8 +290,10 @@ export async function runTerminalPasteTests(helpers) {
       await fixture.inputResult({ kind: "paste", operation_id: 1, admitted: true, bytes_written: 70_000 }, "p1-result");
       stage("p1: outcome");
       const outcome = await pending;
-      assert.deepEqual({ kind: outcome.kind, outcome: outcome.outcome, bytes: outcome.bytes, operationId: outcome.operationId },
-        { kind: "paste", outcome: "admitted", bytes: 70_000, operationId: 1 });
+      assert.deepEqual(
+        { kind: outcome.kind, outcome: outcome.outcome, minimumBytes: outcome.minimumBytes, requestedBytes: outcome.requestedBytes, deliveredBytes: outcome.deliveredBytes, operationId: outcome.operationId },
+        { kind: "paste", outcome: "admitted", minimumBytes: text.length, requestedBytes: 70_000, deliveredBytes: 70_000, operationId: 1 }
+      );
       fixture.client.disconnect();
     });
 
@@ -310,7 +312,10 @@ export async function runTerminalPasteTests(helpers) {
       await fixture.inputResult({ kind: "paste", operation_id: 1, admitted: true, bytes_written: bytes }, "p2-result");
       const outcome = await pending;
       assert.equal(outcome.outcome, "admitted");
-      assert.equal(outcome.bytes, bytes);
+      assert.equal(outcome.requestedBytes, bytes, "requested bytes are the exact UTF-8 size");
+      assert.equal(outcome.minimumBytes, text.length, "minimum bytes are the UTF-16 lower bound");
+      assert.ok(outcome.minimumBytes < outcome.requestedBytes);
+      assert.equal(outcome.deliveredBytes, bytes);
       fixture.client.disconnect();
     });
 
@@ -372,7 +377,7 @@ export async function runTerminalPasteTests(helpers) {
       const cases = [
         ["operation_out_of_bounds", 0, { outcome: "rejected", reason: "operation_out_of_bounds", detail: /rejected by the terminal/ }],
         ["timeout", 0, { outcome: "unknown", reason: "timeout", detail: /delivery of 10 bytes is unknown/ }],
-        ["partial_write", 3, { outcome: "partial", bytesWritten: 3, detail: /delivered 3 of 10 bytes/ }]
+        ["partial_write", 3, { outcome: "partial", deliveredBytes: 3, detail: /delivered 3 of 10 bytes/ }]
       ];
       for (const [rejection, bytesWritten, expected] of cases) {
         operationId += 1;
@@ -383,7 +388,8 @@ export async function runTerminalPasteTests(helpers) {
         const outcome = await pending;
         assert.equal(outcome.outcome, expected.outcome, rejection);
         if (expected.reason) assert.equal(outcome.reason, expected.reason, rejection);
-        if (expected.bytesWritten !== undefined) assert.equal(outcome.bytesWritten, expected.bytesWritten, rejection);
+        if (expected.deliveredBytes !== undefined) assert.equal(outcome.deliveredBytes, expected.deliveredBytes, rejection);
+        assert.equal(outcome.requestedBytes, 10, rejection);
         assert.match(outcome.detail, expected.detail, rejection);
         await flushMicrotasks();
         assert.equal((await fixture.framesSince()).length, expectedFrames, `${rejection}: no retry frames`);
@@ -397,6 +403,8 @@ export async function runTerminalPasteTests(helpers) {
       const tooLarge = await fixture.plane.writePaste("x".repeat(MAX_PASTE_BYTES + 1));
       assert.equal(tooLarge.outcome, "rejected");
       assert.equal(tooLarge.reason, "too_large");
+      assert.equal(tooLarge.requestedBytes, undefined, "refused before encoding reports no exact byte count");
+      assert.equal(tooLarge.minimumBytes, MAX_PASTE_BYTES + 1);
       const empty = await fixture.plane.writePaste("");
       assert.equal(empty.reason, "empty");
       assert.equal((await fixture.framesSince()).length, 0, "no frames for refused pastes");
