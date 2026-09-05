@@ -568,9 +568,12 @@ export async function runWebrtcReconnectTests(helpers) {
           if (event.type === "hello-ack") client.disconnect();
         }
       });
-      helloClient.client.subscribeEntityFrames("session", () => undefined);
+      // Attach the rejection assertion before any other await so the readiness rejection
+      // raised by disconnect() inside the callback is owned from the start.
+      const helloReady = helloClient.client.subscribeEntityFrames("session", () => undefined).ready;
+      const helloReadyRejects = assert.rejects(helloReady, /disconnected/);
       await waitForTestCondition(() => eventsSince(helloBefore, "hello-ack").length === 1);
-      await flushMicrotasks();
+      await helloReadyRejects;
       await flushMicrotasks();
       await flushMicrotasks();
       assert.equal(eventsSince(helloBefore, "encrypted-stream-ready").length, 0, "no ready after a disconnecting hello-ack callback");
