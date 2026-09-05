@@ -613,6 +613,54 @@ export async function runWebrtcReconnectTests(helpers) {
       closedClient.client.disconnect();
     }
 
+    // (g2) Terminal-only demand: the loss callback detaches the terminal listener and another
+    // callback starts attempt B. Demand captured before the callbacks stays sticky, so when B
+    // fails recovery continues without a new caller request and the terminal reattaches.
+    {
+      const before = lifecycleEvents.length;
+      let callbackRequest;
+      const { client, channels, attempts } = makeClient({
+        failAttempts: new Set([2]),
+        onLifecycle: (event, owner) => {
+          // This option callback runs before the window dispatch that detaches the data
+          // plane's terminal listener. Attempt B starts here; the listener detaches next; the
+          // old close handler then takes the generation-mismatch branch.
+          if (event.type === "data-channel-closed" && !callbackRequest) {
+            callbackRequest = owner.request({ type: "status" }).catch((error) => error);
+          }
+        }
+      });
+      const statuses = [];
+      const plane = createHubTerminalDataPlane({ sessionId: "reconnect-terminal-callback-session", bridge: client });
+      plane.subscribeStatus((status) => statuses.push(status));
+      plane.subscribeOutput(() => undefined);
+      await waitForTestCondition(() => channels.length === 1 && channels[0].sent.length >= 1);
+      const firstAttach = (await decryptAll(channels[0])).find((request) => request.type === "attach");
+      assert.ok(firstAttach);
+      channels[0].close();
+      await waitForTestCondition(() => Boolean(callbackRequest));
+      // Attempt B (2) was started by the callback and fails; the captured demand schedules retry 1.
+      await waitAttempts(attempts, 2);
+      const scheduled = await waitScheduled(before, 1);
+      assert.equal(scheduled[0].delayMs, 500);
+      assert.ok((await callbackRequest) instanceof Error, "the callback's request rejected with B");
+      await fireRetryTimer(500);
+      await waitAttempts(attempts, 3);
+      await waitForTestCondition(() => channels[1]?.helloAckDelivered === true);
+      await waitForTestCondition(() => statuses.some((status) => /Reattaching terminal stream after WebRTC recovery/.test(status.message)));
+      await waitForTestCondition(() => channels[1].sent.length >= 1);
+      const detach = (await decryptAll(channels[1])).find((request) => request.type === "detach");
+      assert.ok(detach, "abandoned subscription detached on the recovered peer");
+      await emitChunkedTestResponse(channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-g2-detach" });
+      await waitForTestCondition(() => channels[1].sent.length >= 2);
+      const reattach = (await decryptAll(channels[1])).find((request) => request.type === "attach");
+      assert.ok(reattach, "terminal reattached after the callback-started attempt failed, without a new caller request");
+      assert.notEqual(reattach.subscription_id, firstAttach.subscription_id);
+      assert.equal(eventsSince(before, "reconnect-scheduled").length, 1);
+      void plane.detach().catch(() => undefined);
+      client.disconnect();
+    }
+
     // (h) Absolute deadline with a bootstrap provider that never settles.
     {
       const before = lifecycleEvents.length;

@@ -1718,7 +1718,7 @@ class WebrtcDaemonTransport {
     dataChannel.addEventListener("close", () => {
       if (!this.isCurrentPeer(generation, peerConnection, dataChannel)) return;
       recordLiveHarnessEvent("webrtc_data_channel", { state: "closed" });
-      const shouldReconnect = this.hasReconnectDemand();
+      const shouldReconnect = this.captureReconnectDemand();
       this.emitLifecycle({ type: "data-channel-closed" });
       this.handleTransportClosed(
         webrtcFailure("transport", "local WebRTC data channel closed"),
@@ -1729,7 +1729,7 @@ class WebrtcDaemonTransport {
     dataChannel.addEventListener("error", () => {
       if (!this.isCurrentPeer(generation, peerConnection, dataChannel)) return;
       recordLiveHarnessEvent("webrtc_data_channel", { state: "error" });
-      const shouldReconnect = this.hasReconnectDemand();
+      const shouldReconnect = this.captureReconnectDemand();
       this.emitLifecycle({ type: "data-channel-error" });
       this.handleTransportClosed(
         webrtcFailure("transport", "local WebRTC data channel failed"),
@@ -2067,21 +2067,35 @@ class WebrtcDaemonTransport {
     this.peerFailed = true;
     // Snapshot before emitLifecycle. HubTerminalDataPlane.handleTransportLost
     // abandons the current stream and removes its TerminalStreamListener.
-    const shouldReconnect = this.hasReconnectDemand();
+    const shouldReconnect = this.captureReconnectDemand();
     this.emitLifecycle({ type: "data-channel-error" });
     this.handleTransportClosed(error, shouldReconnect, generation);
   }
 
+  /**
+   * Captures reconnect demand at the moment of loss, before lifecycle callbacks run. A
+   * callback may detach terminal listeners and may start the next attempt; the demand
+   * stays sticky for that attempt. Only an authenticated Hello or disconnect clears it.
+   */
+  private captureReconnectDemand(): boolean {
+    const demand = this.reconnectDemand || this.hasReconnectDemand();
+    if (demand && !this.disconnected) this.reconnectDemand = true;
+    return demand;
+  }
+
   /** Rejects pending requests; with a generation, only that peer generation's requests. */
   private failPending(error: unknown, generation?: number): void {
-    const failing = generation === undefined
-      ? this.pendingRequests.splice(0)
-      : this.pendingRequests.filter((pending) => pending.generation === generation);
-    if (generation !== undefined) {
-      for (const pending of failing) {
-        const index = this.pendingRequests.indexOf(pending);
-        if (index >= 0) this.pendingRequests.splice(index, 1);
+    let failing: PendingRequest[];
+    if (generation === undefined) {
+      failing = this.pendingRequests.splice(0);
+    } else {
+      failing = [];
+      const keep: PendingRequest[] = [];
+      for (const pending of this.pendingRequests) {
+        (pending.generation === generation ? failing : keep).push(pending);
       }
+      this.pendingRequests.length = 0;
+      this.pendingRequests.push(...keep);
     }
     for (const pending of failing) {
       pending.reject(error);
