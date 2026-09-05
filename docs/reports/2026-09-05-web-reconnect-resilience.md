@@ -58,6 +58,8 @@ Every scenario uses the real `WebrtcDaemonTransport` through `createWebrtcDaemon
 
 The existing test that recovers through a new `list_apps` request stays as a compatibility check. It is not the proof of recovery.
 
+On the final repaired source, the clean run executed every scenario in the table in order: (a), (a2), (b), (c), (d) with its three cancellation points, (e) twice (late rejection, then late resolution), and (f). Every assertion site in the file lies on the passing path; none is reached only through a failure branch. The run exited 0, so each assertion held.
+
 ## Executed checks
 
 All commands ran in the worktree under Node `v22.21.1` in a root-assigned test window.
@@ -72,6 +74,7 @@ Logs are read-only in `/private/tmp/botster-web-foundation.sm0cZt/evidence/web-r
 
 The repaired client hash was recorded (`client.sha256.before-control`), the `13f89ba` client was restored, and `node src/App.test.mjs` ran: exit 1 (`app-test-negative-control-13f89ba-client.log`).
 Scenario (a) failed at the wait for the first `reconnect-scheduled` event after the failed recovery attempt. The old client makes one attempt and schedules nothing.
+This control fails on retry lifecycle observation only. It does not by itself prove the later recovery, cancellation, ownership, or backoff scenarios; those are established only by the passing run on the repaired source.
 The repaired client was restored and its SHA-256 matched.
 
 ## Failed iterations
