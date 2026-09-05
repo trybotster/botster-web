@@ -2050,7 +2050,7 @@ assert.match(hubTerminalDataPlane, /this\.pendingResize = \{ rows, columns \}[\s
 assert.match(webrtcDaemonClient, /control DataChannel received a terminal delivery/);
 assert.match(
   webrtcDaemonClient,
-  /const shouldReconnect = this\.hasReconnectDemand\(\);\s*this\.emitLifecycle\(\{ type: "data-channel-error" \}\)/
+  /const shouldReconnect = this\.captureReconnectDemand\(\);\s*this\.emitLifecycle\(\{ type: "data-channel-error" \}\)/
 );
 assert.match(hubTerminalDataPlane, /terminalEventQueue/);
 assert.doesNotMatch(hubTerminalDataPlane, /terminalInputQueue/);
