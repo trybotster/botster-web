@@ -39,9 +39,18 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     for (const child of node.childNodes ?? []) findAll(child, predicate, found);
     return found;
   };
-  const textOf = (node) => `${node.nodeType === 3 ? node.textContent ?? "" : ""}${[...(node.childNodes ?? [])].map(textOf).join("")}`;
+  // The suite's minimal DOM stores React's class assignment through setAttribute("class") and
+  // keeps an element's textContent independent of its childNodes. Read the class from the
+  // attribute with a className fallback, and read text from child nodes when present,
+  // otherwise from the element's own textContent, so nothing is double-counted.
+  const classOf = (node) => (typeof node.getAttribute === "function" ? node.getAttribute("class") : null) ?? node.className ?? "";
+  const textOf = (node) => {
+    if (node.nodeType === 3) return node.textContent ?? "";
+    const children = [...(node.childNodes ?? [])];
+    return children.length > 0 ? children.map(textOf).join("") : (node.textContent ?? "");
+  };
   const inputMessage = (element) =>
-    findAll(element, (node) => node.nodeType === 1 && node.className === "terminal-input-message")[0] ?? null;
+    findAll(element, (node) => node.nodeType === 1 && classOf(node) === "terminal-input-message")[0] ?? null;
 
   const makeDataPlane = (sessionId) => {
     const state = { statusSubscriptions: 0, statusUnsubscribes: 0, detachCount: 0 };
