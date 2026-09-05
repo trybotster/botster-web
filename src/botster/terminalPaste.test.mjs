@@ -19,7 +19,6 @@ export async function runTerminalPasteTests(helpers) {
     decryptTestEnvelope,
     decryptTestEnvelopeBytes,
     emitChunkedTestResponse,
-    waitForTestCondition,
     flushMicrotasks,
     localWebrtcBootstrapFixture,
     createWebrtcDaemonClient,
