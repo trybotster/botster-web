@@ -11,7 +11,8 @@ import { createServer as createViteServer } from "vite";
 import {
   encodeModeGatedInput,
   encodePaste,
-  encodeResize
+  encodeResize,
+  MAX_PASTE_BYTES
 } from "@trybotster/terminal-protocol";
 import {
   assertDurableStateOwnership,
@@ -38,6 +39,8 @@ import {
   assertCallerOwnedSharedSessionContract,
   classifyAltExitRendererWrites,
   productionSessionScriptSource,
+  receiverReadyOrErrorPattern,
+  receiverReceiptPattern,
   workspacesLifecycleAbsenceResult,
   workspacesLifecycleDomResult,
   workspacesLifecycleMaterializationResult,
@@ -71,6 +74,7 @@ const sharedSessionContract = assertCallerOwnedSharedSessionContract();
 const sharedSessionMode = sharedSessionContract.mode;
 const sharedSessionProveExit = sharedSessionContract.proveExit;
 const directTerminalMode = process.env.BOTSTER_LIVE_DIRECT_TERMINAL === "1";
+const livePasteCasesMode = process.env.BOTSTER_LIVE_PASTE_CASES === "1";
 const sharedHubAssignment = sharedHubDriverMode
   ? parseWorkspacesSpawnAssignment(process.env.BOTSTER_WORKSPACES_SPAWN_CASES)
   : undefined;
@@ -504,6 +508,9 @@ try {
   // retained history, and in-page DataChannel reconnect with surviving document + H0-H5.
   await proveMountedMouseModeGatedInput(page);
   await proveMountedClipboardPaste(page);
+  if (livePasteCasesMode) {
+    await proveLivePasteCases(page);
+  }
   await proveZeroBrowserOscColorReplies(page);
   await provePaletteProjectionAfterOsc(page, productionSessionId);
   await proveRetainedHistoryAfterEcho(page, echoProbe);
@@ -7526,6 +7533,282 @@ async function proveMountedClipboardPaste(page) {
     bracketed_paste: pasteResult.mode_flags?.bracketed_paste ?? null,
     key_after_paste: "botster-web-production-echo:after-paste"
   });
+}
+
+/**
+ * Live paste cases against the real Hub with an exact PTY receiver (BOTSTER_LIVE_PASTE_CASES=1).
+ *
+ * The session script's receiver reads exactly the announced wire byte count in raw mode and
+ * echoes the received count and SHA-256. Two byte sequences stay apart: the payload is the
+ * clipboard text as UTF-8, whose length is compared with Web's requestedBytes; the wire adds
+ * Core's bracketed-paste markers only under the mode the case set explicitly. The wire length
+ * is compared with the receiver's count and the wire SHA-256 with the receiver's SHA-256. A
+ * digest is compared only with a digest, a count only with a count. Pinned Core 93acae3
+ * reports bytes_written as the actual PTY write, so it equals the wire length; Web forwards
+ * it as deliveredBytes.
+ *
+ * Script-emitted lines can arrive split across terminal_output events, so every wait matches
+ * a complete line (marker, fields, and line terminator) over the concatenated output.
+ */
+async function proveLivePasteCases(page) {
+  const ESC = "\u001b";
+  const MARKER_BYTES = 12; // ESC[200~ and ESC[201~
+  const readEventsLength = () =>
+    page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length);
+  const daemonOutputSince = (since) =>
+    page.evaluate((from) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from)
+        .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
+        .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+        .join(""),
+    since);
+  // Waits until the concatenated daemon output since `since` matches a complete line pattern,
+  // and returns that match. The pattern must include its own line terminator.
+  const waitForLine = async (since, pattern, label) => {
+    const source = pattern.source;
+    await page.waitForFunction(
+      ({ from, expected }) =>
+        new RegExp(expected).test(
+          (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from)
+            .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
+            .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+            .join("")
+        ),
+      { from: since, expected: source },
+      { timeout: 45_000 }
+    ).catch(async (error) => {
+      const tail = (await daemonOutputSince(since)).slice(-400);
+      throw new Error(`${label}: complete line /${source}/ not observed: ${error.message}; output tail=${JSON.stringify(tail)}`);
+    });
+    const match = (await daemonOutputSince(since)).match(pattern);
+    if (!match) throw new Error(`${label}: line pattern matched in the page but not in the harness read`);
+    return match;
+  };
+  const dispatchClipboardPaste = async (text) => {
+    await waitForTerminalCanvas(page);
+    await callTerminalControl(page, "focus");
+    await page.locator(".terminal-view-container canvas").first().click();
+    await page.waitForFunction(
+      () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
+      undefined,
+      { timeout: 5_000 }
+    );
+    return page.evaluate((data) => {
+      const target = globalThis.document.activeElement;
+      const transfer = new globalThis.DataTransfer();
+      transfer.setData("text/plain", data);
+      const event = new globalThis.ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true });
+      target.dispatchEvent(event);
+      return { defaultPrevented: event.defaultPrevented, target: target?.tagName ?? null };
+    }, text);
+  };
+  const nextPasteOutcome = async (beforeCount, label) => {
+    await page.waitForFunction(
+      ({ before }) =>
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "paste_outcome").length > before,
+      { before: beforeCount },
+      { timeout: 45_000 }
+    ).catch(async (error) => {
+      const telemetry = await page.evaluate(() =>
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
+          .filter((entry) => ["paste", "paste_outcome", "paste_committed", "paste_settled", "paste_stale_retry", "clipboard_paste", "paste_routed", "input_result", "mode_flags"].includes(entry.kind))
+          .slice(-12)
+      );
+      throw new Error(`${label}: no paste outcome: ${error.message}; telemetry=${JSON.stringify(telemetry)}`);
+    });
+    return page.evaluate(
+      ({ before }) =>
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "paste_outcome")[before]?.payload ?? null,
+      { before: beforeCount }
+    );
+  };
+  const pasteInputResult = (operationId) =>
+    page.evaluate(
+      (id) =>
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
+          .filter((entry) => entry.kind === "input_result" && entry.payload?.kind === "paste" && entry.payload?.operation_id === id)
+          .at(-1)?.payload ?? null,
+      operationId
+    );
+  const keyPathLeaks = (needle) =>
+    page.evaluate(
+      (marker) =>
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
+          .filter((entry) => entry.kind === "pty_send_input" || entry.kind === "mode_gated_input" || entry.kind === "input")
+          .map((entry) => String(entry.payload?.data ?? entry.payload?.bytes ?? ""))
+          .filter((data) => data.includes(marker)).length,
+      needle
+    );
+  const sha256Hex = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+  // Bracketed paste is an application mode. The session script emits DECSET/DECRST 2004
+  // explicitly; the harness confirms the bytes reached the daemon output before pasting.
+  const setBracketedPaste = async (enabled) => {
+    const since = await readEventsLength();
+    const name = enabled ? "on" : "off";
+    await callTerminalControl(page, "writeInput", `botster-web-production-bracket-${name}\n`);
+    await waitForLine(since, new RegExp(`botster-web-production-bracket-${name}-done\\r?\\n`), `bracket ${name}`);
+    const text = await daemonOutputSince(since);
+    const sequence = enabled ? `${ESC}[?2004h` : `${ESC}[?2004l`;
+    if (!text.includes(sequence)) {
+      throw new Error(`bracket ${name}: DEC 2004 sequence not observed in daemon terminal output`);
+    }
+  };
+
+  // One case: announce the wire length, wait for the raw-mode ready marker, dispatch the real
+  // paste gesture, then compare Web's outcome, Core's input_result, and the receiver's receipt.
+  const receivePaste = async ({ label, text, bracketed }) => {
+    const payload = Buffer.from(text, "utf8");
+    const wire = bracketed
+      ? Buffer.concat([Buffer.from(`${ESC}[200~`, "latin1"), payload, Buffer.from(`${ESC}[201~`, "latin1")])
+      : payload;
+    const leakMarker = `botster-web-live-paste-${label}:`;
+    if (!text.startsWith(leakMarker)) throw new Error(`${label}: fixture must start with its leak marker`);
+
+    // The ready line is emitted in raw mode (no opost), so it ends in a bare newline. An
+    // error line means the receiver failed closed and never armed.
+    const readySince = await readEventsLength();
+    await callTerminalControl(page, "writeInput", `botster-web-production-receive:${wire.length}\n`);
+    const ready = await waitForLine(readySince, receiverReadyOrErrorPattern(wire.length), `${label} receiver ready`);
+    if (ready[1] !== undefined) {
+      throw new Error(`${label}: receiver failed closed: ${ready[1]}${ready[2] !== undefined ? `:${ready[2]}` : ""}`);
+    }
+
+    const outcomesBefore = await terminalTelemetryCount(page, "paste_outcome");
+    const retriesBefore = await terminalTelemetryCount(page, "paste_stale_retry");
+    const receiptSince = await readEventsLength();
+    const dispatched = await dispatchClipboardPaste(text);
+    if (!dispatched.defaultPrevented) {
+      throw new Error(`${label}: paste gesture was not consumed by the Botster capture path: ${JSON.stringify(dispatched)}`);
+    }
+
+    const outcome = await nextPasteOutcome(outcomesBefore, label);
+    if (outcome?.outcome !== "admitted") {
+      throw new Error(`${label}: expected an admitted outcome, observed ${JSON.stringify(outcome)}`);
+    }
+    if (outcome.minimumBytes !== text.length || outcome.requestedBytes !== payload.length) {
+      throw new Error(`${label}: size accounting mismatch: ${JSON.stringify({ outcome, utf16: text.length, utf8: payload.length })}`);
+    }
+    const retries = (await terminalTelemetryCount(page, "paste_stale_retry")) - retriesBefore;
+    if (retries > 1) throw new Error(`${label}: more than one stale-mode retry observed (${retries})`);
+    const result = await pasteInputResult(outcome.operationId);
+    if (!result?.admitted) throw new Error(`${label}: no admitted input_result for operation ${outcome.operationId}: ${JSON.stringify(result)}`);
+    if (result.mode_flags?.bracketed_paste !== bracketed) {
+      throw new Error(`${label}: input_result bracketed_paste=${String(result.mode_flags?.bracketed_paste)} but the case set ${bracketed}`);
+    }
+    if (outcome.deliveredBytes !== result.bytes_written) {
+      throw new Error(`${label}: deliveredBytes ${outcome.deliveredBytes} differs from Core bytes_written ${result.bytes_written}`);
+    }
+    // Pinned Core 93acae3: managed_session_runtime.rs prepends ESC[200~ and appends ESC[201~
+    // before the mode-gated PTY write, and bytes_written reports the actual PTY write count,
+    // so an admitted bracketed paste reports payload + 12 and an unbracketed one reports the
+    // payload. Web forwards that count as deliveredBytes; requestedBytes stays the payload.
+    const expectedBytesWritten = bracketed ? payload.length + MARKER_BYTES : payload.length;
+    if (result.bytes_written !== expectedBytesWritten) {
+      throw new Error(`${label}: bytes_written ${result.bytes_written}, expected ${expectedBytesWritten} (${bracketed ? "payload plus markers" : "payload"})`);
+    }
+    const bytesWrittenAccounting = bracketed ? "payload_plus_markers" : "payload";
+
+    // The receipt is emitted after the saved (opost-on) state is restored, so it ends in CRLF
+    // or LF. Wait for the complete line: announced N, count, 64 hex digits, terminator.
+    const receipt = await waitForLine(receiptSince, receiverReceiptPattern(wire.length), `${label} receipt`);
+    const receivedCount = Number.parseInt(receipt[1], 10);
+    const receivedDigest = receipt[2];
+
+    // Exactly one outcome and one settlement for this operation id, and exactly one new
+    // outcome overall since the dispatch.
+    const uniqueness = await page.evaluate(
+      ({ id, before }) => {
+        const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+        return {
+          outcomes_for_operation: terminal.filter((entry) => entry.kind === "paste_outcome" && entry.payload?.operationId === id).length,
+          settled_for_operation: terminal.filter((entry) => entry.kind === "paste_settled" && entry.payload?.operation_id === id).length,
+          new_outcomes: terminal.filter((entry) => entry.kind === "paste_outcome").length - before
+        };
+      },
+      { id: outcome.operationId, before: outcomesBefore }
+    );
+    if (uniqueness.outcomes_for_operation !== 1 || uniqueness.settled_for_operation !== 1 || uniqueness.new_outcomes !== 1) {
+      throw new Error(`${label}: expected exactly one outcome and one settlement for operation ${outcome.operationId}: ${JSON.stringify(uniqueness)}`);
+    }
+    const wireDigest = sha256Hex(wire);
+    if (receivedCount !== wire.length) {
+      throw new Error(`${label}: receiver read ${receivedCount} bytes, expected ${wire.length} wire bytes`);
+    }
+    if (receivedDigest !== wireDigest) {
+      throw new Error(`${label}: receiver digest ${receivedDigest} differs from expected wire digest ${wireDigest}`);
+    }
+    const leaks = await keyPathLeaks(leakMarker);
+    if (leaks !== 0) throw new Error(`${label}: paste text reached the key path in ${leaks} entries`);
+
+    // A key typed after the receipt is echoed after it.
+    const afterSince = await readEventsLength();
+    await typeThroughMountedTerminal(page, `after-${label}\n`);
+    await waitForLine(afterSince, new RegExp(`botster-web-production-echo:after-${label}\\r?\\n`), `${label} key after paste`);
+
+    recordProofNote("live_paste_case", {
+      label,
+      bracketed_paste: bracketed,
+      utf16_units: text.length,
+      payload_bytes: payload.length,
+      payload_sha256: sha256Hex(payload),
+      wire_bytes: wire.length,
+      wire_sha256: wireDigest,
+      received_bytes: receivedCount,
+      received_sha256: receivedDigest,
+      bytes_written: result.bytes_written,
+      bytes_written_accounting: bytesWrittenAccounting,
+      stale_retries: retries,
+      operation_id: outcome.operationId
+    });
+  };
+
+  await setBracketedPaste(false);
+  await receivePaste({ label: "ascii", text: `botster-web-live-paste-ascii:${"p".repeat(70_000)}`, bracketed: false });
+  await receivePaste({ label: "unicode", text: `botster-web-live-paste-unicode:${"€ü漢字🙂".repeat(200)}`, bracketed: false });
+  await receivePaste({ label: "crlf", text: "botster-web-live-paste-crlf:line1\r\nline2\r\n\r\nend", bracketed: false });
+  await setBracketedPaste(true);
+  await receivePaste({ label: "bracket-on", text: `botster-web-live-paste-bracket-on:${"q".repeat(4_096)}`, bracketed: true });
+  await setBracketedPaste(false);
+  await receivePaste({ label: "bracket-off", text: `botster-web-live-paste-bracket-off:${"r".repeat(4_096)}`, bracketed: false });
+
+  // Oversized clipboard text is refused before encoding. What the harness observes directly:
+  // a rejected/too_large outcome without requestedBytes, no new paste, paste_committed, or
+  // paste_settled telemetry, and no key-path input carrying the text. The plane records no
+  // per-frame telemetry, so "no protocol frames were sent" is an inference from the plane
+  // source (the too_large return precedes encoding and the transaction), not an observation.
+  {
+    const label = "too-large";
+    const outcomesBefore = await terminalTelemetryCount(page, "paste_outcome");
+    const pasteBefore = await terminalTelemetryCount(page, "paste");
+    const committedBefore = await terminalTelemetryCount(page, "paste_committed");
+    const settledBefore = await terminalTelemetryCount(page, "paste_settled");
+    const text = `botster-web-live-paste-too-large:${"x".repeat(MAX_PASTE_BYTES)}`;
+    const dispatched = await dispatchClipboardPaste(text);
+    if (!dispatched.defaultPrevented) throw new Error(`${label}: paste gesture was not consumed`);
+    const outcome = await nextPasteOutcome(outcomesBefore, label);
+    if (outcome?.outcome !== "rejected" || outcome.reason !== "too_large") {
+      throw new Error(`${label}: expected rejected/too_large, observed ${JSON.stringify(outcome)}`);
+    }
+    if (outcome.requestedBytes !== undefined) throw new Error(`${label}: oversized text must be refused before encoding, observed requestedBytes ${outcome.requestedBytes}`);
+    const pasteAfter = await terminalTelemetryCount(page, "paste");
+    const committedAfter = await terminalTelemetryCount(page, "paste_committed");
+    const settledAfter = await terminalTelemetryCount(page, "paste_settled");
+    const newOutcomes = (await terminalTelemetryCount(page, "paste_outcome")) - outcomesBefore;
+    if (pasteAfter !== pasteBefore || committedAfter !== committedBefore || settledAfter !== settledBefore || newOutcomes !== 1) {
+      throw new Error(`${label}: refused paste produced transaction telemetry: ${JSON.stringify({ pasteBefore, pasteAfter, committedBefore, committedAfter, settledBefore, settledAfter, newOutcomes })}`);
+    }
+    const leaks = await keyPathLeaks("botster-web-live-paste-too-large:");
+    if (leaks !== 0) throw new Error(`${label}: refused paste reached the key path in ${leaks} entries`);
+    recordProofNote("live_paste_case", {
+      label,
+      outcome: outcome.outcome,
+      reason: outcome.reason,
+      minimum_bytes: outcome.minimumBytes,
+      observed: "rejected outcome; no new paste, paste_committed, or paste_settled telemetry; no key-path input",
+      frames_not_sent: "inferred from plane source, not observed"
+    });
+  }
 }
 
 async function proveZeroBrowserOscColorReplies(page) {

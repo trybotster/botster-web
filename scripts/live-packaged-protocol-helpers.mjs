@@ -544,14 +544,95 @@ export function classifyAltExitRendererWrites(decodedWrites) {
   return "pending";
 }
 
+/** Largest wire length the receiver accepts: MAX_PASTE_BYTES plus the 12 bracket marker bytes. */
+export const RECEIVER_MAX_WIRE_BYTES = 1_048_588;
+
+/** Ready line, printed in raw mode (no opost), so it ends in a bare LF. */
+export function receiverReadyPattern(wireLength) {
+  return new RegExp(`botster-web-production-receive-ready:${wireLength}\\n`);
+}
+
+/** Receipt line, printed after the saved state is restored: announced N, count, SHA-256, terminator. */
+export function receiverReceiptPattern(wireLength) {
+  return new RegExp(`botster-web-production-received:${wireLength}:(\\d+):([0-9a-f]{64})\\r?\\n`);
+}
+
+/** Error line printed when the receiver fails closed; group 1 is the kind, group 2 an optional number. */
+export const receiverErrorPattern = /botster-web-production-receive-error:([a-z-]+)(?::(\d+))?\r?\n/;
+
+/** Ready or error, so a wait can end on either without accepting a partial line. */
+export function receiverReadyOrErrorPattern(wireLength) {
+  return new RegExp(`${receiverReadyPattern(wireLength).source}|${receiverErrorPattern.source}`);
+}
+
+/** Matches a complete script line over concatenated terminal output; null until the terminator arrives. */
+export function matchCompleteLine(text, pattern) {
+  return text.match(pattern);
+}
+
 export function productionSessionScriptSource() {
   return [
+    // Exact paste receiver. The harness announces the wire byte count N it expects the PTY to
+    // receive (a positive integer bounded by MAX_PASTE_BYTES plus the 12 bracket marker bytes).
+    // The receiver saves the current stty state and fails closed, without a ready line, if the
+    // save or the raw switch fails. Raw mode (no icrnl, no opost, no isig, no line editing)
+    // with echo off is set before the ready line. The reader (dd bs=1 count=N from /dev/tty,
+    // which writes each byte as it arrives so a killed reader loses nothing, unlike head) and
+    // a 30 s wall-clock watchdog are owned by pid: both are killed and reaped on success, on
+    // timeout, and from the script's exit and signal traps, which also remove the exact
+    // temporary file and restore the saved terminal state. VTIME 10 s ends an idle read (dd
+    // stops on the zero-length read). The receipt line carries the announced N, the received
+    // count, and the SHA-256 of the file.
+    "entry_tty=$(stty -g 2>/dev/null || true)",
+    "receive_dir=$(dirname \"$0\")",
+    "receive_file=",
+    "reader_pid=",
+    "watchdog_pid=",
+    "saved_tty=",
+    "receiver_cleanup() {",
+    "  if [ -n \"$reader_pid\" ]; then kill $reader_pid 2>/dev/null; wait $reader_pid 2>/dev/null; reader_pid=; fi",
+    "  if [ -n \"$watchdog_pid\" ]; then kill $watchdog_pid 2>/dev/null; wait $watchdog_pid 2>/dev/null; watchdog_pid=; fi",
+    "  if [ -n \"$receive_file\" ]; then rm -f \"$receive_file\"; receive_file=; fi",
+    "  if [ -n \"$saved_tty\" ]; then stty \"$saved_tty\" 2>/dev/null; saved_tty=; fi",
+    "}",
+    "script_exit() { receiver_cleanup; if [ -n \"$entry_tty\" ]; then stty \"$entry_tty\" 2>/dev/null; fi; }",
+    "trap script_exit EXIT",
+    "trap 'script_exit; exit 1' INT TERM HUP",
+    "botster_receive() {",
+    "  n=$1",
+    "  case \"$n\" in ''|*[!0-9]*) echo botster-web-production-receive-error:invalid; return ;; esac",
+    "  if [ ${#n} -gt 7 ]; then echo botster-web-production-receive-error:width:${#n}; return; fi",
+    "  if [ \"$n\" -lt 1 ] || [ \"$n\" -gt 1048588 ]; then echo botster-web-production-receive-error:bounds:$n; return; fi",
+    "  receive_file=\"$receive_dir/botster-web-production-receive.$$\"",
+    "  rm -f \"$receive_file\"",
+    "  saved_tty=$(stty -g 2>/dev/null)",
+    "  if [ -z \"$saved_tty\" ]; then receive_file=; echo botster-web-production-receive-error:stty-save; return; fi",
+    "  if ! stty raw -echo min 0 time 100 2>/dev/null; then receiver_cleanup; echo botster-web-production-receive-error:stty-raw; return; fi",
+    "  dd bs=1 count=\"$n\" < /dev/tty > \"$receive_file\" 2>/dev/null &",
+    "  reader_pid=$!",
+    "  ( trap 'kill $sleep_pid 2>/dev/null; wait $sleep_pid 2>/dev/null; exit 0' TERM; sleep 30 & sleep_pid=$!; wait $sleep_pid; kill $reader_pid 2>/dev/null ) &",
+    "  watchdog_pid=$!",
+    "  echo botster-web-production-receive-ready:$n",
+    "  wait $reader_pid 2>/dev/null",
+    "  reader_pid=",
+    "  kill $watchdog_pid 2>/dev/null; wait $watchdog_pid 2>/dev/null; watchdog_pid=",
+    "  stty \"$saved_tty\" 2>/dev/null; saved_tty=",
+    "  count=$(wc -c < \"$receive_file\" | tr -d ' ')",
+    "  digest=$( (shasum -a 256 2>/dev/null || sha256sum) < \"$receive_file\" | cut -c1-64)",
+    "  rm -f \"$receive_file\"; receive_file=",
+    "  echo botster-web-production-received:$n:$count:$digest",
+    "}",
     "stty -echo -icanon min 1 time 0 2>/dev/null || true",
     "echo botster-web-production-ready",
     "while IFS= read -r line; do",
     "  case \"$line\" in",
     "    botster-web-production-size) set -- $(stty size); echo botster-web-production-size:${1}x${2} ;;",
     "    botster-web-production-exit) echo botster-web-production-exiting; exit 0 ;;",
+    "    botster-web-production-pid) echo botster-web-production-pid:$$ ;;",
+    "    botster-web-production-tty) echo botster-web-production-tty:$(stty -g 2>/dev/null) ;;",
+    "    botster-web-production-bracket-on) printf '\\033[?2004h'; echo botster-web-production-bracket-on-done ;;",
+    "    botster-web-production-bracket-off) printf '\\033[?2004l'; echo botster-web-production-bracket-off-done ;;",
+    "    botster-web-production-receive:*) n=${line#botster-web-production-receive:}; n=$(printf '%s' \"$n\" | tr -d '\\r'); botster_receive \"$n\" ;;",
     "    botster-web-production-bytes-lead) printf '\\342' ;;",
     "    botster-web-production-bytes-rest) printf '\\202\\254' ;;",
     "    botster-web-production-bytes-ctrl) printf '\\000\\033[0m\\377' ;;",
