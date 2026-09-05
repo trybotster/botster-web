@@ -7409,7 +7409,11 @@ try {
     createWebrtcDaemonClient,
     createHubTerminalDataPlane,
     webRtcLifecycleDiagnostic,
-    localWebrtcReconnectPolicy
+    localWebrtcReconnectPolicy,
+    bindGhostsnpInstaller,
+    ghostsnpFixturePayloadBase64,
+    ghostsnpFixtureBytes,
+    testModeFlags
   });
 } finally {
   globalThis.window = originalWindow;

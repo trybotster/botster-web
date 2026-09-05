@@ -1260,6 +1260,11 @@ class WebrtcDaemonTransport {
         terminalCompatible,
         detail
       });
+      // Lifecycle callbacks run synchronously and may disconnect or reconnect. Re-check
+      // ownership after the callback boundary before marking the stream ready.
+      if (!this.ownsAttempt(attempt)) {
+        throw webrtcFailure("transport", "local WebRTC attempt was cancelled during the hello-ack callback");
+      }
       if (!this.encryptedStreamReady) {
         this.encryptedStreamReady = true;
         this.emitLifecycle({ type: "encrypted-stream-ready", requestType: "hello" });
@@ -1379,13 +1384,8 @@ class WebrtcDaemonTransport {
     this.currentAttempt = attempt;
     this.connectPromise = promise;
     this.peerFailed = false;
-    if (this.reconnectDemand) {
-      this.emitLifecycle({
-        type: "reconnect-attempt",
-        attempt: this.retryAttempt + 1,
-        deadlineMs: localWebrtcReconnectPolicy.attemptTimeoutMs
-      });
-    }
+    // Install every owned resource before the lifecycle callback boundary, so a callback
+    // that disconnects clears the deadline through the attempt and this method stops.
     attempt.deadlineTimer = window.setTimeout(() => {
       attempt.deadlineTimer = undefined;
       this.failAttempt(
@@ -1393,6 +1393,16 @@ class WebrtcDaemonTransport {
         webrtcFailure("transport", `local WebRTC connection attempt timed out after ${localWebrtcReconnectPolicy.attemptTimeoutMs} ms`)
       );
     }, localWebrtcReconnectPolicy.attemptTimeoutMs);
+    if (this.reconnectDemand) {
+      this.emitLifecycle({
+        type: "reconnect-attempt",
+        attempt: this.retryAttempt + 1,
+        deadlineMs: localWebrtcReconnectPolicy.attemptTimeoutMs
+      });
+      if (attempt.settled || !this.ownsAttempt(attempt)) {
+        return promise;
+      }
+    }
     void this.open(attempt).then(
       () => this.completeAttempt(attempt),
       (error: unknown) => this.failAttempt(attempt, error)
@@ -1488,17 +1498,19 @@ class WebrtcDaemonTransport {
       delay_ms: delayMs,
       message: errorMessage(error)
     });
+    // Install the timer before the lifecycle callback boundary. A callback that disconnects
+    // or starts a connection cancels this timer through cancelRetryTimer.
+    this.retryTimer = window.setTimeout(() => {
+      this.retryTimer = undefined;
+      if (this.disconnected || !this.reconnectDemand) return;
+      void this.connect().catch(() => undefined);
+    }, delayMs);
     this.emitLifecycle({
       type: "reconnect-scheduled",
       attempt: this.retryAttempt,
       delayMs,
       detail: errorMessage(error)
     });
-    this.retryTimer = window.setTimeout(() => {
-      this.retryTimer = undefined;
-      if (this.disconnected || !this.reconnectDemand) return;
-      void this.connect().catch(() => undefined);
-    }, delayMs);
   }
 
   private cancelRetryTimer(): void {
@@ -1710,7 +1722,8 @@ class WebrtcDaemonTransport {
       this.emitLifecycle({ type: "data-channel-closed" });
       this.handleTransportClosed(
         webrtcFailure("transport", "local WebRTC data channel closed"),
-        shouldReconnect
+        shouldReconnect,
+        generation
       );
     });
     dataChannel.addEventListener("error", () => {
@@ -1720,7 +1733,8 @@ class WebrtcDaemonTransport {
       this.emitLifecycle({ type: "data-channel-error" });
       this.handleTransportClosed(
         webrtcFailure("transport", "local WebRTC data channel failed"),
-        shouldReconnect
+        shouldReconnect,
+        generation
       );
     });
 
@@ -2055,11 +2069,21 @@ class WebrtcDaemonTransport {
     // abandons the current stream and removes its TerminalStreamListener.
     const shouldReconnect = this.hasReconnectDemand();
     this.emitLifecycle({ type: "data-channel-error" });
-    this.handleTransportClosed(error, shouldReconnect);
+    this.handleTransportClosed(error, shouldReconnect, generation);
   }
 
-  private failPending(error: unknown): void {
-    for (const pending of this.pendingRequests.splice(0)) {
+  /** Rejects pending requests; with a generation, only that peer generation's requests. */
+  private failPending(error: unknown, generation?: number): void {
+    const failing = generation === undefined
+      ? this.pendingRequests.splice(0)
+      : this.pendingRequests.filter((pending) => pending.generation === generation);
+    if (generation !== undefined) {
+      for (const pending of failing) {
+        const index = this.pendingRequests.indexOf(pending);
+        if (index >= 0) this.pendingRequests.splice(index, 1);
+      }
+    }
+    for (const pending of failing) {
       pending.reject(error);
     }
   }
@@ -2072,7 +2096,17 @@ class WebrtcDaemonTransport {
     );
   }
 
-  private handleTransportClosed(error: unknown, shouldReconnect = this.hasReconnectDemand()): void {
+  private handleTransportClosed(
+    error: unknown,
+    shouldReconnect = this.hasReconnectDemand(),
+    generation = this.peerGeneration
+  ): void {
+    if (generation !== this.peerGeneration) {
+      // A lifecycle callback already started a newer attempt, which reset the lost peer.
+      // Fail only the lost generation's requests; never touch the newer attempt.
+      this.failPending(error, generation);
+      return;
+    }
     const attempt = this.currentAttempt;
     if (attempt && !attempt.settled) {
       // The peer closed while its attempt was still connecting: fail that attempt by

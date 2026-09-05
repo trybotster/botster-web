@@ -1,8 +1,10 @@
 // Resilient WebRTC reconnect over the real WebrtcDaemonTransport with fake peers and channels.
 //
-// Every scenario establishes reconnect demand, closes the live transport, fails at least two
-// connection attempts, and then recovers WITHOUT a new caller request. Timers go through the
-// test window so retry delays and attempt deadlines are fired explicitly.
+// Recovery scenarios (a), (a2), (b), (c), (e), (f) establish reconnect demand, close the live
+// transport, fail at least one connection attempt, and recover WITHOUT a new caller request.
+// Scenarios (d), (g), and (h) cover cancellation, lifecycle-callback boundaries, and the
+// absolute attempt deadline. Timers go through the test window so retry delays and attempt
+// deadlines are fired explicitly.
 //
 // Runs inside App.test.mjs while the test window object (lifecycle capture, timers) is active.
 
@@ -22,7 +24,11 @@ export async function runWebrtcReconnectTests(helpers) {
     createWebrtcDaemonClient,
     createHubTerminalDataPlane,
     webRtcLifecycleDiagnostic,
-    localWebrtcReconnectPolicy
+    localWebrtcReconnectPolicy,
+    bindGhostsnpInstaller,
+    ghostsnpFixturePayloadBase64,
+    ghostsnpFixtureBytes,
+    testModeFlags
   } = helpers;
   const secret = localWebrtcBootstrapFixture.grant_secret;
 
@@ -104,13 +110,14 @@ export async function runWebrtcReconnectTests(helpers) {
    * Client whose peer factory fails for the attempt numbers in `failAttempts` (1-based
    * across the client's lifetime) and otherwise returns a fresh fake peer with auto Hello.
    */
-  const makeClient = ({ failAttempts = new Set(), fetchImpl, refreshBootstrap, autoHello = true, blockAttempts = new Map() } = {}) => {
+  const makeClient = ({ failAttempts = new Set(), fetchImpl, refreshBootstrap, autoHello = true, blockAttempts = new Map(), onLifecycle } = {}) => {
     const channels = [];
     let attempts = 0;
     let signalCalls = 0;
     const client = createWebrtcDaemonClient({
       bootstrap: localWebrtcBootstrapFixture,
       ...(refreshBootstrap ? { refreshBootstrap } : {}),
+      ...(onLifecycle ? { onLifecycle: (event) => onLifecycle(event, client) } : {}),
       peerConnectionFactory: () => {
         attempts += 1;
         if (failAttempts.has(attempts)) {
@@ -248,8 +255,11 @@ export async function runWebrtcReconnectTests(helpers) {
       const { client, channels, attempts } = makeClient({ failAttempts: new Set([2, 3]) });
       const statuses = [];
       const plane = createHubTerminalDataPlane({ sessionId: "reconnect-terminal-session", bridge: client });
+      const installs = [];
+      bindGhostsnpInstaller(plane, installs);
+      const outputs = [];
       plane.subscribeStatus((status) => statuses.push(status));
-      plane.subscribeOutput(() => undefined);
+      plane.subscribeOutput((data) => outputs.push(data));
       await waitForTestCondition(() => channels.length === 1 && channels[0].sent.length >= 1);
       const firstAttach = (await decryptAll(channels[0])).find((request) => request.type === "attach");
       assert.ok(firstAttach, "terminal attach was requested on the first peer");
@@ -280,6 +290,72 @@ export async function runWebrtcReconnectTests(helpers) {
       assert.ok(reattach, "terminal reattached on the recovered peer without a caller request");
       assert.notEqual(reattach.subscription_id, firstAttach.subscription_id);
       assert.equal(recovered.some((request) => request.type === "subscribe_entities"), false, "no entity demand existed");
+
+      // Complete the actual admission on the recovered peer: reservation, reserved-channel
+      // Hello, snapshot READY and FINISH, Attached, then live output into the real data plane.
+      await emitChunkedTestResponse(channels[1], secret, {
+        kind: "terminal_reservation",
+        terminal_reservation: {
+          session_id: "reconnect-terminal-session",
+          subscription_id: reattach.subscription_id,
+          generation: 9101,
+          peer_generation: 4,
+          label: "r-reconnect-terminal",
+          expires_in_seconds: 30
+        },
+        events: []
+      }, { messageId: "reconnect-b-reservation" });
+      await waitForTestCondition(() =>
+        channels[1].createdDataChannels.some((channel) => channel.label === "r-reconnect-terminal" && channel.helloAckDelivered === true)
+      );
+      const terminalChannel = channels[1].createdDataChannels.find((channel) => channel.label === "r-reconnect-terminal");
+      assert.equal(terminalChannel.readyState, "open");
+      // Attach also reads mode flags and the screen over the control channel; answer as they arrive.
+      const answered = new Set();
+      const answerControlReads = async () => {
+        for (const [index, sent] of channels[1].sent.entries()) {
+          if (answered.has(index)) continue;
+          let request;
+          try {
+            request = await decryptTestEnvelope(secret, sent);
+          } catch {
+            continue;
+          }
+          if (request.type === "read_mode_flags") {
+            answered.add(index);
+            await emitChunkedTestResponse(channels[1], secret,
+              { kind: "read_mode_flags", mode_flags: testModeFlags("reconnect-terminal-session"), events: [] },
+              { messageId: `reconnect-b-mode-flags-${index}` });
+          } else if (request.type === "read_screen") {
+            answered.add(index);
+            await emitChunkedTestResponse(channels[1], secret,
+              { kind: "read_screen", read_screen: { session_id: "reconnect-terminal-session", text: "" }, events: [] },
+              { messageId: `reconnect-b-read-screen-${index}` });
+          }
+        }
+      };
+      const terminalFrame = (frame, messageId) => emitChunkedTestResponse(terminalChannel, secret, {
+        session_id: "reconnect-terminal-session",
+        subscription_id: reattach.subscription_id,
+        ...frame
+      }, { messageId, deliveryKind: "daemon_terminal_frame" });
+      const snapshot = { type: "snapshot", payload_base64: ghostsnpFixturePayloadBase64, payload_encoding: "base64", bytes: ghostsnpFixtureBytes };
+      await terminalFrame(snapshot, "reconnect-b-snapshot-ready");
+      await terminalFrame(snapshot, "reconnect-b-snapshot-finish");
+      await terminalFrame({ type: "attach_state", state: "attached" }, "reconnect-b-attached");
+      for (let round = 0; round < 20 && !statuses.some((status) => status.state === "attached"); round += 1) {
+        await answerControlReads();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      assert.ok(statuses.some((status) => status.state === "attached"), "data plane reached Attached on the recovered peer");
+      await terminalFrame({
+        type: "terminal_output",
+        payload_base64: Buffer.from("recovered-output").toString("base64"),
+        payload_encoding: "base64",
+        bytes: 16
+      }, "reconnect-b-output");
+      await waitForTestCondition(() => outputs.some((data) => Buffer.from(data).toString("utf8") === "recovered-output"));
+      assert.equal(installs.length, 2, "both snapshot frames reached the real snapshot reader");
       void plane.detach().catch(() => undefined);
       client.disconnect();
     }
@@ -453,6 +529,113 @@ export async function runWebrtcReconnectTests(helpers) {
       assert.equal(eventsSince(before, "reconnect-scheduled").length, expectedDelays.length);
       client.disconnect();
       assert.equal([...timers.values()].filter((entry) => entry.eventIndex > before && expectedDelays.includes(entry.delay)).length, 0);
+    }
+    // (g) Lifecycle callbacks are synchronous external calls; each boundary is fenced.
+    {
+      // hello-ack callback disconnects: the stream never becomes ready, nothing is restored.
+      const helloBefore = lifecycleEvents.length;
+      const helloClient = makeClient({
+        onLifecycle: (event, client) => {
+          if (event.type === "hello-ack") client.disconnect();
+        }
+      });
+      helloClient.client.subscribeEntityFrames("session", () => undefined);
+      await waitForTestCondition(() => eventsSince(helloBefore, "hello-ack").length === 1);
+      await flushMicrotasks();
+      await flushMicrotasks();
+      await flushMicrotasks();
+      assert.equal(eventsSince(helloBefore, "encrypted-stream-ready").length, 0, "no ready after a disconnecting hello-ack callback");
+      assert.equal((await decryptAll(helloClient.channels[0])).some((request) => request.type === "subscribe_entities"), false, "no subscription restore after disconnect");
+      await assert.rejects(helloClient.client.request({ type: "status" }), /disconnected/);
+
+      // reconnect-attempt callback disconnects: no open work starts and no deadline timer survives.
+      const attemptBefore = lifecycleEvents.length;
+      const attemptClient = makeClient({
+        onLifecycle: (event, client) => {
+          if (event.type === "reconnect-attempt") client.disconnect();
+        }
+      });
+      const attemptSubscription = attemptClient.client.subscribeEntityFrames("session", () => undefined);
+      await answerEntitySubscribe(attemptClient.channels, 0, "reconnect-g-attempt-subscribe");
+      await attemptSubscription.ready;
+      attemptClient.channels[0].close();
+      await waitForTestCondition(() => eventsSince(attemptBefore, "reconnect-attempt").length === 1);
+      await flushMicrotasks();
+      await flushMicrotasks();
+      await flushMicrotasks();
+      assert.equal(attemptClient.attempts(), 1, "the cancelled attempt created no peer");
+      assert.equal(liveTimersWithDelay(localWebrtcReconnectPolicy.attemptTimeoutMs, attemptBefore).length, 0, "no deadline timer after the callback disconnect");
+      assert.equal(eventsSince(attemptBefore, "reconnect-scheduled").length, 0);
+
+      // reconnect-scheduled callback disconnects: no retry timer survives.
+      const scheduledBefore = lifecycleEvents.length;
+      const scheduledClient = makeClient({
+        failAttempts: new Set([2]),
+        onLifecycle: (event, client) => {
+          if (event.type === "reconnect-scheduled") client.disconnect();
+        }
+      });
+      const scheduledSubscription = scheduledClient.client.subscribeEntityFrames("session", () => undefined);
+      await answerEntitySubscribe(scheduledClient.channels, 0, "reconnect-g-scheduled-subscribe");
+      await scheduledSubscription.ready;
+      scheduledClient.channels[0].close();
+      await waitScheduled(scheduledBefore, 1);
+      await flushMicrotasks();
+      assert.equal(liveTimersWithDelay(500, scheduledBefore).length, 0, "no retry timer after the callback disconnect");
+      assert.equal(scheduledClient.attempts(), 2);
+
+      // data-channel-closed callback starts a new connection: the old close handler must not
+      // fail the new attempt, and the new peer serves the request and restores the subscription.
+      const closedBefore = lifecycleEvents.length;
+      let callbackRequest;
+      const closedClient = makeClient({
+        onLifecycle: (event, client) => {
+          if (event.type === "data-channel-closed" && !callbackRequest) {
+            callbackRequest = client.request({ type: "status" });
+          }
+        }
+      });
+      const closedSubscription = closedClient.client.subscribeEntityFrames("session", () => undefined);
+      await answerEntitySubscribe(closedClient.channels, 0, "reconnect-g-closed-subscribe");
+      await closedSubscription.ready;
+      closedClient.channels[0].close();
+      await waitForTestCondition(() => Boolean(callbackRequest));
+      await waitAttempts(closedClient.attempts, 2);
+      await waitForTestCondition(() => closedClient.channels[1]?.helloAckDelivered === true);
+      await waitForTestCondition(() => closedClient.channels[1].sent.length >= 2);
+      const callbackRequests = await decryptAll(closedClient.channels[1]);
+      assert.equal(callbackRequests.filter((request) => request.type === "status").length, 1);
+      assert.equal(callbackRequests.filter((request) => request.type === "subscribe_entities").length, 1);
+      await emitChunkedTestResponse(closedClient.channels[1], secret, { kind: "status", status: null, sessions: [], packages: [], events: [], diagnostics: [] }, { messageId: "reconnect-g-closed-status" });
+      assert.equal((await callbackRequest).kind, "status");
+      assert.equal(eventsSince(closedBefore, "reconnect-scheduled").length, 0, "the old close handler scheduled nothing against the new attempt");
+      assert.equal(closedClient.attempts(), 2);
+      closedClient.client.disconnect();
+    }
+
+    // (h) Absolute deadline with a bootstrap provider that never settles.
+    {
+      const before = lifecycleEvents.length;
+      let resolveBootstrap;
+      const neverBootstrap = new Promise((resolve) => { resolveBootstrap = resolve; });
+      const { client, attempts } = makeClient({ refreshBootstrap: () => neverBootstrap });
+      const pending = client.request({ type: "status" });
+      await flushMicrotasks();
+      const deadlines = liveTimersWithDelay(localWebrtcReconnectPolicy.attemptTimeoutMs, before - 1);
+      assert.equal(deadlines.length, 1, "exactly one live attempt deadline timer");
+      fireTimer(deadlines[0][0]);
+      await assert.rejects(pending, /timed out after 10000 ms/);
+      assert.equal(attempts(), 0, "no peer was created");
+      assert.equal(eventsSince(before, "reconnect-scheduled").length, 0, "no demand, so no retry");
+      // The provider settles late; its result stays fenced.
+      resolveBootstrap(localWebrtcBootstrapFixture);
+      await flushMicrotasks();
+      await flushMicrotasks();
+      await flushMicrotasks();
+      assert.equal(attempts(), 0, "late bootstrap did not create a peer");
+      assert.equal(eventsSince(before).length, 0, "no lifecycle events from the expired attempt");
+      assert.equal(liveTimersWithDelay(localWebrtcReconnectPolicy.attemptTimeoutMs, before - 1).length, 0);
+      client.disconnect();
     }
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
