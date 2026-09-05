@@ -97,15 +97,27 @@ Cancellation and error cases (before-Commit cancel, after-Commit unknown, Core `
 
 ## Cancellation coverage by ownership boundary
 
-Boundaries observed in every case: the decoded frames on the reserved channel (Begin, Chunk, Commit, Abort), the plane's `paste_committed` and `paste_settled` telemetry, and the single outcome. No case infers a boundary from elapsed time. All of these run in the controlled fixture of `terminalPaste.test.mjs`: the real `HubTerminalDataPlane` over the real `WebrtcDaemonTransport` with fake peers, admitted through reservation and Hello. The full mounted application (Chromium and the real Hub) covers admitted, stale-retry, and too-large outcomes in the live lane; cancelled and unknown presentation is covered by the React view-host test on the minimal DOM, because the mounted application has no deterministic interruption point.
+Boundaries observed in every case: the decoded frames on the reserved channel (Begin, Chunk, Commit, Abort), the plane's `paste_committed` and `paste_settled` telemetry, and the single outcome. No case infers a boundary from elapsed time.
+
+### Completed in the controlled fixture
+
+These run in `terminalPaste.test.mjs`: the real `HubTerminalDataPlane` over the real `WebrtcDaemonTransport` with fake peers, admitted through reservation and Hello. They prove Web's behavior at each boundary; they do not involve a real Hub or Core. Cancelled and unknown presentation is covered by the React view-host test on the minimal DOM.
 
 | Label | Case | Boundary | Status |
 | --- | --- | --- | --- |
-| F1 | pre-Commit interruption by a failed frame send on a live generation (p8) | frames Begin then Abort, no Commit; outcome cancelled "was not sent" | passed earlier and in this run |
-| F2 | pre-Commit interruption by attachment change (p12, new) | the reserved channel is closed synchronously after Begin is forwarded; the plane's stream-loss path bumps the generation; the transaction's next-iteration `stillLive` guard cancels with "attachment changed"; the lost stream carries Begin only, no Abort on a recovered generation; the replacement stream carries nothing from that operation; a later paste restarts at operation id 1 and admits | passed; no production hook was necessary, the existing fake send boundary expressed it |
+| F1 | pre-Commit interruption by a failed frame send on a live generation (p8) | frames Begin then Abort, no Commit; outcome cancelled "was not sent" | passed |
+| F2 | pre-Commit interruption by attachment change (p12) | the reserved channel is closed synchronously after Begin is forwarded; the plane's stream-loss path bumps the generation; the transaction's next-iteration `stillLive` guard cancels with "attachment changed"; the lost stream carries Begin only, no Abort on a recovered generation; the replacement stream carries nothing from that operation; a later paste restarts at operation id 1 and admits | passed; no production hook was necessary, the existing fake send boundary expressed it |
 | F3 | loss of the authoritative result after Commit (p9-lost) | Commit observed on the decoded stream before the control channel closes; outcome unknown `stream_lost`; no Abort | passed |
 | F4 | result bound after Commit (p9-bound) | controlled timer after Commit observed; outcome unknown `result_bound`; Abort observed as the fourth frame; a late admitted result settles cleanly | passed |
-| F5 | Core-side authoritative rejection | p5 maps injected `partial_write`, `timeout`, and rejections without retry, which proves Web's mapping only, not a real Core rejection | mapping passed; a real `session_not_writable` case is pending and needs Core confirmation that an ended session keeps an attachable subscription that still answers with `input_result` |
+| F5 mapping | Web's mapping of injected `partial_write`, `timeout`, and other rejections without retry (p5) | injected `input_result` frames | passed; proves Web's mapping only |
+
+### Pending against the real Hub
+
+| Case | What it must show | Status |
+| --- | --- | --- |
+| Live lane (`smoke:live-packaged-protocol:paste`) | admitted, stale-retry, and too-large outcomes through the full mounted application, with the exact receiver | implemented, not run; needs the heavy window |
+| Real Core rejection | an authoritative non-admitted `input_result` produced by Core, not injected | not designed. An ended session is not a route: the pinned Core client worker retires the terminal adapter after `ProcessExit` delivery, so retained history does not establish an open input-result path. A real rejection needs a Core-provided condition on a live, writable session; none is identified yet |
+| Real cancellation or result loss against Core | a pre-Commit interruption or post-Commit result loss with a real Hub | not designed; the mounted application has no deterministic interruption point, and no production hook is added |
 
 ## Not yet covered
 
