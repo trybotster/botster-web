@@ -3509,6 +3509,7 @@ const {
   applyAssemblyTimeoutCleanup,
   createLocalWebrtcBootstrapRefresher,
   createWebrtcDaemonClient,
+  localWebrtcReconnectPolicy,
   localWebrtcResponseChunkLimits,
   setApplyAssemblyTimeoutCleanup,
   WebrtcDaemonClientError,
@@ -7393,6 +7394,23 @@ try {
     signalingFailureClient.request({ type: "status" }),
     (error) => connectionFailureDiagnostic(false, error).id === "webrtc-signaling-failed"
   );
+
+  // Resilient reconnect: recovery through capped retries without a new caller request.
+  await (await import("./botster/webrtcReconnect.test.mjs")).runWebrtcReconnectTests({
+    createFakeDataChannel,
+    createFakePeerConnection,
+    installAutoHelloAck,
+    decryptTestEnvelope,
+    emitChunkedTestResponse,
+    waitForTestCondition,
+    flushMicrotasks,
+    localWebrtcBootstrapFixture,
+    lifecycleEvents,
+    createWebrtcDaemonClient,
+    createHubTerminalDataPlane,
+    webRtcLifecycleDiagnostic,
+    localWebrtcReconnectPolicy
+  });
 } finally {
   globalThis.window = originalWindow;
 }

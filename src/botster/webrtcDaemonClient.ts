@@ -60,9 +60,40 @@ export type WebrtcDaemonLifecycleEvent =
       reason: "reservation_missing" | "rejected" | "expired" | "closed";
       detail: string;
     }
-  | { type: "hello-ack"; hostCompatible: boolean; terminalCompatible: boolean; detail: string };
+  | { type: "hello-ack"; hostCompatible: boolean; terminalCompatible: boolean; detail: string }
+  | { type: "reconnect-attempt"; attempt: number; deadlineMs: number }
+  | { type: "reconnect-scheduled"; attempt: number; delayMs: number; detail: string };
 
 export const webRtcDaemonLifecycleEventName = "botster:webrtc-daemon-lifecycle";
+
+/**
+ * Reconnect policy after a transport loss while reconnect demand exists. Retries continue at
+ * the capped delay until an authenticated Hello or an explicit disconnect. Each attempt has
+ * an absolute deadline measured from attempt start; the deadline rejects the caller even
+ * when a bootstrap provider or fetch ignores cancellation.
+ */
+export const localWebrtcReconnectPolicy = Object.freeze({
+  initialDelayMs: 500,
+  maxDelayMs: 10_000,
+  attemptTimeoutMs: 10_000
+});
+
+/**
+ * One connection attempt. `generation` is the canonical attempt identity: it is allocated
+ * before the first await and equals `peerGeneration` only while the attempt owns the client.
+ * Timer, abort controller, and peer resources belong to the attempt and are cleared by identity.
+ */
+type ConnectAttempt = {
+  generation: number;
+  promise: Promise<void>;
+  resolve(): void;
+  reject(error: unknown): void;
+  settled: boolean;
+  deadlineTimer: number | undefined;
+  abort: AbortController | undefined;
+  peerConnection: RTCPeerConnection | undefined;
+  dataChannel: RTCDataChannel | undefined;
+};
 
 type PendingKind = "hello" | "request";
 
@@ -491,6 +522,12 @@ class WebrtcDaemonTransport {
   private dataChannel: RTCDataChannel | undefined;
   private cryptoKey: CryptoKey | undefined;
   private connectPromise: Promise<void> | undefined;
+  private currentAttempt: ConnectAttempt | undefined;
+  private helloGeneration: number | undefined;
+  private retryTimer: number | undefined;
+  private retryAttempt = 0;
+  /** Sticky until an authenticated Hello: captured at loss, before terminal listeners detach. */
+  private reconnectDemand = false;
   private encryptedStreamReady = false;
   private disconnected = false;
   private closing = false;
@@ -1188,11 +1225,13 @@ class WebrtcDaemonTransport {
     });
   }
 
-  private async sendHello(generation: number): Promise<DaemonHelloAck> {
-    if (generation !== this.peerGeneration) {
+  private async sendHello(attempt: ConnectAttempt): Promise<DaemonHelloAck> {
+    const generation = attempt.generation;
+    if (!this.ownsAttempt(attempt)) {
       throw webrtcFailure("transport", "local WebRTC hello targeted a stale peer generation");
     }
-    if (this.helloPromise) return this.helloPromise;
+    if (this.helloPromise && this.helloGeneration === generation) return this.helloPromise;
+    this.helloGeneration = generation;
     const hello: DaemonHello = {
       protocol: hostHelloProtocol,
       compatibility: hostCompatibilityRequirement,
@@ -1206,6 +1245,11 @@ class WebrtcDaemonTransport {
       }
       return ack;
     }).then((ack) => {
+      // Post-await guard: a Hello ack for a superseded or disconnected attempt must not
+      // mark the stream ready or emit lifecycle events.
+      if (!this.ownsAttempt(attempt)) {
+        throw webrtcFailure("transport", "local WebRTC hello ack arrived for a superseded attempt");
+      }
       const terminalCompatible = isTerminalCompatibilityAccepted(ack.terminal_compatibility);
       const detail = terminalCompatible
         ? `Host Hello accepted protocol ${ack.compatibility.protocol} v${ack.compatibility.protocol_version}; terminal plane is compatible.`
@@ -1302,11 +1346,165 @@ class WebrtcDaemonTransport {
       return Promise.resolve();
     }
 
-    this.connectPromise ??= this.open().catch((error: unknown) => {
-      this.resetPeerState();
-      throw error;
+    if (this.connectPromise) return this.connectPromise;
+    // A caller during the retry wait starts the attempt now through the same single path.
+    this.cancelRetryTimer();
+    return this.startAttempt();
+  }
+
+  private startAttempt(): Promise<void> {
+    // The previous peer, if any, is already reset by the loss path. Close anything left over
+    // before the new attempt publishes its own resources.
+    this.resetPeerState();
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((resolveAttempt, rejectAttempt) => {
+      resolve = resolveAttempt;
+      reject = rejectAttempt;
     });
-    return this.connectPromise;
+    // Callers that never await this promise (retry timer, loss path) must not surface an
+    // unhandled rejection; the attempt reports failure through failAttempt.
+    promise.catch(() => undefined);
+    const attempt: ConnectAttempt = {
+      generation: ++this.peerGeneration,
+      promise,
+      resolve,
+      reject,
+      settled: false,
+      deadlineTimer: undefined,
+      abort: typeof AbortController === "function" ? new AbortController() : undefined,
+      peerConnection: undefined,
+      dataChannel: undefined
+    };
+    this.currentAttempt = attempt;
+    this.connectPromise = promise;
+    this.peerFailed = false;
+    if (this.reconnectDemand) {
+      this.emitLifecycle({
+        type: "reconnect-attempt",
+        attempt: this.retryAttempt + 1,
+        deadlineMs: localWebrtcReconnectPolicy.attemptTimeoutMs
+      });
+    }
+    attempt.deadlineTimer = window.setTimeout(() => {
+      attempt.deadlineTimer = undefined;
+      this.failAttempt(
+        attempt,
+        webrtcFailure("transport", `local WebRTC connection attempt timed out after ${localWebrtcReconnectPolicy.attemptTimeoutMs} ms`)
+      );
+    }, localWebrtcReconnectPolicy.attemptTimeoutMs);
+    void this.open(attempt).then(
+      () => this.completeAttempt(attempt),
+      (error: unknown) => this.failAttempt(attempt, error)
+    );
+    return promise;
+  }
+
+  private ownsAttempt(attempt: ConnectAttempt): boolean {
+    return this.currentAttempt === attempt && attempt.generation === this.peerGeneration && !this.disconnected;
+  }
+
+  private staleAttemptFailure(): WebrtcDaemonClientError {
+    return webrtcFailure("transport", "local WebRTC connection attempt was superseded");
+  }
+
+  private completeAttempt(attempt: ConnectAttempt): void {
+    if (attempt.settled) return;
+    attempt.settled = true;
+    this.clearAttemptDeadline(attempt);
+    if (this.connectPromise === attempt.promise) this.connectPromise = undefined;
+    if (this.ownsAttempt(attempt)) {
+      // Retry state resets only after the authenticated Hello that open() awaited.
+      this.retryAttempt = 0;
+      this.reconnectDemand = false;
+      this.cancelRetryTimer();
+    }
+    attempt.resolve();
+  }
+
+  /**
+   * Fails one attempt by identity. An owning attempt captures the failure and the reconnect
+   * demand before invalidation, resets shared peer state, and schedules recovery. A stale
+   * attempt closes only its own resources and never touches a newer attempt.
+   */
+  private failAttempt(attempt: ConnectAttempt, error: unknown, demandOverride?: boolean): void {
+    if (attempt.settled) return;
+    attempt.settled = true;
+    this.clearAttemptDeadline(attempt);
+    attempt.abort?.abort();
+    const owner = this.ownsAttempt(attempt);
+    if (owner) {
+      const demand = demandOverride ?? (this.reconnectDemand || this.hasReconnectDemand());
+      this.currentAttempt = undefined;
+      if (this.connectPromise === attempt.promise) this.connectPromise = undefined;
+      this.resetPeerState();
+      this.closeAttemptResources(attempt);
+      this.failPending(error);
+      attempt.reject(error);
+      if (demand && !this.disconnected) {
+        this.reconnectDemand = true;
+        this.scheduleRetry(error);
+      }
+      return;
+    }
+    this.closeAttemptResources(attempt);
+    attempt.reject(error);
+  }
+
+  private clearAttemptDeadline(attempt: ConnectAttempt): void {
+    if (attempt.deadlineTimer === undefined) return;
+    window.clearTimeout(attempt.deadlineTimer);
+    attempt.deadlineTimer = undefined;
+  }
+
+  private closeAttemptResources(attempt: ConnectAttempt): void {
+    const dataChannel = attempt.dataChannel;
+    const peerConnection = attempt.peerConnection;
+    attempt.dataChannel = undefined;
+    attempt.peerConnection = undefined;
+    if (dataChannel === this.dataChannel) this.dataChannel = undefined;
+    if (peerConnection === this.peerConnection) this.peerConnection = undefined;
+    try {
+      if (dataChannel && dataChannel.readyState !== "closed") dataChannel.close?.();
+    } catch {
+      // Closing a failed channel is best-effort.
+    }
+    try {
+      peerConnection?.close?.();
+    } catch {
+      // Closing a failed peer is best-effort.
+    }
+  }
+
+  private scheduleRetry(error: unknown): void {
+    if (this.retryTimer !== undefined || this.disconnected) return;
+    this.retryAttempt += 1;
+    const delayMs = Math.min(
+      localWebrtcReconnectPolicy.initialDelayMs * 2 ** (this.retryAttempt - 1),
+      localWebrtcReconnectPolicy.maxDelayMs
+    );
+    recordLiveHarnessEvent("webrtc_reconnect_scheduled", {
+      attempt: this.retryAttempt,
+      delay_ms: delayMs,
+      message: errorMessage(error)
+    });
+    this.emitLifecycle({
+      type: "reconnect-scheduled",
+      attempt: this.retryAttempt,
+      delayMs,
+      detail: errorMessage(error)
+    });
+    this.retryTimer = window.setTimeout(() => {
+      this.retryTimer = undefined;
+      if (this.disconnected || !this.reconnectDemand) return;
+      void this.connect().catch(() => undefined);
+    }, delayMs);
+  }
+
+  private cancelRetryTimer(): void {
+    if (this.retryTimer === undefined) return;
+    window.clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
   }
 
   disconnect(): void {
@@ -1314,8 +1512,22 @@ class WebrtcDaemonTransport {
     if (typeof window !== "undefined" && this.pageHideHandler && typeof window.removeEventListener === "function") {
       window.removeEventListener("pagehide", this.pageHideHandler);
     }
+    // Invalidate ownership before cleanup so a late attempt cannot publish.
+    const attempt = this.currentAttempt;
+    this.currentAttempt = undefined;
+    this.cancelRetryTimer();
+    this.reconnectDemand = false;
+    const error = webrtcFailure("transport", "local WebRTC transport disconnected");
+    if (attempt && !attempt.settled) {
+      attempt.settled = true;
+      this.clearAttemptDeadline(attempt);
+      attempt.abort?.abort();
+      this.closeAttemptResources(attempt);
+      attempt.reject(error);
+    }
+    this.connectPromise = undefined;
     this.resetPeerState();
-    this.failPending(webrtcFailure("transport", "local WebRTC transport disconnected"));
+    this.failPending(error);
   }
 
   /**
@@ -1440,15 +1652,22 @@ class WebrtcDaemonTransport {
     return true;
   }
 
-  private async open(): Promise<void> {
-    this.peerFailed = false;
-    this.resetPeerState();
+  /**
+   * Runs one attempt. The attempt identity is allocated by startAttempt before this method's
+   * first await. Every await is followed by an ownership check; a superseded attempt closes
+   * only its own resources and rejects without touching shared state.
+   */
+  private async open(attempt: ConnectAttempt): Promise<void> {
+    const generation = attempt.generation;
     const bootstrap = await this.resolveBootstrap();
+    if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
+    let cryptoKey: CryptoKey;
     try {
-      this.cryptoKey = await importStreamKey(bootstrap.grant_secret);
+      cryptoKey = await importStreamKey(bootstrap.grant_secret);
     } catch (error) {
       throw webrtcFailure("bootstrap", `local WebRTC bootstrap grant is invalid: ${errorMessage(error)}`);
     }
+    if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
 
     let peerConnection: RTCPeerConnection;
     try {
@@ -1456,8 +1675,7 @@ class WebrtcDaemonTransport {
     } catch (error) {
       throw webrtcFailure("transport", `local WebRTC peer connection failed: ${errorMessage(error)}`);
     }
-    this.peerConnection = peerConnection;
-    const generation = ++this.peerGeneration;
+    attempt.peerConnection = peerConnection;
     let dataChannel: RTCDataChannel;
     try {
       dataChannel = peerConnection.createDataChannel("botster-daemon", {
@@ -1468,6 +1686,10 @@ class WebrtcDaemonTransport {
     } catch (error) {
       throw webrtcFailure("transport", `local WebRTC data channel creation failed: ${errorMessage(error)}`);
     }
+    attempt.dataChannel = dataChannel;
+    // Publish only while owning. Peer listeners below check identity against these fields.
+    this.cryptoKey = cryptoKey;
+    this.peerConnection = peerConnection;
     this.dataChannel = dataChannel;
     let messageQueue = Promise.resolve();
     dataChannel.addEventListener("message", (event) => {
@@ -1509,7 +1731,9 @@ class WebrtcDaemonTransport {
     } catch (error) {
       throw webrtcFailure("transport", `local WebRTC offer creation failed: ${errorMessage(error)}`);
     }
+    if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
     await waitForIceGatheringComplete(peerConnection);
+    if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
 
     const signalRequest: DaemonRequest = {
       type: "local_webrtc_signal",
@@ -1529,15 +1753,19 @@ class WebrtcDaemonTransport {
           kind: "daemon_request",
           request_id: `local-webrtc-signal-${Date.now()}`,
           payload: signalRequest
-        })
+        }),
+        ...(attempt.abort ? { signal: attempt.abort.signal } : {})
       });
     } catch (error) {
+      if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
       throw webrtcFailure("signaling", `local WebRTC signaling request failed: ${errorMessage(error)}`);
     }
+    if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
     if (!response.ok) {
       throw webrtcFailure("signaling", `local WebRTC signaling failed with HTTP ${response.status}`);
     }
     const reply = await response.json() as { payload?: DaemonResponse };
+    if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
     const answer = reply.payload?.local_webrtc_answer?.answer;
     recordLiveHarnessEvent("webrtc_signal_response", {
       has_answer: Boolean(answer),
@@ -1551,10 +1779,16 @@ class WebrtcDaemonTransport {
       await peerConnection.setRemoteDescription(answer as unknown as RTCSessionDescriptionInit);
       await waitForDataChannelOpen(dataChannel);
     } catch (error) {
+      if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
       throw webrtcFailure("transport", `local WebRTC transport failed: ${errorMessage(error)}`);
     }
-    await this.sendHello(generation);
+    if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
+    await this.sendHello(attempt);
+    if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
     queueMicrotask(() => {
+      // Cancellation fence: a disconnect or supersession between Hello and this microtask
+      // must not restore subscriptions on a peer that no longer owns the client.
+      if (!this.ownsAttempt(attempt)) return;
       for (const subscription of this.entitySubscriptions) {
         void this.startEntitySubscription(subscription, generation);
       }
@@ -1839,10 +2073,20 @@ class WebrtcDaemonTransport {
   }
 
   private handleTransportClosed(error: unknown, shouldReconnect = this.hasReconnectDemand()): void {
+    const attempt = this.currentAttempt;
+    if (attempt && !attempt.settled) {
+      // The peer closed while its attempt was still connecting: fail that attempt by
+      // identity so the deadline, abort controller, and retry path all resolve once.
+      this.failAttempt(attempt, error, shouldReconnect || this.reconnectDemand);
+      return;
+    }
     this.resetPeerState();
     this.failPending(error);
-    if (!this.disconnected && shouldReconnect) {
-      queueMicrotask(() => void this.reconnectEntitySubscriptions());
+    if (!this.disconnected && (shouldReconnect || this.reconnectDemand)) {
+      // Demand is captured before terminal listeners detach and stays sticky until an
+      // authenticated Hello, so later retries do not re-evaluate it.
+      this.reconnectDemand = true;
+      queueMicrotask(() => void this.recoverConnection());
     }
   }
 
@@ -1857,10 +2101,12 @@ class WebrtcDaemonTransport {
     }
     this.dataChannel = undefined;
     this.peerConnection = undefined;
-    this.connectPromise = undefined;
+    // connectPromise is cleared by attempt identity in completeAttempt, failAttempt, and
+    // disconnect, never here: a stale reset must not clear a newer attempt.
     this.cryptoKey = undefined;
     this.encryptedStreamReady = false;
     this.helloPromise = undefined;
+    this.helloGeneration = undefined;
     this.clearAssemblies();
     if (this.dropNextInboundEntityFrameState.state === "armed") {
       this.clearDropNextInboundEntityFrameTimeout();
@@ -1899,7 +2145,12 @@ class WebrtcDaemonTransport {
     }
   }
 
-  private async reconnectEntitySubscriptions(): Promise<void> {
+  /**
+   * First recovery attempt after a loss. A failed attempt schedules the next one through
+   * failAttempt, so recovery does not depend on a new caller request.
+   */
+  private async recoverConnection(): Promise<void> {
+    if (this.disconnected || !this.reconnectDemand) return;
     try {
       await this.connect();
     } catch (error) {

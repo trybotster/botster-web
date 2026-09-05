@@ -197,6 +197,22 @@ export function webRtcLifecycleDiagnostic(event: WebrtcDaemonLifecycleEvent): Co
         source: "webrtc"
       };
     }
+    case "reconnect-attempt":
+      return {
+        id: "webrtc-data-channel-state",
+        title: `WebRTC reconnect attempt ${event.attempt}`,
+        detail: `Reconnecting to the local daemon; this attempt times out after ${event.deadlineMs} ms.`,
+        severity: "warning",
+        source: "webrtc"
+      };
+    case "reconnect-scheduled":
+      return {
+        id: "webrtc-data-channel-state",
+        title: `WebRTC reconnect scheduled (attempt ${event.attempt})`,
+        detail: `Retrying in ${event.delayMs} ms after: ${event.detail}`,
+        severity: "warning",
+        source: "webrtc"
+      };
     case "encrypted-stream-ready":
       return {
         id: "webrtc-encrypted-stream",
