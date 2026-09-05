@@ -308,7 +308,7 @@ export function terminalInputOutcomeDiagnostic(
     title,
     detail: `${outcome.detail} (session ${sessionId}, ${
       outcome.requestedBytes !== undefined ? `${outcome.requestedBytes} bytes requested` : `at least ${outcome.minimumBytes} bytes`
-    }${"deliveredBytes" in outcome ? `, ${outcome.deliveredBytes} delivered` : ""}${outcome.operationId !== undefined ? `, operation ${outcome.operationId}` : ""})`,
+    }${"deliveredBytes" in outcome ? `, ${outcome.deliveredBytes} PTY bytes written` : ""}${outcome.operationId !== undefined ? `, operation ${outcome.operationId}` : ""})`,
     severity,
     source: "terminal"
   };

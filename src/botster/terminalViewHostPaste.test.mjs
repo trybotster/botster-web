@@ -165,17 +165,17 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     await settle();
     assert.ok(inputMessage(host.element), "the message persists across renders");
     await act(async () => {
-      emitOutcome({ kind: "paste", outcome: "partial", minimumBytes: 10, requestedBytes: 12, deliveredBytes: 3, operationId: 2, detail: "Terminal delivered 3 of 12 bytes before the write stopped." });
+      emitOutcome({ kind: "paste", outcome: "partial", minimumBytes: 10, requestedBytes: 12, deliveredBytes: 3, operationId: 2, detail: "Terminal wrote 3 PTY bytes for a 12-byte clipboard paste before the write stopped." });
     });
     message = inputMessage(host.element);
     assert.equal(message.getAttribute("data-terminal-input-outcome"), "partial");
-    assert.match(textOf(message), /partially delivered \(3 of 12 bytes\)/);
+    assert.match(textOf(message), /partially delivered \(3 PTY bytes written for 12 bytes of clipboard text\)/);
     await act(async () => {
       emitOutcome({ kind: "paste", outcome: "rejected", minimumBytes: 7, reason: "too_large", detail: "Paste of at least 7 bytes exceeds the limit." });
     });
     assert.match(textOf(inputMessage(host.element)), /Paste rejected \(too_large\)/);
     await act(async () => {
-      emitOutcome({ kind: "paste", outcome: "admitted", minimumBytes: 10, requestedBytes: 12, deliveredBytes: 12, operationId: 3, detail: "Paste delivered 12 of 12 bytes." });
+      emitOutcome({ kind: "paste", outcome: "admitted", minimumBytes: 10, requestedBytes: 12, deliveredBytes: 12, operationId: 3, detail: "Terminal wrote 12 PTY bytes for a 12-byte clipboard paste." });
     });
     assert.equal(inputMessage(host.element), null, "an admitted paste clears the message");
     await act(async () => {

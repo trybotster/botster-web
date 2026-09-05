@@ -436,8 +436,18 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
             detail: `Terminal stream was lost after Commit; delivery of ${bytes} bytes is unknown.`
           };
         }
+        // bytes_written is Core's actual PTY write. Under bracketed paste it includes the
+        // marker bytes Core adds, so it is never compared with the clipboard size as "N of M".
+        const markerNote = result.mode_flags?.bracketed_paste ? ", including bracketed-paste markers" : "";
         if (result.admitted) {
-          return { kind: "paste", outcome: "admitted", ...sizes, deliveredBytes: result.bytes_written, operationId, detail: `Paste delivered ${result.bytes_written} of ${bytes} bytes.` };
+          return {
+            kind: "paste",
+            outcome: "admitted",
+            ...sizes,
+            deliveredBytes: result.bytes_written,
+            operationId,
+            detail: `Terminal wrote ${result.bytes_written} PTY bytes for a ${bytes}-byte clipboard paste${markerNote}.`
+          };
         }
         if (result.rejection === "partial_write" || (!result.admitted && result.bytes_written > 0)) {
           // Authoritative partial delivery: Core reports the bytes that reached the PTY.
@@ -447,7 +457,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
             ...sizes,
             deliveredBytes: result.bytes_written,
             operationId,
-            detail: `Terminal delivered ${result.bytes_written} of ${bytes} bytes before the write stopped.`
+            detail: `Terminal wrote ${result.bytes_written} PTY bytes for a ${bytes}-byte clipboard paste before the write stopped${markerNote}.`
           };
         }
         if (result.rejection === "timeout") {
@@ -475,7 +485,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
           ...sizes,
           operationId,
           reason: result.rejection ?? "rejected",
-          detail: `Paste rejected by the terminal: ${result.rejection ?? "rejected"}${result.bytes_written > 0 ? ` after ${result.bytes_written} bytes` : ""}.`
+          detail: `Paste rejected by the terminal: ${result.rejection ?? "rejected"}${result.bytes_written > 0 ? ` after ${result.bytes_written} PTY bytes` : ""}.`
         };
       } finally {
         await this.testHooks?.beforePasteFinalize?.();

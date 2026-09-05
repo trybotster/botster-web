@@ -47,10 +47,14 @@ export interface TerminalAttachmentStatus {
  * Sizes are never ambiguous: `minimumBytes` is the UTF-16 length, a cheap lower bound on
  * the UTF-8 size that is always known; `requestedBytes` is the exact UTF-8 size and is
  * present only once the content was encoded; `deliveredBytes` is Core's authoritative
- * count of bytes that reached the PTY. No outcome allocates the clipboard to fill a size.
- * - admitted: Core delivered the operation; deliveredBytes may equal requestedBytes.
+ * count of bytes written to the PTY. That count includes the bracketed-paste markers Core
+ * adds when the fenced mode has `bracketed_paste`, so it is a PTY byte count, not clipboard
+ * progress: an admitted bracketed paste reports requestedBytes plus 12, and a partial count
+ * may include marker bytes. Web never subtracts markers. No outcome allocates the clipboard
+ * to fill a size.
+ * - admitted: Core delivered the operation; deliveredBytes is the full PTY write.
  * - rejected: Core or Web refused before delivery; Core proves zero PTY bytes.
- * - partial: Core reports that delivery began and stopped after deliveredBytes.
+ * - partial: Core reports that the PTY write began and stopped after deliveredBytes.
  * - cancelled: Web stopped the operation before its Commit reached Core; zero PTY bytes.
  * - unknown: no authoritative result proves delivery either way (result bound reached,
  *   stream lost after Commit, or a Core timeout that may follow a completed write).

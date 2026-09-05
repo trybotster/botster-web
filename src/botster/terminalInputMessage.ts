@@ -13,7 +13,9 @@ export function terminalInputMessage(outcome: TerminalInputOutcome): string {
     case "rejected":
       return `Paste rejected (${outcome.reason}): ${outcome.detail}`;
     case "partial":
-      return `Paste partially delivered (${outcome.deliveredBytes} of ${terminalInputSize(outcome)}): ${outcome.detail}`;
+      // deliveredBytes counts PTY bytes, which include Core's bracketed-paste markers, so it
+      // is never presented as "N of M" against the clipboard size.
+      return `Paste partially delivered (${outcome.deliveredBytes} PTY bytes written for ${terminalInputSize(outcome)} of clipboard text): ${outcome.detail}`;
     case "cancelled":
       return `Paste cancelled before delivery: ${outcome.detail}`;
     case "unknown":

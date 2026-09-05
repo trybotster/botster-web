@@ -469,7 +469,7 @@ export async function runTerminalPasteTests(helpers) {
       const cases = [
         ["operation_out_of_bounds", 0, { outcome: "rejected", reason: "operation_out_of_bounds", detail: /rejected by the terminal/ }],
         ["timeout", 0, { outcome: "unknown", reason: "timeout", detail: /delivery of 10 bytes is unknown/ }],
-        ["partial_write", 3, { outcome: "partial", deliveredBytes: 3, detail: /delivered 3 of 10 bytes/ }]
+        ["partial_write", 3, { outcome: "partial", deliveredBytes: 3, detail: /wrote 3 PTY bytes for a 10-byte clipboard paste before the write stopped/ }]
       ];
       for (const [rejection, bytesWritten, expected] of cases) {
         operationId += 1;
@@ -618,6 +618,41 @@ export async function runTerminalPasteTests(helpers) {
       // A late authoritative result after the bound changes nothing and settles cleanly.
       await bound.inputResult({ kind: "paste", operation_id: 1, admitted: true, bytes_written: 6 }, "p9-late");
       await flushMicrotasks();
+    });
+
+    // (p12) Cancellation before Commit by attachment change. The reserved channel is closed
+    // synchronously right after the Begin frame is forwarded, so the plane's own stream-loss
+    // path bumps the attachment generation and the transaction's next-iteration stillLive
+    // guard cancels. Per the plane's rule no Abort is sent on a recovered generation, so the
+    // lost stream carries Begin only, the replacement stream carries nothing from this
+    // operation, and a later paste on the new attachment restarts at operation id 1.
+    await runScenario("p12-detached-generation", async () => {
+      const fixture = await attachPlane("p12");
+      const originalSend = fixture.terminal.send.bind(fixture.terminal);
+      let protocolFrames = 0;
+      fixture.terminal.send = (data) => {
+        originalSend(data);
+        const chunk = JSON.parse(data);
+        if (chunk.chunk_index === 0) {
+          protocolFrames += 1;
+          if (protocolFrames === 1) fixture.terminal.close();
+        }
+      };
+      const pending = fixture.plane.writePaste("detach-me\n");
+      const outcome = await awaitWithControlPump(fixture, pending, "p12: cancelled outcome");
+      assert.equal(outcome.outcome, "cancelled");
+      assert.match(outcome.detail, /attachment changed/i, "the stillLive guard, not a failed send, cancelled the paste");
+      const oldFrames = await fixture.framesSince();
+      assert.deepEqual(oldFrames.map((frame) => kindName(frame.kind)), ["begin"], "Begin only on the lost stream: no Commit, no Abort on a recovered generation");
+      const second = await fixture.admit(1);
+      assert.equal((await second.framesSince()).length, 0, "nothing from the cancelled operation on the replacement stream");
+      const later = fixture.plane.writePaste("later\n");
+      const newFrames = await waitFrameCount(second, 3, "p12: later commit");
+      assert.deepEqual(newFrames.map((frame) => kindName(frame.kind)), ["begin", "chunk", "commit"], "no Abort for the cancelled operation on the new stream");
+      assert.equal(beginHeader(newFrames[0].body).operationId, 1, "operation ids restart on the new attachment");
+      await second.inputResult({ kind: "paste", operation_id: 1, admitted: true, bytes_written: 6 }, "p12-later");
+      const laterOutcome = await awaitWithControlPump(fixture, later, "p12: later outcome");
+      assert.equal(laterOutcome.outcome, "admitted", "a later paste succeeds after the cancellation");
     });
 
     // (p11) A settled old transaction's finalizer runs after a new operation reused its id on
