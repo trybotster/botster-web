@@ -23,6 +23,9 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
       await Promise.race([body(), timeout]);
     } finally {
       realClearTimeout(bound);
+      for (const host of mountedHosts.splice(0)) {
+        await host.unmount().catch(() => undefined);
+          }
     }
   };
   const settle = async () => {
@@ -79,6 +82,8 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
       }
     };
   };
+  // Every mounted host is unmounted and removed when its scenario ends, also after a failure.
+  const mountedHosts = [];
   const mountHost = async (props) => {
     const element = globalThis.document.createElement("div");
     globalThis.document.body.appendChild(element);
@@ -86,12 +91,19 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     await act(async () => {
       root.render(createElement(TerminalViewHost, props));
     });
-    return {
+    let mounted = true;
+    const host = {
       element,
       root,
       rerender: (nextProps) => act(async () => { root.render(createElement(TerminalViewHost, nextProps)); }),
-      unmount: () => act(async () => { root.unmount(); })
+      unmount: async () => {
+        if (!mounted) return;
+        mounted = false;
+        await act(async () => { root.unmount(); });
+      }
     };
+    mountedHosts.push(host);
+    return host;
   };
 
   // (v1) Cleanup during a delayed attach: the continuation installs nothing afterwards.
@@ -105,7 +117,6 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     for (let round = 0; round < 40 && calls.attach === 0; round += 1) await settle();
     assert.equal(calls.attach, 1, "attach was requested");
     assert.equal(state.statusSubscriptions, 1, "status subscribed before attach");
-    await host.unmount();
     stage("v1: release attach after unmount");
     releaseAttach();
     await settle();
@@ -113,7 +124,6 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     assert.equal(calls.subscribeInputOutcomes, 0, "no outcome subscription after cleanup ran during attach");
     assert.equal(state.statusUnsubscribes, 1, "status subscription released exactly once");
     assert.equal(calls.unmount >= 1, true, "cleanup unmounted the bridge mount");
-    host.element.remove();
   });
 
   // (v2) Outcome message lifecycle: rejected shows and persists, admitted clears, unknown shows.
@@ -174,7 +184,5 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     await settle();
     assert.equal(inputMessage(host.element), null, "replacement session shows no old-session input message");
     assert.equal(calls.outcomeUnsubscribes >= 1, true, "the old outcome subscription was released");
-    await host.unmount();
-    host.element.remove();
   });
 }

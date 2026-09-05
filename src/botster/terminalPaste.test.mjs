@@ -46,8 +46,23 @@ export async function runTerminalPasteTests(helpers) {
   const SCENARIO_BOUND_MS = 20_000;
   let currentStage = "start";
   const stage = (label) => { currentStage = label; };
+  // Fixtures created during a scenario are always cleaned up, also after a failed assertion or
+  // a timeout: the plane is detached first (removing its window lifecycle listeners and
+  // recovery registration), then the client is disconnected.
+  const scenarioFixtures = [];
+  const cleanupFixture = async (fixture) => {
+    try {
+      await Promise.race([
+        Promise.resolve(fixture.plane?.detach?.()).catch(() => undefined),
+        new Promise((resolve) => realSetTimeout(resolve, 1_000))
+      ]);
+    } finally {
+      fixture.client?.disconnect?.();
+    }
+  };
   const runScenario = async (name, body) => {
     currentStage = "start";
+    scenarioFixtures.length = 0;
     let bound;
     const timeout = new Promise((_, reject) => {
       bound = realSetTimeout(() => {
@@ -58,6 +73,7 @@ export async function runTerminalPasteTests(helpers) {
       await Promise.race([body(), timeout]);
     } finally {
       realClearTimeout(bound);
+      for (const fixture of scenarioFixtures.splice(0)) await cleanupFixture(fixture);
     }
   };
   const waitCondition = async (predicate, label) => {
@@ -151,15 +167,38 @@ export async function runTerminalPasteTests(helpers) {
     const statuses = [];
     const outputs = [];
     const plane = createHubTerminalDataPlane({ sessionId, bridge: client, ...(testHooks ? { testHooks } : {}) });
+    const fixtureRecord = { client, plane };
+    scenarioFixtures.push(fixtureRecord);
     bindGhostsnpInstaller(plane);
     plane.subscribeStatus((status) => statuses.push(status));
     plane.subscribeOutput((data) => outputs.push(data));
-    await waitCondition(() => channels.length === 1 && channels[0].sent.length >= 1, `${name}: attach request`);
+    const admissionState = () => ({
+      channels: channels.length,
+      controlSent: channels[0]?.sent.length ?? 0,
+      createdChannels: (channels[0]?.createdDataChannels ?? []).map((channel) => ({
+        label: channel.label,
+        readyState: channel.readyState,
+        helloAckDelivered: channel.helloAckDelivered === true,
+        helloSent: channel.helloSent?.length ?? 0
+      })),
+      statuses: statuses.map((status) => status.state),
+      answered: answeredRequests
+    });
+    const waitAdmission = async (predicate, label) => {
+      stage(`${name}: ${label}`);
+      for (let round = 0; round < 200; round += 1) {
+        if (predicate()) return;
+        await new Promise((resolve) => realSetTimeout(resolve, 10));
+      }
+      assert.fail(`${name}: ${label} did not complete within 2 s; admission state: ${JSON.stringify(admissionState())}`);
+    };
+    let answeredRequests = [];
+    await waitAdmission(() => channels.length === 1 && channels[0].sent.length >= 1, "attach request");
     const control = channels[0];
     const answered = new Set();
     // Every control request answered by the responder, in order, so a run can confirm or
     // reject a diagnosis that depends on which reads were outstanding.
-    const answeredRequests = [];
+    answeredRequests = [];
     const modeFlags = testModeFlags(sessionId, modeOverrides);
     const answerControlReads = async () => {
       for (const [index, sent] of control.sent.entries()) {
@@ -217,9 +256,9 @@ export async function runTerminalPasteTests(helpers) {
       assert.ok(attach, `${name}: attach request ${ordinal}`);
       const subscriptionId = attach.subscription_id;
       const label = `r-${name}-${subscriptionId}`;
-      await waitCondition(
+      await waitAdmission(
         () => control.createdDataChannels.some((channel) => channel.label === label && channel.helloAckDelivered === true),
-        `${name}: reserved channel Hello ${ordinal}`
+        `reserved channel Hello ${ordinal}`
       );
       const terminal = control.createdDataChannels.find((channel) => channel.label === label);
       const terminalFrame = (frame, messageId) => emitChunkedTestResponse(terminal, secret, {
@@ -236,7 +275,10 @@ export async function runTerminalPasteTests(helpers) {
         await answerControlReads();
         await new Promise((resolve) => realSetTimeout(resolve, 0));
       }
-      assert.ok(statuses.filter((status) => status.state === "attached").length > attachedBefore, `${name}: plane reached Attached (${ordinal})`);
+      assert.ok(
+        statuses.filter((status) => status.state === "attached").length > attachedBefore,
+        `${name}: plane reached Attached (${ordinal}); admission state: ${JSON.stringify(admissionState())}`
+      );
       const sentBefore = terminal.sent.length;
       const inputResult = (result, messageId) => terminalFrame({
         type: "input_result",
@@ -304,7 +346,6 @@ export async function runTerminalPasteTests(helpers) {
         { kind: outcome.kind, outcome: outcome.outcome, minimumBytes: outcome.minimumBytes, requestedBytes: outcome.requestedBytes, deliveredBytes: outcome.deliveredBytes, operationId: outcome.operationId },
         { kind: "paste", outcome: "admitted", minimumBytes: text.length, requestedBytes: 70_000, deliveredBytes: 70_000, operationId: 1 }
       );
-      fixture.client.disconnect();
     });
 
     // (p2) Unicode paste: UTF-8 byte length above UTF-16 length, exact content.
@@ -326,7 +367,6 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(outcome.minimumBytes, text.length, "minimum bytes are the UTF-16 lower bound");
       assert.ok(outcome.minimumBytes < outcome.requestedBytes);
       assert.equal(outcome.deliveredBytes, bytes);
-      fixture.client.disconnect();
     });
 
     // (p3) bracketed_paste on and off: byte-identical frames; Web never adds markers.
@@ -343,8 +383,7 @@ export async function runTerminalPasteTests(helpers) {
         assert.equal(content.includes("\x1b[200~"), false, "no bracketed-paste opener from Web");
         await fixture.inputResult({ kind: "paste", operation_id: 1, admitted: true, bytes_written: text.length }, `p3-${bracketed}-result`);
         assert.equal((await pending).outcome, "admitted");
-        fixture.client.disconnect();
-      }
+        }
       assert.equal(collected[0], collected[1], "frames are identical under bracketed_paste off and on");
     });
 
@@ -375,7 +414,6 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(rejected.outcome, "rejected");
       assert.equal(rejected.reason, "stale_mode");
       assert.equal((await fixture.framesSince()).length, 12, "no third attempt");
-      fixture.client.disconnect();
     });
 
     // (p5) Results that are never retried: a rejection with zero bytes stays rejected, a
@@ -404,7 +442,6 @@ export async function runTerminalPasteTests(helpers) {
         await flushMicrotasks();
         assert.equal((await fixture.framesSince()).length, expectedFrames, `${rejection}: no retry frames`);
       }
-      fixture.client.disconnect();
     });
 
     // (p6) Bounds: per-paste size before encoding, queued operation count, and queued bytes.
@@ -455,7 +492,6 @@ export async function runTerminalPasteTests(helpers) {
       await waitFrameCount(fixture, baseline + 2 * bigFrames + 3, "p6: post-release commit");
       await fixture.inputResult({ kind: "paste", operation_id: MAX_QUEUED_PASTE_OPERATIONS + 3, admitted: true, bytes_written: 1 }, "p6-after");
       assert.equal((await afterPending).outcome, "admitted");
-      fixture.client.disconnect();
     });
 
     // (p7) Ordering: keys do not overtake a paste, and no resize frame lands inside Begin..Commit.
@@ -482,7 +518,6 @@ export async function runTerminalPasteTests(helpers) {
       await fixture.inputResult({ kind: "mode_gated_input", admitted: true, bytes_written: 1 }, "p7-key-b");
       await second;
       await resize;
-      fixture.client.disconnect();
     });
 
     // (p8) Cancellation before Commit: a failing chunk send aborts on the live stream.
@@ -504,7 +539,6 @@ export async function runTerminalPasteTests(helpers) {
       assert.deepEqual(frames.map((frame) => kindName(frame.kind)), ["begin", "abort"], "Begin then best-effort Abort, no Commit");
       assert.equal(beginHeader(frames[0].body).operationId, 1);
       assert.ok(sends >= 2);
-      fixture.client.disconnect();
     });
 
     // (p9) Unknown delivery: committed, then the stream is lost; and committed, then the bound fires.
@@ -517,7 +551,6 @@ export async function runTerminalPasteTests(helpers) {
       const lostOutcome = await pendingLost;
       assert.equal(lostOutcome.outcome, "unknown");
       assert.match(lostOutcome.detail, /stream was lost/);
-      lost.client.disconnect();
 
       const bound = await attachPlane("p9-bound");
       const pendingBound = bound.plane.writePaste("bound\n");
@@ -534,7 +567,6 @@ export async function runTerminalPasteTests(helpers) {
       // A late authoritative result after the bound changes nothing and settles cleanly.
       await bound.inputResult({ kind: "paste", operation_id: 1, admitted: true, bytes_written: 6 }, "p9-late");
       await flushMicrotasks();
-      bound.client.disconnect();
     });
 
     // (p11) A settled old transaction's finalizer runs after a new operation reused its id on
@@ -567,7 +599,6 @@ export async function runTerminalPasteTests(helpers) {
       stage("p11: new outcome");
       const newOutcome = await newPending;
       assert.equal(newOutcome.outcome, "admitted", "the new operation's resolver survived the old finalizer");
-      fixture.client.disconnect();
     });
 
     // (p10) Transport without a paste owner: explicit unsupported rejection, no key path.
