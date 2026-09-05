@@ -44,6 +44,23 @@ export async function runWebrtcReconnectTests(helpers) {
     return timer;
   };
   globalThis.window.clearTimeout = (timer) => timers.delete(timer);
+  // Explicit timer ownership: the client installs an attempt's deadline immediately before it
+  // emits reconnect-attempt, and a retry timer immediately before it emits reconnect-scheduled.
+  // Capture the most recently created timer at each of those emissions as the owned timer.
+  const ownedTimers = new Map();
+  const originalDispatch = globalThis.window.dispatchEvent;
+  globalThis.window.dispatchEvent = (event) => {
+    const type = event.detail?.type;
+    if (type === "reconnect-attempt" || type === "reconnect-scheduled") {
+      ownedTimers.set(lifecycleEvents.length, { type, timerId: nextTimer, delay: timers.get(nextTimer)?.delay });
+    }
+    return originalDispatch.call(globalThis.window, event);
+  };
+  const ownedTimerAt = (eventIndex, type) => {
+    const owned = ownedTimers.get(eventIndex);
+    assert.ok(owned && owned.type === type, `owned timer captured at ${type} event ${eventIndex}`);
+    return owned;
+  };
 
   const eventsSince = (index, type) =>
     lifecycleEvents.slice(index).map((event) => event.detail).filter((detail) => !type || detail.type === type);
@@ -61,26 +78,39 @@ export async function runWebrtcReconnectTests(helpers) {
     timers.delete(id);
     entry.callback();
   };
-  // The retry timer is the unique timer with the scheduled delay created at the scheduled event.
+  // The retry timer is the timer owned by the latest reconnect-scheduled emission. It must also
+  // be the only live timer with that delay created at that emission.
   const fireRetryTimer = async (expectedDelay) => {
     const scheduledIndex = lastEventIndexOf("reconnect-scheduled");
     assert.ok(scheduledIndex >= 0, "a reconnect-scheduled event exists");
     const scheduled = lifecycleEvents[scheduledIndex].detail;
     assert.equal(scheduled.delayMs, expectedDelay);
+    const owned = ownedTimerAt(scheduledIndex, "reconnect-scheduled");
+    assert.equal(owned.delay, expectedDelay, "the owned retry timer carries the scheduled delay");
     const candidates = liveTimersWithDelay(expectedDelay, scheduledIndex - 1);
     assert.equal(candidates.length, 1, `exactly one live retry timer with delay ${expectedDelay}`);
-    fireTimer(candidates[0][0]);
+    assert.equal(candidates[0][0], owned.timerId, "the live retry timer is the owned one");
+    fireTimer(owned.timerId);
     await flushMicrotasks();
   };
-  // The attempt deadline is the unique attemptTimeoutMs timer created at the reconnect-attempt event.
+  // The attempt deadline is the timer owned by the latest reconnect-attempt emission. It must
+  // also be the only live attemptTimeoutMs timer created at that emission.
   const fireDeadlineTimer = async () => {
     const attemptIndex = lastEventIndexOf("reconnect-attempt");
     assert.ok(attemptIndex >= 0, "a reconnect-attempt event exists");
+    const owned = ownedTimerAt(attemptIndex, "reconnect-attempt");
+    assert.equal(owned.delay, localWebrtcReconnectPolicy.attemptTimeoutMs, "the owned deadline carries attemptTimeoutMs");
     const candidates = liveTimersWithDelay(localWebrtcReconnectPolicy.attemptTimeoutMs, attemptIndex - 1)
-      .filter(([, entry]) => entry.eventIndex === attemptIndex + 1);
+      .filter(([, entry]) => entry.eventIndex === attemptIndex);
     assert.equal(candidates.length, 1, "exactly one live attempt deadline timer");
-    fireTimer(candidates[0][0]);
+    assert.equal(candidates[0][0], owned.timerId, "the live deadline is the owned one");
+    fireTimer(owned.timerId);
     await flushMicrotasks();
+  };
+  const deadlineCleared = () => {
+    const attemptIndex = lastEventIndexOf("reconnect-attempt");
+    const owned = ownedTimerAt(attemptIndex, "reconnect-attempt");
+    return !timers.has(owned.timerId);
   };
   // Key import and peer creation are real async work, so attempt counts and scheduled events
   // are awaited as conditions rather than asserted after a microtask flush.
@@ -518,8 +548,7 @@ export async function runWebrtcReconnectTests(helpers) {
         const scheduled = await waitScheduled(before, index + 1);
         assert.equal(scheduled[index].attempt, index + 1);
         assert.equal(scheduled[index].delayMs, delay);
-        assert.equal(liveTimersWithDelay(localWebrtcReconnectPolicy.attemptTimeoutMs, lastEventIndexOf("reconnect-attempt") - 1)
-          .filter(([, entry]) => entry.eventIndex === lastEventIndexOf("reconnect-attempt") + 1).length, 0, "failed attempt cleared its deadline");
+        assert.equal(deadlineCleared(), true, "failed attempt cleared its deadline");
         assert.equal([...timers.values()].filter((entry) => entry.eventIndex > before && expectedDelays.includes(entry.delay)).length, 1, "one live retry timer");
         await fireRetryTimer(delay);
       }
@@ -688,5 +717,6 @@ export async function runWebrtcReconnectTests(helpers) {
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     globalThis.window.clearTimeout = originalClearTimeout;
+    globalThis.window.dispatchEvent = originalDispatch;
   }
 }
