@@ -3314,11 +3314,19 @@ await writeFile(
     FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY: terminalProtocolModule.FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY,
     FEATURE_TRANSPORT_DUPLEX_BINARY: terminalProtocolModule.FEATURE_TRANSPORT_DUPLEX_BINARY
   })};
-const MAX_INPUT_DATA_BYTES = 65535;
-const MAX_MODE_GATED_DATA_BYTES = 65519;
-const MAX_PASTE_CHUNK_DATA_BYTES = 65527;
-const MAX_PASTE_BYTES = 1048576;
+// Size constants come from the real package so the generated runtime cannot drift from it.
+const MAX_INPUT_DATA_BYTES = ${JSON.stringify(terminalProtocolModule.MAX_INPUT_DATA_BYTES)};
+const MAX_MODE_GATED_DATA_BYTES = ${JSON.stringify(terminalProtocolModule.MAX_MODE_GATED_DATA_BYTES)};
+const MAX_PASTE_CHUNK_DATA_BYTES = ${JSON.stringify(terminalProtocolModule.MAX_PASTE_CHUNK_DATA_BYTES)};
+const MAX_PASTE_BYTES = ${JSON.stringify(terminalProtocolModule.MAX_PASTE_BYTES)};
+const MAX_PASTE_CHUNKS = ${JSON.stringify(terminalProtocolModule.MAX_PASTE_CHUNKS)};
+const TERMINAL_INPUT_SCHEME_VERSION = ${JSON.stringify(terminalProtocolModule.TERMINAL_INPUT_SCHEME_VERSION)};
 module.exports.MAX_INPUT_DATA_BYTES = MAX_INPUT_DATA_BYTES;
+module.exports.MAX_MODE_GATED_DATA_BYTES = MAX_MODE_GATED_DATA_BYTES;
+module.exports.MAX_PASTE_CHUNK_DATA_BYTES = MAX_PASTE_CHUNK_DATA_BYTES;
+module.exports.MAX_PASTE_BYTES = MAX_PASTE_BYTES;
+module.exports.MAX_PASTE_CHUNKS = MAX_PASTE_CHUNKS;
+module.exports.TERMINAL_INPUT_SCHEME_VERSION = TERMINAL_INPUT_SCHEME_VERSION;
 module.exports.encodeTerminalInput = ${terminalProtocolModule.encodeTerminalInput.toString()};
 module.exports.encodeModeGatedInput = ${terminalProtocolModule.encodeModeGatedInput.toString()};
 module.exports.encodeResize = ${terminalProtocolModule.encodeResize.toString()};
@@ -3417,6 +3425,31 @@ await Promise.all([
 ]);
 
 const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
+// The generated CommonJS package must expose every constant the production sources import,
+// with the real package's values; a missing constant silently disables production bounds.
+{
+  const generatedTerminalProtocol = requireRuntime("@trybotster/terminal-protocol");
+  for (const name of [
+    "PROTOCOL",
+    "PROTOCOL_VERSION",
+    "CONFORMANCE_FIXTURE_REVISION",
+    "TERMINAL_INPUT_SCHEME_VERSION",
+    "MAX_INPUT_DATA_BYTES",
+    "MAX_MODE_GATED_DATA_BYTES",
+    "MAX_PASTE_CHUNK_DATA_BYTES",
+    "MAX_PASTE_BYTES",
+    "MAX_PASTE_CHUNKS"
+  ]) {
+    assert.equal(
+      generatedTerminalProtocol[name],
+      terminalProtocolModule[name],
+      `generated terminal-protocol runtime must export ${name} with the package value`
+    );
+  }
+  for (const name of ["encodeTerminalInput", "encodeModeGatedInput", "encodeResize", "encodePaste", "encodePasteAbort"]) {
+    assert.equal(typeof generatedTerminalProtocol[name], "function", `generated terminal-protocol runtime must export ${name}`);
+  }
+}
 const { createBotsterWebClient } = requireRuntime("./botster/client.js");
 const {
   admittedNoticeReaction,
