@@ -11,6 +11,7 @@ import {
   type TerminalViewMount
 } from "./terminal";
 import { createResttyTerminalRenderer } from "./resttyRenderer";
+import { terminalInputMessage } from "./terminalInputMessage";
 
 const defaultBridge = new DefaultTerminalViewBridge(createResttyTerminalRenderer);
 const defaultDescriptor: TerminalViewDescriptor = {
@@ -228,26 +229,4 @@ function installLiveHarnessTerminalControls(
       delete harness.terminalControl;
     }
   };
-}
-
-/** User-visible text for a non-admitted input outcome; the three cases stay distinct. */
-export function terminalInputSize(outcome: TerminalInputOutcome): string {
-  return outcome.requestedBytes !== undefined
-    ? `${outcome.requestedBytes} bytes`
-    : `at least ${outcome.minimumBytes} bytes`;
-}
-
-export function terminalInputMessage(outcome: TerminalInputOutcome): string {
-  switch (outcome.outcome) {
-    case "rejected":
-      return `Paste rejected (${outcome.reason}): ${outcome.detail}`;
-    case "partial":
-      return `Paste partially delivered (${outcome.deliveredBytes} of ${terminalInputSize(outcome)}): ${outcome.detail}`;
-    case "cancelled":
-      return `Paste cancelled before delivery: ${outcome.detail}`;
-    case "unknown":
-      return `Paste delivery unknown: ${outcome.detail}`;
-    case "admitted":
-      return outcome.detail;
-  }
 }

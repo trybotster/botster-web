@@ -112,10 +112,6 @@ export async function runTerminalPasteTests(helpers) {
       for (const fixture of scenarioFixtures.splice(0)) await cleanupFixture(fixture);
     }
   };
-  const waitCondition = async (predicate, label) => {
-    stage(label ?? `waitCondition ${predicate.toString().replace(/\s+/g, " ")}`);
-    await waitForTestCondition(predicate);
-  };
 
   // Controlled window timers for the result bound only; every other wait uses real timers.
   const originalSetTimeout = globalThis.window.setTimeout;
