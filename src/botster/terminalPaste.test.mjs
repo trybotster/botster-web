@@ -57,6 +57,24 @@ export async function runTerminalPasteTests(helpers) {
   };
   // The fixture under test exposes its admission state for the outer timeout message.
   let currentAdmissionState = () => null;
+  // Control pumps stop when the scenario ends so cleanup never races a late responder pass.
+  let scenarioActive = false;
+  // Await a directly awaited operation while the fixture's single responder answers the
+  // control reads (read_mode_flags, read_screen, attach, detach) that the operation may need.
+  const awaitWithControlPump = async (fixture, promise, label) => {
+    stage(label);
+    let settled = false;
+    const tracked = promise.then(
+      (value) => { settled = true; return value; },
+      (error) => { settled = true; throw error; }
+    );
+    while (!settled && scenarioActive) {
+      await fixture.answerControlReads();
+      if (settled) break;
+      await new Promise((resolve) => realSetTimeout(resolve, 10));
+    }
+    return tracked;
+  };
   // Fixtures created during a scenario are always cleaned up, also after a failed assertion or
   // a timeout: the plane is detached first (removing its window lifecycle listeners and
   // recovery registration), then the client is disconnected.
@@ -77,6 +95,7 @@ export async function runTerminalPasteTests(helpers) {
     stage(`${name}: start`);
     currentAdmissionState = () => null;
     scenarioFixtures.length = 0;
+    scenarioActive = true;
     let bound;
     const timeout = new Promise((_, reject) => {
       bound = realSetTimeout(() => {
@@ -88,6 +107,7 @@ export async function runTerminalPasteTests(helpers) {
     try {
       await Promise.race([body(), timeout]);
     } finally {
+      scenarioActive = false;
       realClearTimeout(bound);
       for (const fixture of scenarioFixtures.splice(0)) await cleanupFixture(fixture);
     }
@@ -217,7 +237,14 @@ export async function runTerminalPasteTests(helpers) {
     // reject a diagnosis that depends on which reads were outstanding.
     answeredRequests = [];
     const modeFlags = testModeFlags(sessionId, modeOverrides);
-    const answerControlReads = async () => {
+    // One responder owner per fixture: concurrent callers share one in-flight pass, so an
+    // uncorrelated request can never be answered twice.
+    let responderPass;
+    const answerControlReads = () => {
+      responderPass ??= runResponderPass().finally(() => { responderPass = undefined; });
+      return responderPass;
+    };
+    const runResponderPass = async () => {
       for (const [index, sent] of control.sent.entries()) {
         if (answered.has(index)) continue;
         let request;
@@ -470,13 +497,13 @@ export async function runTerminalPasteTests(helpers) {
     await runScenario("p6-bounds", async () => {
       const fixture = await attachPlane("p6");
       stage("p6: oversized refusal");
-      const tooLarge = await fixture.plane.writePaste("x".repeat(MAX_PASTE_BYTES + 1));
+      const tooLarge = await awaitWithControlPump(fixture, fixture.plane.writePaste("x".repeat(MAX_PASTE_BYTES + 1)), "p6: oversized refusal");
       assert.equal(tooLarge.outcome, "rejected");
       assert.equal(tooLarge.reason, "too_large");
       assert.equal(tooLarge.requestedBytes, undefined, "refused before encoding reports no exact byte count");
       assert.equal(tooLarge.minimumBytes, MAX_PASTE_BYTES + 1);
       stage("p6: empty refusal");
-      const empty = await fixture.plane.writePaste("");
+      const empty = await awaitWithControlPump(fixture, fixture.plane.writePaste(""), "p6: empty refusal");
       assert.equal(empty.reason, "empty");
       stage("p6: frames after refusals");
       assert.equal((await fixture.framesSince()).length, 0, "no frames for refused pastes");
@@ -487,7 +514,7 @@ export async function runTerminalPasteTests(helpers) {
         pendings.push(fixture.plane.writePaste(`queued-${index}\n`));
       }
       stage("p6: operation-count overflow refusal");
-      const overflow = await fixture.plane.writePaste("one-too-many\n");
+      const overflow = await awaitWithControlPump(fixture, fixture.plane.writePaste("one-too-many\n"), "p6: operation-count overflow refusal");
       assert.equal(overflow.outcome, "rejected");
       assert.equal(overflow.reason, "queue_bounds");
       await waitFrameCount(fixture, 3, "p6: first queued commit");
@@ -503,7 +530,7 @@ export async function runTerminalPasteTests(helpers) {
       const bigA = fixture.plane.writePaste(big);
       const bigB = fixture.plane.writePaste(big);
       stage("p6: byte-count overflow refusal");
-      const bigC = await fixture.plane.writePaste("c");
+      const bigC = await awaitWithControlPump(fixture, fixture.plane.writePaste("c"), "p6: byte-count overflow refusal");
       assert.equal(bigC.reason, "queue_bounds");
       assert.equal(MAX_QUEUED_PASTE_BYTES, 2 * MAX_PASTE_BYTES);
       const bigFrames = Math.ceil(MAX_PASTE_BYTES / MAX_PASTE_CHUNK_DATA_BYTES) + 2;
@@ -517,11 +544,11 @@ export async function runTerminalPasteTests(helpers) {
       // Counters released: the next paste is queued (still pending), not refused.
       stage("p6: post-release paste queued");
       const afterPending = fixture.plane.writePaste("c");
-      const raced = await Promise.race([afterPending, new Promise((resolve) => realSetTimeout(() => resolve("pending"), 50))]);
+      const raced = await awaitWithControlPump(fixture, Promise.race([afterPending, new Promise((resolve) => realSetTimeout(() => resolve("pending"), 50))]), "p6: post-release race");
       assert.equal(raced, "pending", "paste after release is queued rather than refused");
       await waitFrameCount(fixture, baseline + 2 * bigFrames + 3, "p6: post-release commit");
       await fixture.inputResult({ kind: "paste", operation_id: MAX_QUEUED_PASTE_OPERATIONS + 3, admitted: true, bytes_written: 1 }, "p6-after");
-      assert.equal((await afterPending).outcome, "admitted");
+      assert.equal((await awaitWithControlPump(fixture, afterPending, "p6: post-release outcome")).outcome, "admitted");
     });
 
     // (p7) Ordering: keys do not overtake a paste, and no resize frame lands inside Begin..Commit.
@@ -562,7 +589,7 @@ export async function runTerminalPasteTests(helpers) {
         if (chunk.message_id.endsWith(":2") && chunk.chunk_index === 0) throw new Error("chunk send failed");
         originalSend(data);
       };
-      const outcome = await fixture.plane.writePaste("cancel-me\n");
+      const outcome = await awaitWithControlPump(fixture, fixture.plane.writePaste("cancel-me\n"), "p8: cancelled outcome");
       assert.equal(outcome.outcome, "cancelled");
       assert.match(outcome.detail, /was not sent/);
       const frames = await fixture.framesSince();
@@ -577,8 +604,7 @@ export async function runTerminalPasteTests(helpers) {
       const pendingLost = lost.plane.writePaste("lost\n");
       await waitFrameCount(lost, 3, "p9: commit before loss");
       lost.control.close();
-      stage("p9: outcome after loss");
-      const lostOutcome = await pendingLost;
+      const lostOutcome = await awaitWithControlPump(lost, pendingLost, "p9: outcome after loss");
       assert.equal(lostOutcome.outcome, "unknown");
       assert.match(lostOutcome.detail, /stream was lost/);
 
@@ -587,7 +613,7 @@ export async function runTerminalPasteTests(helpers) {
       await waitFrameCount(bound, 3, "p9: commit before bound");
       await flushMicrotasks();
       fireResultBound();
-      const boundOutcome = await pendingBound;
+      const boundOutcome = await awaitWithControlPump(bound, pendingBound, "p9: outcome after bound");
       assert.equal(boundOutcome.outcome, "unknown");
       assert.equal(boundOutcome.reason, "result_bound");
       assert.match(boundOutcome.detail, /an abort was attempted/);
@@ -621,13 +647,11 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(beginHeader(newFrames[0].body).operationId, 1, "operation ids restart on the new attachment");
       // Release the old finalizer only now, after the new operation registered id 1.
       releaseFinalize();
-      stage("p11: old outcome");
-      const oldOutcome = await oldPending;
+      const oldOutcome = await awaitWithControlPump(fixture, oldPending, "p11: old outcome");
       assert.equal(oldOutcome.outcome, "unknown");
       assert.equal(oldOutcome.reason, "stream_lost");
       await second.inputResult({ kind: "paste", operation_id: 1, admitted: true, bytes_written: 4 }, "p11-new-result");
-      stage("p11: new outcome");
-      const newOutcome = await newPending;
+      const newOutcome = await awaitWithControlPump(fixture, newPending, "p11: new outcome");
       assert.equal(newOutcome.outcome, "admitted", "the new operation's resolver survived the old finalizer");
     });
 
