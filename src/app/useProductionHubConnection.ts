@@ -125,6 +125,7 @@ export function useProductionHubConnection(options: {
       key: HubEntityLoadKey,
       request: { family: string; id?: string }
     ) => {
+      if (cancelled) return;
       setEntityLoadStatus((current) => ({ ...current, [key]: "loading" }));
       try {
         await runtimeClient.entities.pull(request);
@@ -134,26 +135,50 @@ export function useProductionHubConnection(options: {
       } catch (error) {
         if (!cancelled) {
           setEntityLoadStatus((current) => ({ ...current, [key]: "error" }));
+          recordDiagnostic({
+            id: `entity-load-${key}`,
+            title: key === "session" ? "Session discovery failed" : "Optional Hub data failed",
+            detail: error instanceof Error ? visibleStatusText(error.message) : `Could not load ${request.family}.`,
+            severity: key === "session" ? "danger" : "warning",
+            source: "stream",
+            operation: request.family
+          });
         }
-        throw error;
       }
     };
 
     void runtimeClient.hub
       .connect(botsterWebCapabilities)
-      .then(() => {
+      .then(async () => {
+        if (cancelled) return;
         controlStreamEstablished = true;
+        await runtimeClient.hub.subscribe();
+        if (cancelled) return;
+
+        // Complete session load status without waiting for optional requests.
+        void pullProductionEntity("session", { family: "session" });
+        void pullProductionEntity("hubStatus", { family: hubStatusFamily });
+        void pullProductionEntity("app", { family: "botster-web.app" });
+        void pullProductionEntity("packageNavigation", { family: "botster-web.package_navigation" });
+        void pullProductionEntity("package", { family: "botster-web.package" });
+        void pullProductionEntity("availablePackage", { family: "botster-web.available_package" });
+        void pullProductionEntity("spawnTarget", { family: "botster-web.spawn_target" });
+        void pullProductionEntity("sessionType", { family: "session_type" });
+        try {
+          await runtimeClient.hub.subscribeSurface({ surface: "botster-web.production.session", path: "/sessions/local" });
+        } catch (error) {
+          if (!cancelled) {
+            recordDiagnostic({
+              id: "production-surface-load",
+              title: "Optional Hub surface failed",
+              detail: error instanceof Error ? visibleStatusText(error.message) : "Could not load the Hub surface.",
+              severity: "warning",
+              source: "stream",
+              operation: "surface_subscribe"
+            });
+          }
+        }
       })
-      .then(() => runtimeClient.hub.subscribe())
-      .then(() => runtimeClient.hub.subscribeSurface({ surface: "botster-web.production.session", path: "/sessions/local" }))
-      .then(() => pullProductionEntity("hubStatus", { family: hubStatusFamily }))
-      .then(() => pullProductionEntity("app", { family: "botster-web.app" }))
-      .then(() => pullProductionEntity("packageNavigation", { family: "botster-web.package_navigation" }))
-      .then(() => pullProductionEntity("package", { family: "botster-web.package" }))
-      .then(() => pullProductionEntity("availablePackage", { family: "botster-web.available_package" }))
-      .then(() => pullProductionEntity("spawnTarget", { family: "botster-web.spawn_target" }))
-      .then(() => pullProductionEntity("sessionType", { family: "session_type" }))
-      .then(() => pullProductionEntity("session", { family: "session" }))
       .catch((error: unknown) => {
         if (!cancelled) {
           updateLocalState({

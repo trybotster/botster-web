@@ -18154,3 +18154,5 @@ function removeCssAtRules(source) {
     assert.equal(digest.length, 64);
   }
 }
+
+await (await import("./app/productionHubConnection.test.mjs")).runProductionHubConnectionTests();
