@@ -191,6 +191,11 @@ if (!workspacesPackagePath) {
 let hubProcess;
 let hubStdout = "";
 let hubStderr = "";
+// Failure cleanup for the harness-owned production session: shut it down and remove it
+// through the daemon API before the Hub is stopped, so its session worker does not outlive
+// the Hub. Best effort and bounded; the normal success path shuts it down explicitly.
+let productionSessionStarted = false;
+let productionSessionShutDown = false;
 const ownsWebrtcDataDir = suppliedDataDir === undefined;
 const webrtcDataDir =
   suppliedDataDir ??
@@ -670,6 +675,7 @@ try {
   throw error;
 } finally {
   await browser?.close();
+  await cleanupProductionSessionBestEffort();
   if (hubProcess && hubProcess.exitCode === null) {
     hubProcess.kill("SIGTERM");
     await Promise.race([
@@ -6211,6 +6217,7 @@ async function startProductionSession() {
   if (response.error) {
     throw new Error(`production session spawn failed: ${JSON.stringify(response.error)}`);
   }
+  productionSessionStarted = true;
 }
 
 async function shutdownProductionSession() {
@@ -6221,6 +6228,25 @@ async function shutdownProductionSession() {
   });
   if (response.error) {
     throw new Error(`production session shutdown failed: ${JSON.stringify(response.error)}`);
+  }
+  productionSessionShutDown = true;
+}
+
+/**
+ * Failure-path cleanup of the exact harness-owned production session, bounded to 3 s per
+ * request: shutdown_session, then remove_session, through the daemon socket while the Hub
+ * is still running. Errors are logged, never thrown, so the original failure is preserved.
+ */
+async function cleanupProductionSessionBestEffort() {
+  if (!productionSessionStarted || productionSessionShutDown || !webrtcDataDir || hubProcess?.exitCode !== null) return;
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  for (const type of ["shutdown_session", "remove_session"]) {
+    const bound = new Promise((resolve) => setTimeout(() => resolve({ error: { kind: "cleanup_bound" } }), 3_000));
+    const response = await Promise.race([
+      sendDaemonRequest(socketPath, { type, session_id: productionSessionId }).catch((error) => ({ error: { message: error.message } })),
+      bound
+    ]);
+    console.error(`[failure cleanup] ${type} ${productionSessionId}: ${response?.error ? JSON.stringify(response.error) : "ok"}`);
   }
 }
 
@@ -7440,15 +7466,103 @@ async function proveMountedMouseModeGatedInput(page) {
  * paste transaction, and Core, and the session producer answers it. The paste must never
  * appear on the key path, and a key typed afterwards must still be delivered in order.
  */
+/** Decoded daemon terminal_output text since an events index, as a latin1 string. */
+async function daemonTerminalOutputSince(page, since) {
+  return page.evaluate((from) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from)
+      .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
+      .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+      .join(""),
+  since);
+}
+
+/** Waits for a complete script line (pattern includes its terminator) in the daemon output since an index. */
+async function waitForDaemonOutputLine(page, since, pattern, label, timeout = 45_000) {
+  await page.waitForFunction(
+    ({ from, source }) =>
+      new RegExp(source).test(
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from)
+          .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
+          .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+          .join("")
+      ),
+    { from: since, source: pattern.source },
+    { timeout }
+  ).catch(async (error) => {
+    const tail = (await daemonTerminalOutputSince(page, since)).slice(-600);
+    throw new Error(`${label}: complete line /${pattern.source}/ not observed: ${error.message}; output tail=${JSON.stringify(tail)}`);
+  });
+  const match = (await daemonTerminalOutputSince(page, since)).match(pattern);
+  if (!match) throw new Error(`${label}: line matched in the page but not in the harness read`);
+  return match;
+}
+
+/**
+ * Flushes the session shell's pending input line by sending one newline through the key
+ * path and returns the pending content the shell echoed. The script's `*)` branch echoes
+ * `botster-web-production-echo:<line>`, so the content shows exactly what bytes were
+ * waiting in the line reader (for example mouse reports written as PTY input).
+ */
+async function flushPendingInputLine(page, label) {
+  const since = await page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length);
+  await callTerminalControl(page, "writeInput", "\n");
+  const match = await waitForDaemonOutputLine(page, since, /botster-web-production-echo:([^\r\n]*)\r?\n/, `${label} flush`);
+  return match[1];
+}
+
+/** Flushes the pending line and requires it to be empty: the strict clean-input boundary. */
+async function assertCleanInputBoundary(page, label) {
+  const pending = await flushPendingInputLine(page, label);
+  if (pending.length !== 0) {
+    throw new Error(`${label}: pending input line was not empty before paste: ${JSON.stringify(pending)} (${pending.length} chars)`);
+  }
+}
+
+/**
+ * Explicit clean boundary before any paste proof. The mouse proof leaves mouse reporting on,
+ * and admitted mouse reports are PTY input that lands in the shell's pending line. Steps,
+ * each observed: flush and record whatever was pending (this confirms or refutes input
+ * contamination), disable mouse reporting through the session producer and observe its done
+ * marker and the DECRST bytes, then flush again and require an empty line.
+ */
+async function establishCleanInputBoundary(page, label) {
+  const pendingBefore = await flushPendingInputLine(page, `${label} initial`);
+  recordProofNote("input_line_flush", { label, pending_chars: pendingBefore.length, pending: pendingBefore.slice(0, 200) });
+  const since = await page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length);
+  await callTerminalControl(page, "writeInput", "botster-web-production-mouse-off\n");
+  await waitForDaemonOutputLine(page, since, /botster-web-production-mouse-off-done\r?\n/, `${label} mouse off`);
+  const text = await daemonTerminalOutputSince(page, since);
+  if (!text.includes("[?1000l") || !text.includes("[?1006l")) {
+    throw new Error(`${label}: mouse DECRST 1000/1006 not observed in daemon terminal output`);
+  }
+  await assertCleanInputBoundary(page, `${label} after mouse off`);
+  return pendingBefore;
+}
+
+/** Focuses the mounted Restty textarea through the terminal control and a canvas click. */
+async function focusMountedTerminal(page) {
+  await waitForTerminalCanvas(page);
+  await callTerminalControl(page, "focus");
+  await page.locator(".terminal-view-container canvas").first().click();
+  await page.waitForFunction(
+    () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
+    undefined,
+    { timeout: 5_000 }
+  );
+}
+
 async function proveMountedClipboardPaste(page) {
   const body = "p".repeat(70_000);
   const payload = `botster-web-production-large-paste:${body}\n`;
   const expectedBytes = payload.length;
+  // Clean boundary: record and flush pending input, disable mouse reporting, require an
+  // empty line. The canvas click that focuses the textarea happens before a second strict
+  // flush, so a click cannot add PTY input between the boundary and the paste dispatch.
+  await establishCleanInputBoundary(page, "mounted paste");
+  await focusMountedTerminal(page);
+  await assertCleanInputBoundary(page, "mounted paste after focus click");
   const outcomesBefore = await terminalTelemetryCount(page, "paste_outcome");
   const outputBefore = await page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length);
-  await waitForTerminalCanvas(page);
-  await callTerminalControl(page, "focus");
-  await page.locator(".terminal-view-container canvas").first().click();
   await page.waitForFunction(
     () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
     undefined,
@@ -7492,8 +7606,14 @@ async function proveMountedClipboardPaste(page) {
     },
     { since: outputBefore, marker: "botster-web-production-large-paste-ok" },
     { timeout: 45_000 }
-  ).catch((error) => {
-    throw new Error(`session producer did not acknowledge the mounted 70,000-byte paste: ${error.message}`);
+  ).catch(async (error) => {
+    // Show what the shell actually echoed, so input contamination is visible, not inferred.
+    const output = await daemonTerminalOutputSince(page, outputBefore);
+    const echoes = [...output.matchAll(/botster-web-production-echo:([^\r\n]{0,120})/g)].map((match) => match[1]);
+    throw new Error(
+      `session producer did not acknowledge the mounted 70,000-byte paste: ${error.message}; ` +
+        `output chars=${output.length} echo_lines=${JSON.stringify(echoes.slice(0, 5))} tail=${JSON.stringify(output.slice(-300))}`
+    );
   });
   const leaks = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
@@ -7584,15 +7704,16 @@ async function proveLivePasteCases(page) {
     if (!match) throw new Error(`${label}: line pattern matched in the page but not in the harness read`);
     return match;
   };
+  // Dispatch never clicks: focus and the strict clean-input flush happen before the receiver
+  // is armed, so no pointer input can land between arming and the paste bytes.
   const dispatchClipboardPaste = async (text) => {
-    await waitForTerminalCanvas(page);
-    await callTerminalControl(page, "focus");
-    await page.locator(".terminal-view-container canvas").first().click();
     await page.waitForFunction(
       () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
       undefined,
       { timeout: 5_000 }
-    );
+    ).catch((error) => {
+      throw new Error(`paste dispatch: Restty textarea is not focused: ${error.message}`);
+    });
     return page.evaluate((data) => {
       const target = globalThis.document.activeElement;
       const transfer = new globalThis.DataTransfer();
@@ -7665,8 +7786,11 @@ async function proveLivePasteCases(page) {
     const leakMarker = `botster-web-live-paste-${label}:`;
     if (!text.startsWith(leakMarker)) throw new Error(`${label}: fixture must start with its leak marker`);
 
-    // The ready line is emitted in raw mode (no opost), so it ends in a bare newline. An
-    // error line means the receiver failed closed and never armed.
+    // Focus (with its canvas click) and the strict clean flush come before the receiver is
+    // armed. The ready line is emitted in raw mode (no opost), so it ends in a bare newline.
+    // An error line means the receiver failed closed and never armed.
+    await focusMountedTerminal(page);
+    await assertCleanInputBoundary(page, `${label} before arming`);
     const readySince = await readEventsLength();
     await callTerminalControl(page, "writeInput", `botster-web-production-receive:${wire.length}\n`);
     const ready = await waitForLine(readySince, receiverReadyOrErrorPattern(wire.length), `${label} receiver ready`);
@@ -7763,6 +7887,7 @@ async function proveLivePasteCases(page) {
     });
   };
 
+  await assertCleanInputBoundary(page, "live paste cases start");
   await setBracketedPaste(false);
   await receivePaste({ label: "ascii", text: `botster-web-live-paste-ascii:${"p".repeat(70_000)}`, bracketed: false });
   await receivePaste({ label: "unicode", text: `botster-web-live-paste-unicode:${"€ü漢字🙂".repeat(200)}`, bracketed: false });
@@ -7784,6 +7909,8 @@ async function proveLivePasteCases(page) {
     const committedBefore = await terminalTelemetryCount(page, "paste_committed");
     const settledBefore = await terminalTelemetryCount(page, "paste_settled");
     const text = `botster-web-live-paste-too-large:${"x".repeat(MAX_PASTE_BYTES)}`;
+    await focusMountedTerminal(page);
+    await assertCleanInputBoundary(page, `${label} before dispatch`);
     const dispatched = await dispatchClipboardPaste(text);
     if (!dispatched.defaultPrevented) throw new Error(`${label}: paste gesture was not consumed`);
     const outcome = await nextPasteOutcome(outcomesBefore, label);

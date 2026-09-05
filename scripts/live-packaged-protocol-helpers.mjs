@@ -638,6 +638,7 @@ export function productionSessionScriptSource() {
     "    botster-web-production-bytes-ctrl) printf '\\000\\033[0m\\377' ;;",
     "    botster-web-production-bytes-hold) printf '\\250\\001\\377' ;;",
     "    botster-web-production-mouse-on) printf '\\033[?1000h\\033[?1006h' ;;",
+    "    botster-web-production-mouse-off) printf '\\033[?1000l\\033[?1006l'; echo botster-web-production-mouse-off-done ;;",
     "    botster-web-production-bytes-ablate) printf '\\375' ;;",
     "    botster-web-production-large-paste:*) echo botster-web-production-large-paste-ok ;;",
     "    *botster-web-production-alt-redraw:*) marker=${line#*botster-web-production-alt-redraw:}; marker=$(printf '%s' \"$marker\" | tr -d '\\r'); printf '\\033[?1000l\\033[?1006l'; set -- $(stty size); rows=$1; printf '\\033[?1049h\\033[2J\\033[H'; row=1; while [ \"$row\" -le \"$rows\" ]; do printf '\\033[%s;1H%s-row-%s-of-%s' \"$row\" \"$marker\" \"$row\" \"$rows\"; row=$((row + 1)); done; printf '\\033[%s;1H%s-final-row-%s' \"$rows\" \"$marker\" \"$rows\" ;;",
