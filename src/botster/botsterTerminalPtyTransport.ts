@@ -26,7 +26,7 @@ export class BotsterTerminalPtyTransport implements PtyTransport {
 
   constructor(private readonly options: BotsterTerminalPtyTransportOptions) {}
 
-  setRenderObserver(onRender: (data: TerminalOutput) => void): void {
+  setRenderObserver(onRender: ((data: TerminalOutput) => void) | undefined): void {
     this.onRender = onRender;
   }
 

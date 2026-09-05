@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { createServer } from "vite";
+import { verifyMountedRendererTelemetry } from "./mounted-renderer-telemetry.mjs";
 
 const host = "127.0.0.1";
 const probe = "botster-web-mounted-keyboard-input";
@@ -32,6 +33,7 @@ try {
   }
 
   browser = await chromium.launch();
+  await verifyMountedRendererTelemetry(browser, `http://${host}:${address.port}`);
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   await page.goto(`http://${host}:${address.port}/mounted-terminal-keyboard-smoke.html`, {
     waitUntil: "domcontentloaded"

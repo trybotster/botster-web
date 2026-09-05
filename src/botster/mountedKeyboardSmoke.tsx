@@ -189,15 +189,17 @@ const harness: MountedKeyboardHarness = {
   };
 }).__BOTSTER_MOUNTED_KEYBOARD_SMOKE__ = harness;
 
-(window as typeof window & {
-  __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
-    events: unknown[];
-    terminal: Array<{ kind: string; payload: unknown }>;
+if (new URLSearchParams(window.location.search).get("rendererTelemetry") !== "off") {
+  (window as typeof window & {
+    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
+      events: unknown[];
+      terminal: Array<{ kind: string; payload: unknown }>;
+    };
+  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {
+    events: [],
+    terminal: harness.terminal
   };
-}).__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {
-  events: [],
-  terminal: harness.terminal
-};
+}
 
 const dataPlane: TerminalDataPlaneAttachment = {
   sessionId: descriptor.sessionId,

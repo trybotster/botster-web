@@ -162,17 +162,12 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     state.inputSubscription = state.renderer.onInput((data) => {
       void dataPlane.writeInput(data);
     });
+    const observeRender = createRendererWriteObserver(descriptor.sessionId);
     state.outputSubscription = dataPlane.subscribeOutput((data) => {
-      void Promise.resolve(state.renderer.write(data)).then(() => {
-        if (state.container.dataset) {
-          state.container.dataset.terminalLastRenderedOutput = bytesToBase64(data);
-        }
-        recordLiveHarnessTerminal("renderer_write", {
-          payload_bytes_base64: bytesToBase64(data),
-          bytes: data.byteLength,
-          sessionId: descriptor.sessionId
-        });
-      });
+      const rendered = state.renderer.write(data);
+      if (observeRender) {
+        void Promise.resolve(rendered).then(() => observeRender(data));
+      }
     });
   }
 
@@ -353,13 +348,26 @@ function bytesToBase64(bytes: Uint8Array): string {
   throw new Error("No base64 encoder is available in this runtime.");
 }
 
-function recordLiveHarnessTerminal(kind: string, payload: unknown): void {
-  if (typeof window === "undefined") return;
-
-  const harness = (window as typeof window & {
+/** Install payload collection only when a harness has explicitly created its terminal recorder. */
+export function createRendererWriteObserver(sessionId: string): ((data: TerminalOutput) => void) | undefined {
+  const runtime = globalThis as typeof globalThis & {
     __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
       terminal?: Array<{ kind: string; payload: unknown }>;
+      suppressRendererWriteTelemetry?: boolean;
     };
-  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-  harness?.terminal?.push({ kind, payload });
+  };
+  const harness = runtime.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+  if (!harness?.terminal) return undefined;
+
+  return (data) => {
+    if (runtime.__BOTSTER_LIVE_PROTOCOL_HARNESS__ !== harness || !harness.terminal || harness.suppressRendererWriteTelemetry) return;
+    harness.terminal.push({
+      kind: "renderer_write",
+      payload: {
+        payload_bytes_base64: bytesToBase64(data),
+        bytes: data.byteLength,
+        sessionId
+      }
+    });
+  };
 }

@@ -29,7 +29,7 @@
     "smoke:incremental-ghostsnp-attach": "node scripts/incremental-ghostsnp-attach-browser-smoke.mjs",
     "observe:terminal-baseline": "node scripts/terminal-baseline-capture.mjs",
     "observe:terminal-baseline:validate": "node scripts/terminal-baseline-capture.mjs --validate",
-    "test": "node scripts/check-daemon-protocol-drift.mjs && node src/App.test.mjs",
+    "test": "node scripts/check-daemon-protocol-drift.mjs && node scripts/renderer-telemetry-test.mjs && node src/App.test.mjs",
     "lint": "node ./node_modules/eslint/bin/eslint.js .",
     "typecheck": "node ./node_modules/typescript/bin/tsc -b --pretty false"
   },

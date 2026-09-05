@@ -13,7 +13,7 @@ import type {
   TerminalSubscription,
   TerminalViewDescriptor
 } from "./terminal";
-import { bytesToBase64 } from "./hubTerminalDataPlane";
+import { createRendererWriteObserver } from "./terminal";
 import type { DaemonModeFlags } from "./realHubDaemonDto";
 import { BotsterTerminalPtyTransport } from "./botsterTerminalPtyTransport";
 import type { TerminalGrid } from "./terminalGrid";
@@ -79,21 +79,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
 
   mount(container: HTMLElement): void {
     this.container = container;
-    this.ptyTransport.setRenderObserver((data) => {
-      if (this.container?.dataset) {
-        this.container.dataset.terminalLastRenderedOutput = bytesToBase64(data);
-      }
-      const harness = (globalThis as typeof globalThis & {
-        __BOTSTER_LIVE_PROTOCOL_HARNESS__?: { suppressRendererWriteTelemetry?: boolean };
-      }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-      if (!harness?.suppressRendererWriteTelemetry) {
-        recordLiveHarnessTerminal("renderer_write", {
-          payload_bytes_base64: bytesToBase64(data),
-          bytes: data.byteLength,
-          sessionId: this.descriptor.sessionId
-        });
-      }
-    });
+    this.ptyTransport.setRenderObserver(createRendererWriteObserver(this.descriptor.sessionId));
     const onKeyDown = (event: KeyboardEvent) => {
       // One-shot keyboard semantic; cleared when sendInput consumes it.
       this.pendingSemantic = { kind: "key", event };
