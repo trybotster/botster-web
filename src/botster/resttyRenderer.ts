@@ -459,34 +459,41 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   private async routePaste(text: string, source: string): Promise<TerminalInputOutcome> {
     const outcome = await this.ptyTransport.writePaste(text);
     recordLiveHarnessTerminal("paste_routed", { source, ...outcome, sessionId: this.descriptor.sessionId });
-    for (const listener of this.inputOutcomeListeners) {
-      listener(outcome);
-    }
+    this.publishInputOutcome(outcome);
     return outcome;
   }
 
   /**
    * Restty's context-menu Paste item calls pane.app.pasteFromClipboard(), which would
    * format and submit the text as key input. Redirect that one entry point to the explicit
-   * paste owner; every other menu item and Restty's own clipboard read stay as shipped.
-   * An empty clipboard read falls back to Restty's original handler so its own reporting
-   * still runs.
+   * paste owner; every other menu item stays as shipped. The clipboard is read exactly
+   * once: an empty read is inert, and a failed read is reported as an explicit outcome.
+   * Restty's original handler is never invoked, so a clipboard that changes between reads
+   * cannot reach the key path.
    */
   private installContextMenuPasteOwner(pane: { app?: { pasteFromClipboard?: () => Promise<boolean> } }): void {
     const app = pane.app;
     if (!app || typeof app.pasteFromClipboard !== "function") return;
-    const original = app.pasteFromClipboard.bind(app);
     app.pasteFromClipboard = async () => {
-      let text = "";
+      let text: string;
       try {
         text = await navigator.clipboard.readText();
       } catch (error: unknown) {
-        recordLiveHarnessTerminal("clipboard_read_failed", {
-          message: error instanceof Error ? error.message : String(error),
-          sessionId: this.descriptor.sessionId
+        const detail = error instanceof Error ? error.message : String(error);
+        recordLiveHarnessTerminal("clipboard_read_failed", { message: detail, sessionId: this.descriptor.sessionId });
+        this.publishInputOutcome({
+          kind: "paste",
+          outcome: "rejected",
+          bytes: 0,
+          reason: "clipboard_unavailable",
+          detail: `Clipboard could not be read: ${detail}`
         });
+        return false;
       }
-      if (!text) return original();
+      if (!text) {
+        recordLiveHarnessTerminal("clipboard_paste_empty", { source: "context_menu", sessionId: this.descriptor.sessionId });
+        return false;
+      }
       recordLiveHarnessTerminal("clipboard_paste", {
         source: "context_menu",
         chars: text.length,
@@ -495,6 +502,12 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       const outcome = await this.routePaste(text, "context_menu");
       return outcome.outcome === "admitted";
     };
+  }
+
+  private publishInputOutcome(outcome: TerminalInputOutcome): void {
+    for (const listener of this.inputOutcomeListeners) {
+      listener(outcome);
+    }
   }
 
   private sendWheelDecision(decision: WheelDecision): void {

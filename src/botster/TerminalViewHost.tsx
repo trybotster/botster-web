@@ -81,6 +81,8 @@ export function TerminalViewHost({
     let mount: TerminalViewMount | undefined;
     let statusSubscription: { unsubscribe(): void } | undefined;
     let inputOutcomeSubscription: { unsubscribe(): void } | undefined;
+    // A replacement session starts without the previous session's input message.
+    setInputMessage(undefined);
     let uninstallLiveHarnessTerminalControls: (() => void) | undefined;
     let exitReported = false;
 
@@ -102,6 +104,13 @@ export function TerminalViewHost({
           }
         });
         await bridge.attach(descriptor, terminalDataPlane);
+        // Cleanup may have run during attach. Fence before installing anything cleanup
+        // would otherwise never remove; the status subscription above is released here too.
+        if (cancelled) {
+          statusSubscription?.unsubscribe();
+          statusSubscription = undefined;
+          return;
+        }
         inputOutcomeSubscription = bridge.subscribeInputOutcomes?.(descriptor, (outcome) => {
           if (cancelled) return;
           setInputMessage(outcome.outcome === "admitted" ? undefined : outcome);
@@ -218,6 +227,8 @@ export function terminalInputMessage(outcome: TerminalInputOutcome): string {
   switch (outcome.outcome) {
     case "rejected":
       return `Paste rejected (${outcome.reason}): ${outcome.detail}`;
+    case "partial":
+      return `Paste partially delivered (${outcome.bytesWritten} of ${outcome.bytes} bytes): ${outcome.detail}`;
     case "cancelled":
       return `Paste cancelled before delivery: ${outcome.detail}`;
     case "unknown":

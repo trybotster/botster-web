@@ -10617,6 +10617,14 @@ try {
   );
   markHostChromeContract("terminal-mounted");
 
+  // Input-outcome message surface and the attach cancellation fence, mounted through React.
+  await (await import("./botster/terminalViewHostPaste.test.mjs")).runTerminalViewHostPasteTests({
+    TerminalViewHost,
+    act,
+    createElement,
+    createRoot
+  });
+
   // terminal-detached + dashboard-view
   const dashboardMarkup = renderToStaticMarkup(
     createElement(DashboardView, {

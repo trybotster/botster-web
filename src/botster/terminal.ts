@@ -43,17 +43,21 @@ export interface TerminalAttachmentStatus {
 
 /**
  * Outcome of one explicit terminal input operation. Paste is the first operation.
- * - admitted: Core delivered the complete content; bytes is the delivered count.
- * - rejected: Core or Web refused before delivery; zero PTY bytes.
- * - cancelled: Web stopped the operation before its commit reached Core; zero PTY bytes.
- * - unknown: the operation was committed but no authoritative result arrived, so delivery
- *   is neither proven nor disproven.
+ * `bytes` is the operation's UTF-8 size when known; a transport-level unsupported
+ * rejection reports the UTF-16 length as a lower bound because nothing was encoded.
+ * - admitted: Core delivered the complete content.
+ * - rejected: Core or Web refused before delivery; Core proves zero PTY bytes.
+ * - partial: Core reports that delivery began and stopped; bytesWritten is authoritative.
+ * - cancelled: Web stopped the operation before its Commit reached Core; zero PTY bytes.
+ * - unknown: no authoritative result proves delivery either way (result bound reached,
+ *   stream lost after Commit, or a Core timeout that may follow a completed write).
  */
 export type TerminalInputOutcome =
   | { kind: "paste"; outcome: "admitted"; bytes: number; operationId: number; detail: string }
   | { kind: "paste"; outcome: "rejected"; bytes: number; operationId?: number; reason: string; detail: string }
+  | { kind: "paste"; outcome: "partial"; bytes: number; bytesWritten: number; operationId: number; detail: string }
   | { kind: "paste"; outcome: "cancelled"; bytes: number; operationId?: number; detail: string }
-  | { kind: "paste"; outcome: "unknown"; bytes: number; operationId: number; detail: string };
+  | { kind: "paste"; outcome: "unknown"; bytes: number; operationId?: number; reason?: string; detail: string };
 
 export interface TerminalDataPlaneAttachment {
   sessionId: string;

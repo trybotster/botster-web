@@ -111,29 +111,31 @@ export class BotsterTerminalPtyTransport implements PtyTransport {
    * key input. Without a paste owner the outcome is an explicit unsupported rejection.
    */
   async writePaste(text: string): Promise<TerminalInputOutcome> {
-    const bytes = new TextEncoder().encode(text).byteLength;
+    // The clipboard is not encoded here: the paste owner bounds and encodes it once.
+    // `chars` is the UTF-16 length, a lower bound on the UTF-8 size.
+    const chars = text.length;
     const dataPlane = this.dataPlane;
     if (!dataPlane) {
-      this.options.record("paste_unsupported", { bytes, reason: "no_data_plane" });
-      return { kind: "paste", outcome: "rejected", bytes, reason: "unsupported", detail: "No terminal is attached; paste was not delivered." };
+      this.options.record("paste_unsupported", { chars, reason: "no_data_plane" });
+      return { kind: "paste", outcome: "rejected", bytes: chars, reason: "unsupported", detail: "No terminal is attached; paste was not delivered." };
     }
     if (!dataPlane.writePaste) {
-      this.options.record("paste_unsupported", { bytes, reason: "no_paste_owner", sessionId: dataPlane.sessionId });
+      this.options.record("paste_unsupported", { chars, reason: "no_paste_owner", sessionId: dataPlane.sessionId });
       return {
         kind: "paste",
         outcome: "rejected",
-        bytes,
+        bytes: chars,
         reason: "unsupported",
         detail: "This terminal attachment does not support clipboard paste; paste was not delivered."
       };
     }
-    this.options.record("pty_write_paste", { bytes, sessionId: dataPlane.sessionId });
+    this.options.record("pty_write_paste", { chars, sessionId: dataPlane.sessionId });
     try {
       return await dataPlane.writePaste(text);
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : String(error);
-      this.options.record("paste_error", { bytes, message: detail, sessionId: dataPlane.sessionId });
-      return { kind: "paste", outcome: "unknown", bytes, operationId: 0, detail: `Paste failed: ${detail}` };
+      this.options.record("paste_error", { chars, message: detail, sessionId: dataPlane.sessionId });
+      return { kind: "paste", outcome: "unknown", bytes: chars, reason: "error", detail: `Paste failed before an outcome was known: ${detail}` };
     }
   }
 

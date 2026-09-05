@@ -130,7 +130,7 @@ export async function runTerminalPasteTests(helpers) {
    * One attached plane over a real transport. `modeOverrides` shape the read_mode_flags
    * answer (bracketed_paste, tokens). Control read requests are answered as they arrive.
    */
-  const attachPlane = async (name, { modeOverrides = {}, autoAckTerminal = true } = {}) => {
+  const attachPlane = async (name, { modeOverrides = {}, autoAckTerminal = true, testHooks } = {}) => {
     const channels = [];
     const client = createWebrtcDaemonClient({
       bootstrap: localWebrtcBootstrapFixture,
@@ -150,7 +150,7 @@ export async function runTerminalPasteTests(helpers) {
     const sessionId = `paste-${name}-session`;
     const statuses = [];
     const outputs = [];
-    const plane = createHubTerminalDataPlane({ sessionId, bridge: client });
+    const plane = createHubTerminalDataPlane({ sessionId, bridge: client, ...(testHooks ? { testHooks } : {}) });
     bindGhostsnpInstaller(plane);
     plane.subscribeStatus((status) => statuses.push(status));
     plane.subscribeOutput((data) => outputs.push(data));
@@ -186,56 +186,73 @@ export async function runTerminalPasteTests(helpers) {
               subscription_id: request.subscription_id,
               generation: 9200,
               peer_generation: 1,
-              label: `r-${name}`,
+              label: `r-${name}-${request.subscription_id}`,
               expires_in_seconds: 30
             },
             events: []
-          }, { messageId: `${name}-reservation` });
+          }, { messageId: `${name}-reservation-${index}` });
+        } else if (request.type === "detach") {
+          answered.add(index);
+          await emitChunkedTestResponse(control, secret, { kind: "events", events: [] }, { messageId: `${name}-detach-${index}` });
         }
       }
     };
-    await answerControlReads();
-    await waitCondition(
-      () => control.createdDataChannels.some((channel) => channel.label === `r-${name}` && channel.helloAckDelivered === true),
-      `${name}: reserved channel Hello`
-    );
-    const terminal = control.createdDataChannels.find((channel) => channel.label === `r-${name}`);
-    const attach = (await Promise.all(control.sent.map((sent) => decryptTestEnvelope(secret, sent).catch(() => null))))
-      .find((request) => request?.type === "attach");
-    const subscriptionId = attach.subscription_id;
-    const terminalFrame = (frame, messageId) => emitChunkedTestResponse(terminal, secret, {
-      session_id: sessionId,
-      subscription_id: subscriptionId,
-      ...frame
-    }, { messageId, deliveryKind: "daemon_terminal_frame" });
-    const snapshot = { type: "snapshot", payload_base64: ghostsnpFixturePayloadBase64, payload_encoding: "base64", bytes: ghostsnpFixtureBytes };
-    await terminalFrame(snapshot, `${name}-snapshot-ready`);
-    await terminalFrame(snapshot, `${name}-snapshot-finish`);
-    await terminalFrame({ type: "attach_state", state: "attached" }, `${name}-attached`);
-    for (let round = 0; round < 40 && !statuses.some((status) => status.state === "attached"); round += 1) {
-      await answerControlReads();
-      await new Promise((resolve) => realSetTimeout(resolve, 0));
-    }
-    assert.ok(statuses.some((status) => status.state === "attached"), `${name}: plane reached Attached`);
-    const sentBefore = terminal.sent.length;
-    const inputResult = (result, messageId) => terminalFrame({
-      type: "input_result",
-      subscription_id: subscriptionId,
-      mode_generation: modeFlags.mode_generation,
-      mode_revision: modeFlags.mode_revision,
-      mode_flags: {
-        kitty_enabled: modeFlags.kitty_enabled,
-        cursor_visible: modeFlags.cursor_visible,
-        bracketed_paste: modeFlags.bracketed_paste,
-        mouse_mode: modeFlags.mouse_mode,
-        alt_screen: modeFlags.alt_screen,
-        focus_reporting: modeFlags.focus_reporting,
-        application_cursor: modeFlags.application_cursor
-      },
-      ...result
-    }, messageId);
-    const framesSince = async () => decodeSentFrames({ label: terminal.label, sent: terminal.sent.slice(sentBefore) });
-    return { client, control, terminal, plane, statuses, outputs, modeFlags, subscriptionId, sessionId, answerControlReads, inputResult, framesSince, sentBefore };
+    // Complete admission for the attach request at `ordinal` (0 = first attach): reserved
+    // channel Hello, snapshot READY and FINISH, then Attached. Returns result/frame helpers
+    // bound to that admission's channel and subscription id.
+    const admit = async (ordinal) => {
+      let attach;
+      for (let round = 0; round < 60 && !attach; round += 1) {
+        await answerControlReads();
+        const requests = await Promise.all(control.sent.map((sent) => decryptTestEnvelope(secret, sent).catch(() => null)));
+        attach = requests.filter((request) => request?.type === "attach")[ordinal];
+        if (!attach) await new Promise((resolve) => realSetTimeout(resolve, 5));
+      }
+      assert.ok(attach, `${name}: attach request ${ordinal}`);
+      const subscriptionId = attach.subscription_id;
+      const label = `r-${name}-${subscriptionId}`;
+      await waitCondition(
+        () => control.createdDataChannels.some((channel) => channel.label === label && channel.helloAckDelivered === true),
+        `${name}: reserved channel Hello ${ordinal}`
+      );
+      const terminal = control.createdDataChannels.find((channel) => channel.label === label);
+      const terminalFrame = (frame, messageId) => emitChunkedTestResponse(terminal, secret, {
+        session_id: sessionId,
+        subscription_id: subscriptionId,
+        ...frame
+      }, { messageId, deliveryKind: "daemon_terminal_frame" });
+      const snapshot = { type: "snapshot", payload_base64: ghostsnpFixturePayloadBase64, payload_encoding: "base64", bytes: ghostsnpFixtureBytes };
+      const attachedBefore = statuses.filter((status) => status.state === "attached").length;
+      await terminalFrame(snapshot, `${name}-${ordinal}-snapshot-ready`);
+      await terminalFrame(snapshot, `${name}-${ordinal}-snapshot-finish`);
+      await terminalFrame({ type: "attach_state", state: "attached" }, `${name}-${ordinal}-attached`);
+      for (let round = 0; round < 40 && statuses.filter((status) => status.state === "attached").length <= attachedBefore; round += 1) {
+        await answerControlReads();
+        await new Promise((resolve) => realSetTimeout(resolve, 0));
+      }
+      assert.ok(statuses.filter((status) => status.state === "attached").length > attachedBefore, `${name}: plane reached Attached (${ordinal})`);
+      const sentBefore = terminal.sent.length;
+      const inputResult = (result, messageId) => terminalFrame({
+        type: "input_result",
+        subscription_id: subscriptionId,
+        mode_generation: modeFlags.mode_generation,
+        mode_revision: modeFlags.mode_revision,
+        mode_flags: {
+          kitty_enabled: modeFlags.kitty_enabled,
+          cursor_visible: modeFlags.cursor_visible,
+          bracketed_paste: modeFlags.bracketed_paste,
+          mouse_mode: modeFlags.mouse_mode,
+          alt_screen: modeFlags.alt_screen,
+          focus_reporting: modeFlags.focus_reporting,
+          application_cursor: modeFlags.application_cursor
+        },
+        ...result
+      }, messageId);
+      const framesSince = async () => decodeSentFrames({ label: terminal.label, sent: terminal.sent.slice(sentBefore) });
+      return { terminal, subscriptionId, inputResult, framesSince, sentBefore };
+    };
+    const first = await admit(0);
+    return { client, control, plane, statuses, outputs, modeFlags, sessionId, answerControlReads, admit, ...first };
   };
   // Frames decode asynchronously, so poll them on the real timer instead of waitForTestCondition.
   const waitFrameCount = async (fixture, count, label) => {
@@ -346,21 +363,28 @@ export async function runTerminalPasteTests(helpers) {
       fixture.client.disconnect();
     });
 
-    // (p5) Rejections that are never retried: operation_out_of_bounds, timeout, partial_write.
-    await runScenario("p5-rejections", async () => {
+    // (p5) Results that are never retried: a rejection with zero bytes stays rejected, a
+    // partial write keeps its authoritative byte count, and a Core timeout is unknown.
+    await runScenario("p5-results", async () => {
       const fixture = await attachPlane("p5");
       let expectedFrames = 0;
       let operationId = 0;
-      for (const [rejection, bytesWritten] of [["operation_out_of_bounds", 0], ["timeout", 0], ["partial_write", 3]]) {
+      const cases = [
+        ["operation_out_of_bounds", 0, { outcome: "rejected", reason: "operation_out_of_bounds", detail: /rejected by the terminal/ }],
+        ["timeout", 0, { outcome: "unknown", reason: "timeout", detail: /delivery of 10 bytes is unknown/ }],
+        ["partial_write", 3, { outcome: "partial", bytesWritten: 3, detail: /delivered 3 of 10 bytes/ }]
+      ];
+      for (const [rejection, bytesWritten, expected] of cases) {
         operationId += 1;
         const pending = fixture.plane.writePaste("reject-me\n");
         expectedFrames += 3;
         await waitFrameCount(fixture, expectedFrames, `p5 ${rejection}: commit`);
         await fixture.inputResult({ kind: "paste", operation_id: operationId, admitted: false, bytes_written: bytesWritten, rejection }, `p5-${rejection}`);
         const outcome = await pending;
-        assert.equal(outcome.outcome, "rejected", rejection);
-        assert.equal(outcome.reason, rejection);
-        assert.match(outcome.detail, bytesWritten > 0 ? /after 3 bytes/ : /rejected by the terminal/);
+        assert.equal(outcome.outcome, expected.outcome, rejection);
+        if (expected.reason) assert.equal(outcome.reason, expected.reason, rejection);
+        if (expected.bytesWritten !== undefined) assert.equal(outcome.bytesWritten, expected.bytesWritten, rejection);
+        assert.match(outcome.detail, expected.detail, rejection);
         await flushMicrotasks();
         assert.equal((await fixture.framesSince()).length, expectedFrames, `${rejection}: no retry frames`);
       }
@@ -484,11 +508,48 @@ export async function runTerminalPasteTests(helpers) {
       fireResultBound();
       const boundOutcome = await pendingBound;
       assert.equal(boundOutcome.outcome, "unknown");
-      assert.match(boundOutcome.detail, /No paste result within/);
+      assert.equal(boundOutcome.reason, "result_bound");
+      assert.match(boundOutcome.detail, /an abort was attempted/);
+      const boundFrames = await waitFrameCount(bound, 4, "p9: abort after bound");
+      assert.deepEqual(boundFrames.map((frame) => kindName(frame.kind)), ["begin", "chunk", "commit", "abort"], "Abort attempted on the live stream after the bound");
+      assert.equal(lostOutcome.reason, "stream_lost");
       // A late authoritative result after the bound changes nothing and settles cleanly.
       await bound.inputResult({ kind: "paste", operation_id: 1, admitted: true, bytes_written: 6 }, "p9-late");
       await flushMicrotasks();
       bound.client.disconnect();
+    });
+
+    // (p11) A settled old transaction's finalizer runs after a new operation reused its id on
+    // the next attachment; the new resolver must survive and receive its result.
+    await runScenario("p11-finalizer-identity", async () => {
+      let releaseFinalize;
+      const finalizeGate = new Promise((resolve) => { releaseFinalize = resolve; });
+      let gateArmed = false;
+      const fixture = await attachPlane("p11", {
+        testHooks: { beforePasteFinalize: () => (gateArmed ? finalizeGate : undefined) }
+      });
+      const oldPending = fixture.plane.writePaste("old\n");
+      await waitFrameCount(fixture, 3, "p11: old commit");
+      gateArmed = true;
+      // Lose only the reserved terminal channel: the plane abandons the stream, settles the
+      // old result as lost, and reattaches on the same control peer with a fresh subscription.
+      fixture.terminal.close();
+      const second = await fixture.admit(1);
+      gateArmed = false;
+      const newPending = fixture.plane.writePaste("new\n");
+      const newFrames = await waitFrameCount(second, 3, "p11: new commit");
+      assert.equal(beginHeader(newFrames[0].body).operationId, 1, "operation ids restart on the new attachment");
+      // Release the old finalizer only now, after the new operation registered id 1.
+      releaseFinalize();
+      stage("p11: old outcome");
+      const oldOutcome = await oldPending;
+      assert.equal(oldOutcome.outcome, "unknown");
+      assert.equal(oldOutcome.reason, "stream_lost");
+      await second.inputResult({ kind: "paste", operation_id: 1, admitted: true, bytes_written: 4 }, "p11-new-result");
+      stage("p11: new outcome");
+      const newOutcome = await newPending;
+      assert.equal(newOutcome.outcome, "admitted", "the new operation's resolver survived the old finalizer");
+      fixture.client.disconnect();
     });
 
     // (p10) Transport without a paste owner: explicit unsupported rejection, no key path.

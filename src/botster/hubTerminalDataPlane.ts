@@ -69,10 +69,17 @@ export interface HubTerminalDataPlaneTestHooks {
   beforeResize?: () => Promise<void> | void;
   beforeModeGatedInput?: () => Promise<void> | void;
   beforeListenerDelivery?: () => Promise<void> | void;
+  /** Test-only gate before a settled paste transaction removes its result entry. */
+  beforePasteFinalize?: () => Promise<void> | void;
   /** Test-only shorter race for the public Detach hang bound. */
   detachRequestBoundMs?: number;
   /** Test-only shorter bound for admitted terminal hydration progress. */
   hydrationProgressBoundMs?: number;
+}
+
+interface PendingPasteResult {
+  generation: number;
+  resolve(result: TerminalInputResult | "lost"): void;
 }
 
 interface ScreenHydration {
@@ -135,8 +142,13 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private nextPasteOperationId = 1;
   private queuedPasteBytes = 0;
   private queuedPasteOperations = 0;
-  /** Resolvers for committed paste operations awaiting their authoritative result. */
-  private readonly pendingPasteResults = new Map<number, (result: TerminalInputResult | "lost") => void>();
+  /**
+   * Resolvers for committed paste operations awaiting their authoritative result, keyed by
+   * operation id. Operation ids restart at 1 on every attachment change, so entries carry
+   * their attachment generation and are removed only by identity: a settled old transaction
+   * can never remove a newer operation's resolver that reuses its id.
+   */
+  private readonly pendingPasteResults = new Map<number, PendingPasteResult>();
   private snapshotRecoveries = 0;
   private readonly onWebrtcLifecycle?: (event: Event) => void;
 
@@ -248,8 +260,20 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       bytes: number,
       operationId?: number
     ): TerminalInputOutcome => ({ kind: "paste", outcome: "rejected", bytes, operationId, reason, detail });
+    // Every check that does not need the UTF-8 size runs before the single encoding, so an
+    // oversized or refused clipboard string is never allocated as bytes.
     if (text.length === 0) {
       return rejected("empty", "Clipboard paste was empty.", 0);
+    }
+    if (this.detached) {
+      return rejected("detached", "Terminal is detached; paste was not delivered.", text.length);
+    }
+    if (this.queuedPasteOperations >= MAX_QUEUED_PASTE_OPERATIONS) {
+      return rejected(
+        "queue_bounds",
+        `Paste refused: ${this.queuedPasteOperations} paste operations are already queued.`,
+        text.length
+      );
     }
     // UTF-16 units never exceed UTF-8 bytes: reject before encoding an oversized string.
     if (text.length > MAX_PASTE_BYTES) {
@@ -263,16 +287,6 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     const bytes = data.byteLength;
     if (bytes > MAX_PASTE_BYTES) {
       return rejected("too_large", `Paste of ${bytes} bytes exceeds the ${MAX_PASTE_BYTES}-byte paste limit.`, bytes);
-    }
-    if (this.detached) {
-      return rejected("detached", "Terminal is detached; paste was not delivered.", bytes);
-    }
-    if (this.queuedPasteOperations >= MAX_QUEUED_PASTE_OPERATIONS) {
-      return rejected(
-        "queue_bounds",
-        `Paste refused: ${this.queuedPasteOperations} paste operations are already queued.`,
-        bytes
-      );
     }
     if (this.queuedPasteBytes + bytes > MAX_QUEUED_PASTE_BYTES) {
       return rejected(
@@ -349,8 +363,10 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       const frames = encodePaste(operationId, modes.mode_generation, modes.mode_revision, data);
       const commitIndex = frames.length - 1;
       let committed = false;
+      let entry!: PendingPasteResult;
       const resultPromise = new Promise<TerminalInputResult | "lost">((resolve) => {
-        this.pendingPasteResults.set(operationId, resolve);
+        entry = { generation: attachmentGeneration, resolve };
+        this.pendingPasteResults.set(operationId, entry);
       });
       try {
         for (const [index, frame] of frames.entries()) {
@@ -379,19 +395,55 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         });
         const result = await Promise.race([resultPromise, bound]);
         if (timer !== undefined) window.clearTimeout(timer);
-        if (result === "bound" || result === "lost") {
+        if (result === "bound") {
+          // Core can still cancel an operation that is assembling or queued before its gated
+          // submission. Attempt that only on the stream that carried Begin. Abort never
+          // retracts a completed PTY write, so the outcome stays unknown.
+          await abortBestEffort(operationId);
           return {
             kind: "paste",
             outcome: "unknown",
             bytes,
             operationId,
-            detail: result === "bound"
-              ? `No paste result within ${PASTE_RESULT_BOUND_MS} ms; delivery of ${bytes} bytes is unknown.`
-              : `Terminal stream was lost after Commit; delivery of ${bytes} bytes is unknown.`
+            reason: "result_bound",
+            detail: `No paste result within ${PASTE_RESULT_BOUND_MS} ms; an abort was attempted and delivery of ${bytes} bytes is unknown.`
+          };
+        }
+        if (result === "lost") {
+          return {
+            kind: "paste",
+            outcome: "unknown",
+            bytes,
+            operationId,
+            reason: "stream_lost",
+            detail: `Terminal stream was lost after Commit; delivery of ${bytes} bytes is unknown.`
           };
         }
         if (result.admitted) {
           return { kind: "paste", outcome: "admitted", bytes: result.bytes_written, operationId, detail: `Paste delivered ${result.bytes_written} bytes.` };
+        }
+        if (result.rejection === "partial_write" || (!result.admitted && result.bytes_written > 0)) {
+          // Authoritative partial delivery: Core reports the bytes that reached the PTY.
+          return {
+            kind: "paste",
+            outcome: "partial",
+            bytes,
+            bytesWritten: result.bytes_written,
+            operationId,
+            detail: `Terminal delivered ${result.bytes_written} of ${bytes} bytes before the write stopped.`
+          };
+        }
+        if (result.rejection === "timeout") {
+          // Core's Timeout can follow its post-submit wait after a completed write, so zero
+          // delivery is not proven. Never retried.
+          return {
+            kind: "paste",
+            outcome: "unknown",
+            bytes,
+            operationId,
+            reason: "timeout",
+            detail: `Terminal reported a timeout for the paste; delivery of ${bytes} bytes is unknown.`
+          };
         }
         if (result.rejection === "stale_mode" && attempt === 0 && this.modeFlags && stillLive()) {
           // Core proves zero PTY bytes for stale_mode at both its own stage and the worker
@@ -409,8 +461,11 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
           detail: `Paste rejected by the terminal: ${result.rejection ?? "rejected"}${result.bytes_written > 0 ? ` after ${result.bytes_written} bytes` : ""}.`
         };
       } finally {
-        // An uncommitted operation drops its resolver with the map entry.
-        this.pendingPasteResults.delete(operationId);
+        await this.testHooks?.beforePasteFinalize?.();
+        // Remove only this transaction's own entry: ids restart on attachment change.
+        if (this.pendingPasteResults.get(operationId) === entry) {
+          this.pendingPasteResults.delete(operationId);
+        }
         recordLiveHarnessTerminal("paste_settled", { operation_id: operationId, committed });
       }
     }
@@ -418,7 +473,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   private settlePendingPasteResults(): void {
-    for (const resolve of this.pendingPasteResults.values()) resolve("lost");
+    for (const entry of this.pendingPasteResults.values()) entry.resolve("lost");
     this.pendingPasteResults.clear();
   }
 
@@ -1454,7 +1509,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     };
     recordLiveHarnessTerminal("input_result", result);
     if (result.kind === "paste" && result.operation_id !== undefined) {
-      this.pendingPasteResults.get(result.operation_id)?.(result);
+      const pending = this.pendingPasteResults.get(result.operation_id);
+      if (pending && pending.generation === attachmentGeneration) pending.resolve(result);
       return;
     }
     if (result.kind !== "mode_gated_input") return;

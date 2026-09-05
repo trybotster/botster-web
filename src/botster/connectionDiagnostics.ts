@@ -288,15 +288,21 @@ export function terminalInputOutcomeDiagnostic(
   outcome: TerminalInputOutcome
 ): ConnectionDiagnostic {
   const severity: ConnectionDiagnosticSeverity =
-    outcome.outcome === "admitted" ? "success" : outcome.outcome === "rejected" ? "danger" : "warning";
+    outcome.outcome === "admitted"
+      ? "success"
+      : outcome.outcome === "rejected" || outcome.outcome === "partial"
+        ? "danger"
+        : "warning";
   const title =
     outcome.outcome === "admitted"
       ? "Paste delivered"
       : outcome.outcome === "rejected"
         ? "Paste rejected"
-        : outcome.outcome === "cancelled"
-          ? "Paste cancelled before delivery"
-          : "Paste delivery unknown";
+        : outcome.outcome === "partial"
+          ? "Paste partially delivered"
+          : outcome.outcome === "cancelled"
+            ? "Paste cancelled before delivery"
+            : "Paste delivery unknown";
   return {
     id: `terminal-input-${sessionId}`,
     title,
