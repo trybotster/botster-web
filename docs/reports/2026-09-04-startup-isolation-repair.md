@@ -47,11 +47,14 @@ Surface pending and failure cases wrap the real transport `send` for the `surfac
 | surface_failure | Surface subscription rejects. Warning diagnostic only. No action status. |
 | connect_failure | Status request rejects. `hub-unavailable` diagnostic, one action status, no optional call, session not loaded. |
 | subscribe_failure | Session subscription rejects. `stream-disconnected` diagnostic, one action status, no optional call, session not loaded. |
-| cancel_connect | Unmount while status is pending. Disconnect runs. Late resolution writes nothing. |
-| cancel_subscribe | Unmount while session subscription is pending. Disconnect runs. Late resolution writes nothing. |
-| cancel_optional | Unmount while an optional request is pending. Late rejection writes nothing. |
+| cancel_connect | Unmount while status is pending. Disconnect runs. Late resolution produces no observable late calls, diagnostics, action status, or rendered load updates. |
+| cancel_subscribe | Unmount while session subscription is pending. Disconnect runs. Late resolution produces no observable late calls, diagnostics, action status, or rendered load updates. |
+| cancel_optional | Unmount while an optional request is pending. Late rejection produces no observable late calls, diagnostics, action status, or rendered load updates. |
 
-Every non-failure scenario also verifies: status precedes session subscribe, session subscribe precedes the first optional call, every optional call and the surface subscribe occur, and a real session upsert frame through the actual subscription reaches the entity store and the rendered list.
+The successful startup scenarios (optional, surface_pending, surface_failure) also verify: status precedes session subscribe, session subscribe precedes the first optional call, every optional call and the surface subscribe occur, and a real session upsert frame through the actual subscription reaches the entity store and the rendered list.
+The cancel scenarios return before those assertions.
+
+The cancellation tests observe the bridge, the diagnostic and action callbacks, and the rendered load status. React unmount can suppress state setter effects on its own, so the tests do not independently instrument every setter invocation. The `cancelled` guards in the production source are present and reviewed.
 
 ## Executed checks
 
