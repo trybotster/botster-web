@@ -9,6 +9,7 @@ import {
   terminalCompatibilityRequirement
 } from "./protocolPlanes";
 import type { WebrtcDaemonLifecycleEvent } from "./webrtcDaemonClient";
+import type { TerminalInputOutcome } from "./terminal";
 
 export const hubStatusFamily = "botster-web.hub_status";
 export const hubCompatibilityDiagnosticId = "hub-compatibility";
@@ -274,6 +275,33 @@ export function terminalUnavailableDiagnostic(error: unknown): ConnectionDiagnos
     title: "Terminal stream unavailable",
     detail: errorMessage(error, "The terminal data plane could not attach to the selected session."),
     severity: "danger",
+    source: "terminal"
+  };
+}
+
+/**
+ * Durable diagnostic for one explicit terminal input outcome. One row per session,
+ * replaced by each later outcome, so the panel keeps the latest paste result.
+ */
+export function terminalInputOutcomeDiagnostic(
+  sessionId: string,
+  outcome: TerminalInputOutcome
+): ConnectionDiagnostic {
+  const severity: ConnectionDiagnosticSeverity =
+    outcome.outcome === "admitted" ? "success" : outcome.outcome === "rejected" ? "danger" : "warning";
+  const title =
+    outcome.outcome === "admitted"
+      ? "Paste delivered"
+      : outcome.outcome === "rejected"
+        ? "Paste rejected"
+        : outcome.outcome === "cancelled"
+          ? "Paste cancelled before delivery"
+          : "Paste delivery unknown";
+  return {
+    id: `terminal-input-${sessionId}`,
+    title,
+    detail: `${outcome.detail} (session ${sessionId}, ${outcome.bytes} bytes${outcome.operationId !== undefined ? `, operation ${outcome.operationId}` : ""})`,
+    severity,
     source: "terminal"
   };
 }

@@ -7,6 +7,7 @@ import type {
   ModeDependentTerminalInput,
   TerminalDataPlaneAttachment,
   TerminalInput,
+  TerminalInputOutcome,
   TerminalOutput,
   TerminalRendererAdapter,
   TerminalSnapshotReader,
@@ -65,6 +66,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     record: recordLiveHarnessTerminal
   });
   private readonly inputListeners = new Set<(data: TerminalInput) => void>();
+  private readonly inputOutcomeListeners = new Set<(outcome: TerminalInputOutcome) => void>();
   private terminal?: Restty;
   private container?: HTMLElement;
   private pendingSemantic: PendingSemanticInput | undefined;
@@ -109,23 +111,43 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       }
     };
 
+    // Clipboard paste is an explicit semantic operation. Capture it on the container
+    // before Restty's textarea listeners so the text never enters Restty's key path,
+    // which would format bracketed-paste markers and submit one oversized key input.
+    // Detection is by DOM event type only: never by payload length or marker bytes.
+    const onPaste = (event: ClipboardEvent) => {
+      this.handleClipboardPaste(event, event.clipboardData, "clipboard_event");
+    };
+    const onBeforeInput = (event: Event) => {
+      const input = event as InputEvent;
+      if (input.inputType !== "insertFromPaste") return;
+      this.handleClipboardPaste(input, input.dataTransfer, "beforeinput");
+    };
+
     container.addEventListener("keydown", onKeyDown, true);
     container.addEventListener("pointerdown", onPointerDown, true);
     container.addEventListener("pointerup", onPointerUp, true);
     container.addEventListener("pointermove", onPointerMove, true);
     container.addEventListener("wheel", onWheel, true);
+    container.addEventListener("paste", onPaste, true);
+    container.addEventListener("beforeinput", onBeforeInput, true);
     this.removeDomListeners = () => {
       container.removeEventListener("keydown", onKeyDown, true);
       container.removeEventListener("pointerdown", onPointerDown, true);
       container.removeEventListener("pointerup", onPointerUp, true);
       container.removeEventListener("pointermove", onPointerMove, true);
       container.removeEventListener("wheel", onWheel, true);
+      container.removeEventListener("paste", onPaste, true);
+      container.removeEventListener("beforeinput", onBeforeInput, true);
     };
 
     this.terminal = new Restty({
       root: container,
       createInitialPane: { focus: false },
       fontSources: botsterResttyFontSources,
+      // Restty's default context menu keeps every item; only its Paste action is redirected
+      // to the explicit paste owner through the pane app's paste entry point.
+      onPaneCreated: (pane) => this.installContextMenuPasteOwner(pane),
       appOptions: {
         // Pure renderer: session owns PTY queries including OSC color replies.
         // Restty ≥448497041 wires readOnly → suppressQueryReplies (OSC 10/11/12).
@@ -399,6 +421,80 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
 
   private applyGridToRestty(grid: TerminalGrid): void {
     this.terminal?.resize(grid.columns, grid.rows);
+  }
+
+  onInputOutcome(listener: (outcome: TerminalInputOutcome) => void): TerminalSubscription {
+    this.inputOutcomeListeners.add(listener);
+    return {
+      unsubscribe: () => {
+        this.inputOutcomeListeners.delete(listener);
+      }
+    };
+  }
+
+  /**
+   * Consumes a DOM paste gesture only when it carries non-empty text/plain. Once consumed
+   * the gesture is a paste: it is routed to the paste owner and its outcome, including an
+   * explicit unsupported rejection, is reported. Empty or non-text clipboard payloads are
+   * left to Restty's existing handling. A consumed paste event is default-prevented, so no
+   * duplicate insertFromPaste beforeinput follows it.
+   */
+  private handleClipboardPaste(
+    event: Event,
+    transfer: DataTransfer | null | undefined,
+    source: "clipboard_event" | "beforeinput"
+  ): void {
+    const text = transfer?.getData("text/plain") ?? "";
+    if (!text) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    recordLiveHarnessTerminal("clipboard_paste", {
+      source,
+      chars: text.length,
+      sessionId: this.descriptor.sessionId
+    });
+    void this.routePaste(text, source);
+  }
+
+  private async routePaste(text: string, source: string): Promise<TerminalInputOutcome> {
+    const outcome = await this.ptyTransport.writePaste(text);
+    recordLiveHarnessTerminal("paste_routed", { source, ...outcome, sessionId: this.descriptor.sessionId });
+    for (const listener of this.inputOutcomeListeners) {
+      listener(outcome);
+    }
+    return outcome;
+  }
+
+  /**
+   * Restty's context-menu Paste item calls pane.app.pasteFromClipboard(), which would
+   * format and submit the text as key input. Redirect that one entry point to the explicit
+   * paste owner; every other menu item and Restty's own clipboard read stay as shipped.
+   * An empty clipboard read falls back to Restty's original handler so its own reporting
+   * still runs.
+   */
+  private installContextMenuPasteOwner(pane: { app?: { pasteFromClipboard?: () => Promise<boolean> } }): void {
+    const app = pane.app;
+    if (!app || typeof app.pasteFromClipboard !== "function") return;
+    const original = app.pasteFromClipboard.bind(app);
+    app.pasteFromClipboard = async () => {
+      let text = "";
+      try {
+        text = await navigator.clipboard.readText();
+      } catch (error: unknown) {
+        recordLiveHarnessTerminal("clipboard_read_failed", {
+          message: error instanceof Error ? error.message : String(error),
+          sessionId: this.descriptor.sessionId
+        });
+      }
+      if (!text) return original();
+      recordLiveHarnessTerminal("clipboard_paste", {
+        source: "context_menu",
+        chars: text.length,
+        sessionId: this.descriptor.sessionId
+      });
+      const outcome = await this.routePaste(text, "context_menu");
+      return outcome.outcome === "admitted";
+    };
   }
 
   private sendWheelDecision(decision: WheelDecision): void {

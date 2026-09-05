@@ -41,6 +41,20 @@ export interface TerminalAttachmentStatus {
   message: string;
 }
 
+/**
+ * Outcome of one explicit terminal input operation. Paste is the first operation.
+ * - admitted: Core delivered the complete content; bytes is the delivered count.
+ * - rejected: Core or Web refused before delivery; zero PTY bytes.
+ * - cancelled: Web stopped the operation before its commit reached Core; zero PTY bytes.
+ * - unknown: the operation was committed but no authoritative result arrived, so delivery
+ *   is neither proven nor disproven.
+ */
+export type TerminalInputOutcome =
+  | { kind: "paste"; outcome: "admitted"; bytes: number; operationId: number; detail: string }
+  | { kind: "paste"; outcome: "rejected"; bytes: number; operationId?: number; reason: string; detail: string }
+  | { kind: "paste"; outcome: "cancelled"; bytes: number; operationId?: number; detail: string }
+  | { kind: "paste"; outcome: "unknown"; bytes: number; operationId: number; detail: string };
+
 export interface TerminalDataPlaneAttachment {
   sessionId: string;
   writeInput(data: TerminalInput): void | Promise<void>;
@@ -49,6 +63,12 @@ export interface TerminalDataPlaneAttachment {
    * Implementations re-encode the semantic event once after a stale reject.
    */
   writeModeGatedInput?(semantic: ModeDependentTerminalInput): void | Promise<void>;
+  /**
+   * Explicit clipboard paste as one Core-owned transaction. The plane encodes the
+   * protocol frames, supplies the mode token, and reports the authoritative outcome.
+   * It never adds bracketed-paste markers; Core emits them under the fenced mode.
+   */
+  writePaste?(text: string): Promise<TerminalInputOutcome>;
   /** Bind the Restty incremental snapshot decoder for one subscription. */
   bindIncrementalSnapshotReader?(createReader: () => TerminalSnapshotReader): void;
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription;
@@ -63,6 +83,8 @@ export interface TerminalRendererAdapter {
   mount(container: HTMLElement): void | Promise<void>;
   attachDataPlane?(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription | void | Promise<TerminalSubscription | void>;
   onInput(listener: (data: TerminalInput) => void): TerminalSubscription;
+  /** Outcomes of explicit input operations the renderer routed (paste). */
+  onInputOutcome?(listener: (outcome: TerminalInputOutcome) => void): TerminalSubscription;
   write(data: TerminalOutput): void | Promise<void>;
   resize(rows: number, columns: number): void | Promise<void>;
   focus(): void | Promise<void>;
@@ -84,6 +106,11 @@ export interface TerminalViewBridge {
   resize(descriptor: TerminalViewDescriptor, rows: number, columns: number): Promise<void>;
   focus(descriptor: TerminalViewDescriptor): Promise<void>;
   writeInput(descriptor: TerminalViewDescriptor, data: TerminalInput): Promise<void>;
+  /** Subscribe to explicit input outcomes from the mounted renderer, if it reports them. */
+  subscribeInputOutcomes?(
+    descriptor: TerminalViewDescriptor,
+    listener: (outcome: TerminalInputOutcome) => void
+  ): TerminalSubscription;
 }
 
 interface TerminalMountState {
@@ -253,6 +280,15 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     await state.dataPlane?.writeInput(data);
   }
 
+  subscribeInputOutcomes(
+    descriptor: TerminalViewDescriptor,
+    listener: (outcome: TerminalInputOutcome) => void
+  ): TerminalSubscription {
+    const state = this.mounts.get(descriptor.sessionId);
+    const subscription = state?.renderer.onInputOutcome?.(listener);
+    return subscription ?? { unsubscribe() {} };
+  }
+
   private requireMount(descriptor: TerminalViewDescriptor): TerminalMountState {
     const state = this.mounts.get(descriptor.sessionId);
     if (!state) {
@@ -282,6 +318,17 @@ export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
     if (!this.detached) {
       this.inputs.push(data);
     }
+  }
+
+  readonly pastes: string[] = [];
+
+  async writePaste(text: string): Promise<TerminalInputOutcome> {
+    const bytes = new TextEncoder().encode(text).byteLength;
+    if (this.detached) {
+      return { kind: "paste", outcome: "rejected", bytes, reason: "detached", detail: "Mock terminal data plane is detached." };
+    }
+    this.pastes.push(text);
+    return { kind: "paste", outcome: "admitted", bytes, operationId: this.pastes.length, detail: "Mock paste recorded." };
   }
 
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription {

@@ -10,6 +10,7 @@ const echo = `botster-web-mounted-keyboard-echo:${probe}`;
 const fullLine = `${probe}\n`;
 const finalOutput = "botster-web-mounted-final-output\r\n";
 const wheelScrollbackLane = process.env.BOTSTER_MOUNTED_WHEEL_SCROLLBACK === "1";
+const clipboardPasteLane = process.env.BOTSTER_MOUNTED_PASTE === "1";
 const historySeedPath = fileURLToPath(new URL("../fixtures/terminal-baseline/history-seed.sh", import.meta.url));
 const WHEEL_LINE_EVENTS = 1;
 const WHEEL_LINES = 3;
@@ -64,7 +65,9 @@ try {
   );
   await page.waitForTimeout(1_000);
 
-  if (wheelScrollbackLane) {
+  if (clipboardPasteLane) {
+    await proveMountedClipboardPaste(page, browser, `http://${host}:${address.port}`);
+  } else if (wheelScrollbackLane) {
     const history = execFileSync("sh", [historySeedPath], { encoding: "utf8" })
       .replace(/\n/g, "\r\n")
       .replace(/(?:\r\n)+$/, "");
@@ -308,4 +311,203 @@ try {
 } finally {
   await browser?.close();
   await vite?.close();
+}
+
+/**
+ * Mounted clipboard paste through the real Restty renderer and the production capture path.
+ * Every case dispatches a real DOM paste gesture on the focused Restty textarea. Nothing here
+ * calls the paste owner directly, and no case infers paste from payload length.
+ */
+async function proveMountedClipboardPaste(page, browser, origin) {
+  const largeText = `botster-web-mounted-paste:${"p".repeat(70_000)}\n`;
+  const unicodeText = "héllo wörld — €12 😀 日本語 ✓\n".repeat(64);
+  const unicodeBytes = Buffer.byteLength(unicodeText, "utf8");
+  if (unicodeBytes <= unicodeText.length) throw new Error("unicode paste fixture must exceed its UTF-16 length");
+  const menuText = "botster-web-mounted-context-menu-paste\n";
+
+  const focusTerminal = async () => {
+    await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl.focus());
+    await page.locator(".terminal-view-container canvas").first().click({ position: { x: 10, y: 10 } });
+    await page.waitForFunction(
+      () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
+      undefined,
+      { timeout: 5_000 }
+    );
+  };
+  const dispatchPaste = (text) =>
+    page.evaluate((data) => {
+      const target = globalThis.document.activeElement;
+      if (!(target instanceof globalThis.HTMLTextAreaElement)) {
+        throw new Error(`mounted paste smoke expected Restty textarea focus, observed ${target?.tagName ?? "none"}`);
+      }
+      const transfer = new globalThis.DataTransfer();
+      if (data) transfer.setData("text/plain", data);
+      const event = new globalThis.ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true });
+      const dispatched = target.dispatchEvent(event);
+      return { dispatched, defaultPrevented: event.defaultPrevented };
+    }, text);
+  const readState = () =>
+    page.evaluate(() => {
+      const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
+      const terminal = harness?.terminal ?? [];
+      return {
+        pastes: harness.pastes.map((text) => ({ chars: text.length, text })),
+        pasteOutcomes: harness.pasteOutcomes,
+        inputs: [...harness.inputs],
+        callbackOrder: [...harness.callbackOrder],
+        ptySendInputs: terminal.filter((entry) => entry.kind === "pty_send_input").map((entry) => String(entry.payload?.data ?? "")),
+        clipboardPastes: terminal.filter((entry) => entry.kind === "clipboard_paste").map((entry) => entry.payload),
+        message: globalThis.document.querySelector(".terminal-input-message")?.textContent ?? null,
+        messageOutcome: globalThis.document.querySelector(".terminal-input-message")?.getAttribute("data-terminal-input-outcome") ?? null
+      };
+    });
+  const failWith = async (label, error) => {
+    const state = await readState();
+    throw new Error(`${label}: ${error.message}\nmounted paste smoke state:\n${JSON.stringify({
+      ...state,
+      pastes: state.pastes.map((entry) => ({ chars: entry.chars, head: entry.text.slice(0, 40) }))
+    }, null, 2)}`, { cause: error });
+  };
+
+  await focusTerminal();
+
+  // 1. 70,000-byte clipboard paste reaches the paste owner byte-identical, never the key path.
+  const large = await dispatchPaste(largeText);
+  if (!large.defaultPrevented) throw new Error("large paste was not consumed by the Botster capture handler");
+  await page.waitForFunction(
+    ({ expected }) => {
+      const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
+      return harness.pastes.length === 1 && harness.pastes[0] === expected &&
+        harness.pasteOutcomes.some((entry) => entry.outcome === "admitted" && entry.bytes === expected.length);
+    },
+    { expected: largeText },
+    { timeout: 15_000 }
+  ).catch((error) => failWith("large paste", error));
+  let state = await readState();
+  if (state.inputs.length !== 0 || state.ptySendInputs.length !== 0) {
+    throw new Error(`large paste leaked into the key path: inputs=${state.inputs.length} pty_send_input=${state.ptySendInputs.length}`);
+  }
+  if (state.clipboardPastes.length !== 1 || state.clipboardPastes[0].chars !== largeText.length) {
+    throw new Error(`expected exactly one clipboard_paste record, observed ${JSON.stringify(state.clipboardPastes)}`);
+  }
+  if (state.message !== null) throw new Error(`admitted paste must not leave an input message, observed ${state.message}`);
+
+  // 2. Unicode paste: UTF-8 byte count exceeds UTF-16 length and text arrives byte-identical.
+  await dispatchPaste(unicodeText);
+  await page.waitForFunction(
+    ({ expected, expectedBytes }) => {
+      const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
+      return harness.pastes.length === 2 && harness.pastes[1] === expected &&
+        harness.pasteOutcomes.filter((entry) => entry.outcome === "admitted" && entry.bytes === expectedBytes).length === 1;
+    },
+    { expected: unicodeText, expectedBytes: unicodeBytes },
+    { timeout: 15_000 }
+  ).catch((error) => failWith("unicode paste", error));
+
+  // 3. Ordinary keys before and after a paste stay on the key path, in order.
+  await page.keyboard.type("a", { delay: 10 });
+  await dispatchPaste("P\n");
+  await page.keyboard.type("b", { delay: 10 });
+  await page.waitForFunction(
+    () => {
+      const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
+      const order = harness.callbackOrder;
+      const a = order.indexOf("input:a");
+      const paste = order.indexOf("paste:2");
+      const b = order.indexOf("input:b");
+      return a >= 0 && paste > a && b > paste && harness.pastes.length === 3;
+    },
+    undefined,
+    { timeout: 15_000 }
+  ).catch((error) => failWith("ordered keys around paste", error));
+  state = await readState();
+  if (state.inputs.some((data) => data.includes("P\n"))) throw new Error("paste text reached the key path during the ordering case");
+
+  // 4. Empty clipboard text is not consumed by Botster; Restty's own handler still runs.
+  const empty = await dispatchPaste("");
+  if (!empty.defaultPrevented) throw new Error("empty paste should still be default-prevented by Restty's own handler");
+  state = await readState();
+  if (state.pastes.length !== 3 || state.clipboardPastes.length !== 3) {
+    throw new Error(`empty paste must not create a paste operation: ${JSON.stringify({ pastes: state.pastes.length, records: state.clipboardPastes.length })}`);
+  }
+
+  // 5. Context-menu Paste routes to the paste owner; other items remain.
+  await page.evaluate((text) => {
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      configurable: true,
+      value: { readText: async () => text, writeText: async () => undefined }
+    });
+  }, menuText);
+  await page.locator(".terminal-view-container canvas").first().click({ button: "right", position: { x: 20, y: 20 } });
+  const menu = page.locator(".pane-context-menu");
+  await menu.waitFor({ state: "visible", timeout: 5_000 });
+  const menuLabels = await menu.locator(".pane-context-menu-item").allInnerTexts();
+  if (!menuLabels.some((label) => label.startsWith("Copy")) || !menuLabels.some((label) => label.startsWith("Paste"))) {
+    throw new Error(`context menu lost its default items: ${JSON.stringify(menuLabels)}`);
+  }
+  await menu.locator(".pane-context-menu-item").filter({ hasText: "Paste" }).first().click();
+  await page.waitForFunction(
+    ({ expected }) => {
+      const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
+      return harness.pastes.length === 4 && harness.pastes[3] === expected &&
+        (harness.terminal ?? []).some((entry) => entry.kind === "clipboard_paste" && entry.payload?.source === "context_menu");
+    },
+    { expected: menuText },
+    { timeout: 15_000 }
+  ).catch((error) => failWith("context-menu paste", error));
+  state = await readState();
+  if (state.inputs.some((data) => data.includes("context-menu"))) throw new Error("context-menu paste reached the key path");
+
+  console.log("mounted terminal clipboard paste smoke passed " + JSON.stringify({
+    large_bytes: largeText.length,
+    unicode_bytes: unicodeBytes,
+    unicode_chars: unicodeText.length,
+    pastes: state.pastes.length,
+    key_inputs: state.inputs
+  }));
+
+  // 6. Attachment without a paste owner: explicit unsupported rejection, visible and dismissible.
+  const unsupportedPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await unsupportedPage.goto(`${origin}/mounted-terminal-keyboard-smoke.html?pasteOwner=off`, { waitUntil: "domcontentloaded" });
+    await unsupportedPage.waitForFunction(
+      () => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl?.focus) &&
+        (globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__?.terminal ?? []).some((entry) => entry.kind === "pty_connected"),
+      undefined,
+      { timeout: 15_000 }
+    );
+    await unsupportedPage.waitForTimeout(1_000);
+    await unsupportedPage.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl.focus());
+    await unsupportedPage.locator(".terminal-view-container canvas").first().click({ position: { x: 10, y: 10 } });
+    const unsupported = await unsupportedPage.evaluate((data) => {
+      const target = globalThis.document.activeElement;
+      const transfer = new globalThis.DataTransfer();
+      transfer.setData("text/plain", data);
+      const event = new globalThis.ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true });
+      target.dispatchEvent(event);
+      return { defaultPrevented: event.defaultPrevented };
+    }, "unsupported-paste\n");
+    if (!unsupported.defaultPrevented) throw new Error("unsupported-attachment paste was not consumed as a paste");
+    await unsupportedPage.waitForFunction(
+      () => {
+        const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
+        const message = globalThis.document.querySelector(".terminal-input-message");
+        return harness.pasteOutcomes.length === 1 && harness.pasteOutcomes[0].outcome === "rejected" &&
+          harness.pasteOutcomes[0].reason === "unsupported" && harness.pastes.length === 0 && harness.inputs.length === 0 &&
+          message?.getAttribute("data-terminal-input-outcome") === "rejected" &&
+          (message?.textContent ?? "").includes("does not support clipboard paste");
+      },
+      undefined,
+      { timeout: 15_000 }
+    );
+    await unsupportedPage.locator(".terminal-input-message button").click();
+    await unsupportedPage.waitForFunction(
+      () => globalThis.document.querySelector(".terminal-input-message") === null,
+      undefined,
+      { timeout: 5_000 }
+    );
+    console.log("mounted terminal unsupported paste owner smoke passed");
+  } finally {
+    await unsupportedPage.close();
+  }
 }

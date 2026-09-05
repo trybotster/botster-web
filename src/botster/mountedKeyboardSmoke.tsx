@@ -140,6 +140,10 @@ type MountedKeyboardHarness = {
   emitStatus(status: TerminalAttachmentStatus): void;
   exitSessions: string[];
   inputs: string[];
+  /** Explicit paste operations received by the fake data plane, byte-identical text. */
+  pastes: string[];
+  /** Outcomes reported to the view host; `unsupported` when the paste owner is disabled. */
+  pasteOutcomes: Array<{ sessionId: string; outcome: string; bytes: number; reason?: string }>;
   statuses: Array<{ sessionId: string; state: TerminalAttachmentStatus["state"] }>;
   terminal: Array<{ kind: string; payload: unknown }>;
   outputSubscribers: number;
@@ -170,6 +174,8 @@ const harness: MountedKeyboardHarness = {
   },
   exitSessions: [],
   inputs: [],
+  pastes: [],
+  pasteOutcomes: [],
   statuses: [],
   terminal: [],
   outputSubscribers: 0,
@@ -201,15 +207,35 @@ if (new URLSearchParams(window.location.search).get("rendererTelemetry") !== "of
   };
 }
 
+// `?pasteOwner=off` mounts an attachment without a paste owner so the smoke can prove the
+// explicit unsupported rejection instead of a silent drop or a key-path fallback.
+const pasteOwnerEnabled = new URLSearchParams(window.location.search).get("pasteOwner") !== "off";
+const pasteEchoPrefix = "botster-web-mounted-paste-echo:";
+
 const dataPlane: TerminalDataPlaneAttachment = {
   sessionId: descriptor.sessionId,
   writeInput(data) {
     harness.inputs.push(data);
+    harness.callbackOrder.push(`input:${data}`);
     const output = new TextEncoder().encode(`${echoPrefix}${data.trimEnd()}\r\n`);
     for (const listener of outputListeners) {
       listener(output);
     }
   },
+  ...(pasteOwnerEnabled
+    ? {
+        async writePaste(text: string) {
+          harness.pastes.push(text);
+          const bytes = new TextEncoder().encode(text).byteLength;
+          harness.callbackOrder.push(`paste:${bytes}`);
+          const output = new TextEncoder().encode(`${pasteEchoPrefix}${bytes}\r\n`);
+          for (const listener of outputListeners) {
+            listener(output);
+          }
+          return { kind: "paste" as const, outcome: "admitted" as const, bytes, operationId: harness.pastes.length, detail: `Mounted smoke recorded ${bytes} bytes.` };
+        }
+      }
+    : {}),
   subscribeOutput(listener) {
     outputListeners.add(listener);
     harness.outputSubscribers = outputListeners.size;
@@ -257,6 +283,14 @@ createRoot(rootElement).render(
     dataPlane={dataPlane}
     onAttachmentStatus={(sessionId, status) => {
       harness.statuses.push({ sessionId, state: status.state });
+    }}
+    onInputOutcome={(sessionId, outcome) => {
+      harness.pasteOutcomes.push({
+        sessionId,
+        outcome: outcome.outcome,
+        bytes: outcome.bytes,
+        ...(outcome.outcome === "rejected" ? { reason: outcome.reason } : {})
+      });
     }}
     onExit={(sessionId) => {
       harness.exitSessions.push(sessionId);

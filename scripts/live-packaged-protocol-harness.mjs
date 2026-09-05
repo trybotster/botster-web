@@ -503,6 +503,7 @@ try {
   // Production-path terminal oracles required by Review: mouse, palette, zero OSC replies,
   // retained history, and in-page DataChannel reconnect with surviving document + H0-H5.
   await proveMountedMouseModeGatedInput(page);
+  await proveMountedClipboardPaste(page);
   await proveZeroBrowserOscColorReplies(page);
   await provePaletteProjectionAfterOsc(page, productionSessionId);
   await proveRetainedHistoryAfterEcho(page, echoProbe);
@@ -7423,6 +7424,107 @@ async function proveMountedMouseModeGatedInput(page) {
     mode_gated_delta: after - before,
     modes,
     decset: ["1000", "1006"]
+  });
+}
+
+/**
+ * Mounted clipboard paste against the real Hub: a real DOM paste gesture on the focused
+ * Restty textarea carries a 70,000-byte line through the production capture path, the
+ * paste transaction, and Core, and the session producer answers it. The paste must never
+ * appear on the key path, and a key typed afterwards must still be delivered in order.
+ */
+async function proveMountedClipboardPaste(page) {
+  const body = "p".repeat(70_000);
+  const payload = `botster-web-production-large-paste:${body}\n`;
+  const expectedBytes = payload.length;
+  const outcomesBefore = await terminalTelemetryCount(page, "paste_outcome");
+  const outputBefore = await page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length);
+  await waitForTerminalCanvas(page);
+  await callTerminalControl(page, "focus");
+  await page.locator(".terminal-view-container canvas").first().click();
+  await page.waitForFunction(
+    () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
+    undefined,
+    { timeout: 5_000 }
+  );
+  const dispatched = await page.evaluate((data) => {
+    const target = globalThis.document.activeElement;
+    const transfer = new globalThis.DataTransfer();
+    transfer.setData("text/plain", data);
+    const event = new globalThis.ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    return { defaultPrevented: event.defaultPrevented, target: target?.tagName ?? null };
+  }, payload);
+  if (!dispatched.defaultPrevented) {
+    throw new Error(`mounted clipboard paste was not consumed by the Botster capture path: ${JSON.stringify(dispatched)}`);
+  }
+  await page.waitForFunction(
+    ({ beforeCount, bytes }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
+        .filter((entry) => entry.kind === "paste_outcome")
+        .slice(beforeCount)
+        .some((entry) => entry.payload?.outcome === "admitted" && entry.payload?.bytes === bytes),
+    { beforeCount: outcomesBefore, bytes: expectedBytes },
+    { timeout: 45_000 }
+  ).catch(async (error) => {
+    const telemetry = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
+        .filter((entry) => ["paste", "paste_outcome", "paste_committed", "paste_settled", "clipboard_paste", "paste_routed", "input_result"].includes(entry.kind))
+        .slice(-12)
+    );
+    throw new Error(`mounted clipboard paste did not reach an admitted outcome: ${error.message}; telemetry=${JSON.stringify(telemetry)}`);
+  });
+  await page.waitForFunction(
+    ({ since, marker }) => {
+      const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since);
+      const text = events
+        .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
+        .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+        .join("");
+      return text.includes(marker);
+    },
+    { since: outputBefore, marker: "botster-web-production-large-paste-ok" },
+    { timeout: 45_000 }
+  ).catch((error) => {
+    throw new Error(`session producer did not acknowledge the mounted 70,000-byte paste: ${error.message}`);
+  });
+  const leaks = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
+      .filter((entry) => entry.kind === "pty_send_input" || entry.kind === "mode_gated_input" || entry.kind === "input")
+      .map((entry) => String(entry.payload?.data ?? entry.payload?.bytes ?? ""))
+      .filter((data) => data.includes("botster-web-production-large-paste:"))
+  );
+  if (leaks.length !== 0) {
+    throw new Error(`mounted paste leaked into the key path: ${leaks.length} entries`);
+  }
+  const pasteResult = await page.evaluate(({ bytes }) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
+      .filter((entry) => entry.kind === "input_result" && entry.payload?.kind === "paste")
+      .map((entry) => entry.payload)
+      .find((result) => result.admitted === true && result.bytes_written === bytes) ?? null,
+  { bytes: expectedBytes });
+  if (!pasteResult) throw new Error("no admitted paste input_result with the exact byte count was recorded");
+  // A key typed after the paste is delivered and echoed in order.
+  await typeThroughMountedTerminal(page, "after-paste\n");
+  await page.waitForFunction(
+    ({ since, marker }) => {
+      const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since);
+      const text = events
+        .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
+        .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+        .join("");
+      return text.indexOf("botster-web-production-large-paste-ok") < text.indexOf(marker);
+    },
+    { since: outputBefore, marker: "botster-web-production-echo:after-paste" },
+    { timeout: 45_000 }
+  ).catch((error) => {
+    throw new Error(`key typed after the mounted paste was not echoed after the paste acknowledgement: ${error.message}`);
+  });
+  recordProofNote("mounted_clipboard_paste", {
+    bytes: expectedBytes,
+    operation_id: pasteResult.operation_id ?? null,
+    bracketed_paste: pasteResult.mode_flags?.bracketed_paste ?? null,
+    key_after_paste: "botster-web-production-echo:after-paste"
   });
 }
 

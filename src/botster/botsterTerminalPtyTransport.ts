@@ -2,6 +2,7 @@ import type { PtyCallbacks, PtyConnectOptions, PtyTransport } from "../vendor/re
 import type {
   ModeDependentTerminalInput,
   TerminalDataPlaneAttachment,
+  TerminalInputOutcome,
   TerminalOutput,
   TerminalSubscription
 } from "./terminal";
@@ -103,6 +104,37 @@ export class BotsterTerminalPtyTransport implements PtyTransport {
       });
     });
     return true;
+  }
+
+  /**
+   * Explicit clipboard paste. A recognized paste stays a paste: it is never rewritten as
+   * key input. Without a paste owner the outcome is an explicit unsupported rejection.
+   */
+  async writePaste(text: string): Promise<TerminalInputOutcome> {
+    const bytes = new TextEncoder().encode(text).byteLength;
+    const dataPlane = this.dataPlane;
+    if (!dataPlane) {
+      this.options.record("paste_unsupported", { bytes, reason: "no_data_plane" });
+      return { kind: "paste", outcome: "rejected", bytes, reason: "unsupported", detail: "No terminal is attached; paste was not delivered." };
+    }
+    if (!dataPlane.writePaste) {
+      this.options.record("paste_unsupported", { bytes, reason: "no_paste_owner", sessionId: dataPlane.sessionId });
+      return {
+        kind: "paste",
+        outcome: "rejected",
+        bytes,
+        reason: "unsupported",
+        detail: "This terminal attachment does not support clipboard paste; paste was not delivered."
+      };
+    }
+    this.options.record("pty_write_paste", { bytes, sessionId: dataPlane.sessionId });
+    try {
+      return await dataPlane.writePaste(text);
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.options.record("paste_error", { bytes, message: detail, sessionId: dataPlane.sessionId });
+      return { kind: "paste", outcome: "unknown", bytes, operationId: 0, detail: `Paste failed: ${detail}` };
+    }
   }
 
   resize(cols: number, rows: number): boolean {

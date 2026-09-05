@@ -7416,6 +7416,27 @@ try {
     testModeFlags,
     emitMappedSubscriptionResponsesInWireOrder
   });
+
+  // Clipboard paste as a Core transaction through the real data plane and transport.
+  await (await import("./botster/terminalPaste.test.mjs")).runTerminalPasteTests({
+    createFakeDataChannel,
+    createFakePeerConnection,
+    installAutoHelloAck,
+    decryptTestEnvelope,
+    decryptTestEnvelopeBytes,
+    emitChunkedTestResponse,
+    waitForTestCondition,
+    flushMicrotasks,
+    localWebrtcBootstrapFixture,
+    createWebrtcDaemonClient,
+    createHubTerminalDataPlane,
+    bindGhostsnpInstaller,
+    ghostsnpFixturePayloadBase64,
+    ghostsnpFixtureBytes,
+    testModeFlags,
+    terminalProtocolModule,
+    requireRuntime
+  });
 } finally {
   globalThis.window = originalWindow;
 }

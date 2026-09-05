@@ -5,6 +5,7 @@ import {
   MockTerminalDataPlane,
   type TerminalAttachmentStatus,
   type TerminalDataPlaneAttachment,
+  type TerminalInputOutcome,
   type TerminalViewBridge,
   type TerminalViewDescriptor,
   type TerminalViewMount
@@ -22,6 +23,8 @@ export interface TerminalViewHostProps {
   descriptor?: TerminalViewDescriptor;
   onAttachmentStatus?: (sessionId: string, status: TerminalAttachmentStatus) => void;
   onDiagnostic?: (error: unknown) => void;
+  /** Explicit input operation outcomes (paste), including successes. */
+  onInputOutcome?: (sessionId: string, outcome: TerminalInputOutcome) => void;
   onExit?: (sessionId: string) => void;
 }
 
@@ -31,14 +34,19 @@ export function TerminalViewHost({
   descriptor = defaultDescriptor,
   onAttachmentStatus,
   onDiagnostic,
+  onInputOutcome,
   onExit
 }: TerminalViewHostProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const onAttachmentStatusRef = useRef(onAttachmentStatus);
   const onDiagnosticRef = useRef(onDiagnostic);
+  const onInputOutcomeRef = useRef(onInputOutcome);
   const onExitRef = useRef(onExit);
   const [mountDiagnostic, setMountDiagnostic] = useState<string | undefined>();
   const [attachmentStatus, setAttachmentStatus] = useState<TerminalAttachmentStatus | undefined>();
+  // Persistent input message: a non-admitted paste outcome stays visible until the user
+  // dismisses it or a later paste is admitted. Attachment lifecycle is not involved.
+  const [inputMessage, setInputMessage] = useState<TerminalInputOutcome | undefined>();
   const terminalDataPlane = useMemo(
     () =>
       dataPlane ??
@@ -58,6 +66,10 @@ export function TerminalViewHost({
   }, [onDiagnostic]);
 
   useEffect(() => {
+    onInputOutcomeRef.current = onInputOutcome;
+  }, [onInputOutcome]);
+
+  useEffect(() => {
     onExitRef.current = onExit;
   }, [onExit]);
 
@@ -68,6 +80,7 @@ export function TerminalViewHost({
     let cancelled = false;
     let mount: TerminalViewMount | undefined;
     let statusSubscription: { unsubscribe(): void } | undefined;
+    let inputOutcomeSubscription: { unsubscribe(): void } | undefined;
     let uninstallLiveHarnessTerminalControls: (() => void) | undefined;
     let exitReported = false;
 
@@ -89,6 +102,11 @@ export function TerminalViewHost({
           }
         });
         await bridge.attach(descriptor, terminalDataPlane);
+        inputOutcomeSubscription = bridge.subscribeInputOutcomes?.(descriptor, (outcome) => {
+          if (cancelled) return;
+          setInputMessage(outcome.outcome === "admitted" ? undefined : outcome);
+          onInputOutcomeRef.current?.(descriptor.sessionId, outcome);
+        });
         uninstallLiveHarnessTerminalControls = installLiveHarnessTerminalControls(bridge, descriptor, terminalDataPlane);
         setMountDiagnostic(undefined);
         container.dataset.terminalMount = "mounted";
@@ -107,6 +125,7 @@ export function TerminalViewHost({
     return () => {
       cancelled = true;
       statusSubscription?.unsubscribe();
+      inputOutcomeSubscription?.unsubscribe();
       uninstallLiveHarnessTerminalControls?.();
       if (mount) {
         void bridge.unmount(descriptor, mount).catch(() => undefined);
@@ -132,6 +151,23 @@ export function TerminalViewHost({
         data-terminal-session-id={descriptor.sessionId}
         role="region"
       />
+      {inputMessage ? (
+        <div
+          className="terminal-input-message"
+          role="status"
+          data-terminal-input-kind={inputMessage.kind}
+          data-terminal-input-outcome={inputMessage.outcome}
+        >
+          <span>{terminalInputMessage(inputMessage)}</span>
+          <button
+            type="button"
+            aria-label="Dismiss terminal input message"
+            onClick={() => setInputMessage(undefined)}
+          >
+            Dismiss
+          </button>
+        </div>
+      ) : null}
       {mountDiagnostic ? (
         <div className="diagnostic-panel" data-terminal-diagnostic="mount-failed">
           <strong>Terminal renderer unavailable</strong>
@@ -175,4 +211,18 @@ function installLiveHarnessTerminalControls(
       delete harness.terminalControl;
     }
   };
+}
+
+/** User-visible text for a non-admitted input outcome; the three cases stay distinct. */
+export function terminalInputMessage(outcome: TerminalInputOutcome): string {
+  switch (outcome.outcome) {
+    case "rejected":
+      return `Paste rejected (${outcome.reason}): ${outcome.detail}`;
+    case "cancelled":
+      return `Paste cancelled before delivery: ${outcome.detail}`;
+    case "unknown":
+      return `Paste delivery unknown: ${outcome.detail}`;
+    case "admitted":
+      return outcome.detail;
+  }
 }

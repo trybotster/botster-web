@@ -2,6 +2,7 @@ import type {
   ModeDependentTerminalInput,
   TerminalAttachmentStatus,
   TerminalDataPlaneAttachment,
+  TerminalInputOutcome,
   TerminalOutput,
   TerminalSnapshotReader,
   TerminalSubscription
@@ -13,6 +14,7 @@ import {
   encodeResize,
   encodeTerminalInput,
   MAX_INPUT_DATA_BYTES,
+  MAX_PASTE_BYTES,
   type TerminalInputResult
 } from "@trybotster/terminal-protocol";
 import type {
@@ -40,6 +42,21 @@ let nextSubscriptionSequence = 1;
  * `requestTimeoutMs` so unmount cannot hang on a never-resolving bridge.
  */
 export const DETACH_REQUEST_BOUND_MS = localWebrtcResponseChunkLimits.requestTimeoutMs;
+
+/**
+ * Bounds on clipboard paste operations retained by one plane. Core bounds one paste at
+ * MAX_PASTE_BYTES; Web additionally bounds the UTF-8 bytes and the count of pastes that
+ * are queued or in flight, so serialization cannot retain unbounded clipboard strings.
+ */
+export const MAX_QUEUED_PASTE_BYTES = 2 * MAX_PASTE_BYTES;
+export const MAX_QUEUED_PASTE_OPERATIONS = 16;
+
+/**
+ * Bound on the wait for an authoritative paste result after Commit. Core waits its
+ * gated-input timeout (5 s) plus 1 s before it reports Timeout; this bound adds margin
+ * so a late result still lands as authoritative rather than as unknown delivery.
+ */
+export const PASTE_RESULT_BOUND_MS = 8_000;
 
 /**
  * Optional hooks that pause ownership-creating async boundaries so isolation
@@ -116,6 +133,10 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     resolve: () => void;
   }> = [];
   private nextPasteOperationId = 1;
+  private queuedPasteBytes = 0;
+  private queuedPasteOperations = 0;
+  /** Resolvers for committed paste operations awaiting their authoritative result. */
+  private readonly pendingPasteResults = new Map<number, (result: TerminalInputResult | "lost") => void>();
   private snapshotRecoveries = 0;
   private readonly onWebrtcLifecycle?: (event: Event) => void;
 
@@ -195,6 +216,210 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return this.enqueueTerminalFrame((attachmentGeneration) =>
       this.writeModeGatedInputAfterBarrier(semantic, attachmentGeneration)
     );
+  }
+
+  /**
+   * Explicit clipboard paste as one Core transaction (Begin, chunks, Commit).
+   *
+   * Web encodes the protocol frames, supplies the mode token, and reports the outcome.
+   * Core validates assembly, bounds, in-flight, and mode; emits bracketed-paste markers
+   * under the fenced mode; and delivers. Web never adds markers.
+   *
+   * Ordering: the operation joins the same terminalFrameQueue as keys and mode-gated
+   * input. Keys queued after the paste cannot overtake it. A resize is coalesced into
+   * pendingResize and flushed before the next queued send, never between Begin and Commit.
+   *
+   * Outcomes: rejected (zero PTY bytes), cancelled before Commit reached Core (zero PTY
+   * bytes, best-effort Abort on the still-live stream), admitted, or unknown when the
+   * operation was committed and no authoritative result arrived within PASTE_RESULT_BOUND_MS
+   * or the stream was lost. Only StaleMode is retried, once, because Core proves zero
+   * PTY bytes for that rejection; Timeout and PartialWrite are never retried.
+   */
+  async writePaste(text: string): Promise<TerminalInputOutcome> {
+    const outcome = await this.writePasteOperation(text);
+    recordLiveHarnessTerminal("paste_outcome", { ...outcome, sessionId: this.sessionId });
+    return outcome;
+  }
+
+  private async writePasteOperation(text: string): Promise<TerminalInputOutcome> {
+    const rejected = (
+      reason: string,
+      detail: string,
+      bytes: number,
+      operationId?: number
+    ): TerminalInputOutcome => ({ kind: "paste", outcome: "rejected", bytes, operationId, reason, detail });
+    if (text.length === 0) {
+      return rejected("empty", "Clipboard paste was empty.", 0);
+    }
+    // UTF-16 units never exceed UTF-8 bytes: reject before encoding an oversized string.
+    if (text.length > MAX_PASTE_BYTES) {
+      return rejected(
+        "too_large",
+        `Paste of at least ${text.length} bytes exceeds the ${MAX_PASTE_BYTES}-byte paste limit.`,
+        text.length
+      );
+    }
+    const data = new TextEncoder().encode(text);
+    const bytes = data.byteLength;
+    if (bytes > MAX_PASTE_BYTES) {
+      return rejected("too_large", `Paste of ${bytes} bytes exceeds the ${MAX_PASTE_BYTES}-byte paste limit.`, bytes);
+    }
+    if (this.detached) {
+      return rejected("detached", "Terminal is detached; paste was not delivered.", bytes);
+    }
+    if (this.queuedPasteOperations >= MAX_QUEUED_PASTE_OPERATIONS) {
+      return rejected(
+        "queue_bounds",
+        `Paste refused: ${this.queuedPasteOperations} paste operations are already queued.`,
+        bytes
+      );
+    }
+    if (this.queuedPasteBytes + bytes > MAX_QUEUED_PASTE_BYTES) {
+      return rejected(
+        "queue_bounds",
+        `Paste refused: queued paste bytes would exceed ${MAX_QUEUED_PASTE_BYTES}.`,
+        bytes
+      );
+    }
+    this.queuedPasteOperations += 1;
+    this.queuedPasteBytes += bytes;
+    recordLiveHarnessTerminal("paste", { bytes, path: "subscription_data_channel" });
+    let outcome: TerminalInputOutcome | undefined;
+    try {
+      await this.enqueueTerminalFrame(async (attachmentGeneration) => {
+        outcome = await this.sendPasteTransaction(data, attachmentGeneration);
+      });
+    } catch (error: unknown) {
+      outcome ??= {
+        kind: "paste",
+        outcome: "cancelled",
+        bytes,
+        detail: `Paste was not delivered: ${error instanceof Error ? error.message : String(error)}`
+      };
+    } finally {
+      this.queuedPasteOperations -= 1;
+      this.queuedPasteBytes -= bytes;
+    }
+    return outcome ?? {
+      kind: "paste",
+      outcome: "cancelled",
+      bytes,
+      detail: "Paste was cancelled before the terminal was attached."
+    };
+  }
+
+  private async sendPasteTransaction(
+    data: Uint8Array,
+    attachmentGeneration: number
+  ): Promise<TerminalInputOutcome> {
+    const bytes = data.byteLength;
+    const stream = this.streamSubscription;
+    if (!stream?.sendFrame) {
+      return { kind: "paste", outcome: "cancelled", bytes, detail: "Terminal stream is not attached; paste was not delivered." };
+    }
+    let modes = this.modeFlags ?? await this.refreshModeFlags(attachmentGeneration);
+    if (!modes || !this.isCurrentAttachment(attachmentGeneration)) {
+      return {
+        kind: "paste",
+        outcome: modes ? "cancelled" : "rejected",
+        bytes,
+        ...(modes ? {} : { reason: "mode_unavailable" }),
+        detail: modes
+          ? "Terminal attachment changed before the paste started."
+          : "Authoritative terminal modes are unavailable; paste was not delivered."
+      } as TerminalInputOutcome;
+    }
+    const stillLive = () => this.isCurrentAttachment(attachmentGeneration) && this.streamSubscription === stream;
+    const abortBestEffort = async (operationId: number) => {
+      // Never send an abort on a recovered generation: only on the stream that carried Begin.
+      if (!stillLive()) return;
+      await stream.sendFrame!(encodePasteAbort(operationId)).catch(() => undefined);
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (!isJsonSafeModeToken(modes)) {
+        return {
+          kind: "paste",
+          outcome: "rejected",
+          bytes,
+          reason: "mode_token",
+          detail: "Mode freshness token is not JSON-safe; paste was not delivered."
+        };
+      }
+      const operationId = this.nextPasteOperationId++;
+      const frames = encodePaste(operationId, modes.mode_generation, modes.mode_revision, data);
+      const commitIndex = frames.length - 1;
+      let committed = false;
+      const resultPromise = new Promise<TerminalInputResult | "lost">((resolve) => {
+        this.pendingPasteResults.set(operationId, resolve);
+      });
+      try {
+        for (const [index, frame] of frames.entries()) {
+          if (!stillLive()) {
+            await abortBestEffort(operationId);
+            return { kind: "paste", outcome: "cancelled", bytes, operationId, detail: "Terminal attachment changed; paste was cancelled before Commit." };
+          }
+          try {
+            await stream.sendFrame(frame);
+          } catch (error: unknown) {
+            await abortBestEffort(operationId);
+            return {
+              kind: "paste",
+              outcome: "cancelled",
+              bytes,
+              operationId,
+              detail: `Paste frame ${index + 1} of ${frames.length} was not sent: ${error instanceof Error ? error.message : String(error)}`
+            };
+          }
+          if (index === commitIndex) committed = true;
+        }
+        recordLiveHarnessTerminal("paste_committed", { operation_id: operationId, bytes, frames: frames.length, attempt });
+        let timer: number | undefined;
+        const bound = new Promise<"bound">((resolve) => {
+          timer = window.setTimeout(() => resolve("bound"), PASTE_RESULT_BOUND_MS);
+        });
+        const result = await Promise.race([resultPromise, bound]);
+        if (timer !== undefined) window.clearTimeout(timer);
+        if (result === "bound" || result === "lost") {
+          return {
+            kind: "paste",
+            outcome: "unknown",
+            bytes,
+            operationId,
+            detail: result === "bound"
+              ? `No paste result within ${PASTE_RESULT_BOUND_MS} ms; delivery of ${bytes} bytes is unknown.`
+              : `Terminal stream was lost after Commit; delivery of ${bytes} bytes is unknown.`
+          };
+        }
+        if (result.admitted) {
+          return { kind: "paste", outcome: "admitted", bytes: result.bytes_written, operationId, detail: `Paste delivered ${result.bytes_written} bytes.` };
+        }
+        if (result.rejection === "stale_mode" && attempt === 0 && this.modeFlags && stillLive()) {
+          // Core proves zero PTY bytes for stale_mode at both its own stage and the worker
+          // stage, so one re-encode under the returned authoritative mode cannot duplicate.
+          modes = this.modeFlags;
+          recordLiveHarnessTerminal("paste_stale_retry", { operation_id: operationId, bytes });
+          continue;
+        }
+        return {
+          kind: "paste",
+          outcome: "rejected",
+          bytes,
+          operationId,
+          reason: result.rejection ?? "rejected",
+          detail: `Paste rejected by the terminal: ${result.rejection ?? "rejected"}${result.bytes_written > 0 ? ` after ${result.bytes_written} bytes` : ""}.`
+        };
+      } finally {
+        // An uncommitted operation drops its resolver with the map entry.
+        this.pendingPasteResults.delete(operationId);
+        recordLiveHarnessTerminal("paste_settled", { operation_id: operationId, committed });
+      }
+    }
+    return { kind: "paste", outcome: "rejected", bytes, reason: "stale_mode", detail: "Paste rejected: terminal modes changed twice." };
+  }
+
+  private settlePendingPasteResults(): void {
+    for (const resolve of this.pendingPasteResults.values()) resolve("lost");
+    this.pendingPasteResults.clear();
   }
 
   private async writeModeGatedInputAfterBarrier(
@@ -523,6 +748,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.terminalEventQueue = Promise.resolve();
     this.terminalFrameQueue = Promise.resolve();
     this.clearPendingModeGatedInputs();
+    this.settlePendingPasteResults();
     this.nextPasteOperationId = 1;
     this.restoredVisibleScreenGeneration = undefined;
     this.modeFlags = undefined;
@@ -692,6 +918,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       this.terminalFrameQueue = Promise.resolve();
     }
     this.clearPendingModeGatedInputs();
+    this.settlePendingPasteResults();
     this.nextPasteOperationId = 1;
     this.restoredVisibleScreenGeneration = undefined;
     this.modeFlags = undefined;
@@ -1226,6 +1453,10 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       mode_revision: result.mode_revision
     };
     recordLiveHarnessTerminal("input_result", result);
+    if (result.kind === "paste" && result.operation_id !== undefined) {
+      this.pendingPasteResults.get(result.operation_id)?.(result);
+      return;
+    }
     if (result.kind !== "mode_gated_input") return;
     const pending = this.pendingModeGatedInputs[0];
     if (!pending) return;

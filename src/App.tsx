@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createBotsterWebClient } from "./botster/client";
 import {
   initialConnectionDiagnostics,
+  terminalInputOutcomeDiagnostic,
   terminalUnavailableDiagnostic,
   upsertDiagnostic,
   webRtcLifecycleDiagnostic,
@@ -16,7 +17,7 @@ import {
   type WebrtcDaemonLifecycleEvent
 } from "./botster/webrtcDaemonClient";
 import type { HubEntityLoadStatus } from "./botster/LocalHubFirstScreen";
-import type { TerminalAttachmentStatus, TerminalViewDescriptor } from "./botster/terminal";
+import type { TerminalAttachmentStatus, TerminalInputOutcome, TerminalViewDescriptor } from "./botster/terminal";
 import type { UiTreeSnapshot } from "./botster/uiNodes";
 import { TerminalViewHost } from "./botster/TerminalViewHost";
 import { isMountedSessionRoute } from "./botster/terminalSession";
@@ -293,6 +294,12 @@ export default function App() {
     [recordDiagnostic]
   );
 
+  const recordTerminalInputOutcome = useCallback(
+    (sessionId: string, outcome: TerminalInputOutcome) =>
+      recordDiagnostic(terminalInputOutcomeDiagnostic(sessionId, outcome)),
+    [recordDiagnostic]
+  );
+
   const routeSessionId = viewedSessionIdFromRoute(activeRoute);
   const packageEventNotices = usePackageEventNotices({
     runtimeClient,
@@ -344,6 +351,7 @@ export default function App() {
       descriptor={terminalDescriptor}
       onAttachmentStatus={recordTerminalAttachmentStatus}
       onDiagnostic={recordTerminalDiagnostic}
+      onInputOutcome={recordTerminalInputOutcome}
       onExit={releaseTerminalSession}
     />
   ) : null;
