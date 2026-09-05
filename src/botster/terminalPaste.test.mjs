@@ -157,6 +157,9 @@ export async function runTerminalPasteTests(helpers) {
     await waitCondition(() => channels.length === 1 && channels[0].sent.length >= 1, `${name}: attach request`);
     const control = channels[0];
     const answered = new Set();
+    // Every control request answered by the responder, in order, so a run can confirm or
+    // reject a diagnosis that depends on which reads were outstanding.
+    const answeredRequests = [];
     const modeFlags = testModeFlags(sessionId, modeOverrides);
     const answerControlReads = async () => {
       for (const [index, sent] of control.sent.entries()) {
@@ -166,6 +169,9 @@ export async function runTerminalPasteTests(helpers) {
           request = await decryptTestEnvelope(secret, sent);
         } catch {
           continue;
+        }
+        if (["read_mode_flags", "read_screen", "attach", "detach"].includes(request.type)) {
+          answeredRequests.push({ index, type: request.type });
         }
         if (request.type === "read_mode_flags") {
           answered.add(index);
@@ -249,20 +255,24 @@ export async function runTerminalPasteTests(helpers) {
         ...result
       }, messageId);
       const framesSince = async () => decodeSentFrames({ label: terminal.label, sent: terminal.sent.slice(sentBefore) });
-      return { terminal, subscriptionId, inputResult, framesSince, sentBefore };
+      return { terminal, subscriptionId, inputResult, framesSince, sentBefore, answerControlReads, answeredRequests };
     };
     const first = await admit(0);
-    return { client, control, plane, statuses, outputs, modeFlags, sessionId, answerControlReads, admit, ...first };
+    return { client, control, plane, statuses, outputs, modeFlags, sessionId, answerControlReads, answeredRequests, admit, ...first };
   };
   // Frames decode asynchronously, so poll them on the real timer instead of waitForTestCondition.
+  // The plane may issue control reads (read_mode_flags) before its first paste frame, so the
+  // control responder is pumped on every poll. Budget: 2 s inside the 20 s scenario bound.
   const waitFrameCount = async (fixture, count, label) => {
     stage(label);
-    for (let round = 0; round < 60; round += 1) {
+    for (let round = 0; round < 200; round += 1) {
+      await fixture.answerControlReads?.();
       const frames = await fixture.framesSince();
       if (frames.length >= count) return frames;
-      await new Promise((resolve) => realSetTimeout(resolve, 5));
+      await new Promise((resolve) => realSetTimeout(resolve, 10));
     }
-    assert.fail(`${label}: expected at least ${count} frames`);
+    const frames = await fixture.framesSince();
+    assert.fail(`${label}: expected at least ${count} frames, observed ${frames.length} [${frames.map((frame) => kindName(frame.kind)).join(",")}]; answered control requests: ${JSON.stringify(fixture.answeredRequests ?? [])}`);
   };
 
   try {
