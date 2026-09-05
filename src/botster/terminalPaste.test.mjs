@@ -44,8 +44,19 @@ export async function runTerminalPasteTests(helpers) {
   const realSetTimeout = setTimeout;
   const realClearTimeout = clearTimeout;
   const SCENARIO_BOUND_MS = 20_000;
+  // Every bound the scenarios depend on must be a finite positive integer before any run.
+  for (const [name, value] of Object.entries({ MAX_PASTE_BYTES, MAX_PASTE_CHUNK_DATA_BYTES, MAX_QUEUED_PASTE_BYTES, MAX_QUEUED_PASTE_OPERATIONS, PASTE_RESULT_BOUND_MS })) {
+    assert.ok(Number.isInteger(value) && value > 0, `${name} must be a finite positive integer, observed ${String(value)}`);
+  }
   let currentStage = "start";
-  const stage = (label) => { currentStage = label; };
+  const stageHistory = [];
+  const stage = (label) => {
+    currentStage = label;
+    stageHistory.push({ label, at: Date.now() });
+    if (stageHistory.length > 12) stageHistory.shift();
+  };
+  // The fixture under test exposes its admission state for the outer timeout message.
+  let currentAdmissionState = () => null;
   // Fixtures created during a scenario are always cleaned up, also after a failed assertion or
   // a timeout: the plane is detached first (removing its window lifecycle listeners and
   // recovery registration), then the client is disconnected.
@@ -62,11 +73,16 @@ export async function runTerminalPasteTests(helpers) {
   };
   const runScenario = async (name, body) => {
     currentStage = "start";
+    stageHistory.length = 0;
+    stage(`${name}: start`);
+    currentAdmissionState = () => null;
     scenarioFixtures.length = 0;
     let bound;
     const timeout = new Promise((_, reject) => {
       bound = realSetTimeout(() => {
-        reject(new Error(`paste scenario ${name} timed out after ${SCENARIO_BOUND_MS} ms at stage: ${currentStage}`));
+        const started = stageHistory[0]?.at ?? Date.now();
+        const history = stageHistory.map((entry) => `${entry.label}@+${entry.at - started}ms`).join(" -> ");
+        reject(new Error(`paste scenario ${name} timed out after ${SCENARIO_BOUND_MS} ms at stage: ${currentStage}; recent stages: ${history}; admission state: ${JSON.stringify(currentAdmissionState())}`));
       }, SCENARIO_BOUND_MS);
     });
     try {
@@ -193,6 +209,7 @@ export async function runTerminalPasteTests(helpers) {
       assert.fail(`${name}: ${label} did not complete within 2 s; admission state: ${JSON.stringify(admissionState())}`);
     };
     let answeredRequests = [];
+    currentAdmissionState = admissionState;
     await waitAdmission(() => channels.length === 1 && channels[0].sent.length >= 1, "attach request");
     const control = channels[0];
     const answered = new Set();
@@ -268,13 +285,18 @@ export async function runTerminalPasteTests(helpers) {
       }, { messageId, deliveryKind: "daemon_terminal_frame" });
       const snapshot = { type: "snapshot", payload_base64: ghostsnpFixturePayloadBase64, payload_encoding: "base64", bytes: ghostsnpFixtureBytes };
       const attachedBefore = statuses.filter((status) => status.state === "attached").length;
+      stage(`${name}: snapshot READY frame ${ordinal}`);
       await terminalFrame(snapshot, `${name}-${ordinal}-snapshot-ready`);
+      stage(`${name}: snapshot FINISH frame ${ordinal}`);
       await terminalFrame(snapshot, `${name}-${ordinal}-snapshot-finish`);
+      stage(`${name}: attached frame ${ordinal}`);
       await terminalFrame({ type: "attach_state", state: "attached" }, `${name}-${ordinal}-attached`);
+      stage(`${name}: attached poll ${ordinal}`);
       for (let round = 0; round < 40 && statuses.filter((status) => status.state === "attached").length <= attachedBefore; round += 1) {
         await answerControlReads();
         await new Promise((resolve) => realSetTimeout(resolve, 0));
       }
+      stage(`${name}: admitted ${ordinal}`);
       assert.ok(
         statuses.filter((status) => status.state === "attached").length > attachedBefore,
         `${name}: plane reached Attached (${ordinal}); admission state: ${JSON.stringify(admissionState())}`
@@ -447,19 +469,24 @@ export async function runTerminalPasteTests(helpers) {
     // (p6) Bounds: per-paste size before encoding, queued operation count, and queued bytes.
     await runScenario("p6-bounds", async () => {
       const fixture = await attachPlane("p6");
+      stage("p6: oversized refusal");
       const tooLarge = await fixture.plane.writePaste("x".repeat(MAX_PASTE_BYTES + 1));
       assert.equal(tooLarge.outcome, "rejected");
       assert.equal(tooLarge.reason, "too_large");
       assert.equal(tooLarge.requestedBytes, undefined, "refused before encoding reports no exact byte count");
       assert.equal(tooLarge.minimumBytes, MAX_PASTE_BYTES + 1);
+      stage("p6: empty refusal");
       const empty = await fixture.plane.writePaste("");
       assert.equal(empty.reason, "empty");
+      stage("p6: frames after refusals");
       assert.equal((await fixture.framesSince()).length, 0, "no frames for refused pastes");
+      stage("p6: queue 16 pastes");
       // Fill the operation bound with unanswered pastes; the next one is refused immediately.
       const pendings = [];
       for (let index = 0; index < MAX_QUEUED_PASTE_OPERATIONS; index += 1) {
         pendings.push(fixture.plane.writePaste(`queued-${index}\n`));
       }
+      stage("p6: operation-count overflow refusal");
       const overflow = await fixture.plane.writePaste("one-too-many\n");
       assert.equal(overflow.outcome, "rejected");
       assert.equal(overflow.reason, "queue_bounds");
@@ -471,9 +498,11 @@ export async function runTerminalPasteTests(helpers) {
         assert.equal((await pendings[index]).outcome, "admitted");
       }
       // Byte bound: two 1 MiB pastes fit, a third does not while they are queued.
+      stage("p6: queue two 1 MiB pastes");
       const big = "b".repeat(MAX_PASTE_BYTES);
       const bigA = fixture.plane.writePaste(big);
       const bigB = fixture.plane.writePaste(big);
+      stage("p6: byte-count overflow refusal");
       const bigC = await fixture.plane.writePaste("c");
       assert.equal(bigC.reason, "queue_bounds");
       assert.equal(MAX_QUEUED_PASTE_BYTES, 2 * MAX_PASTE_BYTES);
@@ -486,6 +515,7 @@ export async function runTerminalPasteTests(helpers) {
       await fixture.inputResult({ kind: "paste", operation_id: MAX_QUEUED_PASTE_OPERATIONS + 2, admitted: true, bytes_written: MAX_PASTE_BYTES }, "p6-big-b");
       assert.equal((await bigB).outcome, "admitted");
       // Counters released: the next paste is queued (still pending), not refused.
+      stage("p6: post-release paste queued");
       const afterPending = fixture.plane.writePaste("c");
       const raced = await Promise.race([afterPending, new Promise((resolve) => realSetTimeout(() => resolve("pending"), 50))]);
       assert.equal(raced, "pending", "paste after release is queued rather than refused");
