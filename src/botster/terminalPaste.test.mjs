@@ -432,18 +432,24 @@ export async function runTerminalPasteTests(helpers) {
     });
 
     // (p4) stale_mode: one retry with a new operation id under the returned mode; then admitted.
+    // Web adopts the mode token Core returns on the stale_mode result and re-encodes under it.
+    // This is the canonical Core contract (cold cut): a stale_mode result carries the current
+    // authoritative mode_generation/mode_revision, never a placeholder. Web adds no read of its
+    // own. The first Begin uses the original mode (1/1) and the retry uses the returned mode
+    // (2/7), so the differing generation/revision proves the retry adopted Core's returned token.
     await runScenario("p4-stale-retry", async () => {
       const fixture = await attachPlane("p4");
       const text = "stale-once\n";
       const pending = fixture.plane.writePaste(text);
-      await waitFrameCount(fixture, 3, "p4: first commit");
+      const firstCommit = await waitFrameCount(fixture, 3, "p4: first commit");
+      assert.deepEqual(beginHeader(firstCommit[0].body), { operationId: 1, modeGeneration: 1, modeRevision: 1, totalLength: text.length }, "first Begin uses the original attach mode");
       await fixture.inputResult({
         kind: "paste", operation_id: 1, admitted: false, bytes_written: 0, rejection: "stale_mode",
         mode_generation: 2, mode_revision: 7
       }, "p4-stale");
       const frames = await waitFrameCount(fixture, 6, "p4: second commit");
       assert.deepEqual(frames.map((frame) => kindName(frame.kind)), ["begin", "chunk", "commit", "begin", "chunk", "commit"]);
-      assert.deepEqual(beginHeader(frames[3].body), { operationId: 2, modeGeneration: 2, modeRevision: 7, totalLength: text.length });
+      assert.deepEqual(beginHeader(frames[3].body), { operationId: 2, modeGeneration: 2, modeRevision: 7, totalLength: text.length }, "retry Begin adopts the mode Core returned on the stale result");
       await fixture.inputResult({ kind: "paste", operation_id: 2, admitted: true, bytes_written: text.length, mode_generation: 2, mode_revision: 7 }, "p4-admitted");
       const outcome = await pending;
       assert.equal(outcome.outcome, "admitted");
