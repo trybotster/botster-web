@@ -7413,7 +7413,8 @@ try {
     bindGhostsnpInstaller,
     ghostsnpFixturePayloadBase64,
     ghostsnpFixtureBytes,
-    testModeFlags
+    testModeFlags,
+    emitMappedSubscriptionResponsesInWireOrder
   });
 } finally {
   globalThis.window = originalWindow;

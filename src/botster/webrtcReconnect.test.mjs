@@ -28,8 +28,31 @@ export async function runWebrtcReconnectTests(helpers) {
     bindGhostsnpInstaller,
     ghostsnpFixturePayloadBase64,
     ghostsnpFixtureBytes,
-    testModeFlags
+    testModeFlags,
+    emitMappedSubscriptionResponsesInWireOrder
   } = helpers;
+  // Bounded scenario runner on the REAL Node timer, separate from the controlled window
+  // timers. A scenario that never settles fails with its name and the awaited stage instead
+  // of leaving an unlabelled unsettled top-level await.
+  const realSetTimeout = setTimeout;
+  const realClearTimeout = clearTimeout;
+  const SCENARIO_BOUND_MS = 20_000;
+  let currentStage = "start";
+  const stage = (label) => { currentStage = label; };
+  const runScenario = async (name, body) => {
+    currentStage = "start";
+    let bound;
+    const timeout = new Promise((_, reject) => {
+      bound = realSetTimeout(() => {
+        reject(new Error(`reconnect scenario ${name} timed out after ${SCENARIO_BOUND_MS} ms at stage: ${currentStage}`));
+      }, SCENARIO_BOUND_MS);
+    });
+    try {
+      await Promise.race([body(), timeout]);
+    } finally {
+      realClearTimeout(bound);
+    }
+  };
   const secret = localWebrtcBootstrapFixture.grant_secret;
 
   // Controlled window timers: every entry records its delay and the lifecycle event count at
@@ -81,6 +104,7 @@ export async function runWebrtcReconnectTests(helpers) {
   // The retry timer is the timer owned by the latest reconnect-scheduled emission. It must also
   // be the only live timer with that delay created at that emission.
   const fireRetryTimer = async (expectedDelay) => {
+    stage(`fireRetryTimer ${expectedDelay}`);
     const scheduledIndex = lastEventIndexOf("reconnect-scheduled");
     assert.ok(scheduledIndex >= 0, "a reconnect-scheduled event exists");
     const scheduled = lifecycleEvents[scheduledIndex].detail;
@@ -96,6 +120,7 @@ export async function runWebrtcReconnectTests(helpers) {
   // The attempt deadline is the timer owned by the latest reconnect-attempt emission. It must
   // also be the only live attemptTimeoutMs timer created at that emission.
   const fireDeadlineTimer = async () => {
+    stage("fireDeadlineTimer");
     const attemptIndex = lastEventIndexOf("reconnect-attempt");
     assert.ok(attemptIndex >= 0, "a reconnect-attempt event exists");
     const owned = ownedTimerAt(attemptIndex, "reconnect-attempt");
@@ -115,14 +140,20 @@ export async function runWebrtcReconnectTests(helpers) {
   // Key import and peer creation are real async work, so attempt counts and scheduled events
   // are awaited as conditions rather than asserted after a microtask flush.
   const waitAttempts = async (attempts, expected) => {
-    await waitForTestCondition(() => attempts() >= expected);
+    stage(`waitAttempts ${expected}`);
+    await waitCondition(() => attempts() >= expected);
     assert.equal(attempts(), expected);
   };
   const waitScheduled = async (since, expected) => {
-    await waitForTestCondition(() => eventsSince(since, "reconnect-scheduled").length >= expected);
+    stage(`waitScheduled ${expected}`);
+    await waitCondition(() => eventsSince(since, "reconnect-scheduled").length >= expected);
     const scheduled = eventsSince(since, "reconnect-scheduled");
     assert.equal(scheduled.length, expected);
     return scheduled;
+  };
+  const waitCondition = async (predicate) => {
+    stage(`waitCondition ${predicate.toString().replace(/\s+/g, " ")}`);
+    await waitForTestCondition(predicate);
   };
   const decryptAll = async (channel) => {
     const requests = [];
@@ -177,7 +208,8 @@ export async function runWebrtcReconnectTests(helpers) {
   // Peers are created after the bootstrap await, so wait for the channel before answering.
   // Readiness resolves only after the initial snapshot arrives on the reserved entity channel.
   const answerEntitySubscribe = async (channels, index, messageId) => {
-    await waitForTestCondition(() => channels[index]?.sent.length >= 1);
+    stage(`answerEntitySubscribe ${messageId}`);
+    await waitCondition(() => channels[index]?.sent.length >= 1);
     const subscribe = (await decryptAll(channels[index])).find((request) => request.type === "subscribe_entities");
     assert.ok(subscribe, `subscribe_entities on peer ${index}`);
     await emitChunkedTestResponse(channels[index], secret, { kind: "entity_subscribed", events: [], diagnostics: [] }, { messageId });
@@ -189,12 +221,13 @@ export async function runWebrtcReconnectTests(helpers) {
 
   try {
     // (a) Held entity demand: two failed attempts, then recovery without any new request.
-    {
+    await runScenario("a", async () => {
       const before = lifecycleEvents.length;
       const { client, channels, attempts } = makeClient({ failAttempts: new Set([2, 3]) });
       const frames = [];
       const subscription = client.subscribeEntityFrames("session", (frame) => frames.push(frame));
       await answerEntitySubscribe(channels, 0, "reconnect-a-subscribe-1");
+      stage("subscription.ready");
       await subscription.ready;
       await waitAttempts(attempts, 1);
       const firstSubscribe = (await decryptAll(channels[0])).find((request) => request.type === "subscribe_entities");
@@ -222,8 +255,8 @@ export async function runWebrtcReconnectTests(helpers) {
       await fireRetryTimer(1000);
       await waitAttempts(attempts, 4);
       assert.equal(channels.length, 2, "attempt 4 created the recovery peer");
-      await waitForTestCondition(() => channels[1].helloAckDelivered === true);
-      await waitForTestCondition(() => channels[1].sent.length >= 1);
+      await waitCondition(() => channels[1].helloAckDelivered === true);
+      await waitCondition(() => channels[1].sent.length >= 1);
       const recoverySubscribe = (await decryptAll(channels[1])).find((request) => request.type === "subscribe_entities");
       assert.ok(recoverySubscribe, "recovered peer re-subscribed without a caller request");
       assert.notEqual(recoverySubscribe.subscription_id, firstSubscribe.subscription_id);
@@ -232,7 +265,7 @@ export async function runWebrtcReconnectTests(helpers) {
         type: "entity_upsert", subscription_id: recoverySubscribe.subscription_id, entity_type: "session", snapshot_seq: 1,
         id: "after-recovery", entity: { session_uuid: "after-recovery", lifecycle: "running" }
       }, { messageId: "reconnect-a-frame", deliveryKind: "daemon_entity_frame" });
-      await waitForTestCondition(() => frames.some((frame) => frame.id === "after-recovery"));
+      await waitCondition(() => frames.some((frame) => frame.id === "after-recovery"));
       assert.equal(eventsSince(before, "hello-ack").length, 2, "one Hello per successful peer");
       assert.equal(eventsSince(before, "reconnect-attempt").length, 3, "attempts 2, 3, and 4 were reconnect attempts");
       assert.equal(liveTimersWithDelay(500, before).length + liveTimersWithDelay(1000, before).length, 0, "no retry timer after recovery");
@@ -243,19 +276,20 @@ export async function runWebrtcReconnectTests(helpers) {
       await flushMicrotasks();
       await flushMicrotasks();
       await waitAttempts(attempts, 5, "immediate recovery attempt after the second loss");
-      await waitForTestCondition(() => channels[2]?.helloAckDelivered === true);
+      await waitCondition(() => channels[2]?.helloAckDelivered === true);
       assert.equal(eventsSince(secondLoss, "reconnect-scheduled").length, 0, "immediate attempt succeeded");
-      await waitForTestCondition(() => channels[2].sent.length >= 1);
+      await waitCondition(() => channels[2].sent.length >= 1);
       assert.ok((await decryptAll(channels[2])).some((request) => request.type === "subscribe_entities"));
       client.disconnect();
       assert.equal([...timers.values()].filter((entry) => [500, 1000, 2000].includes(entry.delay)).length, 0, "disconnect leaves no retry timer");
-    }
+    });
     // (a2) Backoff restarts at the initial delay after an authenticated Hello.
-    {
+    await runScenario("a2", async () => {
       const before = lifecycleEvents.length;
       const { client, channels, attempts } = makeClient({ failAttempts: new Set([2, 3, 5]) });
       const subscription = client.subscribeEntityFrames("session", () => undefined);
       await answerEntitySubscribe(channels, 0, "reconnect-a2-subscribe-1");
+      stage("subscription.ready");
       await subscription.ready;
       channels[0].close();
       await flushMicrotasks();
@@ -264,7 +298,7 @@ export async function runWebrtcReconnectTests(helpers) {
       await waitScheduled(before, 2);
       await fireRetryTimer(1000);
       await waitAttempts(attempts, 4);
-      await waitForTestCondition(() => channels[1]?.helloAckDelivered === true);
+      await waitCondition(() => channels[1]?.helloAckDelivered === true);
       await answerEntitySubscribe(channels, 1, "reconnect-a2-subscribe-2");
       const secondLoss = lifecycleEvents.length;
       channels[1].close();
@@ -275,12 +309,12 @@ export async function runWebrtcReconnectTests(helpers) {
       assert.equal(scheduled[0].attempt, 1, "retry counter restarted after the authenticated Hello");
       assert.equal(scheduled[0].delayMs, 500);
       await fireRetryTimer(500);
-      await waitForTestCondition(() => channels[2]?.helloAckDelivered === true);
+      await waitCondition(() => channels[2]?.helloAckDelivered === true);
       client.disconnect();
       assert.equal(eventsSince(before, "reconnect-scheduled").length, 3);
-    }
+    });
     // (b) Terminal-only demand through the real HubTerminalDataPlane: no entity subscription.
-    {
+    await runScenario("b", async () => {
       const before = lifecycleEvents.length;
       const { client, channels, attempts } = makeClient({ failAttempts: new Set([2, 3]) });
       const statuses = [];
@@ -290,7 +324,7 @@ export async function runWebrtcReconnectTests(helpers) {
       const outputs = [];
       plane.subscribeStatus((status) => statuses.push(status));
       plane.subscribeOutput((data) => outputs.push(data));
-      await waitForTestCondition(() => channels.length === 1 && channels[0].sent.length >= 1);
+      await waitCondition(() => channels.length === 1 && channels[0].sent.length >= 1);
       const firstAttach = (await decryptAll(channels[0])).find((request) => request.type === "attach");
       assert.ok(firstAttach, "terminal attach was requested on the first peer");
       assert.equal(firstAttach.session_id, "reconnect-terminal-session");
@@ -306,15 +340,15 @@ export async function runWebrtcReconnectTests(helpers) {
       await waitScheduled(before, 2);
       await fireRetryTimer(1000);
       await waitAttempts(attempts, 4);
-      await waitForTestCondition(() => channels[1]?.helloAckDelivered === true);
-      await waitForTestCondition(() => statuses.some((status) => /Reattaching terminal stream after WebRTC recovery/.test(status.message)));
+      await waitCondition(() => channels[1]?.helloAckDelivered === true);
+      await waitCondition(() => statuses.some((status) => /Reattaching terminal stream after WebRTC recovery/.test(status.message)));
       // The data plane detaches the abandoned subscription first and awaits the answer.
-      await waitForTestCondition(() => channels[1].sent.length >= 1);
+      await waitCondition(() => channels[1].sent.length >= 1);
       const detach = (await decryptAll(channels[1])).find((request) => request.type === "detach");
       assert.ok(detach, "abandoned subscription was detached on the recovered peer");
       assert.equal(detach.subscription_id, firstAttach.subscription_id);
       await emitChunkedTestResponse(channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-b-detach" });
-      await waitForTestCondition(() => channels[1].sent.length >= 2);
+      await waitCondition(() => channels[1].sent.length >= 2);
       const recovered = await decryptAll(channels[1]);
       const reattach = recovered.find((request) => request.type === "attach");
       assert.ok(reattach, "terminal reattached on the recovered peer without a caller request");
@@ -384,17 +418,18 @@ export async function runWebrtcReconnectTests(helpers) {
         payload_encoding: "base64",
         bytes: 16
       }, "reconnect-b-output");
-      await waitForTestCondition(() => outputs.some((data) => Buffer.from(data).toString("utf8") === "recovered-output"));
+      await waitCondition(() => outputs.some((data) => Buffer.from(data).toString("utf8") === "recovered-output"));
       assert.equal(installs.length, 2, "both snapshot frames reached the real snapshot reader");
       void plane.detach().catch(() => undefined);
       client.disconnect();
-    }
+    });
     // (c) Duplicate failure signals and concurrent requests during the retry wait.
-    {
+    await runScenario("c", async () => {
       const before = lifecycleEvents.length;
       const { client, channels, attempts } = makeClient({ failAttempts: new Set([2]) });
       const subscription = client.subscribeEntityFrames("session", () => undefined);
       await answerEntitySubscribe(channels, 0, "reconnect-c-subscribe-1");
+      stage("subscription.ready");
       await subscription.ready;
       // A malformed frame fails the peer generation; the close that follows is a duplicate signal.
       channels[0].emitMessage("not-a-chunk");
@@ -413,8 +448,8 @@ export async function runWebrtcReconnectTests(helpers) {
       await flushMicrotasks();
       await waitAttempts(attempts, 3, "requests started exactly one attempt");
       assert.equal(liveTimersWithDelay(500, before).length, 0, "retry timer cancelled by the caller-started attempt");
-      await waitForTestCondition(() => channels[1]?.helloAckDelivered === true);
-      await waitForTestCondition(() => channels[1].sent.length >= 3);
+      await waitCondition(() => channels[1]?.helloAckDelivered === true);
+      await waitCondition(() => channels[1].sent.length >= 3);
       const requests = await decryptAll(channels[1]);
       assert.equal(requests.filter((request) => request.type === "list_apps").length, 1);
       assert.equal(requests.filter((request) => request.type === "status").length, 1);
@@ -422,13 +457,14 @@ export async function runWebrtcReconnectTests(helpers) {
       await emitChunkedTestResponse(channels[1], secret, { kind: "entity_subscribed", events: [], diagnostics: [] }, { messageId: "reconnect-c-subscribe-2" });
       await emitChunkedTestResponse(channels[1], secret, { kind: "apps", apps: [], events: [], diagnostics: [] }, { messageId: "reconnect-c-apps" });
       await emitChunkedTestResponse(channels[1], secret, { kind: "status", status: null, sessions: [], packages: [], events: [], diagnostics: [] }, { messageId: "reconnect-c-status" });
+      stage("c: await first request");
       assert.equal((await first).kind, "apps");
       assert.equal((await second).kind, "status");
       await waitAttempts(attempts, 3);
       client.disconnect();
-    }
+    });
     // (d) Cancellation during bootstrap, signaling, and Hello.
-    {
+    await runScenario("d", async () => {
       // Bootstrap: the provider cannot be aborted; its late result is fenced by ownership.
       let resolveBootstrap;
       const bootstrapGate = new Promise((resolve) => { resolveBootstrap = resolve; });
@@ -437,6 +473,7 @@ export async function runWebrtcReconnectTests(helpers) {
       const pending = bootstrapClient.client.request({ type: "status" });
       await flushMicrotasks();
       bootstrapClient.client.disconnect();
+      stage("d-bootstrap: pending rejects");
       await assert.rejects(pending, /disconnected/);
       resolveBootstrap(localWebrtcBootstrapFixture);
       await flushMicrotasks();
@@ -453,11 +490,12 @@ export async function runWebrtcReconnectTests(helpers) {
       });
       const signalBefore = lifecycleEvents.length;
       const signalPending = signalClient.client.request({ type: "status" });
-      await waitForTestCondition(() => Boolean(resolveSignal));
+      await waitCondition(() => Boolean(resolveSignal));
       assert.ok(signalInit.signal, "signaling fetch received an abort signal");
       assert.equal(signalInit.signal.aborted, false);
       signalClient.client.disconnect();
       assert.equal(signalInit.signal.aborted, true, "disconnect aborted the in-flight signaling fetch");
+      stage("d-signaling: pending rejects");
       await assert.rejects(signalPending, /disconnected/);
       resolveSignal({ ok: true, json: async () => ({ payload: { local_webrtc_answer: { grant_id: "grant-test", answer: { type: "answer", sdp: "answer-sdp" } } } }) });
       await flushMicrotasks();
@@ -471,10 +509,11 @@ export async function runWebrtcReconnectTests(helpers) {
       const helloClient = makeClient({ autoHello: false });
       const helloBefore = lifecycleEvents.length;
       const helloPending = helloClient.client.request({ type: "status" });
-      await waitForTestCondition(() => helloClient.channels[0]?.sent.length === 1);
+      await waitCondition(() => helloClient.channels[0]?.sent.length === 1);
       const hello = await decryptTestEnvelope(secret, helloClient.channels[0].sent[0]);
       assert.equal(hello.protocol, "botster-hub-daemon-v1");
       helloClient.client.disconnect();
+      stage("d-hello: pending rejects");
       await assert.rejects(helloPending, /disconnected/);
       await emitChunkedTestResponse(helloClient.channels[0], secret, {
         protocol: "botster-hub-daemon-v1",
@@ -486,9 +525,9 @@ export async function runWebrtcReconnectTests(helpers) {
       await flushMicrotasks();
       assert.equal(eventsSince(helloBefore, "hello-ack").length, 0, "late Hello ack after disconnect emitted nothing");
       assert.equal(eventsSince(helloBefore, "encrypted-stream-ready").length, 0);
-    }
+    });
     // (e) Obsolete attempt A settles after attempt B succeeds: late rejection and late resolution.
-    for (const lateOutcome of ["reject", "resolve"]) {
+    for (const lateOutcome of ["reject", "resolve"]) await runScenario(`e-${lateOutcome}`, async () => {
       const before = lifecycleEvents.length;
       let settleA;
       const blockedSignal = new Promise((resolve, reject) => {
@@ -500,6 +539,7 @@ export async function runWebrtcReconnectTests(helpers) {
       const { client, channels, attempts } = makeClient({ blockAttempts: new Map([[2, blockedSignal]]) });
       const subscription = client.subscribeEntityFrames("session", () => undefined);
       await answerEntitySubscribe(channels, 0, `reconnect-e-${lateOutcome}-subscribe-1`);
+      stage("subscription.ready");
       await subscription.ready;
       channels[0].close();
       await flushMicrotasks();
@@ -512,7 +552,7 @@ export async function runWebrtcReconnectTests(helpers) {
       assert.equal(channels[1].readyState, "closed", "A's deadline closed A's channel");
       await fireRetryTimer(500);
       await waitAttempts(attempts, 3, "attempt B started");
-      await waitForTestCondition(() => channels[2]?.helloAckDelivered === true);
+      await waitCondition(() => channels[2]?.helloAckDelivered === true);
       await answerEntitySubscribe(channels, 2, `reconnect-e-${lateOutcome}-subscribe-2`);
       const helloAcksBefore = eventsSince(before, "hello-ack").length;
       assert.equal(helloAcksBefore, 2, "Hello on the first peer and on B");
@@ -527,18 +567,20 @@ export async function runWebrtcReconnectTests(helpers) {
       assert.equal(timers.size, timersBefore, "A's late settlement created or cleared no timer");
       // The client still routes through B.
       const probe = client.request({ type: "status" });
-      await waitForTestCondition(() => channels[2].sent.length >= 2);
+      await waitCondition(() => channels[2].sent.length >= 2);
       await emitChunkedTestResponse(channels[2], secret, { kind: "status", status: null, sessions: [], packages: [], events: [], diagnostics: [] }, { messageId: `reconnect-e-${lateOutcome}-status` });
+      stage("e: await probe");
       assert.equal((await probe).kind, "status");
       await waitAttempts(attempts, 3);
       client.disconnect();
-    }
+    });
     // (f) Capped backoff through repeated failure, with one live timer at any time.
-    {
+    await runScenario("f", async () => {
       const before = lifecycleEvents.length;
       const { client, channels, attempts } = makeClient({ failAttempts: new Set([2, 3, 4, 5, 6, 7, 8]) });
       const subscription = client.subscribeEntityFrames("session", () => undefined);
       await answerEntitySubscribe(channels, 0, "reconnect-f-subscribe-1");
+      stage("subscription.ready");
       await subscription.ready;
       channels[0].close();
       await flushMicrotasks();
@@ -553,14 +595,14 @@ export async function runWebrtcReconnectTests(helpers) {
         await fireRetryTimer(delay);
       }
       await waitAttempts(attempts, 9, "attempt 9 followed the seventh retry");
-      await waitForTestCondition(() => channels[1]?.helloAckDelivered === true);
+      await waitCondition(() => channels[1]?.helloAckDelivered === true);
       await answerEntitySubscribe(channels, 1, "reconnect-f-subscribe-2");
       assert.equal(eventsSince(before, "reconnect-scheduled").length, expectedDelays.length);
       client.disconnect();
       assert.equal([...timers.values()].filter((entry) => entry.eventIndex > before && expectedDelays.includes(entry.delay)).length, 0);
-    }
+    });
     // (g) Lifecycle callbacks are synchronous external calls; each boundary is fenced.
-    {
+    await runScenario("g", async () => {
       // hello-ack callback disconnects: the stream never becomes ready, nothing is restored.
       const helloBefore = lifecycleEvents.length;
       const helloClient = makeClient({
@@ -572,7 +614,8 @@ export async function runWebrtcReconnectTests(helpers) {
       // raised by disconnect() inside the callback is owned from the start.
       const helloReady = helloClient.client.subscribeEntityFrames("session", () => undefined).ready;
       const helloReadyRejects = assert.rejects(helloReady, /disconnected/);
-      await waitForTestCondition(() => eventsSince(helloBefore, "hello-ack").length === 1);
+      await waitCondition(() => eventsSince(helloBefore, "hello-ack").length === 1);
+      stage("g-hello: ready rejects");
       await helloReadyRejects;
       await flushMicrotasks();
       await flushMicrotasks();
@@ -589,9 +632,10 @@ export async function runWebrtcReconnectTests(helpers) {
       });
       const attemptSubscription = attemptClient.client.subscribeEntityFrames("session", () => undefined);
       await answerEntitySubscribe(attemptClient.channels, 0, "reconnect-g-attempt-subscribe");
+      stage("g-attempt: subscription.ready");
       await attemptSubscription.ready;
       attemptClient.channels[0].close();
-      await waitForTestCondition(() => eventsSince(attemptBefore, "reconnect-attempt").length === 1);
+      await waitCondition(() => eventsSince(attemptBefore, "reconnect-attempt").length === 1);
       await flushMicrotasks();
       await flushMicrotasks();
       await flushMicrotasks();
@@ -609,6 +653,7 @@ export async function runWebrtcReconnectTests(helpers) {
       });
       const scheduledSubscription = scheduledClient.client.subscribeEntityFrames("session", () => undefined);
       await answerEntitySubscribe(scheduledClient.channels, 0, "reconnect-g-scheduled-subscribe");
+      stage("g-scheduled: subscription.ready");
       await scheduledSubscription.ready;
       scheduledClient.channels[0].close();
       await waitScheduled(scheduledBefore, 1);
@@ -629,26 +674,32 @@ export async function runWebrtcReconnectTests(helpers) {
       });
       const closedSubscription = closedClient.client.subscribeEntityFrames("session", () => undefined);
       await answerEntitySubscribe(closedClient.channels, 0, "reconnect-g-closed-subscribe");
+      stage("g-closed: subscription.ready");
       await closedSubscription.ready;
       closedClient.channels[0].close();
-      await waitForTestCondition(() => Boolean(callbackRequest));
+      await waitCondition(() => Boolean(callbackRequest));
       await waitAttempts(closedClient.attempts, 2);
-      await waitForTestCondition(() => closedClient.channels[1]?.helloAckDelivered === true);
-      await waitForTestCondition(() => closedClient.channels[1].sent.length >= 2);
+      await waitCondition(() => closedClient.channels[1]?.helloAckDelivered === true);
+      await waitCondition(() => closedClient.channels[1].sent.length >= 2);
       const callbackRequests = await decryptAll(closedClient.channels[1]);
       assert.equal(callbackRequests.filter((request) => request.type === "status").length, 1);
       assert.equal(callbackRequests.filter((request) => request.type === "subscribe_entities").length, 1);
-      await emitChunkedTestResponse(closedClient.channels[1], secret, { kind: "status", status: null, sessions: [], packages: [], events: [], diagnostics: [] }, { messageId: "reconnect-g-closed-status" });
+      // Responses match the earliest unanswered control request, so answer both in wire order.
+      await emitMappedSubscriptionResponsesInWireOrder(closedClient.channels[1], secret, {
+        subscribe_entities: { kind: "entity_subscribed", events: [], diagnostics: [] },
+        status: { kind: "status", status: null, sessions: [], packages: [], events: [], diagnostics: [] }
+      }, "reconnect-g-closed");
+      stage("g-closed: await callbackRequest");
       assert.equal((await callbackRequest).kind, "status");
       assert.equal(eventsSince(closedBefore, "reconnect-scheduled").length, 0, "the old close handler scheduled nothing against the new attempt");
       assert.equal(closedClient.attempts(), 2);
       closedClient.client.disconnect();
-    }
+    });
 
     // (g2) Terminal-only demand: the loss callback detaches the terminal listener and another
     // callback starts attempt B. Demand captured before the callbacks stays sticky, so when B
     // fails recovery continues without a new caller request and the terminal reattaches.
-    {
+    await runScenario("g2", async () => {
       const before = lifecycleEvents.length;
       let callbackRequest;
       const { client, channels, attempts } = makeClient({
@@ -666,35 +717,36 @@ export async function runWebrtcReconnectTests(helpers) {
       const plane = createHubTerminalDataPlane({ sessionId: "reconnect-terminal-callback-session", bridge: client });
       plane.subscribeStatus((status) => statuses.push(status));
       plane.subscribeOutput(() => undefined);
-      await waitForTestCondition(() => channels.length === 1 && channels[0].sent.length >= 1);
+      await waitCondition(() => channels.length === 1 && channels[0].sent.length >= 1);
       const firstAttach = (await decryptAll(channels[0])).find((request) => request.type === "attach");
       assert.ok(firstAttach);
       channels[0].close();
-      await waitForTestCondition(() => Boolean(callbackRequest));
+      await waitCondition(() => Boolean(callbackRequest));
       // Attempt B (2) was started by the callback and fails; the captured demand schedules retry 1.
       await waitAttempts(attempts, 2);
       const scheduled = await waitScheduled(before, 1);
       assert.equal(scheduled[0].delayMs, 500);
+      stage("g2: await callbackRequest");
       assert.ok((await callbackRequest) instanceof Error, "the callback's request rejected with B");
       await fireRetryTimer(500);
       await waitAttempts(attempts, 3);
-      await waitForTestCondition(() => channels[1]?.helloAckDelivered === true);
-      await waitForTestCondition(() => statuses.some((status) => /Reattaching terminal stream after WebRTC recovery/.test(status.message)));
-      await waitForTestCondition(() => channels[1].sent.length >= 1);
+      await waitCondition(() => channels[1]?.helloAckDelivered === true);
+      await waitCondition(() => statuses.some((status) => /Reattaching terminal stream after WebRTC recovery/.test(status.message)));
+      await waitCondition(() => channels[1].sent.length >= 1);
       const detach = (await decryptAll(channels[1])).find((request) => request.type === "detach");
       assert.ok(detach, "abandoned subscription detached on the recovered peer");
       await emitChunkedTestResponse(channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-g2-detach" });
-      await waitForTestCondition(() => channels[1].sent.length >= 2);
+      await waitCondition(() => channels[1].sent.length >= 2);
       const reattach = (await decryptAll(channels[1])).find((request) => request.type === "attach");
       assert.ok(reattach, "terminal reattached after the callback-started attempt failed, without a new caller request");
       assert.notEqual(reattach.subscription_id, firstAttach.subscription_id);
       assert.equal(eventsSince(before, "reconnect-scheduled").length, 1);
       void plane.detach().catch(() => undefined);
       client.disconnect();
-    }
+    });
 
     // (h) Absolute deadline with a bootstrap provider that never settles.
-    {
+    await runScenario("h", async () => {
       const before = lifecycleEvents.length;
       let resolveBootstrap;
       const neverBootstrap = new Promise((resolve) => { resolveBootstrap = resolve; });
@@ -704,6 +756,7 @@ export async function runWebrtcReconnectTests(helpers) {
       const deadlines = liveTimersWithDelay(localWebrtcReconnectPolicy.attemptTimeoutMs, before - 1);
       assert.equal(deadlines.length, 1, "exactly one live attempt deadline timer");
       fireTimer(deadlines[0][0]);
+      stage("h: pending rejects on deadline");
       await assert.rejects(pending, /timed out after 10000 ms/);
       assert.equal(attempts(), 0, "no peer was created");
       assert.equal(eventsSince(before, "reconnect-scheduled").length, 0, "no demand, so no retry");
@@ -716,7 +769,7 @@ export async function runWebrtcReconnectTests(helpers) {
       assert.equal(eventsSince(before).length, 0, "no lifecycle events from the expired attempt");
       assert.equal(liveTimersWithDelay(localWebrtcReconnectPolicy.attemptTimeoutMs, before - 1).length, 0);
       client.disconnect();
-    }
+    });
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     globalThis.window.clearTimeout = originalClearTimeout;
