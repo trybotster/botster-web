@@ -25,7 +25,8 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
       realClearTimeout(bound);
       for (const host of mountedHosts.splice(0)) {
         await host.unmount().catch(() => undefined);
-          }
+        if (host.element.parentNode) host.element.parentNode.removeChild(host.element);
+      }
     }
   };
   const settle = async () => {
@@ -117,13 +118,17 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     for (let round = 0; round < 40 && calls.attach === 0; round += 1) await settle();
     assert.equal(calls.attach, 1, "attach was requested");
     assert.equal(state.statusSubscriptions, 1, "status subscribed before attach");
+    // The scenario: cleanup runs while attach is still pending.
+    stage("v1: unmount during pending attach");
+    await host.unmount();
+    assert.equal(calls.unmount >= 1, true, "cleanup unmounted the bridge mount before attach released");
+    assert.equal(state.statusUnsubscribes, 1, "cleanup released the status subscription before attach released");
     stage("v1: release attach after unmount");
     releaseAttach();
     await settle();
     await settle();
     assert.equal(calls.subscribeInputOutcomes, 0, "no outcome subscription after cleanup ran during attach");
-    assert.equal(state.statusUnsubscribes, 1, "status subscription released exactly once");
-    assert.equal(calls.unmount >= 1, true, "cleanup unmounted the bridge mount");
+    assert.equal(state.statusUnsubscribes, 1, "the fenced continuation did not release the status subscription twice");
   });
 
   // (v2) Outcome message lifecycle: rejected shows and persists, admitted clears, unknown shows.
