@@ -509,13 +509,16 @@ try {
   const requestedResize = await latestTerminalResize(page);
   await waitForResizeProof(page, requestedResize);
 
-  // Production-path terminal oracles required by Review: mouse, palette, zero OSC replies,
-  // retained history, and in-page DataChannel reconnect with surviving document + H0-H5.
-  await proveMountedMouseModeGatedInput(page);
+  // Production-path terminal oracles required by Review: paste, mouse, palette, zero OSC
+  // replies, retained history, and in-page DataChannel reconnect with surviving document +
+  // H0-H5. The paste proof and the receiver cases run BEFORE the mouse proof, so mouse
+  // reporting is never enabled when a paste is dispatched: no mouse-report input can land in
+  // the shell's pending line, and no mouse-mode change can straddle the paste's single retry.
   await proveMountedClipboardPaste(page);
   if (livePasteCasesMode) {
     await proveLivePasteCases(page);
   }
+  await proveMountedMouseModeGatedInput(page);
   await proveZeroBrowserOscColorReplies(page);
   await provePaletteProjectionAfterOsc(page, productionSessionId);
   await proveRetainedHistoryAfterEcho(page, echoProbe);
@@ -7519,23 +7522,16 @@ async function assertCleanInputBoundary(page, label) {
 }
 
 /**
- * Explicit clean boundary before any paste proof. The mouse proof leaves mouse reporting on,
- * and admitted mouse reports are PTY input that lands in the shell's pending line. Steps,
- * each observed: flush and record whatever was pending (this confirms or refutes input
- * contamination), disable mouse reporting through the session producer and observe its done
- * marker and the DECRST bytes, then flush again and require an empty line.
+ * Strict clean boundary before a paste proof. The paste proofs run before the mouse proof,
+ * so mouse reporting is never enabled here and the focus click generates no mouse report. The
+ * boundary records whatever was pending (so any unexpected input is visible, not assumed
+ * absent), then flushes again and requires an empty line. No mouse-mode change is made on the
+ * paste path, so no mode change can straddle the paste's single retry.
  */
 async function establishCleanInputBoundary(page, label) {
   const pendingBefore = await flushPendingInputLine(page, `${label} initial`);
   recordProofNote("input_line_flush", { label, pending_chars: pendingBefore.length, pending: pendingBefore.slice(0, 200) });
-  const since = await page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length);
-  await callTerminalControl(page, "writeInput", "botster-web-production-mouse-off\n");
-  await waitForDaemonOutputLine(page, since, /botster-web-production-mouse-off-done\r?\n/, `${label} mouse off`);
-  const text = await daemonTerminalOutputSince(page, since);
-  if (!text.includes("[?1000l") || !text.includes("[?1006l")) {
-    throw new Error(`${label}: mouse DECRST 1000/1006 not observed in daemon terminal output`);
-  }
-  await assertCleanInputBoundary(page, `${label} after mouse off`);
+  await assertCleanInputBoundary(page, `${label} strict`);
   return pendingBefore;
 }
 
@@ -7555,9 +7551,9 @@ async function proveMountedClipboardPaste(page) {
   const body = "p".repeat(70_000);
   const payload = `botster-web-production-large-paste:${body}\n`;
   const expectedBytes = payload.length;
-  // Clean boundary: record and flush pending input, disable mouse reporting, require an
-  // empty line. The canvas click that focuses the textarea happens before a second strict
-  // flush, so a click cannot add PTY input between the boundary and the paste dispatch.
+  // Strict clean boundary: flush and record any pending input, then require an empty line.
+  // Mouse reporting is off (the mouse proof runs after this), so the focus click adds no
+  // mouse report; the second strict flush after focus confirms the line is still empty.
   await establishCleanInputBoundary(page, "mounted paste");
   await focusMountedTerminal(page);
   await assertCleanInputBoundary(page, "mounted paste after focus click");
@@ -7762,18 +7758,19 @@ async function proveLivePasteCases(page) {
     );
   const sha256Hex = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
-  // Bracketed paste is an application mode. The session script emits DECSET/DECRST 2004
-  // explicitly; the harness confirms the bytes reached the daemon output before pasting.
+  // Bracketed paste is an application mode. The session script emits DECSET/DECRST 2004 and
+  // then a done marker. Waiting for the done marker only synchronizes with the shell; it is
+  // not proof that Core's parser applied the mode, because terminal output delivery is not
+  // parser acknowledgement. The authoritative confirmation is the admitted paste
+  // input_result, whose mode_flags.bracketed_paste receivePaste asserts equals the target.
+  // A single deliberate toggle changes the mode once, so the paste's one stale retry converges
+  // under the token Core returns; the assertion on the admitted result is the observed
+  // condition, never the output bytes.
   const setBracketedPaste = async (enabled) => {
     const since = await readEventsLength();
     const name = enabled ? "on" : "off";
     await callTerminalControl(page, "writeInput", `botster-web-production-bracket-${name}\n`);
     await waitForLine(since, new RegExp(`botster-web-production-bracket-${name}-done\\r?\\n`), `bracket ${name}`);
-    const text = await daemonOutputSince(since);
-    const sequence = enabled ? `${ESC}[?2004h` : `${ESC}[?2004l`;
-    if (!text.includes(sequence)) {
-      throw new Error(`bracket ${name}: DEC 2004 sequence not observed in daemon terminal output`);
-    }
   };
 
   // One case: announce the wire length, wait for the raw-mode ready marker, dispatch the real
