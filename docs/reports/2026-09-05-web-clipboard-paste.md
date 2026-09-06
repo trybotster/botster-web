@@ -137,9 +137,17 @@ Against the corrected Hub (final HEAD `1a0df65`, docs-only over executable `a270
 
 Correction (harness and report only; `src/` and `dist/` unchanged, no rebuild): the paste proof and the receiver cases now run before the mouse proof, so mouse reporting is never enabled when a paste is dispatched and no mouse-mode change can straddle the paste's single retry. Every existing proof is kept, only reordered. The paste boundary keeps its strict flush that requires an empty pending line but no longer changes mouse mode. Setting the bracketed mode for a receiver case waits for the shell's done marker for synchronization only; the authoritative confirmation that Core applied the mode is the admitted paste `input_result` whose `mode_flags.bracketed_paste` each case asserts, never the output bytes, because output delivery is not parser acknowledgement. Production keeps exactly one stale retry. Evidence: `node_modules/.botster-foundation-evidence/web-paste/live-rc1/` with `SHA256SUMS`.
 
+## Live run 4 (reordered harness): first successful live pastes; bracketed cases needed a settled mode
+
+Against the same corrected rc1 Hub, the reorder removed the contamination (the pre-paste flush read zero pending bytes) and produced the first successful live pastes: the mounted paste proof admitted, and the ASCII (70,029 bytes), Unicode (UTF-16 1,231 below UTF-8 3,031), and CRLF cases each verified byte-identical, with the payload, wire, and receiver SHA-256 all equal and `bytes_written` equal to the payload. Each of the three converged after one stale retry. The `bracket-on` case was then rejected `stale_mode`, and `bracket-off` and `too-large` did not run.
+
+Observed, not speculative: each admitted case reported exactly one stale retry. The report does not attribute those retries to the receiver's `stty`, which changes PTY line discipline and does not necessarily change the emulator mode flags; the pinned worker increments the mode revision only when the emulator mode flags actually differ. The `bracket-on` failure is consistent with the deliberate bracketed-mode change still being in flight when the paste was dispatched, so two authoritative tokens straddled the single retry.
+
+Correction (harness and report only; `src/` and `dist/` unchanged, no rebuild): each receiver case now observes the authoritative worker mode before dispatch by reusing the existing `readDirectTerminalModeFlags` helper, which queries Core through `read_mode_flags` and validates the token. The case waits, bounded, until `bracketed_paste` equals its explicit target, so Core has applied and settled the deliberate mode change before the paste. The pre-paste generation, revision, `bracketed_paste`, and mouse mode are recorded in each case's proof note. Web keeps its single stale retry, which now converges against a stable authoritative token; no production cache logic changed. All six cases are kept. Evidence: `node_modules/.botster-foundation-evidence/web-paste/live-rc1/` with `SHA256SUMS`.
+
 ## Not yet covered
 
-- Live lane: run 3 validated the Core token fix but did not achieve a successful live paste; the harness reorder above awaits a rerun. It also has not yet exercised bracket-off and bracket-on, Unicode, CRLF, and cancellation or error cases live. Local success does not establish live acceptance.
+- Live lane: run 4 achieved byte-exact live pastes for ASCII, Unicode, and CRLF plus the mounted paste; the bracketed cases and the too-large rejection await a rerun with the settled-mode observation above. Local success does not establish live acceptance.
 - Root source review remains open. Publication is pending.
 
 ## Hashes on `e2f3486`

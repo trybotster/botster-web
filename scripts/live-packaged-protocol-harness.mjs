@@ -7773,8 +7773,29 @@ async function proveLivePasteCases(page) {
     await waitForLine(since, new RegExp(`botster-web-production-bracket-${name}-done\\r?\\n`), `bracket ${name}`);
   };
 
-  // One case: announce the wire length, wait for the raw-mode ready marker, dispatch the real
-  // paste gesture, then compare Web's outcome, Core's input_result, and the receiver's receipt.
+  // Authoritative worker mode observation, reusing the existing direct read_mode_flags helper.
+  // It queries Core for the current mode token and flags, so waiting until bracketed_paste
+  // equals the case's target confirms Core has applied and settled the deliberate mode change
+  // before the paste is dispatched. This is an observed condition, not output delivery, and it
+  // changes no production cache logic. A settled Core mode means Web's single stale retry
+  // converges against a stable authoritative token.
+  const waitForBracketedMode = async (target, label) => {
+    const boundMs = 8_000;
+    const startedAt = Date.now();
+    let flags = await readDirectTerminalModeFlags(page, productionSessionId);
+    while (flags.bracketed_paste !== target) {
+      if (Date.now() - startedAt > boundMs) {
+        throw new Error(`${label}: authoritative bracketed_paste did not reach ${target} within ${boundMs} ms; last flags=${JSON.stringify(flags)}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      flags = await readDirectTerminalModeFlags(page, productionSessionId);
+    }
+    return flags;
+  };
+
+  // One case: announce the wire length, wait for the raw-mode ready marker, observe the
+  // authoritative mode has settled to the target, dispatch the real paste gesture, then
+  // compare Web's outcome, Core's input_result, and the receiver's receipt.
   const receivePaste = async ({ label, text, bracketed }) => {
     const payload = Buffer.from(text, "utf8");
     const wire = bracketed
@@ -7794,6 +7815,9 @@ async function proveLivePasteCases(page) {
     if (ready[1] !== undefined) {
       throw new Error(`${label}: receiver failed closed: ${ready[1]}${ready[2] !== undefined ? `:${ready[2]}` : ""}`);
     }
+
+    // Observe the authoritative worker mode settled to this case's target before dispatch.
+    const preFlags = await waitForBracketedMode(bracketed, `${label} pre-paste mode`);
 
     const outcomesBefore = await terminalTelemetryCount(page, "paste_outcome");
     const retriesBefore = await terminalTelemetryCount(page, "paste_stale_retry");
@@ -7880,7 +7904,11 @@ async function proveLivePasteCases(page) {
       bytes_written: result.bytes_written,
       bytes_written_accounting: bytesWrittenAccounting,
       stale_retries: retries,
-      operation_id: outcome.operationId
+      operation_id: outcome.operationId,
+      pre_paste_mode_generation: preFlags.mode_generation,
+      pre_paste_mode_revision: preFlags.mode_revision,
+      pre_paste_bracketed_paste: preFlags.bracketed_paste,
+      pre_paste_mouse_mode: preFlags.mouse_mode
     });
   };
 
