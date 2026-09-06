@@ -145,9 +145,26 @@ Observed, not speculative: each admitted case reported exactly one stale retry. 
 
 Correction (harness and report only; `src/` and `dist/` unchanged, no rebuild): each receiver case now observes the authoritative worker mode before dispatch by reusing the existing `readDirectTerminalModeFlags` helper, which queries Core through `read_mode_flags` and validates the token. The case waits, bounded, until `bracketed_paste` equals its explicit target, so Core has applied and settled the deliberate mode change before the paste. The pre-paste generation, revision, `bracketed_paste`, and mouse mode are recorded in each case's proof note. Web keeps its single stale retry, which now converges against a stable authoritative token; no production cache logic changed. All six cases are kept. Evidence: `node_modules/.botster-foundation-evidence/web-paste/live-rc1/` with `SHA256SUMS`.
 
+## Live run 5 (settled-mode observation): the full live paste lane passed
+
+Against the corrected rc1 Hub (final HEAD `1a0df65`, Core `bf6e7d9`, transport `0.21.0-rc.1`, dev binaries `hub 0db7ea0e…`, `worker 59760bd1…`, provenance recorded in the log as checkout clean), the whole harness exited 0 and all six paste cases passed byte-exact:
+
+| Case | Payload bytes | Wire bytes | Receiver == wire | bytes_written | Accounting | Pre-paste bracketed | Retries |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| ascii | 70,029 | 70,029 | yes | 70,029 | payload | false | 1 |
+| unicode | 3,031 (UTF-16 1,231) | 3,031 | yes | 3,031 | payload | false | 1 |
+| crlf | 47 | 47 | yes | 47 | payload | false | 1 |
+| bracket-on | 4,130 | 4,142 | yes | 4,142 | payload plus markers | true | 1 |
+| bracket-off | 4,131 | 4,131 | yes | 4,131 | payload | false | 1 |
+| too-large | 1,048,609 (refused) | — | — | — | rejected `too_large`, no frames | — | — |
+
+The bracketed case confirms the marker accounting exactly: the wire is the payload plus the 12 bracket bytes, the raw receiver's SHA-256 matches that wire, and Core's `bytes_written` equals it. The unbracketed and bracket-off cases carry no markers. Each admitted case converged after one stale retry against the settled authoritative token that the pre-paste `read_mode_flags` observation waited for; the recorded pre-paste revisions advanced 1, 1, 1, 2, 3 as the deliberate bracket toggles were applied. The mounted paste proof and the key-after-paste ordering also passed. The harness cleaned up its own session on the success path; no owned process or Chromium survived and both binary hashes were unchanged.
+
+This validates the live clipboard paste lane end to end against the corrected Core: byte-exact delivery for ASCII, Unicode, CRLF, bracketed on and off, and the oversize rejection, with the receiver digest, Web accounting, and Core `bytes_written` all agreeing. It remains candidate validation against the rc.1 Hub, not the final full matrix.
+
 ## Not yet covered
 
-- Live lane: run 4 achieved byte-exact live pastes for ASCII, Unicode, and CRLF plus the mounted paste; the bracketed cases and the too-large rejection await a rerun with the settled-mode observation above. Local success does not establish live acceptance.
+- Cancellation and Core-side error outcomes are proven only in the controlled fixture, not against a real Hub, because the mounted application has no deterministic interruption point and no production hook is added.
 - Root source review remains open. Publication is pending.
 
 ## Hashes on `e2f3486`
