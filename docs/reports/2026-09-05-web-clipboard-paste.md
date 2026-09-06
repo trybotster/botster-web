@@ -111,7 +111,7 @@ These run in `terminalPaste.test.mjs`: the real `HubTerminalDataPlane` over the 
 | F4 | result bound after Commit (p9-bound) | controlled timer after Commit observed; outcome unknown `result_bound`; Abort observed as the fourth frame; a late admitted result settles cleanly | passed |
 | F5 mapping (non-stale) | Web's mapping of injected `partial_write`, `timeout`, and other non-`stale_mode` rejections without retry (p5) | injected `input_result` frames | passed; proves Web's mapping only. These non-stale Core error outcomes are still fixture-only, not observed against a real Hub |
 
-The `stale_mode` retry is the exception: it is now observed live. Run 5 admitted every case after one real `stale_mode` retry against Core's returned authoritative token, so the stale-mode contract and Web's single retry are validated against a real Hub, not only in the fixture.
+The `stale_mode` retry is the exception: it is now observed live. Run 5 admitted all five admitted cases after one real `stale_mode` retry against Core's returned authoritative token, so the stale-mode contract and Web's single retry are validated against a real Hub, not only in the fixture.
 
 ### Pending against the real Hub
 
