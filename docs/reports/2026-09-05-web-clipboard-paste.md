@@ -1,6 +1,6 @@
 # Web clipboard paste through the Core paste transaction
 
-Status: local implementation checks pass on `e2f3486`. Root source review is in progress. The live mounted lane and two negative controls have not run. Publication is pending.
+Status: local implementation checks pass. Both negative controls passed. The live paste lane passed end to end in run 5 against the corrected rc.1 Hub candidate (five admitted cases byte-exact, the oversize case refused), and all final Web gates pass at `db405e7`. This is candidate validation against the rc.1 Hub, not the final full matrix, which must run before Hub merge. Non-stale Core error, cancellation, and result-loss outcomes remain fixture-only. Publication is pending.
 
 Base revision: `b556822250f83d02cbbd853c0967ec6d6f64dd1a8`.
 Branch: `foundation/web-readiness`.
@@ -77,7 +77,7 @@ Both controls ran the unchanged `e2f3486` smoke script and harness page against 
 
 Control A is a compatibility harness over main's production files, not a pure main build: main's harness page has no paste recorder, so the branch page was retained to give main's renderer a paste owner it never calls. The two smoke logs are byte-identical because the script output is deterministic; their write times differ. Evidence is in the worktree under `node_modules/.botster-foundation-evidence/web-paste/negative-controls/` with its own `SHA256SUMS` (11 entries).
 
-## Live lane with an exact receiver (implemented, not yet run)
+## Live lane with an exact receiver (implemented; passed live in run 5)
 
 `npm run smoke:live-packaged-protocol:paste` runs the live harness with `BOTSTER_LIVE_PASTE_CASES=1`, which adds `proveLivePasteCases` after the existing `proveMountedClipboardPaste`. The production session script gains three cases: `bracket-on` and `bracket-off` emit DECSET and DECRST 2004 explicitly and echo a done marker; `receive:<N>` is the receiver. N must be a positive integer no greater than `MAX_PASTE_BYTES` plus the 12 marker bytes. The receiver saves its stty state and fails closed with an error line, without a ready line, if the save or the raw switch fails. It enters raw mode with echo off (no `icrnl`, no `opost`, no `isig`, no line editing), starts a reader (`dd bs=1 count=N` from `/dev/tty` into one file next to the script; `dd` writes each byte as it arrives, so a reader killed by the watchdog loses nothing, which `head` did not guarantee) and a 30 s wall-clock watchdog, both owned by pid, and only then prints its ready line. On success or timeout it kills and reaps both processes, restores the saved state, and echoes `received:<N>:<count>:<sha256>` after removing the file. The script's exit and signal traps run the same cleanup: stop an active reader and watchdog, remove the exact file, restore the saved state, then restore the entry state. `VTIME` 10 s ends an idle read. Script lines can arrive split across output events, so the harness waits for each complete line, including the digest and the line terminator, and validates the announced N in the receipt.
 
@@ -109,14 +109,15 @@ These run in `terminalPaste.test.mjs`: the real `HubTerminalDataPlane` over the 
 | F2 | pre-Commit interruption by attachment change (p12) | the reserved channel is closed synchronously after Begin is forwarded; the plane's stream-loss path bumps the generation; the transaction's next-iteration `stillLive` guard cancels with "attachment changed"; the lost stream carries Begin only, no Abort on a recovered generation; the replacement stream carries nothing from that operation; a later paste restarts at operation id 1 and admits | passed; no production hook was necessary, the existing fake send boundary expressed it |
 | F3 | loss of the authoritative result after Commit (p9-lost) | Commit observed on the decoded stream before the control channel closes; outcome unknown `stream_lost`; no Abort | passed |
 | F4 | result bound after Commit (p9-bound) | controlled timer after Commit observed; outcome unknown `result_bound`; Abort observed as the fourth frame; a late admitted result settles cleanly | passed |
-| F5 mapping | Web's mapping of injected `partial_write`, `timeout`, and other rejections without retry (p5) | injected `input_result` frames | passed; proves Web's mapping only |
+| F5 mapping (non-stale) | Web's mapping of injected `partial_write`, `timeout`, and other non-`stale_mode` rejections without retry (p5) | injected `input_result` frames | passed; proves Web's mapping only. These non-stale Core error outcomes are still fixture-only, not observed against a real Hub |
+
+The `stale_mode` retry is the exception: it is now observed live. Run 5 admitted every case after one real `stale_mode` retry against Core's returned authoritative token, so the stale-mode contract and Web's single retry are validated against a real Hub, not only in the fixture.
 
 ### Pending against the real Hub
 
 | Case | What it must show | Status |
 | --- | --- | --- |
-| Live lane (`smoke:live-packaged-protocol:paste`) | admitted, stale-retry, and too-large outcomes through the full mounted application, with the exact receiver | implemented, not run; needs the heavy window |
-| Real Core rejection | an authoritative non-admitted `input_result` produced by Core, not injected | not designed. An ended session is not a route: the pinned Core client worker retires the terminal adapter after `ProcessExit` delivery, so retained history does not establish an open input-result path. A real rejection needs a Core-provided condition on a live, writable session; none is identified yet |
+| Real Core rejection (non-stale) | an authoritative non-admitted `input_result` produced by Core, not injected, for a non-`stale_mode` rejection such as `partial_write` or `timeout` | not designed. An ended session is not a route: the pinned Core client worker retires the terminal adapter after `ProcessExit` delivery, so retained history does not establish an open input-result path. A real rejection needs a Core-provided condition on a live, writable session; none is identified yet |
 | Real cancellation or result loss against Core | a pre-Commit interruption or post-Commit result loss with a real Hub | not designed; the mounted application has no deterministic interruption point, and no production hook is added |
 
 ## Live run 1 (candidate Hub `f78457a`, Web `afccd1a`): failed before the new cases
@@ -158,14 +159,14 @@ Against the corrected rc1 Hub (final HEAD `1a0df65`, Core `bf6e7d9`, transport `
 | bracket-off | 4,131 | 4,131 | yes | 4,131 | payload | false | 1 |
 | too-large | 1,048,609 (refused) | — | — | — | rejected `too_large`, no frames | — | — |
 
-The bracketed case confirms the marker accounting exactly: the wire is the payload plus the 12 bracket bytes, the raw receiver's SHA-256 matches that wire, and Core's `bytes_written` equals it. The unbracketed and bracket-off cases carry no markers. Each admitted case converged after one stale retry against the settled authoritative token that the pre-paste `read_mode_flags` observation waited for; the recorded pre-paste revisions advanced 1, 1, 1, 2, 3 as the deliberate bracket toggles were applied. The mounted paste proof and the key-after-paste ordering also passed. The harness cleaned up its own session on the success path; no owned process or Chromium survived and both binary hashes were unchanged.
+The bracketed case confirms the marker accounting exactly: the wire is the payload plus the 12 bracket bytes, the raw receiver's SHA-256 matches that wire, and Core's `bytes_written` equals it. The unbracketed and bracket-off cases carry no markers. Each admitted case converged after one stale retry against the settled authoritative token that the pre-paste `read_mode_flags` observation waited for; the recorded pre-paste revisions advanced 1, 1, 1, 2, 3 as the deliberate bracket toggles were applied. The mounted paste proof and the key-after-paste ordering also passed. The harness cleaned up its own session on the success path. That no owned Hub, worker, or Chromium process survived, and that both binary hashes matched their pre-run values afterward, are operator-reported session checks (`pgrep` and `shasum` run after the harness exited); their output was observed in the session, not saved as a separate receipt file. The binary provenance the harness itself recorded in the live log names the Hub git head `1a0df65`, Core lock revision `bf6e7d9`, and a clean checkout.
 
 This validates the live clipboard paste lane end to end against the corrected Core. Five admitted cases delivered byte-exact, with the receiver digest, Web accounting, and Core `bytes_written` all agreeing: ASCII, Unicode, CRLF, bracketed on, and bracketed off. The sixth case, the oversize paste, was refused before encoding, evidenced by a rejected outcome, no paste transaction telemetry, and no key-path input; that no protocol frame was sent is an inference from the plane source, not a delivered byte count. It remains candidate validation against the rc.1 Hub, not the final full matrix.
 
 ## Not yet covered
 
-- Cancellation and Core-side error outcomes are proven only in the controlled fixture, not against a real Hub, because the mounted application has no deterministic interruption point and no production hook is added.
-- Root source review remains open. Publication is pending.
+- Non-stale Core error outcomes (`partial_write`, `timeout`, and other non-`stale_mode` rejections), cancellation, and result loss are proven only in the controlled fixture, not against a real Hub, because the mounted application has no deterministic interruption point and no production hook is added. The `stale_mode` retry is the exception: it is observed live in run 5.
+- The final full live matrix must run before Hub merge, against the pre-merge Hub candidate; run 5 is candidate validation against the rc.1 Hub. Final claim review and publication are pending.
 
 ## Hashes on `e2f3486`
 
