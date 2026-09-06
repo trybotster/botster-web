@@ -163,6 +163,10 @@ The bracketed case confirms the marker accounting exactly: the wire is the paylo
 
 This validates the live clipboard paste lane end to end against the corrected Core. Five admitted cases delivered byte-exact, with the receiver digest, Web accounting, and Core `bytes_written` all agreeing: ASCII, Unicode, CRLF, bracketed on, and bracketed off. The sixth case, the oversize paste, was refused before encoding, evidenced by a rejected outcome, no paste transaction telemetry, and no key-path input; that no protocol frame was sent is an inference from the plane source, not a delivered byte count. It remains candidate validation against the rc.1 Hub, not the final full matrix.
 
+## Final Web gates
+
+The final Web gates ran at commit `db405e7`: `npm run typecheck`, `npm run lint` (zero errors, five pre-existing warnings), `npm test`, and `npm run build`, each exit 0, one command at a time. Their logs and `SHA256SUMS` are preserved under `node_modules/.botster-foundation-evidence/web-paste/final-gates/` and keep their `db405e7` identity; they are not reattributed. Commits after `db405e7` on this branch are report-only and leave `src/` and `dist/` unchanged, so the gate results at `db405e7` still hold for the current checkpoint.
+
 ## Not yet covered
 
 - Non-stale Core error outcomes (`partial_write`, `timeout`, and other non-`stale_mode` rejections), cancellation, and result loss are proven only in the controlled fixture, not against a real Hub, because the mounted application has no deterministic interruption point and no production hook is added. The `stale_mode` retry is the exception: it is observed live in run 5.
