@@ -7677,7 +7677,7 @@ async function proveMountedClipboardPaste(page) {
  */
 async function proveLivePasteCases(page) {
   const ESC = "\u001b";
-  const MARKER_BYTES = 12; // ESC[200~ and ESC[201~
+  const BRACKETED_PASTE_MARKER_BYTES = 12; // ESC[200~ and ESC[201~
   const readEventsLength = () =>
     page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length);
   const daemonOutputSince = (since) =>
@@ -7840,15 +7840,19 @@ async function proveLivePasteCases(page) {
     if (outcome.writtenPtyBytes !== result.written_pty_bytes) {
       throw new Error(`${label}: writtenPtyBytes ${outcome.writtenPtyBytes} differs from Core written_pty_bytes ${result.written_pty_bytes}`);
     }
-    // The worker's paste encoder adds ESC[200~ and ESC[201~ under bracketed paste, and
-    // written_pty_bytes reports the actual PTY write, so a bracketed paste reports payload
-    // plus 12 and an unbracketed one reports the payload. requestedBytes stays the payload.
-    // This expectation is unverified against the v9 worker until the live lane runs.
-    const expectedBytesWritten = bracketed ? payload.length + MARKER_BYTES : payload.length;
-    if (result.written_pty_bytes !== expectedBytesWritten) {
-      throw new Error(`${label}: written_pty_bytes ${result.written_pty_bytes}, expected ${expectedBytesWritten} (${bracketed ? "payload plus markers" : "payload"})`);
+    // Worker encoder contract (Core, Ghostty eb72ec6 src/input/paste.zig via
+    // ghostty_paste_encode): accepted_payload_bytes is the assembled paste length, the sum of
+    // the PASTE_CHUNK payloads. written_pty_bytes is the encoder output the worker wrote:
+    // accepted + 12 with mode 2004 on (ESC[200~ before, ESC[201~ after), accepted with mode
+    // 2004 off. Unsafe-byte and LF-to-CR replacement happen in place and change no length.
+    if (result.accepted_payload_bytes !== payload.length) {
+      throw new Error(`${label}: accepted_payload_bytes ${result.accepted_payload_bytes}, expected the payload ${payload.length}`);
     }
-    const bytesWrittenAccounting = bracketed ? "payload_plus_markers" : "payload";
+    const expectedBytesWritten = bracketed ? payload.length + BRACKETED_PASTE_MARKER_BYTES : payload.length;
+    if (result.written_pty_bytes !== expectedBytesWritten) {
+      throw new Error(`${label}: written_pty_bytes ${result.written_pty_bytes}, expected ${expectedBytesWritten} (${bracketed ? "accepted plus markers" : "accepted"})`);
+    }
+    const bytesWrittenAccounting = bracketed ? "accepted_plus_markers" : "accepted";
 
     // The receipt is emitted after the saved (opost-on) state is restored, so it ends in CRLF
     // or LF. Wait for the complete line: announced N, count, 64 hex digits, terminator.
@@ -8887,12 +8891,15 @@ async function proveInFlightAttachCancellation(page, sessionId) {
     throw new Error(`cancel remount reused subscription ${newSubscriptionId}`);
   }
 
+  // A trial that reached attached before the cancel verifies the detach, no-shutdown, and
+  // fresh-subscription invariants only. It is not evidence for pending-attach cancellation.
   const marker = {
     session_id: sessionId,
     old_subscription_id: held.subscription_id,
     new_subscription_id: newSubscriptionId,
     held_generation: held.generation ?? null,
     cancelled_before_attached: !attachedBeforeCancel,
+    pending_attach_cancellation: attachedBeforeCancel ? "inconclusive" : "observed",
     detach_count: detachEvidence.detach_count,
     chronology: await collectHeldCancelChronology(page, { subscriptionId: held.subscription_id, fromIndex: baseline.terminal_index })
   };
