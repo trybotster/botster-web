@@ -1,19 +1,78 @@
+import { readFile } from "node:fs/promises";
 import { chromium } from "playwright";
 import { createServer } from "vite";
-import { readLateAttachHistoryConformanceFixture } from "@trybotster/hub-test-support";
 
+/**
+ * Browser proof of the scheme 2 incremental attach on one real data plane and one real
+ * Restty renderer. The GHOSTSNP pages come from `fixtures/ghostsnp/ready-then-history`;
+ * the driver wraps them in scheme 2 frames in the route order
+ * ATTACH_STATE attached, MODES, SNAPSHOT_READY, OUTPUT and SNAPSHOT_HISTORY, SNAPSHOT_FINISH.
+ */
 const host = "127.0.0.1";
-const fixture = readLateAttachHistoryConformanceFixture();
-const snapshots = fixture.history_then_live.filter((event) => event.type === "snapshot");
-const readyPaintMarker = fixture.read_screen_text.trim();
+const fixtureDir = new URL("../fixtures/ghostsnp/ready-then-history/", import.meta.url);
+const index = JSON.parse(await readFile(new URL("index.json", fixtureDir), "utf8"));
+const pages = await Promise.all(
+  index.pages.map(async (name) => Array.from(await readFile(new URL(name, fixtureDir))))
+);
+const readyPaintMarker = String(index.ready_screen_text ?? "").trim();
+const [readyPage, ...historyPages] = pages;
 
-if (snapshots.length < 3) {
+if (!readyPage || historyPages.length < 1) {
   throw new Error(
-    `Incremental attach proof requires READY, PAGE, and FINISH frames; observed ${snapshots.length} Snapshot events.`
+    `Incremental attach proof requires one READY page and at least one history page; observed ${pages.length} pages.`
   );
 }
 if (!readyPaintMarker) {
   throw new Error("Incremental attach proof requires a non-empty READY screen marker.");
+}
+
+const TERMINAL_INPUT_KIND_RAW_BYTES = 1;
+const TERMINAL_INPUT_KIND_RESIZE = 5;
+const INPUT_HEADER_BYTES = 12;
+const inputKind = (frame) => frame[1];
+const inputOperationId = (frame) => Number(new DataView(Uint8Array.from(frame).buffer).getBigUint64(4, false));
+const resizeOf = (frame) => {
+  const view = new DataView(Uint8Array.from(frame).buffer);
+  return { rows: view.getUint16(INPUT_HEADER_BYTES, false), cols: view.getUint16(INPUT_HEADER_BYTES + 2, false) };
+};
+const rawTextOf = (frame) => new TextDecoder().decode(Uint8Array.from(frame.slice(INPUT_HEADER_BYTES)));
+
+const smoke = (page) => ({
+  call: (method, ...args) =>
+    page.evaluate(
+      ({ name, values }) => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__[name](...values),
+      { name: method, values: args }
+    ),
+  state: () =>
+    page.evaluate(() => ({
+      grid: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRenderGrid(),
+      rows: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows(),
+      statuses: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getStatuses(),
+      requests: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests(),
+      frames: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames(),
+      outcomes: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getOutcomes()
+    }))
+});
+
+async function openSmokePage(browser, address) {
+  const page = await browser.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto(`http://${host}:${address.port}/incremental-ghostsnp-attach-smoke.html`, {
+    waitUntil: "domcontentloaded"
+  });
+  await page.waitForFunction(
+    () => Boolean(globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__),
+    undefined,
+    { timeout: 15_000 }
+  );
+  return { page, errors, api: smoke(page) };
+}
+
+function assertNoInputFrames(frames, stage) {
+  if (frames.length > 0) {
+    throw new Error(`Web sent a binary input frame ${stage}: ${JSON.stringify(frames.map((frame) => frame.slice(0, 12)))}`);
+  }
 }
 
 let vite;
@@ -28,114 +87,70 @@ try {
   }
 
   browser = await chromium.launch();
-  const page = await browser.newPage();
-  const pageErrors = [];
-  page.on("pageerror", (error) => pageErrors.push(error.message));
-  await page.goto(`http://${host}:${address.port}/incremental-ghostsnp-attach-smoke.html`, {
-    waitUntil: "domcontentloaded"
+
+  // Complete attach: READY paints before history, live output waits for FINISH, queued
+  // input and coalesced resize are released only after the attach completes.
+  const { page, errors: pageErrors, api } = await openSmokePage(browser, address);
+  await api.call("deliverAttaching");
+  await page.evaluate(() => {
+    void globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.writeInput("queued-input-one");
+    void globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.writeInput("queued-input-two");
+    void globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.resize(30, 100);
+    return globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.resize(40, 120);
   });
-  await page.waitForFunction(
-    () => Boolean(globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__),
-    undefined,
-    { timeout: 15_000 }
-  );
+  assertNoInputFrames((await api.state()).frames, "before ATTACH_STATE attached");
+  await api.call("deliverAttached");
+  await api.call("deliverModes", 0, 40, 120);
+  await api.call("deliverSnapshotReady", readyPage);
 
-  const deliverSnapshot = async (targetPage, event) => {
-    const bytes = Array.from(Buffer.from(event.payload_base64, "base64"));
-    await targetPage.evaluate(
-      (frame) => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.deliverSnapshot(frame),
-      bytes
-    );
-  };
-
-  await page.evaluate(() => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.deliverAttaching());
-  await deliverSnapshot(page, snapshots[0]);
-
-  const readyState = await page.evaluate(() => ({
-    grid: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRenderGrid(),
-    rows: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows(),
-    statuses: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getStatuses(),
-    requests: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests(),
-    frames: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames()
-  }));
+  const readyState = await api.state();
   if (!readyState.rows.some((row) => row.includes(readyPaintMarker))) {
     throw new Error(`READY did not paint before history delivery: ${JSON.stringify(readyState.rows)}`);
   }
   if (readyState.statuses.at(-1)?.state !== "attaching") {
     throw new Error(`READY did not keep attaching status: ${JSON.stringify(readyState.statuses)}`);
   }
+  assertNoInputFrames(readyState.frames, "before SNAPSHOT_FINISH");
 
-  await page.evaluate(() => {
-    void globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.writeInput("queued-input-one");
-    void globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.writeInput("queued-input-two");
-    void globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.resize(30, 100);
-    void globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.resize(40, 120);
-    return globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.deliverOutput(
-      Array.from(new TextEncoder().encode("LIVE-AFTER-BARRIER"))
-    );
-  });
-
-  for (const pageFrame of snapshots.slice(1, -1)) {
-    await deliverSnapshot(page, pageFrame);
-    const frames = await page.evaluate(() =>
-      globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames()
-    );
-    if (frames.length > 0) {
-      throw new Error(`Web sent a binary frame before FINISH: ${JSON.stringify(frames)}`);
-    }
+  await api.call("deliverOutput", Array.from(new TextEncoder().encode("LIVE-AFTER-BARRIER")));
+  for (const historyPage of historyPages) {
+    await api.call("deliverSnapshotHistory", historyPage);
+    assertNoInputFrames((await api.state()).frames, "before SNAPSHOT_FINISH");
   }
 
-  const beforeFinishRows = await page.evaluate(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows()
-  );
-  if (beforeFinishRows.some((row) => row.includes("LIVE-AFTER-BARRIER"))) {
-    throw new Error("Web painted live output before attached.");
+  const beforeFinish = await api.state();
+  if (beforeFinish.rows.some((row) => row.includes("LIVE-AFTER-BARRIER"))) {
+    throw new Error("Web painted live output before SNAPSHOT_FINISH.");
   }
-  const beforeFinishGrid = await page.evaluate(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRenderGrid()
-  );
-  if (JSON.stringify(beforeFinishGrid) !== JSON.stringify(readyState.grid)) {
+  if (JSON.stringify(beforeFinish.grid) !== JSON.stringify(readyState.grid)) {
     throw new Error(
-      `Restty resized between READY and FINISH: ${JSON.stringify({ ready: readyState.grid, beforeFinish: beforeFinishGrid })}`
+      `Restty resized between READY and FINISH: ${JSON.stringify({ ready: readyState.grid, beforeFinish: beforeFinish.grid })}`
     );
   }
 
-  await deliverSnapshot(page, snapshots.at(-1));
-  const finishFrames = await page.evaluate(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames()
+  await api.call("deliverSnapshotFinish");
+  await api.call("attached");
+  await page.waitForFunction(() =>
+    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames().length >= 3 &&
+    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows().some((row) => row.includes("LIVE-AFTER-BARRIER"))
   );
-  if (finishFrames.length > 0) {
-    throw new Error(`Web sent a binary frame before attached: ${JSON.stringify(finishFrames)}`);
+
+  const finalState = await api.state();
+  const resizes = finalState.frames.filter((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RESIZE);
+  const inputs = finalState.frames.filter((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RAW_BYTES);
+  if (resizes.length !== 1 || resizes[0] !== finalState.frames[0]) {
+    throw new Error(`Web did not send one coalesced RESIZE ahead of queued input: ${JSON.stringify(finalState.frames.map((frame) => frame.slice(0, 12)))}`);
   }
-
-  await page.evaluate(() => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.deliverAttached());
-  await page.evaluate(() => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.attached());
-  await page.waitForFunction(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames().some(
-      (frame) => frame[1] === 3 && frame[4] === 0 && frame[5] === 40 && frame[6] === 0 && frame[7] === 120
-    )
-  );
-  await page.waitForFunction(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames().filter(
-      (frame) => frame[1] === 1
-    ).length === 2
-  );
-  await page.waitForFunction(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows().some(
-      (row) => row.includes("LIVE-AFTER-BARRIER")
-    )
-  );
-
-  const finalState = await page.evaluate(() => ({
-    rows: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows(),
-    statuses: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getStatuses(),
-    requests: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests(),
-    frames: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames()
-  }));
-  const decoder = new TextDecoder();
-  const inputs = finalState.frames.filter((frame) => frame[1] === 1);
-  if (inputs.map((frame) => decoder.decode(Uint8Array.from(frame.slice(4)))).join("|") !== "queued-input-one|queued-input-two") {
-    throw new Error(`Web changed queued input order: ${JSON.stringify(inputs)}`);
+  const resize = resizeOf(resizes[0]);
+  if (resize.rows !== 40 || resize.cols !== 120) {
+    throw new Error(`Web sent a stale RESIZE: ${JSON.stringify(resize)}`);
+  }
+  if (inputs.map(rawTextOf).join("|") !== "queued-input-one|queued-input-two") {
+    throw new Error(`Web changed queued input order: ${JSON.stringify(inputs.map(rawTextOf))}`);
+  }
+  const operationIds = finalState.frames.map(inputOperationId);
+  if (operationIds.join(",") !== "1,2,3") {
+    throw new Error(`Operation ids are not 1, 2, 3 in send order: ${JSON.stringify(operationIds)}`);
   }
   if (finalState.statuses.at(-1)?.state !== "attached") {
     throw new Error(`Web did not reach attached: ${JSON.stringify(finalState.statuses)}`);
@@ -144,83 +159,57 @@ try {
     throw new Error(`Incremental attach browser errors: ${JSON.stringify(pageErrors)}`);
   }
 
-  const degradedPage = await browser.newPage();
-  const degradedErrors = [];
-  degradedPage.on("pageerror", (error) => degradedErrors.push(error.message));
-  await degradedPage.goto(
-    `http://${host}:${address.port}/incremental-ghostsnp-attach-smoke.html`,
-    { waitUntil: "domcontentloaded" }
-  );
-  await degradedPage.waitForFunction(
-    () => Boolean(globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__),
-    undefined,
-    { timeout: 15_000 }
-  );
-  await degradedPage.evaluate(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.deliverAttaching()
-  );
-  await deliverSnapshot(degradedPage, snapshots[0]);
-  await deliverSnapshot(degradedPage, snapshots[1]);
-  await degradedPage.evaluate(() => {
+  // Degraded attach: HISTORY_UNAVAILABLE after READY keeps the READY screen, ignores later
+  // history pages, and attaches with incomplete history once FINISH arrives.
+  const degraded = await openSmokePage(browser, address);
+  await degraded.api.call("deliverAttaching");
+  await degraded.api.call("deliverAttached");
+  await degraded.api.call("deliverModes", 0, 36, 110);
+  await degraded.api.call("deliverSnapshotReady", readyPage);
+  await degraded.page.evaluate(() => {
     void globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.writeInput("degraded-input");
-    void globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.resize(36, 110);
-    return globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.deliverOutput(
-      Array.from(new TextEncoder().encode("DEGRADED-LIVE"))
-    );
+    return globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.resize(36, 110);
   });
-  await degradedPage.evaluate(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.deliverHistoryIncomplete()
-  );
-  const degradedBeforeAttached = await degradedPage.evaluate(() => ({
-    rows: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows(),
-    statuses: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getStatuses(),
-    requests: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getRequests(),
-    frames: globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames()
-  }));
-  if (degradedBeforeAttached.statuses.at(-1)?.state !== "attaching") {
-    throw new Error(
-      `Degraded history did not remain attaching before attached: ${JSON.stringify(degradedBeforeAttached.statuses)}`
-    );
+  await degraded.api.call("deliverOutput", Array.from(new TextEncoder().encode("DEGRADED-LIVE")));
+  await degraded.api.call("deliverHistoryUnavailable", "capture_failed");
+  await degraded.api.call("deliverSnapshotHistory", historyPages[0]);
+  const degradedBeforeFinish = await degraded.api.state();
+  if (degradedBeforeFinish.statuses.at(-1)?.state !== "attaching") {
+    throw new Error(`Degraded history did not remain attaching before FINISH: ${JSON.stringify(degradedBeforeFinish.statuses)}`);
   }
-  if (degradedBeforeAttached.frames.length > 0) {
-    throw new Error(
-      `Degraded history released a binary frame before attached: ${JSON.stringify(degradedBeforeAttached.frames)}`
-    );
+  assertNoInputFrames(degradedBeforeFinish.frames, "before SNAPSHOT_FINISH on the degraded attach");
+  if (degradedBeforeFinish.rows.some((row) => row.includes("DEGRADED-LIVE"))) {
+    throw new Error("Degraded history painted live output before SNAPSHOT_FINISH.");
   }
-  if (degradedBeforeAttached.rows.some((row) => row.includes("DEGRADED-LIVE"))) {
-    throw new Error("Degraded history painted live output before attached.");
+  if (!degradedBeforeFinish.rows.some((row) => row.includes(readyPaintMarker))) {
+    throw new Error(`Degraded history lost the READY screen: ${JSON.stringify(degradedBeforeFinish.rows)}`);
   }
-  await degradedPage.evaluate(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.deliverAttached()
-  );
-  await degradedPage.evaluate(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.attached()
-  );
-  await degradedPage.waitForFunction(() => {
+  await degraded.api.call("deliverSnapshotFinish");
+  await degraded.api.call("attached");
+  await degraded.page.waitForFunction(() => {
     const harness = globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__;
-    return (
-      harness.getSentFrames().some(
-        (frame) => frame[1] === 3 && frame[4] === 0 && frame[5] === 36 && frame[6] === 0 && frame[7] === 110
-      ) &&
-      harness.getSentFrames().some((frame) => frame[1] === 1) &&
-      harness.readViewportRows().some((row) => row.includes("DEGRADED-LIVE"))
-    );
+    return harness.getSentFrames().length >= 2 && harness.readViewportRows().some((row) => row.includes("DEGRADED-LIVE"));
   });
-  const degradedStatuses = await degradedPage.evaluate(() =>
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getStatuses()
-  );
-  if (
-    degradedStatuses.at(-1)?.state !== "attached" ||
-    !degradedStatuses.at(-1)?.message.includes("incomplete snapshot history")
-  ) {
-    throw new Error(`Degraded history did not attach as usable: ${JSON.stringify(degradedStatuses)}`);
+  const degradedFinal = await degraded.api.state();
+  const degradedResize = degradedFinal.frames.find((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RESIZE);
+  if (!degradedResize || JSON.stringify(resizeOf(degradedResize)) !== JSON.stringify({ rows: 36, cols: 110 })) {
+    throw new Error(`Degraded attach did not send the queued RESIZE: ${JSON.stringify(degradedFinal.frames.map((frame) => frame.slice(0, 12)))}`);
   }
-  if (degradedErrors.length > 0) {
-    throw new Error(`Degraded attach browser errors: ${JSON.stringify(degradedErrors)}`);
+  if (!degradedFinal.frames.some((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RAW_BYTES && rawTextOf(frame) === "degraded-input")) {
+    throw new Error("Degraded attach did not send the queued input.");
+  }
+  if (
+    degradedFinal.statuses.at(-1)?.state !== "attached" ||
+    !degradedFinal.statuses.at(-1)?.message.includes("incomplete snapshot history")
+  ) {
+    throw new Error(`Degraded history did not attach as usable: ${JSON.stringify(degradedFinal.statuses)}`);
+  }
+  if (degraded.errors.length > 0) {
+    throw new Error(`Degraded attach browser errors: ${JSON.stringify(degraded.errors)}`);
   }
 
   console.log(
-    `Incremental attach browser proof passed with ${snapshots.length - 2} PAGE frames, READY paint before FINISH, and usable degraded history.`
+    `Incremental attach browser proof passed with ${historyPages.length} history pages, READY paint before FINISH, and usable degraded history.`
   );
 } finally {
   await browser?.close();

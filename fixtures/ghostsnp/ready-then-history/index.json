@@ -1,0 +1,8 @@
+{
+  "ready_screen_text": "history-before-live\r\n",
+  "pages": [
+    "00-ready.bin",
+    "01-history.bin",
+    "02-history.bin"
+  ]
+}

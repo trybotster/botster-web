@@ -215,6 +215,7 @@ if (new URLSearchParams(window.location.search).get("rendererTelemetry") !== "of
 // explicit unsupported rejection instead of a silent drop or a key-path fallback.
 const pasteOwnerEnabled = new URLSearchParams(window.location.search).get("pasteOwner") !== "off";
 const pasteEchoPrefix = "botster-web-mounted-paste-echo:";
+let lineBuffer = "";
 
 /**
  * The fake data plane echoes each committed key's text as a line so the smoke can prove
@@ -238,10 +239,15 @@ const dataPlane: TerminalDataPlaneAttachment = {
     if (!data) return;
     harness.inputs.push(data);
     harness.callbackOrder.push(`input:${data}`);
-    if (data === "\n") {
-      const line = harness.inputs.join("").split("\n").at(-2) ?? "";
+    // Echo every completed line, as the old raw-input fake did for each write.
+    lineBuffer += data;
+    let newline = lineBuffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = lineBuffer.slice(0, newline);
+      lineBuffer = lineBuffer.slice(newline + 1);
       const output = new TextEncoder().encode(`${echoPrefix}${line}\r\n`);
       for (const listener of outputListeners) listener(output);
+      newline = lineBuffer.indexOf("\n");
     }
   },
   async writePaste(text: string) {

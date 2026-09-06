@@ -163,6 +163,9 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.fixedSubscriptionId = Boolean(options.subscriptionId);
     this.subscriptionId = options.subscriptionId ?? createTerminalSubscriptionId();
     this.testHooks = options.testHooks;
+    // The operator harness decodes route bodies it receives through the transport control.
+    const harness = liveHarness();
+    if (harness) harness.decodeTerminalBody ??= decodeTerminalBody;
     // Surviving-document DataChannel recovery mints a fresh terminal subscription and
     // re-runs the attach ordering without unmounting the renderer. Wait for
     // encrypted-stream-ready so attach RPCs are not issued against a half-open peer.
@@ -360,10 +363,22 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
           // Frames are built once, sent in order, and released; the payload closure goes
           // with them so a paste holds no third copy while Core retains the operation.
           const frames = inflight.operation.frames(operationId);
+          const abortFrame = inflight.operation.abortFrame?.(operationId);
           const frameCount = frames.length;
           inflight.operation = releasedOperation(inflight.retainedBytes);
-          for (const frame of frames) {
-            await stream.sendFrame!(frame);
+          let sentFrames = 0;
+          try {
+            for (const frame of frames) {
+              await stream.sendFrame!(frame);
+              sentFrames += 1;
+            }
+          } catch (error: unknown) {
+            // A paste that stopped after PASTE_BEGIN leaves Core assembling; abort it on the
+            // same stream, best effort, so the route's one assembling paste is released.
+            if (abortFrame && sentFrames > 0 && sentFrames < frameCount && this.streamSubscription === stream) {
+              await stream.sendFrame!(abortFrame).catch(() => undefined);
+            }
+            throw error;
           }
           recordLiveHarnessTerminal("input_sent", {
             kind: inflight.kind,
@@ -888,6 +903,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       this.failRoute(`Terminal frame could not be decoded: ${message}`);
       return;
     }
+    recordLiveHarnessRouteFrame(frame, decoded);
     if (!this.admitRouteGeneration(frame.generation)) {
       recordLiveHarnessTerminal("frame_stale_generation", {
         frame_generation: frame.generation,
@@ -1289,7 +1305,9 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     for (const listener of this.listeners) {
       listener(data);
     }
-    recordLiveHarnessTerminal("output", { bytes: data.byteLength, payload: data });
+    if (liveHarnessTerminalRecorderInstalled()) {
+      recordLiveHarnessTerminal("output", { payload_bytes_base64: bytesToBase64(data), bytes: data.byteLength, source: "output" });
+    }
   }
 
   private emitProcessExit(code: number | null): void {
@@ -1386,13 +1404,83 @@ function createTerminalSubscriptionId(): string {
   return `${hubTerminalSubscriptionId}-${Date.now()}-${nextSubscriptionSequence++}`;
 }
 
+type LiveHarness = {
+  events?: Array<{ kind: string; payload: unknown }>;
+  terminal?: Array<{ kind: string; payload: unknown }>;
+  decodeTerminalBody?: typeof decodeTerminalBody;
+};
+
+function liveHarness(): LiveHarness | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as typeof window & { __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveHarness }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+}
+
+function liveHarnessTerminalRecorderInstalled(): boolean {
+  return Boolean(liveHarness()?.terminal);
+}
+
 /** Records only when an operator harness installed its terminal recorder; no payload copies otherwise. */
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {
-  if (typeof window === "undefined") return;
-  const harness = (window as typeof window & {
-    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
-      terminal?: Array<{ kind: string; payload: unknown }>;
-    };
-  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-  harness?.terminal?.push({ kind, payload });
+  liveHarness()?.terminal?.push({ kind, payload });
+}
+
+/**
+ * One decoded route frame for the operator harness event log. Payload bytes are copied as
+ * base64 only when the harness event recorder exists; production has no recorder.
+ */
+function recordLiveHarnessRouteFrame(frame: TerminalRouteFrame, decoded: TerminalEvent): void {
+  const events = liveHarness()?.events;
+  if (!events) return;
+  const summary: Record<string, unknown> = { kind: decoded.kind };
+  switch (decoded.kind) {
+    case "output":
+    case "snapshot_ready":
+    case "snapshot_history":
+      summary.bytes = decoded.payload.byteLength;
+      summary.payload_base64 = bytesToBase64(decoded.payload);
+      break;
+    case "process_exit":
+      summary.code = decoded.code;
+      break;
+    case "modes":
+      summary.mode_bits = decoded.mode_bits;
+      summary.rows = decoded.rows;
+      summary.cols = decoded.cols;
+      break;
+    case "attach_state":
+      summary.state = decoded.state;
+      break;
+    case "input_result":
+      summary.operation_id = Number(decoded.result.operation_id);
+      summary.outcome = decoded.result.outcome;
+      summary.accepted_payload_bytes = decoded.result.accepted_payload_bytes === null ? null : Number(decoded.result.accepted_payload_bytes);
+      summary.written_pty_bytes = decoded.result.written_pty_bytes === null ? null : Number(decoded.result.written_pty_bytes);
+      summary.mode_bits = decoded.result.mode_bits;
+      summary.detail = decoded.result.detail;
+      break;
+    case "history_unavailable":
+      summary.reason = decoded.reason;
+      break;
+    case "route_resync":
+      summary.from_epoch = decoded.from_epoch;
+      summary.to_epoch = decoded.to_epoch;
+      break;
+    case "snapshot_finish":
+      break;
+  }
+  events.push({
+    kind: "terminal_route_frame",
+    payload: { route: frame.route, generation: frame.generation, stream_epoch: frame.streamEpoch, frame: summary }
+  });
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  if (typeof globalThis.btoa === "function") {
+    let binary = "";
+    for (const value of bytes) binary += String.fromCharCode(value);
+    return globalThis.btoa(binary);
+  }
+  const buffer = (globalThis as { Buffer?: { from(data: Uint8Array): { toString(enc: string): string } } }).Buffer;
+  if (buffer) return buffer.from(bytes).toString("base64");
+  throw new Error("No base64 encoder is available in this runtime.");
 }

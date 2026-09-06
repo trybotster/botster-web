@@ -213,12 +213,22 @@ try {
 
   await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl.focus());
   await page.locator(".terminal-view-container canvas").first().click({ position: { x: 10, y: 10 } });
+  // A browser fires beforeinput before input for committed text. The container capture
+  // consumes beforeinput; Restty's own input handler then encodes render-only bytes.
   await page.evaluate((data) => {
     const target = globalThis.document.activeElement;
     if (!(target instanceof globalThis.HTMLTextAreaElement)) {
       throw new Error(`mounted terminal keyboard smoke expected Restty textarea focus, observed ${target?.tagName ?? "none"}`);
     }
     target.value = data;
+    target.dispatchEvent(
+      new globalThis.InputEvent("beforeinput", {
+        inputType: "insertText",
+        data,
+        bubbles: true,
+        cancelable: true
+      })
+    );
     target.dispatchEvent(
       new globalThis.InputEvent("input", {
         inputType: "insertText",
@@ -355,7 +365,7 @@ async function proveMountedClipboardPaste(page, browser, origin) {
         pasteOutcomes: harness.pasteOutcomes,
         inputs: [...harness.inputs],
         callbackOrder: [...harness.callbackOrder],
-        ptySendInputs: terminal.filter((entry) => entry.kind === "pty_send_input").map((entry) => String(entry.payload?.data ?? "")),
+        ptySendInputs: terminal.filter((entry) => entry.kind === "restty_input_uncaptured").map((entry) => `${entry.payload?.source ?? ""}:${entry.payload?.bytes ?? 0}`),
         clipboardPastes: terminal.filter((entry) => entry.kind === "clipboard_paste").map((entry) => entry.payload),
         message: globalThis.document.querySelector(".terminal-input-message")?.textContent ?? null,
         messageOutcome: globalThis.document.querySelector(".terminal-input-message")?.getAttribute("data-terminal-input-outcome") ?? null
@@ -378,7 +388,7 @@ async function proveMountedClipboardPaste(page, browser, origin) {
     ({ expected }) => {
       const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
       return harness.pastes.length === 1 && harness.pastes[0] === expected &&
-        harness.pasteOutcomes.some((entry) => entry.outcome === "admitted" && entry.requestedBytes === expected.length && entry.deliveredBytes === expected.length);
+        harness.pasteOutcomes.some((entry) => entry.outcome === "written" && entry.requestedBytes === expected.length && entry.writtenPtyBytes === expected.length);
     },
     { expected: largeText },
     { timeout: 15_000 }
@@ -390,7 +400,7 @@ async function proveMountedClipboardPaste(page, browser, origin) {
   if (state.clipboardPastes.length !== 1 || state.clipboardPastes[0].chars !== largeText.length) {
     throw new Error(`expected exactly one clipboard_paste record, observed ${JSON.stringify(state.clipboardPastes)}`);
   }
-  if (state.message !== null) throw new Error(`admitted paste must not leave an input message, observed ${state.message}`);
+  if (state.message !== null) throw new Error(`written paste must not leave an input message, observed ${state.message}`);
 
   // 2. Unicode paste: UTF-8 byte count exceeds UTF-16 length and text arrives byte-identical.
   await dispatchPaste(unicodeText);
@@ -398,7 +408,7 @@ async function proveMountedClipboardPaste(page, browser, origin) {
     ({ expected, expectedBytes }) => {
       const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
       return harness.pastes.length === 2 && harness.pastes[1] === expected &&
-        harness.pasteOutcomes.filter((entry) => entry.outcome === "admitted" && entry.requestedBytes === expectedBytes && entry.deliveredBytes === expectedBytes && entry.minimumBytes === expected.length).length === 1;
+        harness.pasteOutcomes.filter((entry) => entry.outcome === "written" && entry.requestedBytes === expectedBytes && entry.writtenPtyBytes === expectedBytes).length === 1;
     },
     { expected: unicodeText, expectedBytes: unicodeBytes },
     { timeout: 15_000 }
@@ -492,10 +502,10 @@ async function proveMountedClipboardPaste(page, browser, origin) {
       () => {
         const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
         const message = globalThis.document.querySelector(".terminal-input-message");
-        return harness.pasteOutcomes.length === 1 && harness.pasteOutcomes[0].outcome === "rejected" &&
+        return harness.pasteOutcomes.length === 1 && harness.pasteOutcomes[0].outcome === "rejected_locally" &&
           harness.pasteOutcomes[0].reason === "unsupported" && harness.pastes.length === 0 && harness.inputs.length === 0 &&
-          message?.getAttribute("data-terminal-input-outcome") === "rejected" &&
-          (message?.textContent ?? "").includes("does not support clipboard paste");
+          message?.getAttribute("data-terminal-input-outcome") === "rejected_locally" &&
+          (message?.textContent ?? "").includes("has no paste owner");
       },
       undefined,
       { timeout: 15_000 }

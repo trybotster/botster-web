@@ -10,6 +10,7 @@ import {
   encodeKey,
   encodeMouse,
   encodePaste,
+  encodePasteAbort,
   encodeRawBytes,
   encodeResize,
   terminalKeyFromCode,
@@ -28,6 +29,8 @@ export interface EncodedInputOperation {
   /** Client payload bytes the operation carries, for local queue accounting. */
   bodyBytes: number;
   frames(operationId: OperationId): Uint8Array[];
+  /** Best-effort abort when a multi-frame operation stops after its first frame was sent. */
+  abortFrame?(operationId: OperationId): Uint8Array;
 }
 
 export function terminalModsBits(mods: TerminalModifierState): number {
@@ -136,6 +139,7 @@ export function encodeSemanticInput(input: TerminalSemanticInput): EncodedInputO
 export function encodePasteOperation(data: Uint8Array, allowUnsafe = false): EncodedInputOperation {
   return {
     bodyBytes: data.byteLength,
-    frames: (operationId) => encodePaste(operationId, allowUnsafe, data)
+    frames: (operationId) => encodePaste(operationId, allowUnsafe, data),
+    abortFrame: (operationId) => encodePasteAbort(operationId)
   };
 }

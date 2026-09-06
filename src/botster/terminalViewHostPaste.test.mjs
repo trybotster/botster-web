@@ -58,7 +58,10 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
       state,
       dataPlane: {
         sessionId,
-        writeInput() {},
+        sendInput() {},
+        async writePaste(text) {
+          return { kind: "paste", outcome: "rejected_locally", requestedBytes: text.length, reason: "fake", detail: "fake data plane" };
+        },
         subscribeOutput: () => ({ unsubscribe() {} }),
         subscribeStatus(listener) {
           state.statusSubscriptions += 1;
@@ -82,7 +85,7 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
         async attach() { calls.attach += 1; await attach?.(); },
         async detach() { calls.detach += 1; },
         async focus() {},
-        async writeInput() {},
+        async writeRawInput() {},
         async resize() {},
         subscribeInputOutcomes(_descriptor, listener) {
           calls.subscribeInputOutcomes += 1;
@@ -140,7 +143,7 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     assert.equal(state.statusUnsubscribes, 1, "the fenced continuation did not release the status subscription twice");
   });
 
-  // (v2) Outcome message lifecycle: rejected shows and persists, admitted clears, unknown shows.
+  // (v2) Outcome message lifecycle: a rejection shows and persists, written clears, unknown shows.
   await runScenario("v2-outcome-message", async () => {
     const { bridge, calls, emitOutcome } = makeBridge();
     const { dataPlane } = makeDataPlane("outcomes");
@@ -155,36 +158,36 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     assert.equal(calls.subscribeInputOutcomes, 1, "outcome subscription installed once after attach");
     assert.equal(inputMessage(host.element), null, "no message before any outcome");
     await act(async () => {
-      emitOutcome({ kind: "paste", outcome: "rejected", minimumBytes: 12, reason: "unsupported", detail: "This terminal attachment does not support clipboard paste; paste was not delivered." });
+      emitOutcome({ kind: "paste", outcome: "rejected_locally", requestedBytes: 12, reason: "unsupported", detail: "This terminal attachment does not support clipboard paste; paste was not delivered." });
     });
     let message = inputMessage(host.element);
     assert.ok(message, "rejected outcome renders the input message");
-    assert.equal(message.getAttribute("data-terminal-input-outcome"), "rejected");
+    assert.equal(message.getAttribute("data-terminal-input-outcome"), "rejected_locally");
     assert.match(textOf(message), /Paste rejected \(unsupported\)/);
     assert.match(textOf(message), /Dismiss/);
     await settle();
     assert.ok(inputMessage(host.element), "the message persists across renders");
     await act(async () => {
-      emitOutcome({ kind: "paste", outcome: "partial", minimumBytes: 10, requestedBytes: 12, deliveredBytes: 3, operationId: 2, detail: "Terminal wrote 3 PTY bytes for a 12-byte clipboard paste before the write stopped." });
+      emitOutcome({ kind: "paste", outcome: "partial_write", requestedBytes: 12, writtenPtyBytes: 3, operationId: 2, detail: "The PTY write stopped after 3 PTY bytes written." });
     });
     message = inputMessage(host.element);
-    assert.equal(message.getAttribute("data-terminal-input-outcome"), "partial");
-    assert.match(textOf(message), /partially delivered \(3 PTY bytes written for 12 bytes of clipboard text\)/);
+    assert.equal(message.getAttribute("data-terminal-input-outcome"), "partial_write");
+    assert.match(textOf(message), /Paste partially delivered \(3 PTY bytes written for 12 bytes\)/);
     await act(async () => {
-      emitOutcome({ kind: "paste", outcome: "rejected", minimumBytes: 7, reason: "too_large", detail: "Paste of at least 7 bytes exceeds the limit." });
+      emitOutcome({ kind: "paste", outcome: "rejected_too_large", requestedBytes: 7, operationId: 5, detail: "Terminal reported rejected_too_large for the paste operation." });
     });
-    assert.match(textOf(inputMessage(host.element)), /Paste rejected \(too_large\)/);
+    assert.match(textOf(inputMessage(host.element)), /Paste rejected: 7 bytes exceeds the limit/);
     await act(async () => {
-      emitOutcome({ kind: "paste", outcome: "admitted", minimumBytes: 10, requestedBytes: 12, deliveredBytes: 12, operationId: 3, detail: "Terminal wrote 12 PTY bytes for a 12-byte clipboard paste." });
+      emitOutcome({ kind: "paste", outcome: "written", requestedBytes: 12, acceptedPayloadBytes: 12, writtenPtyBytes: 12, operationId: 3, detail: "Terminal accepted the paste operation; 12 PTY bytes written." });
     });
-    assert.equal(inputMessage(host.element), null, "an admitted paste clears the message");
+    assert.equal(inputMessage(host.element), null, "a written paste clears the message");
     await act(async () => {
-      emitOutcome({ kind: "paste", outcome: "unknown", minimumBytes: 10, requestedBytes: 12, operationId: 4, reason: "timeout", detail: "Terminal reported a timeout for the paste; delivery of 12 bytes is unknown." });
+      emitOutcome({ kind: "paste", outcome: "outcome_unknown", requestedBytes: 12, operationId: 4, detail: "Terminal stream was lost after the paste was sent; delivery of 12 bytes is unknown." });
     });
     message = inputMessage(host.element);
-    assert.equal(message.getAttribute("data-terminal-input-outcome"), "unknown");
+    assert.equal(message.getAttribute("data-terminal-input-outcome"), "outcome_unknown");
     assert.match(textOf(message), /Paste delivery unknown/);
-    assert.deepEqual(forwarded.map((entry) => entry.outcome), ["rejected", "partial", "rejected", "admitted", "unknown"]);
+    assert.deepEqual(forwarded.map((entry) => entry.outcome), ["rejected_locally", "partial_write", "rejected_too_large", "written", "outcome_unknown"]);
     assert.ok(forwarded.every((entry) => entry.sessionId === "outcomes"));
 
     // (v3) A replacement session starts without the previous session's message.

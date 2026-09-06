@@ -1060,8 +1060,9 @@ export function htmlAssetUrls(html) {
     .sort();
 }
 
+/** One decoded terminal route frame recorded by the browser harness. */
 export function isDaemonTerminalBodyEntry(entry) {
-  return entry?.kind === "daemon_terminal_event";
+  return entry?.kind === "terminal_route_frame";
 }
 
 export function isDaemonHostCloseEntry(entry) {

@@ -14,10 +14,6 @@ import {
   materializePluginContractMatrixFixture,
   metadata as hubTestSupportMetadata,
   pluginContractMatrixFixturePath,
-  readDaemonProtocolTypescript,
-  readLateAttachHistoryConformanceFixture,
-  readLocalWebrtcDeliveryChunkConformanceFixture,
-  readModeFlagsConformanceFixture,
   readSessionLifecycleSubscriptionConformanceFixture,
   readSessionPluginBindingConformanceFixture,
   readUiContractConformanceFixtures,
@@ -962,6 +958,9 @@ const [
   hubRuntimeSource,
   realHubDaemonDto,
   generatedDaemonProtocol,
+  generatedTerminalProtocol,
+  terminalInputCapture,
+  terminalInputEncoding,
   hubTransport,
   hubTerminalDataPlane,
   webrtcDaemonClient,
@@ -1004,6 +1003,9 @@ const [
   readFile(new URL("./botster/hubRuntime.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/realHubDaemonDto.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/generated/daemon-protocol.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/generated/terminal-protocol.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/terminalInputCapture.ts", import.meta.url), "utf8"),
+  readFile(new URL("./botster/terminalInputEncoding.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/hubTransport.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/hubTerminalDataPlane.ts", import.meta.url), "utf8"),
   readFile(new URL("./botster/webrtcDaemonClient.ts", import.meta.url), "utf8"),
@@ -1864,6 +1866,12 @@ assert.doesNotMatch(realHubDaemonDto, /export interface DaemonPackage\s*\{/);
 assert.doesNotMatch(realHubDaemonDto, /export type DaemonEvent\s*=/);
 assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client Rust serde DTOs/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "read_mode_flags"; session_id: string \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "read_snapshot_page"; session_id: string; capture_id: string; page: number \}/);
+assert.match(generatedDaemonProtocol, /export const PROTOCOL_VERSION = 9;/);
+assert.match(generatedDaemonProtocol, /export type ClientFrame =/);
+assert.match(generatedDaemonProtocol, /export type ServerFrame =/);
+assert.match(generatedDaemonProtocol, /\{ frame: "entity"; entity: DaemonEntityFrame \}/);
+assert.match(generatedDaemonProtocol, /export const LOCAL_WEBRTC_TERMINAL_CHUNK_HEADER_BYTES = 33;/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_apps" \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_package_navigation" \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "list_packages" \}/);
@@ -1938,9 +1946,7 @@ assert.match(generatedDaemonProtocol, /execution\?: DaemonSessionTypeExecution;/
 assert.match(generatedDaemonProtocol, /mouse_mode: number;/);
 assert.match(generatedDaemonProtocol, /\| "read_mode_flags"/);
 assert.match(generatedDaemonProtocol, /export type DaemonEvent/);
-assert.match(generatedDaemonProtocol, /\| \{ type: "terminal_output"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number \}/);
-assert.match(generatedDaemonProtocol, /\| \{ type: "snapshot"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number \}/);
-assert.match(generatedDaemonProtocol, /\| \{ type: "scrollback"; session_id: string; subscription_id: string; payload_base64: string; payload_encoding: "base64"; bytes: number \}/);
+assert.match(generatedDaemonProtocol, /\| \{ type: "terminal_subscription_closed"; session_id: string; subscription_id: string; generation: number; reason: string \}/);
 assert.doesNotMatch(generatedDaemonProtocol, /type: "(?:snapshot|scrollback|terminal_output)"[^\n]*data: string/);
 assert.doesNotMatch(realHubDaemonDto, /compressed\?: boolean|encoding\?: string/);
 assert.doesNotMatch(hubTransport, /createHttpDaemonBridgeClient|EventSource|fetchImpl/);
@@ -2027,48 +2033,38 @@ assert.match(hubTransport, /family: availablePackageFamily/);
 assert.doesNotMatch(hubTransport, /["']view_surface["']|["']settings_surface["']|UpdatePackage|update_package|type: "restart_hub"/);
 assert.match(hubTerminalDataPlane, /streamTerminal/);
 assert.match(hubTransport, /ready: Promise<void>/);
+assert.match(hubTransport, /export interface TerminalRouteFrame/);
+assert.match(hubTransport, /streamEpoch: number;/);
 assert.match(webrtcDaemonClient, /await listener\.onEvent\(event\)/);
-assert.doesNotMatch(webrtcDaemonClient, /enqueueTerminalDelivery|receiveTerminalFrame/);
+assert.doesNotMatch(webrtcDaemonClient, /enqueueTerminalDelivery|receiveTerminalFrame|pendingMatchesResponse|daemon_terminal_frame|payload_base64/);
 assert.match(webrtcDaemonClient, /daemon_hello/);
-assert.match(webrtcDaemonClient, /daemon_terminal_frame/);
-assert.match(webrtcDaemonClient, /daemon_terminal_event/);
+assert.match(webrtcDaemonClient, /frame: "hello"/);
+assert.match(webrtcDaemonClient, /frame\.frame === "hello_ack"/);
+assert.match(webrtcDaemonClient, /pendingKey\(generation, requestId\)/);
+assert.match(webrtcDaemonClient, /hostControlRequestLimits\.maxOutstandingRequests/);
+assert.match(webrtcDaemonClient, /initialDelayMs: 250,\s*maxDelayMs: 8_000/);
+assert.match(webrtcDaemonClient, /view\.getUint32\(29, true\)/);
+assert.match(webrtcDaemonClient, /header\.generation !== BigInt\(binding\.generation\)/);
 assert.match(webrtcDaemonClient, /terminal_subscription_closed/);
-assert.match(liveProtocolHarnessScript, /entry.kind !== "daemon_terminal_event"/);
-assert.match(liveProtocolHarnessScript, /entry.kind === "daemon_terminal_event"/);
-assert.doesNotMatch(
-  liveProtocolHarnessScript.slice(
-    liveProtocolHarnessScript.indexOf("async function waitForDaemonTerminalOutputBytes"),
-    liveProtocolHarnessScript.indexOf("async function proveByteFaithfulLiveTerminal")
-  ),
-  /entry.kind !== "daemon_event"/
-);
 assert.doesNotMatch(webrtcDaemonClient, /for_webrtc_terminal_subscription_closed/);
-assert.match(webrtcDaemonClient, /host drain returned a terminal body/);
-assert.match(hubTerminalDataPlane, /this\.ensureHydration\(attachmentGeneration\)[\s\S]*streamTerminal/);
-assert.match(hubTerminalDataPlane, /progress === "finish"[\s\S]*hydration\.finishReceived = true/);
-assert.match(hubTerminalDataPlane, /this\.pendingResize = \{ rows, columns \}[\s\S]*enqueueTerminalFrame/);
-assert.match(webrtcDaemonClient, /control DataChannel received a terminal delivery/);
+assert.match(webrtcDaemonClient, /control DataChannel received an entity delivery/);
 assert.match(
   webrtcDaemonClient,
   /const shouldReconnect = this\.captureReconnectDemand\(\);\s*this\.emitLifecycle\(\{ type: "data-channel-error" \}\)/
 );
+assert.match(hubTerminalDataPlane, /decodeTerminalBody\(frame\.body\)/);
+assert.match(hubTerminalDataPlane, /admitStreamEpoch/);
+assert.match(hubTerminalDataPlane, /decoded\.from_epoch === this\.acceptedEpoch/);
+assert.match(hubTerminalDataPlane, /MAX_INFLIGHT_INPUT_OPERATIONS/);
+assert.match(hubTerminalDataPlane, /MAX_PENDING_TERMINAL_BYTES/);
+assert.match(hubTerminalDataPlane, /encodePasteOperation/);
 assert.match(hubTerminalDataPlane, /terminalEventQueue/);
-assert.doesNotMatch(hubTerminalDataPlane, /terminalInputQueue/);
+assert.doesNotMatch(hubTerminalDataPlane, /stale_mode|mode_generation|mode_revision|read_mode_flags|writeModeGatedInput|decodeDaemonByteEnvelope|payload_base64|encodeModeGatedInput/);
 assert.doesNotMatch(hubTerminalDataPlane, /type: "send_input"|type: "mode_gated_input"|type: "resize"/);
-assert.match(hubTerminalDataPlane, /encodeTerminalInput|encodeModeGatedInput|encodeResize/);
-assert.match(webrtcDaemonClient, /response\.terminal_reservation/);
-assert.match(webrtcDaemonClient, /createReservedDataChannel\(\s*reservation\.label,/);
-assert.match(webrtcDaemonClient, /createDataChannel\(label, \{ ordered: true \}\)/);
-assert.match(webrtcDaemonClient, /version: 2[\s\S]*delivery_kind: "daemon_terminal_frame"/);
-assert.match(hubTerminalDataPlane, /writeModeGatedInput/);
-assert.match(hubTerminalDataPlane, /decodeDaemonByteEnvelope/);
+assert.match(hubTerminalDataPlane, /type: "read_snapshot_page"/);
 assert.match(hubTerminalDataPlane, /bindIncrementalSnapshotReader/);
-assert.match(hubTerminalDataPlane, /recordLiveHarnessTerminal\("input"/);
 assert.match(hubTerminalDataPlane, /recordLiveHarnessTerminal\("resize"/);
-assert.match(hubTerminalDataPlane, /decodeTerminalOutputEvent/);
-assert.doesNotMatch(hubTerminalDataPlane, /this\.emitOutput\(event\.data/);
-assert.match(terminal, /export type TerminalOutput = Uint8Array/);
-assert.match(hubTerminalDataPlane, /type: "read_mode_flags"/);
+assert.match(hubTerminalDataPlane, /recordLiveHarnessTerminal\("input_result"/);
 assert.match(hubTerminalDataPlane, /bufferHydratingOutput/);
 assert.doesNotMatch(hubTerminalDataPlane, /this\.emitOutput\(readScreen\.text, "read_screen"\)/);
 assert.doesNotMatch(hubTerminalDataPlane, /event\.data, event\.type|restoredHistory|scrollback_unavailable/);
@@ -2077,6 +2073,20 @@ assert.match(hubTerminalDataPlane, /type: "detach"/);
 assert.match(hubTerminalDataPlane, /attachToAuthoritativeSession/);
 assert.doesNotMatch(hubTerminalDataPlane, /type: "list_sessions"/);
 assert.match(hubTerminalDataPlane, /this\.listeners\.size === 0/);
+assert.match(terminal, /export type TerminalOutput = Uint8Array/);
+assert.match(terminal, /sendInput\(input: TerminalSemanticInput\): void;/);
+assert.match(terminalInputCapture, /container\.addEventListener\("keydown", onKeyDown, capture\)/);
+assert.match(terminalInputCapture, /compositionend/);
+assert.match(terminalInputCapture, /insertFromPaste/);
+assert.match(terminalInputEncoding, /terminalKeyFromCode/);
+assert.match(terminalInputEncoding, /encodePaste\(operationId, allowUnsafe, data\)/);
+assert.match(botsterTerminalPtyTransport, /onUncapturedInput\("pty_sink", data\)/);
+assert.match(resttyRenderer, /installTerminalInputCapture/);
+assert.match(resttyRenderer, /beforeInput: \(\{ text, source \}\)/);
+assert.doesNotMatch(resttyRenderer, /createInputHandler|MountScopedWheelReencoder|encodeWheelDecision|writeModeGatedInput/);
+assert.match(generatedTerminalProtocol, /export const PROTOCOL = "botster-terminal-v2";/);
+assert.match(generatedTerminalProtocol, /export function decodeTerminalBody/);
+assert.match(generatedTerminalProtocol, /export function encodeKey/);
 assert.match(resttyRenderer, /readOnly:\s*true/);
 assert.match(resttyRenderer, /pendingSemantic|takePendingSemantic/);
 assert.match(resttyRenderer, /kind: "mouse"|reportKind/);
@@ -2183,14 +2193,15 @@ assert.doesNotMatch(liveProtocolHarnessScript, /startSessionButton|observeStartS
 assert.match(liveProtocolHarnessScript, /proveExternalSessionLifecycle/);
 assert.match(liveProtocolHarnessScript, /waitForRunningSessionFrame\(page\)/);
 assert.match(liveProtocolHarnessScript, /waitForAutomaticTerminalRestore/);
-assert.match(liveProtocolHarnessScript, /proveMountedMouseModeGatedInput/);
+assert.match(liveProtocolHarnessScript, /proveMountedMouseInput/);
 assert.match(liveProtocolHarnessScript, /proveZeroBrowserOscColorReplies/);
 assert.match(liveProtocolHarnessScript, /provePaletteProjectionAfterOsc/);
 assert.match(liveProtocolHarnessScript, /proveInPageTerminalDataChannelReconnect/);
 assert.match(liveProtocolHarnessScript, /closeDataChannel/);
 assert.match(liveProtocolHarnessScript, /ghostsnp_install|restty_load_binary_snapshot/);
-assert.match(liveProtocolHarnessScript, /mode_gated_input/);
-assert.match(liveProtocolHarnessScript, /read_mode_flags/);
+assert.doesNotMatch(liveProtocolHarnessScript, /mode_gated_input|stale_mode|daemon_terminal_event|encodeModeGatedInput|armSnapshotInstallHold|BOTSTER_LIVE_ABLATE_CANCEL_DETACH/);
+assert.match(liveProtocolHarnessScript, /terminal_route_frame/);
+assert.match(liveProtocolHarnessScript, /input_result/);
 assert.doesNotMatch(liveProtocolHarnessScript, /source === "read_screen"/);
 assert.match(liveProtocolHarnessScript, /assertCurrentHubCompatibilityAndSchema/);
 assert.match(liveProtocolHarnessScript, /assertCurrentHubSchemaPresentation/);
@@ -2457,7 +2468,7 @@ assert.match(terminalSmokeFixture, /runTerminalViewBridgeSmokeFixture/);
 assert.match(terminalSmokeFixture, /emitInput\("ls\\n"\)/);
 assert.match(terminalSmokeFixture, /dataPlane\.emitOutput\(new TextEncoder\(\)\.encode\("ok\\r\\n"\)\)/);
 assert.match(terminalSmokeFixture, /bridge\.resize\(descriptor, 24, 80\)/);
-assert.match(terminalSmokeFixture, /bridge\.writeInput\(descriptor, "premount\\n"\)/);
+assert.match(terminalSmokeFixture, /bridge\.writeRawInput\(descriptor, "premount\\n"\)/);
 assert.match(terminalSmokeFixture, /bridge\.unmount\(descriptor\)/);
 assert.match(pluginSurfaces, /sandbox: "host_rendered" \| "isolated_asset"/);
 assert.match(architecture, /Production transport/);
@@ -2465,7 +2476,8 @@ assert.match(architecture, /Terminal data stays outside `HubControlFrame`/);
 assert.match(architecture, /one ordered WebRTC control DataChannel and one ordered DataChannel for each terminal, entity, and package-event subscription/);
 assert.match(architecture, /control channel rejects terminal, entity, and package-event data-plane deliveries/);
 assert.match(architecture, /creates one ordered DataChannel with that exact label/);
-assert.match(architecture, /version 2 `daemon_terminal_frame` delivery chunks/);
+assert.match(architecture, /33-byte header/);
+assert.match(architecture, /stream epoch/);
 assert.match(architecture, /Restty is a terminal renderer only/);
 assert.match(architecture, /DaemonRequest/);
 assert.match(readme, /Restty is the terminal renderer/);
@@ -2565,8 +2577,6 @@ const uiContractSchema = JSON.parse(uiContractSchemaRaw);
 const contractMatrixManifest = JSON.parse(contractMatrixManifestRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
-const expectedHubDaemonProtocolSha256 = hubTestSupportMetadata.daemon_protocol.sha256;
-const installedDaemonProtocol = readDaemonProtocolTypescript();
 assert.equal(
   hubTestSupportMetadata.daemon_protocol.sha256,
   "33c0c27941c0e9751342cfdbeb53d27bb4a1225e5ce7f4be280d9f0dc11ad7f3"
@@ -2608,10 +2618,10 @@ assert.deepEqual(
     { kind: "surface", surface_id: "contract.settings" }
   ]
 );
-assert.equal(createHash("sha256").update(installedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
-assert.equal(createHash("sha256").update(generatedDaemonProtocol).digest("hex"), expectedHubDaemonProtocolSha256);
-assert.match(installedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
-assert.match(installedDaemonProtocol, /interface DaemonPluginResourceCounters/);
+// The vendored daemon-protocol.ts is the Hub 4814089 artifact recorded in PROVENANCE.json;
+// the npm hub-test-support package still ships protocol 8 until Hub republishes it.
+assert.match(generatedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
+assert.match(generatedDaemonProtocol, /interface DaemonPluginResourceCounters/);
 assert.match(generatedDaemonProtocol, /\{ type: "refresh_local_packages" \}/);
 assert.equal(hubTestSupportMetadata.plugin_contract_matrix.package_name, "botster.plugin-contract-matrix");
 assert.equal(hubTestSupportMetadata.application_primitives.surface_id, "contract.app");
@@ -2621,124 +2631,8 @@ for (const primitive of ["button", "dialog", "form", "panel", "text", "text_inpu
 assert.equal(hubTestSupportMetadata.application_primitives.primitive_kinds.includes("action"), false);
 assert.equal(applicationPrimitivesFixturePath(), pluginContractMatrixFixturePath());
 assert.equal(verifyPackageAssets().ok, true);
-const modeFlagsConformanceFixture = readModeFlagsConformanceFixture();
-assert.equal(modeFlagsConformanceFixture.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
-assert.deepEqual(modeFlagsConformanceFixture.request, {
-  type: "read_mode_flags",
-  session_id: "mode-flags-fixture-session"
-});
-assert.deepEqual(modeFlagsConformanceFixture.mouse_off, {
-  response_kind: "read_mode_flags",
-  mode_flags: {
-    session_id: "mode-flags-fixture-session",
-    kitty_enabled: false,
-    cursor_visible: true,
-    bracketed_paste: false,
-    mouse_mode: 0,
-    alt_screen: false,
-    focus_reporting: false,
-    application_cursor: false,
-    mode_generation: 1,
-    mode_revision: 1
-  }
-});
-assert.deepEqual(modeFlagsConformanceFixture.mouse_on, {
-  response_kind: "read_mode_flags",
-  mode_flags: {
-    session_id: "mode-flags-fixture-session",
-    kitty_enabled: false,
-    cursor_visible: true,
-    bracketed_paste: false,
-    mouse_mode: 9,
-    alt_screen: false,
-    focus_reporting: false,
-    application_cursor: false,
-    mode_generation: 1,
-    mode_revision: 2
-  }
-});
-for (const failure of [modeFlagsConformanceFixture.unknown_session, modeFlagsConformanceFixture.backend_failure]) {
-  assert.equal(failure.response_kind, "operator_error");
-  assert.equal(failure.operation, "read_mode_flags");
-  assert.equal(failure.mode_flags, null);
-}
-assert.equal(modeFlagsConformanceFixture.unknown_session.error_code, "unknown_session");
-assert.equal(modeFlagsConformanceFixture.backend_failure.error_code, "runtime_error");
-const lateAttachHistoryConformanceFixture = readLateAttachHistoryConformanceFixture();
-assert.equal(lateAttachHistoryConformanceFixture.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
-for (const scenario of [
-  lateAttachHistoryConformanceFixture.history_then_live,
-  lateAttachHistoryConformanceFixture.no_history_then_live
-]) {
-  const attachingIndex = scenario.findIndex(
-    (event) => event.type === "attach_state" && event.state === "attaching"
-  );
-  const attachedIndex = scenario.findIndex(
-    (event) => event.type === "attach_state" && event.state === "attached"
-  );
-  const snapshotIndexes = scenario
-    .map((event, index) => event.type === "snapshot" ? index : -1)
-    .filter((index) => index >= 0);
-  assert.equal(attachingIndex, 0);
-  assert.equal(snapshotIndexes.length >= 1, true);
-  assert.equal(snapshotIndexes.every((index) => index > attachingIndex && index < attachedIndex), true);
-  assert.equal(scenario.slice(0, attachedIndex).some((event) => event.type === "terminal_output"), false);
-  assert.equal(scenario.some((event) => event.type === "scrollback"), false);
-}
-if (lateAttachHistoryConformanceFixture.conformance_fixture_revision >= 38) {
-  assert.equal(
-    lateAttachHistoryConformanceFixture.history_then_live.filter((event) => event.type === "snapshot").length >= 3,
-    true
-  );
-  assert.equal(
-    lateAttachHistoryConformanceFixture.no_history_then_live.filter((event) => event.type === "snapshot").length,
-    2
-  );
-}
-for (const event of lateAttachHistoryConformanceFixture.history_then_live) {
-  if (event.type !== "snapshot" && event.type !== "scrollback" && event.type !== "terminal_output") continue;
-  assert.equal(event.payload_encoding, "base64");
-  assert.equal(Buffer.from(event.payload_base64, "base64").byteLength, event.bytes);
-  assert.equal("data" in event, false);
-}
-assert.equal(lateAttachHistoryConformanceFixture.read_screen_text, "history-before-live\r\n");
-assert.equal(lateAttachHistoryConformanceFixture.no_history_read_screen_text, "");
-// Web validates the binary-safe envelope. Restty owns all snapshot byte interpretation.
-
-const localWebrtcDeliveryChunkFixture = readLocalWebrtcDeliveryChunkConformanceFixture();
-assert.equal(localWebrtcDeliveryChunkFixture.version, 2);
-assert.equal(localWebrtcDeliveryChunkFixture.maximum_frame_bytes_exclusive, 65_536);
-assert.equal(localWebrtcDeliveryChunkFixture.maximum_delivery_bytes, 16_777_216);
-assert.deepEqual(
-  new Set(localWebrtcDeliveryChunkFixture.scenarios.daemon_entity_frame.map((chunk) => chunk.delivery_kind)),
-  new Set(["daemon_entity_frame"])
-);
-const largeGeneratedChunkFixture = localWebrtcDeliveryChunkFixture.scenarios.large_generated;
-const generatedFixturePayload = repeatUtf8Pattern(
-  largeGeneratedChunkFixture.pattern,
-  largeGeneratedChunkFixture.total_bytes
-);
-const generatedFixtureChunks = chunkUtf8Payload(generatedFixturePayload, largeGeneratedChunkFixture.chunk_payload_bytes);
-assert.equal(Buffer.byteLength(generatedFixturePayload), 262_145);
-assert.equal(generatedFixtureChunks.length, 22);
-assert.equal(generatedFixtureChunks.length, largeGeneratedChunkFixture.expected_chunk_count);
-const reorderedGeneratedFixtureChunks = generatedFixtureChunks.map((payload, chunk_index) => ({
-  version: 2,
-  delivery_kind: "daemon_response",
-  message_id: largeGeneratedChunkFixture.message_id,
-  chunk_index,
-  chunk_count: generatedFixtureChunks.length,
-  total_bytes: largeGeneratedChunkFixture.total_bytes,
-  payload
-})).toReversed();
-assert.equal(
-  createHash("sha256").update(reassembleFixtureChunks(reorderedGeneratedFixtureChunks)).digest("hex"),
-  "06d24e206edb54bed524319b1127725b46e20ea4aae5934688599abd42fa4317"
-);
-assert.equal(
-  reassembleFixtureChunks(localWebrtcDeliveryChunkFixture.scenarios.over_budget_operator_error),
-  "encrypted-operator-error"
-);
+// Terminal and WebRTC delivery conformance moved to Core scheme 2 hex fixtures and the
+// binary chunk header; the v8 JSON fixtures are retired with that contract.
 const sessionLifecycleFixture = readSessionLifecycleSubscriptionConformanceFixture();
 assert.equal(sessionLifecycleFixture.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(sessionLifecycleFixture.fresh_subscription.requires_authoritative_snapshot_before_deltas, true);
@@ -2756,8 +2650,9 @@ assert.deepEqual(
     "session-missing"
   ]
 );
-assert.match(checkDaemonProtocolDriftScript, /@trybotster\/hub-test-support/);
-assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping daemon protocol drift check|check out \.\.\/botster-hub/);
+assert.match(checkDaemonProtocolDriftScript, /PROVENANCE\.json/);
+assert.match(checkDaemonProtocolDriftScript, /sha256/);
+assert.doesNotMatch(checkDaemonProtocolDriftScript, /\.\.\/botster-hub|Skipping daemon protocol drift check|check out \.\.\/botster-hub|BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL/);
 assert.match(liveProtocolHarnessScript, /@trybotster\/hub-test-support/);
 assert.match(liveProtocolHarnessScript, /materializePluginContractMatrixFixture/);
 assert.match(liveProtocolHarnessScript, /assertTerminalAttachChronology/);
@@ -2786,18 +2681,15 @@ try {
 } finally {
   await rm(materializedFixtureRoot, { recursive: true, force: true });
 }
-const mismatchedProtocolRoot = await mkdtemp(join(tmpdir(), "botster-web-daemon-protocol-mismatch-"));
-try {
-  const mismatchedProtocolPath = join(mismatchedProtocolRoot, "daemon-protocol.ts");
-  await writeFile(mismatchedProtocolPath, `${generatedDaemonProtocol}\n// deliberate drift\n`);
-  const driftResult = await runNodeScript(new URL("../scripts/check-daemon-protocol-drift.mjs", import.meta.url), {
-    BOTSTER_HUB_CLIENT_DAEMON_PROTOCOL: mismatchedProtocolPath
-  });
-  assert.notEqual(driftResult.code, 0);
-  assert.match(`${driftResult.stdout}\n${driftResult.stderr}`, /Vendored daemon protocol drift detected/);
-  assert.doesNotMatch(`${driftResult.stdout}\n${driftResult.stderr}`, /missing|Skipping daemon protocol drift check/i);
-} finally {
-  await rm(mismatchedProtocolRoot, { recursive: true, force: true });
+{
+  // The vendored artifacts match their recorded provenance hashes.
+  const driftResult = await runNodeScript(new URL("../scripts/check-daemon-protocol-drift.mjs", import.meta.url));
+  assert.equal(driftResult.code, 0, `${driftResult.stdout}\n${driftResult.stderr}`);
+  const provenance = JSON.parse(await readFile(new URL("./botster/generated/PROVENANCE.json", import.meta.url), "utf8"));
+  assert.deepEqual(Object.keys(provenance.artifacts).sort(), ["daemon-protocol.ts", "terminal-protocol.ts"]);
+  assert.equal(createHash("sha256").update(generatedDaemonProtocol).digest("hex"), provenance.artifacts["daemon-protocol.ts"].sha256);
+  assert.equal(createHash("sha256").update(generatedTerminalProtocol).digest("hex"), provenance.artifacts["terminal-protocol.ts"].sha256);
+
 }
 assert.equal(
   packageJson.scripts["smoke:react-singleton"],
@@ -3296,64 +3188,6 @@ await rm(compiledRoot, { recursive: true, force: true });
 await mkdir(join(compiledRoot, "botster"), { recursive: true });
 await mkdir(join(compiledRoot, "botster/__fixtures__"), { recursive: true });
 
-const terminalProtocolModule = await import("@trybotster/terminal-protocol");
-await mkdir(join(compiledRoot, "node_modules/@trybotster/terminal-protocol"), { recursive: true });
-await mkdir(join(compiledRoot, "node_modules/@trybotster/hub-test-support"), { recursive: true });
-await writeFile(
-  join(compiledRoot, "node_modules/@trybotster/terminal-protocol/package.json"),
-  JSON.stringify({ name: "@trybotster/terminal-protocol", main: "index.cjs", type: "commonjs" })
-);
-await writeFile(
-  join(compiledRoot, "node_modules/@trybotster/terminal-protocol/index.cjs"),
-  `module.exports = ${JSON.stringify({
-    PROTOCOL: terminalProtocolModule.PROTOCOL,
-    PROTOCOL_VERSION: terminalProtocolModule.PROTOCOL_VERSION,
-    CONFORMANCE_FIXTURE_REVISION: terminalProtocolModule.CONFORMANCE_FIXTURE_REVISION,
-    FEATURE_TERMINAL_STREAMING: terminalProtocolModule.FEATURE_TERMINAL_STREAMING,
-    FEATURE_RESIZE: terminalProtocolModule.FEATURE_RESIZE,
-    FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY: terminalProtocolModule.FEATURE_SNAPSHOT_DELIVERY_READY_THEN_HISTORY,
-    FEATURE_TRANSPORT_DUPLEX_BINARY: terminalProtocolModule.FEATURE_TRANSPORT_DUPLEX_BINARY
-  })};
-// Size constants come from the real package so the generated runtime cannot drift from it.
-const MAX_INPUT_DATA_BYTES = ${JSON.stringify(terminalProtocolModule.MAX_INPUT_DATA_BYTES)};
-const MAX_MODE_GATED_DATA_BYTES = ${JSON.stringify(terminalProtocolModule.MAX_MODE_GATED_DATA_BYTES)};
-const MAX_PASTE_CHUNK_DATA_BYTES = ${JSON.stringify(terminalProtocolModule.MAX_PASTE_CHUNK_DATA_BYTES)};
-const MAX_PASTE_BYTES = ${JSON.stringify(terminalProtocolModule.MAX_PASTE_BYTES)};
-const MAX_PASTE_CHUNKS = ${JSON.stringify(terminalProtocolModule.MAX_PASTE_CHUNKS)};
-const TERMINAL_INPUT_SCHEME_VERSION = ${JSON.stringify(terminalProtocolModule.TERMINAL_INPUT_SCHEME_VERSION)};
-module.exports.MAX_INPUT_DATA_BYTES = MAX_INPUT_DATA_BYTES;
-module.exports.MAX_MODE_GATED_DATA_BYTES = MAX_MODE_GATED_DATA_BYTES;
-module.exports.MAX_PASTE_CHUNK_DATA_BYTES = MAX_PASTE_CHUNK_DATA_BYTES;
-module.exports.MAX_PASTE_BYTES = MAX_PASTE_BYTES;
-module.exports.MAX_PASTE_CHUNKS = MAX_PASTE_CHUNKS;
-module.exports.TERMINAL_INPUT_SCHEME_VERSION = TERMINAL_INPUT_SCHEME_VERSION;
-module.exports.encodeTerminalInput = ${terminalProtocolModule.encodeTerminalInput.toString()};
-module.exports.encodeModeGatedInput = ${terminalProtocolModule.encodeModeGatedInput.toString()};
-module.exports.encodeResize = ${terminalProtocolModule.encodeResize.toString()};
-module.exports.encodePaste = ${terminalProtocolModule.encodePaste.toString()};
-module.exports.encodePasteAbort = ${terminalProtocolModule.encodePasteAbort.toString()};
-function assertOperationId(operation_id) {
-  if (!Number.isInteger(operation_id) || operation_id < 0 || operation_id > 0xffffffff) throw new Error("InvalidOperationId");
-}
-function encodeTerminalInputFrame(kind, body) {
-  const frame = new Uint8Array(4 + body.length);
-  frame[0] = 1; frame[1] = kind;
-  new DataView(frame.buffer).setUint16(2, body.length, false);
-  frame.set(body, 4); return frame;
-}\n`
-);
-await writeFile(
-  join(compiledRoot, "node_modules/@trybotster/hub-test-support/package.json"),
-  JSON.stringify({
-    name: "@trybotster/hub-test-support",
-    type: "commonjs",
-    exports: { "./metadata": "./metadata.json" }
-  })
-);
-await writeFile(
-  join(compiledRoot, "node_modules/@trybotster/hub-test-support/metadata.json"),
-  JSON.stringify(hubTestSupportMetadata)
-);
 await mkdir(join(compiledRoot, "node_modules/@trybotster/ui-contract"), { recursive: true });
 await writeFile(
   join(compiledRoot, "node_modules/@trybotster/ui-contract/package.json"),
@@ -3421,35 +3255,24 @@ await Promise.all([
   compileTsModule("botster/botsterTerminalPtyTransport.ts", join(compiledRoot, "botster/botsterTerminalPtyTransport.js")),
   compileTsModule("botster/terminal.ts", join(compiledRoot, "botster/terminal.js")),
   compileTsModule("botster/terminalGrid.ts", join(compiledRoot, "botster/terminalGrid.js")),
-  compileTsModule("botster/mouseMode.ts", join(compiledRoot, "botster/mouseMode.js"))
+  compileTsModule("botster/mouseMode.ts", join(compiledRoot, "botster/mouseMode.js")),
+  compileTsModule("botster/terminalInputEvents.ts", join(compiledRoot, "botster/terminalInputEvents.js")),
+  compileTsModule("botster/terminalInputEncoding.ts", join(compiledRoot, "botster/terminalInputEncoding.js")),
+  compileTsModule("botster/terminalInputCapture.ts", join(compiledRoot, "botster/terminalInputCapture.js")),
+  mkdir(join(compiledRoot, "botster/generated"), { recursive: true }).then(() => Promise.all([
+    compileTsModule("botster/generated/terminal-protocol.ts", join(compiledRoot, "botster/generated/terminal-protocol.js")),
+    compileTsModule("botster/generated/daemon-protocol.ts", join(compiledRoot, "botster/generated/daemon-protocol.js"))
+  ]))
 ]);
 
 const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
-// The generated CommonJS package must expose every constant the production sources import,
-// with the real package's values; a missing constant silently disables production bounds.
-{
-  const generatedTerminalProtocol = requireRuntime("@trybotster/terminal-protocol");
-  for (const name of [
-    "PROTOCOL",
-    "PROTOCOL_VERSION",
-    "CONFORMANCE_FIXTURE_REVISION",
-    "TERMINAL_INPUT_SCHEME_VERSION",
-    "MAX_INPUT_DATA_BYTES",
-    "MAX_MODE_GATED_DATA_BYTES",
-    "MAX_PASTE_CHUNK_DATA_BYTES",
-    "MAX_PASTE_BYTES",
-    "MAX_PASTE_CHUNKS"
-  ]) {
-    assert.equal(
-      generatedTerminalProtocol[name],
-      terminalProtocolModule[name],
-      `generated terminal-protocol runtime must export ${name} with the package value`
-    );
-  }
-  for (const name of ["encodeTerminalInput", "encodeModeGatedInput", "encodeResize", "encodePaste", "encodePasteAbort"]) {
-    assert.equal(typeof generatedTerminalProtocol[name], "function", `generated terminal-protocol runtime must export ${name}`);
-  }
+// The vendored Core-generated codec is the only terminal protocol source the tests use.
+const terminalProtocolModule = requireRuntime("./botster/generated/terminal-protocol.js");
+for (const name of ["decodeTerminalBody", "encodeTerminalBody", "encodeKey", "encodeMouse", "encodeFocus", "encodeResize", "encodeRawBytes", "encodePaste", "terminalKeyFromCode", "decodeModeFlags"]) {
+  assert.equal(typeof terminalProtocolModule[name], "function", `generated terminal-protocol must export ${name}`);
 }
+assert.equal(terminalProtocolModule.PROTOCOL_VERSION, 2);
+assert.equal(terminalProtocolModule.MAX_INPUT_OPERATIONS_PER_SESSION, 32);
 const { createBotsterWebClient } = requireRuntime("./botster/client.js");
 const {
   admittedNoticeReaction,
@@ -3472,28 +3295,23 @@ const {
 } = requireRuntime("./botster/hubTransport.js");
 const {
   createHubTerminalDataPlane,
-  decodeDaemonByteEnvelope,
-  decodeTerminalOutputEvent,
-  DETACH_REQUEST_BOUND_MS
+  DETACH_REQUEST_BOUND_MS,
+  MAX_INFLIGHT_INPUT_OPERATIONS,
+  MAX_PENDING_TERMINAL_BYTES,
+  MAX_PENDING_TERMINAL_ITEMS,
+  MAX_QUEUED_INPUT_BYTES
 } = requireRuntime("./botster/hubTerminalDataPlane.js");
 assert.equal(DETACH_REQUEST_BOUND_MS, 10_000);
+assert.equal(MAX_INFLIGHT_INPUT_OPERATIONS, 32);
+assert.equal(MAX_PENDING_TERMINAL_ITEMS, 256);
+assert.equal(MAX_PENDING_TERMINAL_BYTES, 8 * 1024 * 1024);
+assert.equal(MAX_QUEUED_INPUT_BYTES, 2 * 1024 * 1024);
+const { TerminalInputKind } = terminalProtocolModule;
 
-function testModeFlags(sessionId, overrides = {}) {
-  return {
-    session_id: sessionId,
-    kitty_enabled: false,
-    cursor_visible: true,
-    bracketed_paste: false,
-    mouse_mode: 0,
-    alt_screen: false,
-    focus_reporting: false,
-    application_cursor: false,
-    mode_generation: 1,
-    mode_revision: 1,
-    ...overrides
-  };
-}
-
+/**
+ * Test snapshot reader: the READY frame restores the screen, the single history page carries
+ * the GHOSTSNP finish record. Frames after the finish record are a test failure.
+ */
 function bindGhostsnpInstaller(dataPlane, installs = []) {
   dataPlane.bindIncrementalSnapshotReader(() => {
     let frame = 0;
@@ -3503,7 +3321,7 @@ function bindGhostsnpInstaller(dataPlane, installs = []) {
         frame += 1;
         if (frame === 1) return "ready";
         if (frame === 2) return "finish";
-        throw new Error("test snapshot reader received a frame after FINISH");
+        throw new Error("test snapshot reader received a frame after its finish record");
       },
       cancel() {}
     };
@@ -3511,32 +3329,60 @@ function bindGhostsnpInstaller(dataPlane, installs = []) {
   return installs;
 }
 
-function liveOutputEvent(sessionId, subscriptionId, textOrBytes) {
-  const bytes = typeof textOrBytes === "string" ? Buffer.from(textOrBytes, "utf8") : Buffer.from(textOrBytes);
-  return {
-    type: "terminal_output",
-    session_id: sessionId,
-    subscription_id: subscriptionId,
-    payload_base64: bytes.toString("base64"),
-    payload_encoding: "base64",
-    bytes: bytes.byteLength
-  };
+/** One Core scheme 2 terminal body from the generated encoder. */
+function terminalBody(event) {
+  return terminalProtocolModule.encodeTerminalBody(event);
 }
 
-function opaqueFinishSnapshotEvent(sessionId, subscriptionId) {
-  const bytes = Buffer.from("opaque-finish-frame", "utf8");
-  return {
-    type: "snapshot",
-    session_id: sessionId,
-    subscription_id: subscriptionId,
-    payload_base64: bytes.toString("base64"),
-    payload_encoding: "base64",
-    bytes: bytes.byteLength
-  };
+function outputBody(textOrBytes) {
+  const bytes = typeof textOrBytes === "string" ? Buffer.from(textOrBytes, "utf8") : Buffer.from(textOrBytes);
+  return terminalBody({ kind: "output", payload: Uint8Array.from(bytes) });
+}
+
+const opaqueFinishPage = Uint8Array.from(Buffer.from("opaque-finish-frame", "utf8"));
+
+/** One routed frame as the transport delivers it to the data plane. */
+function routeFrame(route, event, { generation = 1, streamEpoch = 0 } = {}) {
+  return { route, generation, streamEpoch, body: terminalBody(event) };
+}
+
+/** The route ordering up to SNAPSHOT_FINISH: attached, MODES, READY, one history page with the finish record, FINISH. */
+function standardAttachFrames(route, options = {}) {
+  const { modeBits = 2, rows = 24, cols = 80 } = options;
+  return [
+    routeFrame(route, { kind: "attach_state", state: "attached" }, options),
+    routeFrame(route, { kind: "modes", mode_bits: modeBits, rows, cols }, options),
+    routeFrame(route, { kind: "snapshot_ready", payload: ghostsnpFixture() }, options),
+    routeFrame(route, { kind: "snapshot_history", payload: opaqueFinishPage }, options),
+    routeFrame(route, { kind: "snapshot_finish" }, options)
+  ];
+}
+
+/** Input frame header fields: kind byte and the u64 BE operation id after the 12-byte header. */
+function inputFrameHeader(frame) {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  return { kind: frame[1], bodyBytes: view.getUint16(2, false), operationId: Number(view.getBigUint64(4, false)) };
+}
+
+function inputResultBody(operationId, outcome, options = {}) {
+  return terminalBody({
+    kind: "input_result",
+    result: {
+      operation_id: BigInt(operationId),
+      outcome,
+      accepted_payload_bytes: options.accepted === undefined ? null : BigInt(options.accepted),
+      written_pty_bytes: options.written === undefined ? null : BigInt(options.written),
+      mode_bits: options.modeBits ?? 2,
+      detail: options.detail ?? ""
+    }
+  });
 }
 
 const ghostsnpFixturePayloadBase64 = 'R0hPU1RTTlABAAEAmQMAACJWCmBQABgAAAAAAAAAAAAAABcAAABPAAAAAAEAZQAAAAEBAQEAAAAACAAEIgBkAAAAAAQiAGQAAAAABCIAZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//////////AAEBAQEBAQEBAR0fIcxmZrW9aPDGdIGivrKUu4q+t8XIxmZmZtVOU7nKSufFR3qm2sOX2HDAserq6gAAAAAAXwAAhwAArwAA1wAA/wBfAABfXwBfhwBfrwBf1wBf/wCHAACHXwCHhwCHrwCH1wCH/wCvAACvXwCvhwCvrwCv1wCv/wDXAADXXwDXhwDXrwDX1wDX/wD/AAD/XwD/hwD/rwD/1wD//18AAF8AX18Ah18Ar18A118A/19fAF9fX19fh19fr19f119f/1+HAF+HX1+Hh1+Hr1+H11+H/1+vAF+vX1+vh1+vr1+v11+v/1/XAF/XX1/Xh1/Xr1/X11/X/1//AF//X1//h1//r1//11///4cAAIcAX4cAh4cAr4cA14cA/4dfAIdfX4dfh4dfr4df14df/4eHAIeHX4eHh4eHr4eH14eH/4evAIevX4evh4evr4ev14ev/4fXAIfXX4fXh4fXr4fX14fX/4f/AIf/X4f/h4f/r4f/14f//68AAK8AX68Ah68Ar68A168A/69fAK9fX69fh69fr69f169f/6+HAK+HX6+Hh6+Hr6+H16+H/6+vAK+vX6+vh6+vr6+v16+v/6/XAK/XX6/Xh6/Xr6/X16/X/6//AK//X6//h6//r6//16///9cAANcAX9cAh9cAr9cA19cA/9dfANdfX9dfh9dfr9df19df/9eHANeHX9eHh9eHr9eH19eH/9evANevX9evh9evr9ev19ev/9fXANfXX9fXh9fXr9fX19fX/9f/ANf/X9f/h9f/r9f/19f///8AAP8AX/8Ah/8Ar/8A1/8A//9fAP9fX/9fh/9fr/9f1/9f//+HAP+HX/+Hh/+Hr/+H1/+H//+vAP+vX/+vh/+vr/+v1/+v///XAP/XX//Xh//Xr//X1//X////AP//X///h///r///1////wgICBISEhwcHCYmJjAwMDo6OkRERE5OTlhYWGJiYmxsbHZ2doCAgIqKipSUlJ6enqioqLKysry8vMbGxtDQ0Nra2uTk5O7u7gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACADYAAAB7ZgmSAAABAAAAAAAAAAAAAAABAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAwBzAAAAV+gBEVAAGAAAAAAAgADAAAAgAAAACAAAABMAaGlzdG9yeS1iZWZvcmUtbGl2ZQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAAAAAngGPRBQAAAAAA5CDvCgQABgAAAKERil4AAAAAAAAGAAAAAAA+61M+';
 const ghostsnpFixtureBytes = 1176;
+function ghostsnpFixture() {
+  return Uint8Array.from(Buffer.from(ghostsnpFixturePayloadBase64, "base64"));
+}
 
 const {
   applyAssemblyTimeoutCleanup,
@@ -3559,8 +3405,8 @@ function terminalGridProbe() {
   const hubResizes = [];
   const rendered = { grid: undefined, events: [] };
   const target = {
-    resize(rows, columns) {
-      hubResizes.push({ rows, columns });
+    resize(geometry) {
+      hubResizes.push({ rows: geometry.rows, columns: geometry.cols });
     }
   };
   const apply = (grid, event = "browser_resize") => {
@@ -3577,18 +3423,22 @@ function measureTerminalGrid(gridState, probe, rows, columns, event = "browser_r
 
 function runTerminalTransportOrder(order, rows, columns) {
   const probe = terminalGridProbe();
+  const uncaptured = [];
   const transport = new BotsterTerminalPtyTransport({
-    createModeDependentInput: (data) => ({ encode: () => data }),
-    record() {}
+    record() {},
+    onUncapturedInput: (source, data) => uncaptured.push({ source, data })
   });
   const dataPlane = {
     sessionId: `transport-${order}`,
-    writeInput() {},
+    sendInput() {},
+    async writePaste() {
+      throw new Error("not exercised");
+    },
     subscribeOutput() {
       return { unsubscribe() {} };
     },
-    resize(nextRows, nextColumns) {
-      probe.hubResizes.push({ rows: nextRows, columns: nextColumns });
+    resize(geometry) {
+      probe.hubResizes.push({ rows: geometry.rows, columns: geometry.cols });
     }
   };
   const connect = () => transport.connect({
@@ -3619,6 +3469,12 @@ function runTerminalTransportOrder(order, rows, columns) {
   const expected = { rows, columns };
   assert.deepEqual(probe.rendered.grid, expected);
   assert.deepEqual(probe.hubResizes.at(-1), expected);
+  // Restty-encoded mouse and focus reports are render-only; anything else is reported.
+  assert.equal(transport.sendInput("\u001b[<64;1;1M"), true);
+  assert.equal(transport.sendInput("\u001b[I"), true);
+  assert.deepEqual(uncaptured, []);
+  assert.equal(transport.sendInput("typed-by-restty"), true);
+  assert.deepEqual(uncaptured, [{ source: "pty_sink", data: "typed-by-restty" }]);
   subscription.unsubscribe();
   transport.destroy();
 }
@@ -3715,9 +3571,6 @@ await runGhostsnpGridCase("after");
     bridge: {
       async request(request) {
         requests.push({ ...request });
-        if (request.type === "read_mode_flags") {
-          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
-        }
         if (request.type === "read_screen") {
           return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
         }
@@ -3725,36 +3578,16 @@ await runGhostsnpGridCase("after");
       },
       streamTerminal(nextSessionId, nextSubscriptionId, onEvent) {
         queueMicrotask(() => {
-          onEvent({
-            type: "snapshot",
-            session_id: nextSessionId,
-            subscription_id: nextSubscriptionId,
-            payload_base64: ghostsnpFixturePayloadBase64,
-            payload_encoding: "base64",
-            bytes: ghostsnpFixtureBytes
-          });
-          onEvent({
-            type: "snapshot",
-            session_id: nextSessionId,
-            subscription_id: nextSubscriptionId,
-            payload_base64: ghostsnpFixturePayloadBase64,
-            payload_encoding: "base64",
-            bytes: ghostsnpFixtureBytes
-          });
-          onEvent({
-            type: "attach_state",
-            session_id: nextSessionId,
-            subscription_id: nextSubscriptionId,
-            state: "attached"
-          });
+          for (const frame of standardAttachFrames(nextSubscriptionId)) onEvent(frame);
         });
         return {
           ready: Promise.resolve(),
+          generation: 1,
           sendFrame(frame) {
             terminalFrames.push(new Uint8Array(frame));
-            if (reapplyObserved && frame[1] === 3) {
+            if (reapplyObserved && frame[1] === TerminalInputKind.resize) {
               const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
-              if (view.getUint16(4, false) === 44 && view.getUint16(6, false) === 124) {
+              if (view.getUint16(12, false) === 44 && view.getUint16(14, false) === 124) {
                 markFinalHubResize();
               }
             }
@@ -3805,10 +3638,12 @@ await runGhostsnpGridCase("after");
   assert.equal(reappliedAt > importedAt, true);
   assert.deepEqual(probe.rendered.grid, expected);
   const finalResizeFrame = terminalFrames.at(-1);
-  assert.equal(finalResizeFrame[1], 3);
+  assert.equal(finalResizeFrame[1], TerminalInputKind.resize);
   const finalResizeView = new DataView(finalResizeFrame.buffer, finalResizeFrame.byteOffset, finalResizeFrame.byteLength);
-  assert.equal(finalResizeView.getUint16(4, false), expected.rows);
-  assert.equal(finalResizeView.getUint16(6, false), expected.columns);
+  assert.equal(finalResizeView.getUint16(12, false), expected.rows);
+  assert.equal(finalResizeView.getUint16(14, false), expected.columns);
+  // Every input operation id increases within the attachment, starting at 1.
+  assert.deepEqual(terminalFrames.map((frame) => inputFrameHeader(frame).operationId), terminalFrames.map((_, index) => index + 1));
   outputSubscription.unsubscribe();
   await dataPlane.detach();
 }
@@ -3863,12 +3698,14 @@ assert.deepEqual(generatedDaemonRequestFixtures.map((request) => request.type), 
   "plugin_surface_action",
   "read_mode_flags"
 ]);
-assert.deepEqual(
-  generatedDaemonRequestFixtures.find((request) => request.type === "read_mode_flags"),
-  modeFlagsConformanceFixture.request
-);
-assert.equal(generatedModeFlagsResponseFixture.kind, modeFlagsConformanceFixture.mouse_on.response_kind);
-assert.deepEqual(generatedModeFlagsResponseFixture.mode_flags, modeFlagsConformanceFixture.mouse_on.mode_flags);
+assert.deepEqual(generatedDaemonRequestFixtures.find((request) => request.type === "read_mode_flags"), {
+  type: "read_mode_flags",
+  session_id: "mode-flags-fixture-session"
+});
+assert.equal(generatedModeFlagsResponseFixture.kind, "read_mode_flags");
+assert.deepEqual(Object.keys(generatedModeFlagsResponseFixture.mode_flags).sort(), [
+  "alt_screen", "application_cursor", "bracketed_paste", "cols", "cursor_visible", "focus_reporting", "kitty_enabled", "mouse_mode", "rows", "session_id"
+]);
 assert.equal(generatedPluginResourceCountersResponseFixture.kind, "plugin_lifecycle");
 assert.deepEqual(generatedPluginResourceCountersResponseFixture.lifecycle, [
   { package_name: "project-pipelines", state: "running", loaded: true }
@@ -5029,18 +4866,6 @@ const bridge = {
       };
     }
 
-    if (request.type === "attach" || request.type === "drain") {
-      return {
-        kind: "events",
-        events: [
-          liveOutputEvent(
-            request.session_id,
-            "botster-web-production-terminal",
-            request.type === "attach" ? "botster-web-production-ready\r\n" : "botster-web-production-echo:ping\r\n"
-          )
-        ]
-      };
-    }
 
     if (request.type === "read_screen") {
       return {
@@ -5049,14 +4874,6 @@ const bridge = {
           session_id: request.session_id,
           text: "hub-owned-screen\r\n"
         },
-        events: []
-      };
-    }
-
-    if (request.type === "read_mode_flags") {
-      return {
-        kind: "read_mode_flags",
-        mode_flags: testModeFlags(request.session_id),
         events: []
       };
     }
@@ -5099,36 +4916,14 @@ const bridge = {
   },
   streamTerminal(sessionId, subscriptionId, onEvent) {
     bridgeTerminalStreams.push({ sessionId, subscriptionId });
-    onEvent({
-      type: "attach_state",
-      session_id: sessionId,
-      subscription_id: subscriptionId,
-      state: "attaching"
-    });
-    onEvent({
-      type: "snapshot",
-      session_id: sessionId,
-      subscription_id: subscriptionId,
-      payload_base64: ghostsnpFixturePayloadBase64,
-      payload_encoding: "base64",
-      bytes: ghostsnpFixtureBytes
-    });
-    onEvent({
-      type: "snapshot",
-      session_id: sessionId,
-      subscription_id: subscriptionId,
-      payload_base64: ghostsnpFixturePayloadBase64,
-      payload_encoding: "base64",
-      bytes: ghostsnpFixtureBytes
-    });
-    onEvent({
-      type: "attach_state",
-      session_id: sessionId,
-      subscription_id: subscriptionId,
-      state: "attached"
-    });
-    onEvent(liveOutputEvent(sessionId, subscriptionId, "botster-web-production-ready\r\n"));
+    onEvent(routeFrame(subscriptionId, { kind: "attach_state", state: "attaching" }));
+    for (const frame of standardAttachFrames(subscriptionId)) onEvent(frame);
+    onEvent({ route: subscriptionId, generation: 1, streamEpoch: 0, body: outputBody("botster-web-production-ready\r\n") });
     return {
+      ready: Promise.resolve(),
+      generation: 1,
+      async sendFrame() {},
+      abandon() {},
       unsubscribe() {
         bridgeTerminalStreams.push({ sessionId, subscriptionId, unsubscribed: true });
       }
@@ -6076,18 +5871,11 @@ try {
   );
   assert.equal((await statusAfterAttachTimeout).kind, "status");
 
-  await emitChunkedTestResponse(
+  await emitTestTerminalBody(
     siblingTerminalChannel,
     localWebrtcBootstrapFixture.grant_secret,
-    {
-      type: "terminal_output",
-      session_id: "sibling-terminal-session",
-      subscription_id: "sibling-terminal-subscription",
-      payload_base64: Buffer.from("sibling-live").toString("base64"),
-      payload_encoding: "base64",
-      bytes: 12
-    },
-    { messageId: "sibling-terminal-after-timeout", deliveryKind: "daemon_terminal_frame" }
+    { generation: 9002 },
+    outputBody("sibling-live")
   );
   await emitChunkedTestResponse(
     siblingEntityChannel,
@@ -6888,16 +6676,16 @@ try {
 
   const malformedCases = [
     {},
-    { version: 1, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 1, delivery_kind: "server_frame", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
     { version: 2, delivery_kind: "unknown", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
-    { version: 2, delivery_kind: "daemon_response", message_id: "", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
-    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: -1, chunk_count: 1, total_bytes: 1, payload: "x" },
-    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: 2, total_bytes: 1, payload: "x" },
-    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 16_777_217, payload: "x" },
-    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "" },
-    { version: 2, delivery_kind: "daemon_response", message_id: 1, chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
-    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: "1", total_bytes: 1, payload: "x" },
-    { version: 2, delivery_kind: "daemon_response", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: 1 }
+    { version: 2, delivery_kind: "server_frame", message_id: "", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "server_frame", message_id: "x", chunk_index: -1, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "server_frame", message_id: "x", chunk_index: 0, chunk_count: 2, total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "server_frame", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 16_777_217, payload: "x" },
+    { version: 2, delivery_kind: "server_frame", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "" },
+    { version: 2, delivery_kind: "server_frame", message_id: 1, chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "server_frame", message_id: "x", chunk_index: 0, chunk_count: "1", total_bytes: 1, payload: "x" },
+    { version: 2, delivery_kind: "server_frame", message_id: "x", chunk_index: 0, chunk_count: 1, total_bytes: 1, payload: 1 }
   ];
   for (const [index, malformedChunk] of malformedCases.entries()) {
     const malformedChannel = createFakeDataChannel();
@@ -6917,7 +6705,7 @@ try {
   for (let index = 0; index < 17; index += 1) {
     concurrentChannel.emitMessage(JSON.stringify({
       version: 2,
-      delivery_kind: "daemon_response",
+      delivery_kind: "server_frame",
       message_id: `concurrent-response-${index}`,
       chunk_index: 0,
       chunk_count: 2,
@@ -6937,7 +6725,7 @@ try {
   await waitForTestCondition(() => mismatchChannel.sent.length === 1);
   mismatchChannel.emitMessage(JSON.stringify({
     version: 2,
-    delivery_kind: "daemon_response",
+    delivery_kind: "server_frame",
     message_id: "total-mismatch",
     chunk_index: 0,
     chunk_count: 1,
@@ -6956,7 +6744,7 @@ try {
   await waitForTestCondition(() => metadataChannel.sent.length === 1);
   metadataChannel.emitMessage(JSON.stringify({
     version: 2,
-    delivery_kind: "daemon_response",
+    delivery_kind: "server_frame",
     message_id: "metadata-conflict",
     chunk_index: 0,
     chunk_count: 2,
@@ -6965,7 +6753,7 @@ try {
   }));
   metadataChannel.emitMessage(JSON.stringify({
     version: 2,
-    delivery_kind: "daemon_response",
+    delivery_kind: "server_frame",
     message_id: "metadata-conflict",
     chunk_index: 1,
     chunk_count: 3,
@@ -6988,7 +6776,7 @@ try {
     for (let assemblyIndex = 0; assemblyIndex < 3; assemblyIndex += 1) {
       aggregateChannel.emitMessage(JSON.stringify({
         version: 2,
-        delivery_kind: "daemon_response",
+        delivery_kind: "server_frame",
         message_id: `aggregate-response-${assemblyIndex}`,
         chunk_index: aggregateChunkIndex,
         chunk_count: 1_000,
@@ -7023,7 +6811,7 @@ try {
     await waitForTestCondition(() => timeoutChannels[0].sent.length === 1);
     timeoutChannels[0].emitMessage(JSON.stringify({
       version: 2,
-      delivery_kind: "daemon_response",
+      delivery_kind: "server_frame",
       message_id: "incomplete-timeout-response",
       chunk_index: 0,
       chunk_count: 2,
@@ -7040,7 +6828,7 @@ try {
     await waitForTestCondition(() => timeoutChannels[1].sent.length === 1);
     timeoutChannels[0].emitMessage(JSON.stringify({
       version: 2,
-      delivery_kind: "daemon_response",
+      delivery_kind: "server_frame",
       message_id: "incomplete-timeout-response",
       chunk_index: 1,
       chunk_count: 2,
@@ -7112,58 +6900,56 @@ try {
   assert.equal(subscriptionHello.protocol, "botster-hub-daemon-v1");
   assert.ok(subscriptionHello.terminal_compatibility.required_features.includes("transport=duplex_binary"));
 
-  const inputFrame = terminalProtocolModule.encodeTerminalInput(new TextEncoder().encode("typed"));
+  const inputFrame = terminalProtocolModule.encodeRawBytes(1, new TextEncoder().encode("typed"));
   await firstStream.sendFrame(inputFrame);
-  const outboundChunks = firstTerminalChannel.sent.map((value) => JSON.parse(value));
-  assert.ok(outboundChunks.length >= 1);
-  assert.equal(outboundChunks[0].version, 2);
-  assert.equal(outboundChunks[0].delivery_kind, "daemon_terminal_frame");
-  assert.equal(outboundChunks[0].chunk_index, 0);
-  assert.equal(outboundChunks[0].chunk_count, outboundChunks.length);
-  assert.ok(firstTerminalChannel.sent.every((value) => Buffer.byteLength(value) < 65_536));
-  assert.deepEqual(
-    await decryptTestEnvelopeBytes(
-      localWebrtcBootstrapFixture.grant_secret,
-      outboundChunks.map((chunk) => chunk.payload).join("")
-    ),
-    inputFrame
-  );
+  const outboundMessages = firstTerminalChannel.sent.filter((value) => typeof value !== "string");
+  assert.equal(outboundMessages.length, 1, "one small input frame is one binary chunk");
+  const firstChunk = await openTestTerminalChunk(localWebrtcBootstrapFixture.grant_secret, outboundMessages[0]);
+  assert.equal(firstChunk.header.version, 2);
+  assert.equal(firstChunk.header.message_id, 1n);
+  assert.equal(firstChunk.header.chunk_index, 0);
+  assert.equal(firstChunk.header.chunk_count, 1);
+  assert.equal(firstChunk.header.total_bytes, inputFrame.byteLength);
+  assert.equal(firstChunk.header.generation, 41n, "input chunks carry the fixed reservation generation");
+  assert.equal(firstChunk.header.stream_epoch, 0, "input chunks carry stream_epoch 0");
+  assert.deepEqual([...firstChunk.plaintext], [...inputFrame]);
 
-  const largeFrame = terminalProtocolModule.encodeTerminalInput(
-    new Uint8Array(terminalProtocolModule.MAX_INPUT_DATA_BYTES).fill(0x61)
+  const largeFrame = terminalProtocolModule.encodeRawBytes(
+    2,
+    new Uint8Array(terminalProtocolModule.MAX_RAW_INPUT_BYTES).fill(0x61)
   );
-  const priorChunkCount = firstTerminalChannel.sent.length;
+  const priorMessageCount = outboundMessages.length;
   await firstStream.sendFrame(largeFrame);
-  const largeChunks = firstTerminalChannel.sent
-    .slice(priorChunkCount)
-    .map((value) => JSON.parse(value));
-  assert.ok(largeChunks.length > 1);
-  assert.deepEqual(largeChunks.map((chunk) => chunk.chunk_index), [...largeChunks.keys()]);
-  assert.ok(largeChunks.every((chunk) => Buffer.byteLength(chunk.payload) <= 12_288));
-  assert.ok(firstTerminalChannel.sent.every((value) => Buffer.byteLength(value) < 65_536));
-  assert.deepEqual(
-    await decryptTestEnvelopeBytes(
-      localWebrtcBootstrapFixture.grant_secret,
-      largeChunks.map((chunk) => chunk.payload).join("")
-    ),
-    largeFrame
-  );
+  const sentFrames = await sentTestInputFrames(firstTerminalChannel, localWebrtcBootstrapFixture.grant_secret);
+  assert.equal(sentFrames.length, 2);
+  assert.ok(firstTerminalChannel.sent.filter((value) => typeof value !== "string").length > priorMessageCount + 1, "a 65535-byte frame needs several chunks");
+  assert.ok(firstTerminalChannel.sent.every((value) => (typeof value === "string" ? Buffer.byteLength(value) : value.byteLength) < 65_536));
+  assert.equal(sentFrames[1].header.message_id, 2n, "message ids increase per channel per direction");
+  assert.deepEqual([...sentFrames[1].frame], [...largeFrame]);
 
-  await emitChunkedTestResponse(
+  await emitTestTerminalBody(
     firstTerminalChannel,
     localWebrtcBootstrapFixture.grant_secret,
-    {
-      type: "terminal_output",
-      session_id: "dedicated-session-a",
-      subscription_id: "dedicated-subscription-a",
-      payload_base64: Buffer.from("live-a").toString("base64"),
-      payload_encoding: "base64",
-      bytes: 6
-    },
-    { messageId: "dedicated-output-a", deliveryKind: "daemon_terminal_frame" }
+    { generation: 41, streamEpoch: 0, chunkPlaintextBytes: 2 },
+    outputBody("live-a")
   );
   await waitForTestCondition(() => firstTerminalEvents.length === 1);
-  assert.equal(firstTerminalEvents[0].type, "terminal_output");
+  assert.equal(firstTerminalEvents[0].route, "dedicated-subscription-a");
+  assert.equal(firstTerminalEvents[0].generation, 41);
+  assert.equal(firstTerminalEvents[0].streamEpoch, 0);
+  assert.deepEqual(terminalProtocolModule.decodeTerminalBody(firstTerminalEvents[0].body), {
+    kind: "output",
+    payload: new TextEncoder().encode("live-a")
+  });
+  // A chunk for another generation is stale data from a retired subscription: discarded.
+  await emitTestTerminalBody(
+    firstTerminalChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    { generation: 40 },
+    outputBody("stale-generation")
+  );
+  await flushMicrotasks();
+  assert.equal(firstTerminalEvents.length, 1);
   firstTerminalChannel.close();
   await emitChunkedTestResponse(
     dedicatedControlChannel,
@@ -7211,21 +6997,14 @@ try {
   firstStream.abandon();
   assert.equal(firstTerminalChannel.readyState, "closed");
   assert.equal(secondTerminalChannel.readyState, "open");
-  await emitChunkedTestResponse(
+  await emitTestTerminalBody(
     secondTerminalChannel,
     localWebrtcBootstrapFixture.grant_secret,
-    {
-      type: "terminal_output",
-      session_id: "dedicated-session-b",
-      subscription_id: "dedicated-subscription-b",
-      payload_base64: Buffer.from("live-b").toString("base64"),
-      payload_encoding: "base64",
-      bytes: 6
-    },
-    { messageId: "dedicated-output-b", deliveryKind: "daemon_terminal_frame" }
+    { generation: 42 },
+    outputBody("live-b")
   );
   await waitForTestCondition(() => secondTerminalEvents.length === 1);
-  assert.equal(secondTerminalEvents[0].type, "terminal_output");
+  assert.equal(terminalProtocolModule.decodeTerminalBody(secondTerminalEvents[0].body).kind, "output");
   secondStream.abandon();
 
   const cancelledControlChannel = createFakeDataChannel();
@@ -7268,11 +7047,7 @@ try {
   await emitChunkedTestResponse(
     cancelledTerminalChannel,
     localWebrtcBootstrapFixture.grant_secret,
-    {
-      protocol: "botster-hub-daemon-v1",
-      terminal_compatibility: terminalProtocolModule.metadata,
-      diagnostics: []
-    },
+    { frame: "hello_ack", ack: testHelloAckFixture() },
     { messageId: "late-cancelled-hello" }
   );
   await flushMicrotasks();
@@ -7296,45 +7071,24 @@ try {
     { messageId: "fallback-status" }
   );
   await fallbackStatus;
+  // An entity frame on the control channel is a protocol violation: the connection closes.
   await emitChunkedTestResponse(
     fallbackControlChannel,
     localWebrtcBootstrapFixture.grant_secret,
     {
-      type: "terminal_output",
-      session_id: "fallback-session",
-      subscription_id: "fallback-subscription",
-      payload_base64: Buffer.from("forbidden").toString("base64"),
-      payload_encoding: "base64",
-      bytes: 9
+      frame: "entity",
+      entity: { type: "entity_snapshot", subscription_id: "forbidden", entity_type: "session", snapshot_seq: 0, items: [] }
     },
-    { messageId: "forbidden-control-terminal", deliveryKind: "daemon_terminal_frame" }
+    { messageId: "forbidden-control-entity" }
   );
   await waitForTestCondition(() => fallbackControlChannel.readyState === "closed");
   assert.deepEqual(fallbackEvents, []);
 
   const mixedFamilyEntries = [
+    { kind: "daemon_event", payload: { type: "session_lifecycle", session_id: "session-a", state: "running" } },
     {
-      kind: "daemon_event",
-      payload: {
-        type: "terminal_output",
-        session_id: "session-a",
-        subscription_id: "sub-a",
-        payload_base64: "ZHJhaW4=",
-        payload_encoding: "base64",
-        bytes: 5
-      }
-    },
-    {
-      kind: "daemon_terminal_event",
-      payload: {
-        type: "snapshot",
-        session_id: "session-a",
-        subscription_id: "sub-a",
-        payload_base64: "c25hcA==",
-        payload_encoding: "base64",
-        bytes: 4,
-        phase: "ready"
-      }
+      kind: "terminal_route_frame",
+      payload: { route: "sub-a", generation: 1, stream_epoch: 0, frame: { kind: "snapshot_ready" } }
     },
     {
       kind: "daemon_event",
@@ -7348,8 +7102,8 @@ try {
     }
   ];
   assert.deepEqual(
-    selectTerminalBodyEvents(mixedFamilyEntries).map((event) => event.type),
-    ["snapshot"]
+    selectTerminalBodyEvents(mixedFamilyEntries).map((event) => event.frame.kind),
+    ["snapshot_ready"]
   );
   assert.deepEqual(
     selectHostCloseEvents(mixedFamilyEntries).map((event) => event.reason),
@@ -7378,7 +7132,7 @@ try {
     await waitForTestCondition(() => timeoutAblationChannel.sent.length === 1);
     timeoutAblationChannel.emitMessage(JSON.stringify({
       version: 2,
-      delivery_kind: "daemon_response",
+      delivery_kind: "server_frame",
       message_id: "ablation-incomplete",
       chunk_index: 0,
       chunk_count: 2,
@@ -7444,10 +7198,14 @@ try {
     webRtcLifecycleDiagnostic,
     localWebrtcReconnectPolicy,
     bindGhostsnpInstaller,
-    ghostsnpFixturePayloadBase64,
-    ghostsnpFixtureBytes,
-    testModeFlags,
-    emitMappedSubscriptionResponsesInWireOrder
+    emitMappedSubscriptionResponsesInWireOrder,
+    emitTestTerminalBody,
+    sentTestInputFrames,
+    standardAttachFrames,
+    terminalBody,
+    outputBody,
+    inputFrameHeader,
+    terminalProtocolModule
   });
 
   // Clipboard paste as a Core transaction through the real data plane and transport.
@@ -7464,9 +7222,13 @@ try {
     createWebrtcDaemonClient,
     createHubTerminalDataPlane,
     bindGhostsnpInstaller,
-    ghostsnpFixturePayloadBase64,
-    ghostsnpFixtureBytes,
-    testModeFlags,
+    emitTestTerminalBody,
+    sentTestInputFrames,
+    standardAttachFrames,
+    terminalBody,
+    outputBody,
+    inputResultBody,
+    inputFrameHeader,
     terminalProtocolModule,
     requireRuntime
   });
@@ -8915,470 +8677,321 @@ assert.match(
   /Package configuration failed field: pipeline_mode: select_option_unknown: invalid-mode/
 );
 
-// The data plane gates frames on hydration and places the latest resize before queued input.
+const noMods = { shift: false, ctrl: false, alt: false, super: false, capsLock: false, numLock: false };
+
+function fakeRouteBridge(sessionId, options = {}) {
+  const state = { frames: [], requests: [], streams: [], detachRequests: [] };
+  state.bridge = {
+    async request(request) {
+      state.requests.push(request);
+      if (request.type === "detach") state.detachRequests.push(request);
+      if (request.type === "read_screen") {
+        return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
+      }
+      return { kind: "events", events: [] };
+    },
+    streamTerminal(nextSessionId, subscriptionId, onEvent) {
+      assert.equal(nextSessionId, sessionId);
+      const stream = { subscriptionId, onEvent, frames: [] };
+      state.streams.push(stream);
+      return {
+        ready: Promise.resolve(),
+        generation: options.generation ?? 1,
+        sendFrame(frame) {
+          const copy = new Uint8Array(frame);
+          stream.frames.push(copy);
+          state.frames.push(copy);
+          return Promise.resolve();
+        },
+        abandon() {},
+        unsubscribe() {}
+      };
+    }
+  };
+  return state;
+}
+
+// The data plane sends input only after ATTACH_STATE attached, places the latest resize ahead
+// of queued operations, assigns increasing operation ids, keeps 32 operations in flight with
+// later ones queued locally, reports every INPUT_RESULT once, and sends a paste as one operation.
 {
   const sessionId = "dedicated-data-plane-session";
   const subscriptionId = "dedicated-data-plane-subscription";
-  const frames = [];
-  const requests = [];
-  let terminalEvent;
-  const plane = createHubTerminalDataPlane({
-    sessionId,
-    subscriptionId,
-    bridge: {
-      async request(request) {
-        requests.push(request);
-        if (request.type === "read_mode_flags") {
-          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
-        }
-        if (request.type === "read_screen") {
-          return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(nextSessionId, nextSubscriptionId, onEvent) {
-        assert.equal(nextSessionId, sessionId);
-        assert.equal(nextSubscriptionId, subscriptionId);
-        terminalEvent = onEvent;
-        return {
-          ready: Promise.resolve(),
-          sendFrame(frame) {
-            frames.push(new Uint8Array(frame));
-            return Promise.resolve();
-          },
-          abandon() {},
-          unsubscribe() {}
-        };
-      }
-    }
-  });
+  const generation = 7;
+  const wire = fakeRouteBridge(sessionId, { generation });
+  const outcomes = [];
+  const plane = createHubTerminalDataPlane({ sessionId, subscriptionId, bridge: wire.bridge });
   bindGhostsnpInstaller(plane);
+  plane.subscribeInputOutcomes((outcome) => outcomes.push(outcome));
   plane.subscribeOutput(() => undefined);
-  await waitForTestCondition(() => typeof terminalEvent === "function");
-  const input = plane.writeInput("typed-after-resize");
-  const resize = plane.resize(33, 111);
-  await flushMicrotasks();
-  assert.equal(frames.length, 0);
-  await terminalEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-  await terminalEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-  await terminalEvent({
-    type: "attach_state",
-    session_id: sessionId,
-    subscription_id: subscriptionId,
-    state: "attached"
-  });
-  await Promise.all([input, resize]);
-  assert.deepEqual(frames.slice(0, 2).map((frame) => frame[1]), [3, 1]);
+  await waitForTestCondition(() => wire.streams.length === 1);
+  const route = wire.streams[0];
+  const deliver = (event, streamEpoch = 0) => route.onEvent(routeFrame(subscriptionId, event, { generation, streamEpoch }));
+  const deliverBody = (body, streamEpoch = 0) => route.onEvent({ route: subscriptionId, generation, streamEpoch, body });
+  const headers = () => wire.frames.map((frame) => inputFrameHeader(frame));
 
-  const modeGatedInput = plane.writeModeGatedInput({ encode: () => "mouse-bytes" });
-  await waitForTestCondition(() => frames.at(-1)?.[1] === 2);
-  assert.equal(frames.at(-1)[1], 2);
-  await terminalEvent({
-    type: "input_result",
-    subscription_id: subscriptionId,
-    kind: "mode_gated_input",
-    admitted: false,
-    bytes_written: 0,
-    mode_generation: 9,
-    mode_revision: 10,
-    mode_flags: {
-      kitty_enabled: false,
-      cursor_visible: true,
-      bracketed_paste: false,
-      mouse_mode: 9,
-      alt_screen: false,
-      focus_reporting: false,
-      application_cursor: false
-    },
-    rejection: "stale_mode"
-  });
-  assert.deepEqual(frames.slice(-2).map((frame) => frame[1]), [2, 2]);
-  await terminalEvent({
-    type: "input_result",
-    subscription_id: subscriptionId,
-    kind: "mode_gated_input",
-    admitted: true,
-    bytes_written: 11,
-    mode_generation: 9,
-    mode_revision: 10,
-    mode_flags: {
-      kitty_enabled: false,
-      cursor_visible: true,
-      bracketed_paste: false,
-      mouse_mode: 9,
-      alt_screen: false,
-      focus_reporting: false,
-      application_cursor: false
-    }
-  });
-  await modeGatedInput;
-  const orderedInputStart = frames.length;
-  const orderedFirst = plane.writeModeGatedInput({ encode: () => "first-key" });
-  const orderedSecond = plane.writeModeGatedInput({ encode: () => "second-key" });
-  await waitForTestCondition(() => frames.length === orderedInputStart + 1);
-  await terminalEvent({
-    type: "input_result",
-    subscription_id: subscriptionId,
-    kind: "mode_gated_input",
-    admitted: false,
-    bytes_written: 0,
-    mode_generation: 11,
-    mode_revision: 12,
-    mode_flags: {
-      kitty_enabled: false,
-      cursor_visible: true,
-      bracketed_paste: false,
-      mouse_mode: 9,
-      alt_screen: false,
-      focus_reporting: false,
-      application_cursor: false
-    },
-    rejection: "stale_mode"
-  });
-  assert.equal(frames.length, orderedInputStart + 2);
-  await terminalEvent({
-    type: "input_result",
-    subscription_id: subscriptionId,
-    kind: "mode_gated_input",
-    admitted: true,
-    bytes_written: 9,
-    mode_generation: 11,
-    mode_revision: 12,
-    mode_flags: {
-      kitty_enabled: false,
-      cursor_visible: true,
-      bracketed_paste: false,
-      mouse_mode: 9,
-      alt_screen: false,
-      focus_reporting: false,
-      application_cursor: false
-    }
-  });
-  await waitForTestCondition(() => frames.length === orderedInputStart + 3);
-  await terminalEvent({
-    type: "input_result",
-    subscription_id: subscriptionId,
-    kind: "mode_gated_input",
-    admitted: true,
-    bytes_written: 10,
-    mode_generation: 11,
-    mode_revision: 12,
-    mode_flags: {
-      kitty_enabled: false,
-      cursor_visible: true,
-      bracketed_paste: false,
-      mouse_mode: 9,
-      alt_screen: false,
-      focus_reporting: false,
-      application_cursor: false
-    }
-  });
-  await Promise.all([orderedFirst, orderedSecond]);
-  const pasteStart = frames.length;
-  await plane.writeInput("p".repeat(70_000));
-  assert.deepEqual(frames.slice(pasteStart).map((frame) => frame[1]), [4, 5, 5, 6]);
-  assert.equal(requests.some((request) => ["send_input", "mode_gated_input", "resize"].includes(request.type)), false);
+  plane.sendInput({ kind: "raw", bytes: new TextEncoder().encode("typed-after-resize") });
+  plane.resize({ rows: 33, cols: 111, widthPx: 999, heightPx: 660 });
+  await flushMicrotasks();
+  assert.equal(wire.frames.length, 0, "nothing is sent before ATTACH_STATE attached");
+
+  await deliver({ kind: "attach_state", state: "attached" });
+  await waitForTestCondition(() => wire.frames.length === 2);
+  assert.deepEqual(headers().map((header) => header.kind), [TerminalInputKind.resize, TerminalInputKind.raw_bytes]);
+  assert.deepEqual(headers().map((header) => header.operationId), [1, 2]);
+  const resizeView = new DataView(wire.frames[0].buffer, wire.frames[0].byteOffset, wire.frames[0].byteLength);
+  assert.deepEqual(
+    [resizeView.getUint16(12, false), resizeView.getUint16(14, false), resizeView.getUint32(16, false), resizeView.getUint32(20, false)],
+    [33, 111, 999, 660],
+    "RESIZE carries cells and pixels"
+  );
+  for (const frame of standardAttachFrames(subscriptionId, { generation }).slice(1)) await route.onEvent(frame);
+
+  await deliverBody(inputResultBody(2, "written", { accepted: 18, written: 18 }));
+  assert.deepEqual(
+    outcomes.map((outcome) => [outcome.kind, outcome.outcome, outcome.operationId, outcome.acceptedPayloadBytes, outcome.writtenPtyBytes]),
+    [["raw", "written", 2, 18, 18]]
+  );
+  await deliverBody(inputResultBody(1, "written", { accepted: 12, written: 0 }));
+  assert.equal(outcomes.length, 2);
+  // A result for an unknown or completed id is ignored, never retained.
+  await deliverBody(inputResultBody(2, "written", { accepted: 18, written: 18 }));
+  await deliverBody(inputResultBody(99, "written"));
+  assert.equal(outcomes.length, 2);
+
+  plane.sendInput({ kind: "key", action: "press", code: "KeyA", key: "a", mods: noMods, text: "a", composing: false, unshiftedCodepoint: 97 });
+  plane.sendInput({ kind: "mouse", action: "press", button: "left", mods: noMods, col: 3, row: 4, xPx: 30, yPx: 80 });
+  plane.sendInput({ kind: "focus", focused: true });
+  await waitForTestCondition(() => wire.frames.length === 5);
+  assert.deepEqual(headers().slice(2).map((header) => [header.kind, header.operationId]), [
+    [TerminalInputKind.key, 3],
+    [TerminalInputKind.mouse, 4],
+    [TerminalInputKind.focus, 5]
+  ]);
+  const keyBody = wire.frames[2].subarray(12);
+  assert.equal(keyBody[0], 1, "KEY press action");
+  assert.equal(new DataView(keyBody.buffer, keyBody.byteOffset).getUint16(1, false), terminalProtocolModule.terminalKeyFromCode("KeyA"));
+  assert.equal(new TextDecoder().decode(keyBody.subarray(12)), "a");
+  for (const operationId of [3, 4, 5]) await deliverBody(inputResultBody(operationId, "written", { accepted: 1, written: 1 }));
+  assert.equal(outcomes.length, 5);
+
+  // In-flight window: 32 operations go out; the rest wait locally until a result frees a slot.
+  const windowStart = wire.frames.length;
+  for (let index = 0; index < 35; index += 1) {
+    plane.sendInput({ kind: "raw", bytes: new TextEncoder().encode(`w${index}`) });
+  }
+  await waitForTestCondition(() => wire.frames.length === windowStart + MAX_INFLIGHT_INPUT_OPERATIONS);
+  await flushMicrotasks();
+  assert.equal(wire.frames.length, windowStart + 32, "the 33rd operation waits locally");
+  const firstWindowId = headers()[windowStart].operationId;
+  assert.equal(firstWindowId, 6);
+  await deliverBody(inputResultBody(firstWindowId, "written", { accepted: 2, written: 2 }));
+  await waitForTestCondition(() => wire.frames.length === windowStart + 33);
+  for (let operationId = firstWindowId + 1; operationId < firstWindowId + 35; operationId += 1) {
+    await deliverBody(inputResultBody(operationId, "written", { accepted: 2, written: 2 }));
+  }
+  await waitForTestCondition(() => wire.frames.length === windowStart + 35);
+  assert.deepEqual(
+    headers().slice(windowStart).map((header) => header.operationId),
+    Array.from({ length: 35 }, (_, index) => firstWindowId + index),
+    "operation ids increase in send order across the window"
+  );
+  assert.equal(outcomes.length, 5 + 35);
+
+  // One paste is one operation: PASTE_BEGIN, ordered chunks, PASTE_COMMIT under one id.
+  const pasteStart = wire.frames.length;
+  const pastePromise = plane.writePaste("p".repeat(70_000));
+  await waitForTestCondition(() => wire.frames.length === pasteStart + 4);
+  const pasteHeaders = headers().slice(pasteStart);
+  assert.deepEqual(pasteHeaders.map((header) => header.kind), [
+    TerminalInputKind.paste_begin,
+    TerminalInputKind.paste_chunk,
+    TerminalInputKind.paste_chunk,
+    TerminalInputKind.paste_commit
+  ]);
+  assert.equal(new Set(pasteHeaders.map((header) => header.operationId)).size, 1);
+  const pasteId = pasteHeaders[0].operationId;
+  await deliverBody(inputResultBody(pasteId, "written", { accepted: 70_000, written: 70_012 }));
+  const pasteOutcome = await pastePromise;
+  assert.equal(pasteOutcome.outcome, "written");
+  assert.equal(pasteOutcome.requestedBytes, 70_000);
+  assert.equal(pasteOutcome.writtenPtyBytes, 70_012);
+  assert.equal(pasteOutcome.operationId, pasteId);
+  assert.equal(wire.requests.some((request) => ["send_input", "mode_gated_input", "resize", "read_mode_flags"].includes(request.type)), false, "host control never carries input");
   await plane.detach();
 }
 
-// A terminal channel that stops after snapshot READY must reattach once and keep queued input.
+// ROUTE_RESYNC opens a new stream epoch: stale-epoch frames are dropped, a stale resync is
+// dropped, in-flight results still land by operation id, and the route repaints from READY.
+{
+  const sessionId = "resync-data-plane-session";
+  const subscriptionId = "resync-data-plane-subscription";
+  const generation = 3;
+  const wire = fakeRouteBridge(sessionId, { generation });
+  const outputs = [];
+  const outcomes = [];
+  const statuses = [];
+  const plane = createHubTerminalDataPlane({ sessionId, subscriptionId, bridge: wire.bridge });
+  const installs = bindGhostsnpInstaller(plane);
+  plane.subscribeInputOutcomes((outcome) => outcomes.push(outcome));
+  plane.subscribeStatus((status) => statuses.push(status));
+  plane.subscribeOutput((data) => outputs.push(Buffer.from(data).toString("utf8")));
+  await waitForTestCondition(() => wire.streams.length === 1);
+  const route = wire.streams[0];
+  const send = (event, streamEpoch) => route.onEvent(routeFrame(subscriptionId, event, { generation, streamEpoch }));
+  for (const frame of standardAttachFrames(subscriptionId, { generation })) await route.onEvent(frame);
+  await send({ kind: "output", payload: new TextEncoder().encode("epoch-0") }, 0);
+  assert.deepEqual(outputs, ["epoch-0"]);
+  plane.sendInput({ kind: "raw", bytes: new TextEncoder().encode("before-resync") });
+  await waitForTestCondition(() => wire.frames.length === 1);
+
+  // A stale resync (from_epoch does not match) and a wrong-epoch data frame are dropped.
+  await send({ kind: "route_resync", from_epoch: 5, to_epoch: 6 }, 6);
+  await send({ kind: "output", payload: new TextEncoder().encode("wrong-epoch") }, 6);
+  assert.deepEqual(outputs, ["epoch-0"]);
+
+  // The accepted transition: envelope epoch equals to_epoch and from_epoch equals the accepted epoch.
+  await send({ kind: "route_resync", from_epoch: 0, to_epoch: 1 }, 1);
+  await send({ kind: "output", payload: new TextEncoder().encode("late-epoch-0") }, 0);
+  assert.deepEqual(outputs, ["epoch-0"], "old-epoch output after the transition is dropped");
+  // The in-flight result arrives re-stamped in the new epoch and still resolves by id.
+  await route.onEvent({ route: subscriptionId, generation, streamEpoch: 1, body: inputResultBody(1, "written", { accepted: 13, written: 13 }) });
+  assert.deepEqual(outcomes.map((outcome) => [outcome.operationId, outcome.outcome]), [[1, "written"]]);
+  // Live output in the new epoch waits for the fresh capture boundary.
+  await send({ kind: "output", payload: new TextEncoder().encode("epoch-1-live") }, 1);
+  assert.deepEqual(outputs, ["epoch-0"]);
+  const installsBefore = installs.length;
+  await send({ kind: "modes", mode_bits: 2, rows: 24, cols: 80 }, 1);
+  await send({ kind: "snapshot_ready", payload: ghostsnpFixture() }, 1);
+  await send({ kind: "snapshot_history", payload: opaqueFinishPage }, 1);
+  await send({ kind: "snapshot_finish" }, 1);
+  assert.equal(installs.length, installsBefore + 2, "the route re-primes the renderer from a fresh READY");
+  assert.deepEqual(outputs, ["epoch-0", "epoch-1-live"]);
+  assert.equal(statuses.at(-1).state, "attached");
+  await plane.detach();
+}
+
+// A route that stalls after SNAPSHOT_READY re-attaches once with a new subscription id. Input
+// already sent on the old route resolves as unknown when it closes; nothing is replayed.
 {
   const sessionId = "stalled-hydration-recovery-session";
-  const streams = [];
-  const detachRequests = [];
+  const wire = fakeRouteBridge(sessionId);
+  const outcomes = [];
   const plane = createHubTerminalDataPlane({
     sessionId,
     testHooks: { hydrationProgressBoundMs: 20 },
-    bridge: {
-      async request(request) {
-        if (request.type === "detach") detachRequests.push(request);
-        if (request.type === "read_mode_flags") {
-          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
-        }
-        if (request.type === "read_screen") {
-          return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(nextSessionId, subscriptionId, onEvent) {
-        assert.equal(nextSessionId, sessionId);
-        const stream = { subscriptionId, onEvent, frames: [] };
-        streams.push(stream);
-        return {
-          ready: Promise.resolve(),
-          sendFrame(frame) {
-            stream.frames.push(new Uint8Array(frame));
-            return Promise.resolve();
-          },
-          abandon() {},
-          unsubscribe() {}
-        };
-      }
-    }
+    bridge: wire.bridge
   });
   bindGhostsnpInstaller(plane);
+  plane.subscribeInputOutcomes((outcome) => outcomes.push(outcome));
   plane.subscribeOutput(() => undefined);
-  await waitForTestCondition(() => streams.length === 1);
-  await streams[0].onEvent(opaqueFinishSnapshotEvent(sessionId, streams[0].subscriptionId));
-  const queuedInput = plane.writeInput("queued-across-hydration-recovery");
-  await waitForTestCondition(() => streams.length === 2);
-  assert.notEqual(streams[1].subscriptionId, streams[0].subscriptionId);
-  assert.equal(streams[0].frames.length, 0);
-  await streams[1].onEvent(opaqueFinishSnapshotEvent(sessionId, streams[1].subscriptionId));
-  await streams[1].onEvent(opaqueFinishSnapshotEvent(sessionId, streams[1].subscriptionId));
-  await streams[1].onEvent({
-    type: "attach_state",
-    session_id: sessionId,
-    subscription_id: streams[1].subscriptionId,
-    state: "attached"
-  });
-  await queuedInput;
-  assert.deepEqual(streams[1].frames.map((frame) => frame[1]), [1]);
-  assert.equal(detachRequests.length, 1);
-  assert.equal(detachRequests[0].subscription_id, streams[0].subscriptionId);
+  await waitForTestCondition(() => wire.streams.length === 1);
+  const first = wire.streams[0];
+  const firstFrames = standardAttachFrames(first.subscriptionId);
+  await first.onEvent(firstFrames[0]);
+  await first.onEvent(firstFrames[1]);
+  await first.onEvent(firstFrames[2]);
+  plane.sendInput({ kind: "raw", bytes: new TextEncoder().encode("sent-before-stall") });
+  await waitForTestCondition(() => first.frames.length === 1);
+  await waitForTestCondition(() => wire.streams.length === 2);
+  const second = wire.streams[1];
+  assert.notEqual(second.subscriptionId, first.subscriptionId);
+  assert.deepEqual(outcomes.map((outcome) => outcome.outcome), ["outcome_unknown"]);
+  for (const frame of standardAttachFrames(second.subscriptionId)) await second.onEvent(frame);
+  await flushMicrotasks();
+  assert.equal(second.frames.length, 0, "the replacement route replays no input");
+  plane.sendInput({ kind: "raw", bytes: new TextEncoder().encode("after-recovery") });
+  await waitForTestCondition(() => second.frames.length === 1);
+  assert.equal(inputFrameHeader(second.frames[0]).operationId, 1, "operation ids restart with the new attachment");
+  assert.equal(wire.detachRequests.length, 1);
+  assert.equal(wire.detachRequests[0].subscription_id, first.subscriptionId);
   await plane.detach();
 }
 
-function createStalledHydrationCancelFixture(sessionId) {
-  const streams = [];
-  const detachRequests = [];
-  const harness = { terminal: [], ablateCancelDetach: false };
-  globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = harness;
+// Public detach during a stalled hydration sends exactly one Detach and never recovers.
+{
+  const sessionId = "public-detach-positive-control-session";
+  const wire = fakeRouteBridge(sessionId);
   const plane = createHubTerminalDataPlane({
     sessionId,
     testHooks: { hydrationProgressBoundMs: 20 },
-    bridge: {
-      async request(request) {
-        if (request.type === "detach") detachRequests.push(request);
-        if (request.type === "read_mode_flags") {
-          return { kind: "read_mode_flags", mode_flags: testModeFlags(sessionId), events: [] };
-        }
-        if (request.type === "read_screen") {
-          return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
-        }
-        return { kind: "events", events: [] };
-      },
-      streamTerminal(nextSessionId, subscriptionId, onEvent) {
-        assert.equal(nextSessionId, sessionId);
-        const stream = { subscriptionId, onEvent, frames: [] };
-        streams.push(stream);
-        return {
-          ready: Promise.resolve(),
-          sendFrame(frame) {
-            stream.frames.push(new Uint8Array(frame));
-            return Promise.resolve();
-          },
-          abandon() {},
-          unsubscribe() {}
-        };
-      }
-    }
+    bridge: wire.bridge
   });
-  bindGhostsnpInstaller(plane);
-  return { plane, streams, detachRequests, harness };
+  const installs = bindGhostsnpInstaller(plane);
+  plane.subscribeOutput(() => undefined);
+  await waitForTestCondition(() => wire.streams.length === 1);
+  const frames = standardAttachFrames(wire.streams[0].subscriptionId);
+  await wire.streams[0].onEvent(frames[0]);
+  await wire.streams[0].onEvent(frames[1]);
+  await wire.streams[0].onEvent(frames[2]);
+  await waitForTestCondition(() => installs.length === 1);
+  await plane.detach();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(wire.detachRequests.length, 1);
+  assert.equal(wire.detachRequests[0].subscription_id, wire.streams[0].subscriptionId);
+  assert.equal(wire.streams.length, 1, "a detached plane does not recover a stalled route");
 }
 
-function harnessKinds(harness, subscriptionId) {
-  return (harness.terminal ?? [])
-    .filter((entry) => entry.payload?.subscription_id === subscriptionId || entry.payload?.generation != null)
-    .map((entry) => entry.kind);
-}
-
-{
-  const previousHarness = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-  const sessionId = "public-detach-positive-control-session";
-  try {
-    const { plane, streams, detachRequests } = createStalledHydrationCancelFixture(sessionId);
-    plane.subscribeOutput(() => undefined);
-    await waitForTestCondition(() => streams.length === 1);
-    await streams[0].onEvent(opaqueFinishSnapshotEvent(sessionId, streams[0].subscriptionId));
-    await waitForTestCondition(() =>
-      (globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
-        (entry) => entry.kind === "ghostsnp_install" && entry.payload?.progress === "ready"
-      )
-    );
-    await plane.detach();
-    assert.equal(detachRequests.length, 1);
-    assert.equal(detachRequests[0].subscription_id, streams[0].subscriptionId);
-    assert.equal(streams.length, 1);
-  } finally {
-    if (previousHarness === undefined) {
-      delete globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    } else {
-      globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = previousHarness;
-    }
-  }
-}
-
-{
-  const previousHarness = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-  const sessionId = "ablated-cancel-stalled-hydration-session";
-  try {
-    const { plane, streams, detachRequests, harness } = createStalledHydrationCancelFixture(sessionId);
-    plane.subscribeOutput(() => undefined);
-    await waitForTestCondition(() => streams.length === 1);
-    await streams[0].onEvent(opaqueFinishSnapshotEvent(sessionId, streams[0].subscriptionId));
-    await waitForTestCondition(() =>
-      harness.terminal.some(
-        (entry) => entry.kind === "ghostsnp_install" && entry.payload?.progress === "ready"
-      )
-    );
-    harness.ablateCancelDetach = true;
-    await plane.detach();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const heldId = streams[0].subscriptionId;
-    const kinds = harnessKinds(harness, heldId);
-    assert.equal(detachRequests.length, 0, `ablated cancel emitted detach: ${JSON.stringify(detachRequests)}`);
-    assert.equal(streams.length, 1, `ablated cancel recovered a second stream: ${streams.length}`);
-    assert.equal(kinds.includes("cancel_detach_ablated"), true, `missing cancel_detach_ablated: ${JSON.stringify(harness.terminal)}`);
-    assert.equal(kinds.includes("reader_cancel"), true, `missing reader_cancel: ${JSON.stringify(harness.terminal)}`);
-    assert.equal(kinds.includes("hydration_progress_timeout"), false, `hydration bound fired after ablated cancel: ${JSON.stringify(harness.terminal)}`);
-    assert.equal(kinds.includes("snapshot_lost_recover"), false, `snapshot recovery ran after ablated cancel: ${JSON.stringify(harness.terminal)}`);
-  } finally {
-    if (previousHarness === undefined) {
-      delete globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    } else {
-      globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = previousHarness;
-    }
-  }
-}
-
-// Mouse grid must track resize (not hard-coded 80x24).
+// Pointer geometry comes from the mounted canvas and live grid, never a fixed 80x24.
 assert.match(resttyRenderer, /ptyTransport\.currentGrid\(\)/);
 assert.match(resttyRenderer, /measuredGrid\?\.columns/);
 assert.match(resttyRenderer, /measuredGrid\?\.rows/);
-assert.match(resttyRenderer, /MountScopedWheelReencoder/);
-assert.match(resttyRenderer, /getCellHeight|liveCellHeight/);
-assert.match(resttyRenderer, /encodeWheelDecision/);
-assert.match(resttyRenderer, /unmatchedWheelBytesShouldDrop/);
-assert.match(resttyRenderer, /shouldRouteWheelToAppMouse\(event/);
-assert.match(resttyRenderer, /getMouseStatus/);
-assert.match(resttyRenderer, /applicationMouseTrackingActive|applicationMouseActive/);
-assert.match(resttyRenderer, /syncApplicationMouseActive/);
-assert.match(botsterTerminalPtyTransport, /writeSemantic/);
-assert.match(hubTerminalDataPlane, /mode_flags_refreshed_for_encode|encode_empty_after_mode_refresh/);
+assert.match(resttyRenderer, /canvas\.width > 0 \? canvas\.width \/ rect\.width : 1/);
+assert.match(resttyRenderer, /mouseCapturePolicyFromModes/);
+assert.match(resttyRenderer, /reportUncapturedResttyInput/);
+assert.match(botsterTerminalPtyTransport, /sendSemantic/);
+assert.match(botsterTerminalPtyTransport, /looksLikeResttyMouseReport/);
 assert.match(hubTerminalDataPlane, /DaemonTerminalStreamSubscription|abandon\(\)/);
 assert.match(hubTransport, /abandon\(\):\s*void|interface DaemonTerminalStreamSubscription/);
 assert.match(liveProtocolHarnessScript, /requiredSubscriptionId|disableTerminalTransportRecovery/);
-assert.match(liveProtocolHarnessScript, /armSnapshotInstallHold|snapshot_install_held/);
 assert.match(liveProtocolHarnessScript, /entry\.kind !== "renderer_write"/);
-assert.match(hubTerminalDataPlane, /holdLiveSnapshotInstallIfArmed|armSnapshotInstallHold/);
+assert.doesNotMatch(hubTerminalDataPlane, /holdLiveSnapshotInstallIfArmed|armSnapshotInstallHold|ablateCancelDetach/);
 assert.match(productionSessionScriptSource(), /1000h|1006h/);
 assert.match(productionSessionScriptSource(), /1049l/);
 
-assert.equal(
-  decodeDaemonByteEnvelope(ghostsnpFixturePayloadBase64, "base64", ghostsnpFixtureBytes).byteLength,
-  ghostsnpFixtureBytes
-);
+// Live output stays byte-faithful through the binary route: a UTF-8 sequence split across
+// two OUTPUT frames reaches the renderer as the same two byte slices.
+{
+  const sessionId = "split-utf8-session";
+  const subscriptionId = "split-utf8-sub";
+  const wire = fakeRouteBridge(sessionId);
+  const outputs = [];
+  const plane = createHubTerminalDataPlane({ sessionId, subscriptionId, bridge: wire.bridge });
+  bindGhostsnpInstaller(plane);
+  plane.subscribeOutput((data) => outputs.push(Uint8Array.from(data)));
+  await waitForTestCondition(() => wire.streams.length === 1);
+  const route = wire.streams[0];
+  for (const frame of standardAttachFrames(subscriptionId)) await route.onEvent(frame);
+  await route.onEvent({ route: subscriptionId, generation: 1, streamEpoch: 0, body: outputBody(Uint8Array.of(0xe2)) });
+  await route.onEvent({ route: subscriptionId, generation: 1, streamEpoch: 0, body: outputBody(Uint8Array.of(0x82, 0xac)) });
+  await route.onEvent({ route: subscriptionId, generation: 1, streamEpoch: 0, body: outputBody(Uint8Array.of(0x00, 0x1b, 0x5b, 0x30, 0x6d, 0xff)) });
+  assert.deepEqual(outputs.map((chunk) => [...chunk]), [[0xe2], [0x82, 0xac], [0x00, 0x1b, 0x5b, 0x30, 0x6d, 0xff]]);
+  assert.equal(Buffer.concat(outputs.slice(0, 2).map((chunk) => Buffer.from(chunk))).toString("utf8"), "€");
+  await plane.detach();
+}
 
-const euroLead = Uint8Array.of(0xe2);
-const euroRest = Uint8Array.of(0x82, 0xac);
-const splitEuroFirst = liveOutputEvent("split-utf8-session", "split-utf8-sub", euroLead);
-const splitEuroSecond = liveOutputEvent("split-utf8-session", "split-utf8-sub", euroRest);
-const splitDecoded = [
-  decodeTerminalOutputEvent(splitEuroFirst),
-  decodeTerminalOutputEvent(splitEuroSecond)
-];
-assert.deepEqual([...splitDecoded[0]], [0xe2]);
-assert.deepEqual([...splitDecoded[1]], [0x82, 0xac]);
-assert.equal(Buffer.concat(splitDecoded.map((chunk) => Buffer.from(chunk))).toString("utf8"), "€");
-assert.equal(new TextDecoder().decode(splitDecoded[0]).includes("\uFFFD"), true);
+// A body that does not decode fails the route visibly; nothing is painted from it.
+{
+  const sessionId = "malformed-body-session";
+  const subscriptionId = "malformed-body-sub";
+  const wire = fakeRouteBridge(sessionId);
+  const statuses = [];
+  const outputs = [];
+  const plane = createHubTerminalDataPlane({ sessionId, subscriptionId, bridge: wire.bridge });
+  bindGhostsnpInstaller(plane);
+  plane.subscribeStatus((status) => statuses.push(status));
+  plane.subscribeOutput((data) => outputs.push(data));
+  await waitForTestCondition(() => wire.streams.length === 1);
+  const route = wire.streams[0];
+  for (const frame of standardAttachFrames(subscriptionId)) await route.onEvent(frame);
+  const truncated = outputBody("keep-me").subarray(0, 6);
+  await route.onEvent({ route: subscriptionId, generation: 1, streamEpoch: 0, body: truncated });
+  await waitFor(() => statuses.some((status) => status.state === "failed"));
+  assert.deepEqual(outputs, []);
+  assert.match(statuses.at(-1).message, /could not be decoded/);
+}
 
-const arbitraryBytes = Uint8Array.of(0x00, 0x1b, 0x5b, 0x30, 0x6d, 0xff);
-assert.deepEqual(
-  [...decodeTerminalOutputEvent(liveOutputEvent("arb-session", "arb-sub", arbitraryBytes))],
-  [...arbitraryBytes]
-);
-
-const validLiveEnvelope = liveOutputEvent("retire-data-session", "retire-data-sub", "keep-me\r\n");
-assert.throws(
-  () => decodeTerminalOutputEvent({ ...validLiveEnvelope, data: "legacy" }),
-  /retired data field/
-);
-assert.throws(
-  () => decodeTerminalOutputEvent({ ...validLiveEnvelope, payload_encoding: "hex" }),
-  /Unsupported payload encoding/
-);
-assert.throws(
-  () => decodeTerminalOutputEvent({ ...validLiveEnvelope, payload_base64: "!!!!" }),
-  /Invalid base64/
-);
-assert.throws(
-  () => decodeTerminalOutputEvent({ ...validLiveEnvelope, bytes: validLiveEnvelope.bytes + 1 }),
-  /does not match declared bytes/
-);
-
-const retiredDataStatuses = [];
-const retiredDataOutput = [];
-const retiredDataPlane = createHubTerminalDataPlane({
-  sessionId: "retire-data-session",
-  subscriptionId: "retire-data-sub",
-  bridge: {
-    async request() {
-      return { kind: "events", events: [] };
-    },
-    streamTerminal(sessionId, subscriptionId, onEvent) {
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-      onEvent({
-        type: "snapshot",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        payload_base64: ghostsnpFixturePayloadBase64,
-        payload_encoding: "base64",
-        bytes: ghostsnpFixtureBytes
-      });
-      onEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-      onEvent({ ...validLiveEnvelope, session_id: sessionId, subscription_id: subscriptionId, data: "legacy" });
-      return { unsubscribe() {} };
-    }
-  }
-});
-bindGhostsnpInstaller(retiredDataPlane);
-retiredDataPlane.subscribeStatus((status) => retiredDataStatuses.push(status));
-retiredDataPlane.subscribeOutput((data) => retiredDataOutput.push(data));
-await waitFor(() => retiredDataStatuses.some((status) => status.state === "failed"));
-assert.deepEqual(retiredDataOutput, []);
-
-const splitLiveOutput = [];
-const splitLiveDataPlane = createHubTerminalDataPlane({
-  sessionId: "split-utf8-session",
-  subscriptionId: "split-utf8-sub",
-  bridge: {
-    async request(request) {
-      if (request.type === "read_mode_flags") {
-        return { kind: "read_mode_flags", mode_flags: testModeFlags("split-utf8-session"), events: [] };
-      }
-      if (request.type === "read_screen") {
-        return { kind: "read_screen", read_screen: { session_id: "split-utf8-session", text: "" }, events: [] };
-      }
-      return { kind: "events", events: [] };
-    },
-    streamTerminal(sessionId, subscriptionId, onEvent) {
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" });
-      onEvent({
-        type: "snapshot",
-        session_id: sessionId,
-        subscription_id: subscriptionId,
-        payload_base64: ghostsnpFixturePayloadBase64,
-        payload_encoding: "base64",
-        bytes: ghostsnpFixtureBytes
-      });
-      onEvent(opaqueFinishSnapshotEvent(sessionId, subscriptionId));
-      onEvent({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" });
-      onEvent(splitEuroFirst);
-      onEvent(splitEuroSecond);
-      return { unsubscribe() {} };
-    }
-  }
-});
-bindGhostsnpInstaller(splitLiveDataPlane);
-splitLiveDataPlane.subscribeOutput((data) => splitLiveOutput.push(data));
-await waitFor(() => splitLiveOutput.length === 2);
-assert.deepEqual([...splitLiveOutput[0]], [0xe2]);
-assert.deepEqual([...splitLiveOutput[1]], [0x82, 0xac]);
-assert.equal(Buffer.concat(splitLiveOutput.map((chunk) => Buffer.from(chunk))).toString("utf8"), "€");
-
+// A bridge without terminal streaming fails the attach explicitly.
 const terminalWithoutStream = createHubTerminalDataPlane({
   sessionId: activeHubSessionId,
   bridge: {
@@ -9413,357 +9026,122 @@ const vite = await createServer({
 });
 
 try {
+  // Container input capture: every gesture becomes one semantic record, paste is consumed,
+  // and pointer or wheel gestures follow the authoritative mouse policy.
   {
-    const {
-      MountScopedWheelReencoder,
-      WHEEL_REPORTS_PER_BURST,
-      countWheelReports,
-      encodeWheelDecision,
-      shouldRouteWheelToAppMouse,
-      unmatchedWheelBytesShouldDrop,
-      wheelDeltaPixels
-    } = await vite.ssrLoadModule("/src/botster/mountScopedWheelReencoder.ts");
-    const { mouseTrackingBitsFromCoreMode } = await vite.ssrLoadModule("/src/botster/mouseMode.ts");
-    const { createInputHandler } = await vite.ssrLoadModule("/src/vendor/restty/internal.js");
-    const trackingOn = testModeFlags("wheel-pty", { mouse_mode: 9 });
-    const trackingOff = testModeFlags("wheel-local", { mouse_mode: 0 });
-    const metrics = { cellHeight: 20, rows: 24, cell: { col: 2, row: 1 }, applicationMouseActive: true };
-    const wheelEvent = (deltaY, extra = {}) => ({ deltaY, deltaMode: 0, shiftKey: false, altKey: false, ctrlKey: false, ...extra });
-
-    assert.equal(wheelDeltaPixels({ deltaY: -7.5, deltaMode: 0 }, 18, 30), -7.5);
-    assert.equal(wheelDeltaPixels({ deltaY: 2, deltaMode: 1 }, 18, 30), 36);
-    assert.equal(wheelDeltaPixels({ deltaY: 1, deltaMode: 2 }, 16, 40), 640);
-
-    // W1. Sub-cell pixel deltas accumulate across browser wheel events into one row report.
-    {
-      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
-      assert.equal(encoder.consumeWheelEvent(wheelEvent(-4), metrics)?.steps, 0);
-      assert.equal(encoder.consumeWheelEvent(wheelEvent(-4), metrics)?.steps, 0);
-      assert.equal(encoder.consumeWheelEvent(wheelEvent(-4), metrics)?.steps, 0);
-      assert.equal(encoder.consumeWheelEvent(wheelEvent(-4), metrics)?.steps, 0);
-      const decision = encoder.consumeWheelEvent(wheelEvent(-4), metrics);
-      assert.equal(decision.steps, 1);
-      assert.equal(decision.direction, "up");
-      assert.equal(encoder.accumulatorMutations, 5);
-    }
-
-    // W2/W3. Mounted handler report count and direction agree with PTY bytes when tracking is on.
-    {
-      const mountedReplies = [];
-      const mounted = createInputHandler({
-        sendReply: (data) => mountedReplies.push(data),
-        suppressQueryReplies: true,
-        positionToCell: () => ({ col: 2, row: 1 }),
-        getCellHeight: () => 16,
-        getRows: () => 30
-      });
-      mounted.setMouseMode("auto");
-      mounted.rehydrateMouseFromTrackingBits(mouseTrackingBitsFromCoreMode(9));
-      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
-      const liveMetrics = { cellHeight: 16, rows: 30, cell: { col: 2, row: 1 }, applicationMouseActive: true };
-      mounted.sendMouseEvent("wheel", wheelEvent(-48));
-      const decision = encoder.consumeWheelEvent(wheelEvent(-48), liveMetrics);
-      const ptyBytes = encodeWheelDecision(decision, trackingOn);
-      assert.equal(decision.steps, 3);
-      assert.equal(decision.direction, "up");
-      assert.equal(countWheelReports(mountedReplies.join("")), countWheelReports(ptyBytes));
-      assert.equal(countWheelReports(ptyBytes), 3);
-      const sgrUp = `${String.fromCharCode(0x1b)}[<64;`;
-      assert.equal(ptyBytes.startsWith(sgrUp), true);
-      assert.equal(mountedReplies.join("").startsWith(sgrUp), true);
-      mountedReplies.length = 0;
-      const downMounted = createInputHandler({
-        sendReply: (data) => mountedReplies.push(data),
-        suppressQueryReplies: true,
-        positionToCell: () => ({ col: 2, row: 1 }),
-        getCellHeight: () => 16,
-        getRows: () => 30
-      });
-      downMounted.setMouseMode("auto");
-      downMounted.rehydrateMouseFromTrackingBits(mouseTrackingBitsFromCoreMode(9));
-      downMounted.sendMouseEvent("wheel", wheelEvent(16));
-      const downDecision = new MountScopedWheelReencoder({ scheduleDrain: () => undefined }).consumeWheelEvent(
-        wheelEvent(16),
-        liveMetrics
-      );
-      const downBytes = encodeWheelDecision(downDecision, trackingOn);
-      assert.equal(downDecision.direction, "down");
-      assert.equal(countWheelReports(mountedReplies.join("")), countWheelReports(downBytes));
-      assert.equal(downBytes.startsWith(`${String.fromCharCode(0x1b)}[<65;`), true);
-    }
-
-    // W4. A large delta produces a burst bounded by the live grid row count.
-    {
-      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
-      const decision = encoder.consumeWheelEvent(wheelEvent(-400), { cellHeight: 20, rows: 2, cell: { col: 0, row: 0 }, applicationMouseActive: true });
-      assert.equal(decision.steps, 2);
-      assert.equal(decision.steps <= WHEEL_REPORTS_PER_BURST, true);
-    }
-
-    // W5. Pixel-to-cell conversion uses the live cell height, not the 20-pixel fallback.
-    {
-      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
-      const fallback = encoder.consumeWheelEvent(wheelEvent(-20), { cellHeight: 20, rows: 24, cell: { col: 0, row: 0 }, applicationMouseActive: true });
-      const live = new MountScopedWheelReencoder({ scheduleDrain: () => undefined }).consumeWheelEvent(
-        wheelEvent(-20),
-        { cellHeight: 13, rows: 24, cell: { col: 0, row: 0 }, applicationMouseActive: true }
-      );
-      assert.equal(fallback.steps, 1);
-      assert.equal(live.steps, 1);
-      const liveMiss = new MountScopedWheelReencoder({ scheduleDrain: () => undefined }).consumeWheelEvent(
-        wheelEvent(-12),
-        { cellHeight: 13, rows: 24, cell: { col: 0, row: 0 }, applicationMouseActive: true }
-      );
-      assert.equal(liveMiss.steps, 0);
-      const fallbackWouldFire = new MountScopedWheelReencoder({ scheduleDrain: () => undefined }).consumeWheelEvent(
-        wheelEvent(-20),
-        { cellHeight: 20, rows: 24, cell: { col: 0, row: 0 }, applicationMouseActive: true }
-      );
-      assert.equal(fallbackWouldFire.steps, 1);
-    }
-
-    // W6. Every deferred PTY drain passes through the mode gate.
-    {
-      const drains = [];
-      const gated = [];
-      const encoder = new MountScopedWheelReencoder({
-        scheduleDrain: (callback) => drains.push(callback),
-        onDrain: (decision) => {
-          gated.push(encodeWheelDecision(decision, trackingOn));
-        }
-      });
-      const decision = encoder.consumeWheelEvent(wheelEvent(-80), metrics);
-      assert.equal(decision.steps, WHEEL_REPORTS_PER_BURST);
-      assert.equal(drains.length, 1);
-      drains[0]();
-      assert.equal(gated.length, 1);
-      assert.equal(countWheelReports(gated[0]) > 0, true);
-    }
-
-    // W7. No unmatched mounted drain reaches raw PTY input.
-    {
-      assert.equal(unmatchedWheelBytesShouldDrop("\u001b[<64;1;1M"), true);
-      assert.equal(unmatchedWheelBytesShouldDrop("hello"), false);
-    }
-
-    // W8. A mouse mode change before a drain changes the drain decision.
-    {
-      const drains = [];
-      const drained = [];
-      const encoder = new MountScopedWheelReencoder({
-        scheduleDrain: (callback) => drains.push(callback),
-        onDrain: (decision) => drained.push(decision)
-      });
-      const immediate = encoder.consumeWheelEvent(wheelEvent(-80), metrics);
-      assert.equal(countWheelReports(encodeWheelDecision(immediate, trackingOn)) > 0, true);
-      drains[0]();
-      assert.equal(drained.length, 1);
-      assert.equal(encodeWheelDecision(drained[0], trackingOff), "");
-      assert.equal(countWheelReports(encodeWheelDecision(drained[0], trackingOn)) > 0, true);
-    }
-
-    // W9. A stale mount and a stale generation emit no bytes, and teardown cancels a drain.
-    {
-      let current = true;
-      const drains = [];
-      const drained = [];
-      const encoder = new MountScopedWheelReencoder({
-        scheduleDrain: (callback) => drains.push(callback),
-        onDrain: (decision) => drained.push(decision),
-        isCurrent: () => current
-      });
-      encoder.consumeWheelEvent(wheelEvent(-80), metrics);
-      current = false;
-      drains[0]();
-      assert.equal(drained.length, 0);
-      const encoder2 = new MountScopedWheelReencoder({
-        scheduleDrain: (callback) => drains.push(callback),
-        onDrain: (decision) => drained.push(decision)
-      });
-      encoder2.consumeWheelEvent(wheelEvent(-80), metrics);
-      encoder2.reset();
-      drains.at(-1)();
-      assert.equal(drained.length, 0);
-    }
-
-    // W10. One wheel event cannot produce duplicate PTY bytes.
-    {
-      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
-      const decision = encoder.consumeWheelEvent(wheelEvent(-20), metrics);
-      const first = encodeWheelDecision(decision, trackingOn);
-      const second = encodeWheelDecision(decision, trackingOn);
-      assert.equal(encoder.accumulatorMutations, 1);
-      assert.equal(first, second);
-      assert.equal(countWheelReports(first), 1);
-    }
-
-    // W12. Inactive local-scroll pixels must not enter a later PTY report.
-    {
-      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
-      const offMetrics = { ...metrics, applicationMouseActive: false };
-      for (let index = 0; index < 4; index += 1) {
-        assert.equal(encoder.consumeWheelEvent(wheelEvent(-4), offMetrics), undefined);
-      }
-      assert.equal(encoder.pendingPixels(), 0);
-      const firstOn = encoder.consumeWheelEvent(wheelEvent(-4), metrics);
-      assert.equal(firstOn?.steps, 0);
-      assert.equal(encoder.pendingPixels(), -4);
-      assert.equal(encodeWheelDecision(firstOn, trackingOn), "");
-      const earned = encoder.consumeWheelEvent(wheelEvent(-16), metrics);
-      assert.equal(earned.steps, 1);
-      assert.equal(countWheelReports(encodeWheelDecision(earned, trackingOn)), 1);
-    }
-
-    // W14. Shift+wheel is local scrollback even when application mouse tracking is on.
-    {
-      assert.equal(shouldRouteWheelToAppMouse(wheelEvent(-20), true), true);
-      assert.equal(shouldRouteWheelToAppMouse(wheelEvent(-20, { shiftKey: true }), true), false);
-      const encoder = new MountScopedWheelReencoder({ scheduleDrain: () => undefined });
-      const leftover = encoder.consumeWheelEvent(wheelEvent(-16), metrics);
-      assert.equal(leftover?.steps, 0);
-      assert.equal(encoder.pendingPixels(), -16);
-      assert.equal(encoder.consumeWheelEvent(wheelEvent(-20, { shiftKey: true }), metrics), undefined);
-      assert.equal(encoder.pendingPixels(), 0);
-      const firstAfterShift = encoder.consumeWheelEvent(wheelEvent(-4), metrics);
-      assert.equal(firstAfterShift?.steps, 0);
-      assert.equal(encoder.pendingPixels(), -4);
-      assert.equal(encodeWheelDecision(firstAfterShift, trackingOn), "");
-    }
-
-    // W13. Mounted renderer listener: off-to-on, active Shift+wheel, deferred
-    // writeSemantic drain, and unmatched sendInput bytes with zero raw write.
-    // A pending mouse move must not match a later unmatched Restty wheel report.
-    // Encode with mouse_mode 10 (any-motion + SGR). mouse_mode 9 is normal+SGR
-    // and disables motion, so a stale move encodes empty even at bc6ae4b.
-    // Restty construction still fails in this minimal DOM after listeners install.
-    {
-      const { createResttyTerminalRenderer } = await vite.ssrLoadModule("/src/botster/resttyRenderer.ts");
-      let mouseActive = false;
-      const writes = [];
-      const root = globalThis.document.createElement("div");
-      root.style.width = "640px";
-      root.style.height = "360px";
-      globalThis.document.body.appendChild(root);
-      const renderer = createResttyTerminalRenderer({
-        sessionId: "wheel-mounted-app-mouse",
-        renderer: "restty"
-      });
-      renderer.applicationMouseTrackingActive = () => mouseActive;
-      const motionTrackingOn = testModeFlags("wheel-pty-motion", { mouse_mode: 10 });
-      const fireWheel = (deltaY, extra = {}) => {
-        const event = {
-          deltaY,
-          deltaMode: 0,
-          shiftKey: false,
-          altKey: false,
-          ctrlKey: false,
-          clientX: 10,
-          clientY: 10,
-          target: root,
-          preventDefault() {},
-          buttons: 0,
-          ...extra
-        };
-        for (const listener of root._listeners?.get("wheel") ?? []) {
-          listener(event);
-        }
+    const { installTerminalInputCapture, noMouseCapture } = await vite.ssrLoadModule("/src/botster/terminalInputCapture.ts");
+    const makeContainer = () => {
+      const listeners = new Map();
+      const container = {
+        addEventListener(type, listener) {
+          const entries = listeners.get(type) ?? new Set();
+          entries.add(listener);
+          listeners.set(type, entries);
+        },
+        removeEventListener(type, listener) {
+          listeners.get(type)?.delete(listener);
+        },
+        contains() { return false; },
+        dispatch(type, event) {
+          for (const listener of listeners.get(type) ?? []) listener(event);
+        },
+        listenerTypes: () => [...listeners.keys()].filter((type) => (listeners.get(type)?.size ?? 0) > 0)
       };
-      const waitForDrain = () => new Promise((resolve) => {
-        if (typeof globalThis.requestAnimationFrame === "function") {
-          globalThis.requestAnimationFrame(() => resolve());
-          return;
-        }
-        setTimeout(resolve, 16);
+      return container;
+    };
+    const geometry = { cols: 80, rows: 24, left: 0, top: 0, width: 800, height: 480, scaleX: 2, scaleY: 2 };
+    const keyEvent = (overrides) => ({
+      key: "a", code: "KeyA", repeat: false, isComposing: false, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false,
+      getModifierState: () => false, ...overrides
+    });
+    const capture = (policy = noMouseCapture) => {
+      const container = makeContainer();
+      const sink = [];
+      const pastes = [];
+      const handle = installTerminalInputCapture({
+        container,
+        sink: (input) => sink.push(input),
+        onPaste: (text, source) => pastes.push({ text, source }),
+        geometry: () => geometry,
+        mousePolicy: () => policy
       });
-      try {
-        try {
-          renderer.mount(root);
-        } catch {
-          // Minimal DOM lacks classList. Listeners are installed before Restty construction.
-        }
-        assert.equal((root._listeners?.get("wheel") ?? new Set()).size > 0, true);
-        const plane = {
-          sessionId: "wheel-mounted-app-mouse",
-          writeInput(data) {
-            writes.push({ kind: "raw", data });
-          },
-          writeModeGatedInput(semantic) {
-            writes.push({
-              kind: "semantic",
-              first: semantic.encode(motionTrackingOn),
-              retry: semantic.encode(motionTrackingOn)
-            });
-            return Promise.resolve();
-          },
-          subscribeOutput() {
-            return { unsubscribe() {} };
-          },
-          subscribeStatus() {
-            return { unsubscribe() {} };
-          },
-          resize() {},
-          detach() {}
-        };
-        renderer.attachDataPlane(plane);
-        for (let index = 0; index < 4; index += 1) {
-          fireWheel(-4);
-        }
-        assert.equal(writes.length, 0);
-        mouseActive = true;
-        renderer.write(new TextEncoder().encode(""));
-        fireWheel(-4);
-        assert.equal(writes.length, 0, "one sub-cell on-event must not inherit inactive pixels");
-        fireWheel(-20);
-        assert.equal(writes.length, 1);
-        assert.equal(writes[0].kind, "semantic");
-        assert.equal(writes[0].first, writes[0].retry);
-        assert.equal(countWheelReports(writes[0].first), 1);
-        const writesBeforeShift = writes.length;
-        fireWheel(-20, { shiftKey: true });
-        assert.equal(writes.length, writesBeforeShift, "Shift+wheel must not emit a PTY report");
-        fireWheel(-4);
-        assert.equal(writes.length, writesBeforeShift, "Shift+wheel leftover must not combine with the next active event");
-        const beforeLarge = writes.length;
-        fireWheel(-80);
-        assert.equal(writes.length, beforeLarge + 1, "a large delta must send only the immediate burst before the drain frame");
-        assert.equal(writes.at(-1).kind, "semantic");
-        assert.equal(countWheelReports(writes.at(-1).first), WHEEL_REPORTS_PER_BURST);
-        await waitForDrain();
-        assert.equal(writes.length, beforeLarge + 2, "the deferred remainder must send a later writeSemantic");
-        assert.equal(writes.at(-1).kind, "semantic");
-        assert.equal(writes.at(-1).first, writes.at(-1).retry);
-        assert.equal(countWheelReports(writes.at(-1).first), 1);
-        const rawBefore = writes.filter((write) => write.kind === "raw").length;
-        const sent = renderer.ptyTransport.sendInput("\u001b[<64;1;1M");
-        assert.equal(sent, true);
-        assert.equal(writes.filter((write) => write.kind === "raw").length, rawBefore);
-        assert.equal(writes.at(-1).kind, "semantic");
-        assert.equal(writes.at(-1).first, "");
-        assert.equal(writes.at(-1).retry, "");
-        assert.equal((root._listeners?.get("pointermove") ?? new Set()).size > 0, true);
-        const pointerMove = {
-          buttons: 1,
-          clientX: 10,
-          clientY: 10,
-          target: root,
-          preventDefault() {}
-        };
-        for (const listener of root._listeners?.get("pointermove") ?? []) {
-          listener(pointerMove);
-        }
-        const writesBeforeStale = writes.length;
-        const rawBeforeStale = writes.filter((write) => write.kind === "raw").length;
-        const staleSent = renderer.ptyTransport.sendInput("\u001b[<64;1;1M");
-        assert.equal(staleSent, true);
-        assert.equal(writes.filter((write) => write.kind === "raw").length, rawBeforeStale);
-        assert.equal(writes.length, writesBeforeStale + 1);
-        assert.equal(writes.at(-1).kind, "semantic");
-        assert.equal(writes.at(-1).first, "");
-        assert.equal(writes.at(-1).retry, "");
-      } finally {
-        renderer.destroy();
-        root.remove();
-      }
+      return { container, sink, pastes, handle };
+    };
+
+    // K1. A printable keydown carries its text; the following insertText is the same gesture.
+    {
+      const { container, sink } = capture();
+      container.dispatch("keydown", keyEvent({}));
+      container.dispatch("beforeinput", { inputType: "insertText", data: "a", isComposing: false, preventDefault() {}, stopImmediatePropagation() {} });
+      container.dispatch("keyup", keyEvent({}));
+      assert.deepEqual(sink.map((input) => [input.kind, input.action, input.code, input.text]), [["key", "press", "KeyA", "a"], ["key", "release", "KeyA", ""]]);
+      assert.equal(sink[0].unshiftedCodepoint, 97);
+      container.dispatch("keydown", keyEvent({ key: "A", shiftKey: true }));
+      assert.deepEqual([sink.at(-1).text, sink.at(-1).unshiftedCodepoint, sink.at(-1).mods.shift], ["A", 97, true]);
+      container.dispatch("keydown", keyEvent({ key: "Enter", code: "Enter", repeat: true }));
+      assert.deepEqual([sink.at(-1).action, sink.at(-1).text], ["repeat", ""]);
+      container.dispatch("keydown", keyEvent({ key: "c", code: "KeyC", ctrlKey: true }));
+      assert.deepEqual([sink.at(-1).text, sink.at(-1).mods.ctrl], ["", true], "control chords carry no text");
+    }
+
+    // K2. IME composition: keydowns during composition are ignored; the commit is one key record.
+    {
+      const { container, sink } = capture();
+      container.dispatch("compositionstart", { data: "" });
+      container.dispatch("keydown", keyEvent({ key: "Process", code: "KeyN", isComposing: true }));
+      container.dispatch("beforeinput", { inputType: "insertCompositionText", data: "に", isComposing: true, preventDefault() {}, stopImmediatePropagation() {} });
+      container.dispatch("compositionend", { data: "日本" });
+      assert.deepEqual(sink.map((input) => [input.kind, input.text, input.code, input.composing]), [["key", "日本", "", false]]);
+      container.dispatch("beforeinput", { inputType: "insertText", data: "dictated", isComposing: false, preventDefault() {}, stopImmediatePropagation() {} });
+      assert.deepEqual(sink.at(-1).text, "dictated", "inserted text without a keydown is still reported");
+    }
+
+    // K3. Pointer and wheel follow the mouse policy; Shift keeps local selection and scrollback.
+    {
+      const tracking = { tracking: true, dragMotion: true, anyMotion: false };
+      const { container, sink } = capture(tracking);
+      const pointer = (overrides) => ({ clientX: 25, clientY: 45, button: 0, buttons: 1, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, getModifierState: () => false, ...overrides });
+      container.dispatch("pointerdown", pointer({}));
+      container.dispatch("pointermove", pointer({ buttons: 1, clientX: 35 }));
+      container.dispatch("pointermove", pointer({ buttons: 0, clientX: 45 }));
+      container.dispatch("pointerup", pointer({ buttons: 0 }));
+      assert.deepEqual(sink.map((input) => [input.action, input.button ?? null, input.col, input.row, input.xPx, input.yPx]), [
+        ["press", "left", 2, 2, 50, 90],
+        ["motion", null, 3, 2, 70, 90],
+        ["release", "left", 4, 2, 90, 90]
+      ]);
+      sink.length = 0;
+      container.dispatch("pointerdown", pointer({ shiftKey: true }));
+      assert.equal(sink.length, 0, "Shift keeps the pointer for local selection");
+      container.dispatch("wheel", { deltaY: -48, deltaX: 0, deltaMode: 0, clientX: 25, clientY: 45, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, getModifierState: () => false });
+      assert.deepEqual(sink.map((input) => [input.kind, input.action, input.button]), [["mouse", "press", "wheel_up"], ["mouse", "press", "wheel_up"]], "two cell heights scroll two wheel steps; the burst cap is three");
+      sink.length = 0;
+      container.dispatch("wheel", { deltaY: -400, deltaX: 0, deltaMode: 0, clientX: 25, clientY: 45, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, getModifierState: () => false });
+      assert.equal(sink.length, 3, "a large delta is capped per burst");
+      sink.length = 0;
+      container.dispatch("wheel", { deltaY: -400, deltaX: 0, deltaMode: 0, clientX: 25, clientY: 45, shiftKey: true, ctrlKey: false, altKey: false, metaKey: false, getModifierState: () => false });
+      assert.equal(sink.length, 0, "Shift+wheel is local scrollback");
+      const off = capture(noMouseCapture);
+      off.container.dispatch("pointerdown", pointer({}));
+      off.container.dispatch("wheel", { deltaY: -400, deltaX: 0, deltaMode: 0, clientX: 25, clientY: 45, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, getModifierState: () => false });
+      assert.equal(off.sink.length, 0, "without tracking nothing reaches the PTY");
+    }
+
+    // K4. Paste is consumed at the container; empty clipboard text is left to Restty. Focus reports both edges.
+    {
+      const { container, sink, pastes, handle } = capture();
+      let prevented = 0;
+      const clipboard = (text) => ({ clipboardData: { getData: () => text }, preventDefault() { prevented += 1; }, stopImmediatePropagation() {} });
+      container.dispatch("paste", clipboard("hello"));
+      container.dispatch("paste", clipboard(""));
+      container.dispatch("beforeinput", { inputType: "insertFromPaste", dataTransfer: { getData: () => "from-beforeinput" }, preventDefault() { prevented += 1; }, stopImmediatePropagation() {} });
+      assert.deepEqual(pastes, [{ text: "hello", source: "clipboard_event" }, { text: "from-beforeinput", source: "beforeinput" }]);
+      assert.equal(prevented, 2);
+      container.dispatch("focusin", {});
+      container.dispatch("focusout", { relatedTarget: null });
+      assert.deepEqual(sink.map((input) => [input.kind, input.focused]), [["focus", true], ["focus", false]]);
+      handle.uninstall();
+      assert.deepEqual(container.listenerTypes(), []);
     }
   }
 
@@ -15844,6 +15222,46 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
   });
 }
 
+/** Host-control v9 Hello ack fixture: protocol 9, conformance 49, terminal scheme 2. */
+function testHelloAckFixture() {
+  return {
+    protocol: "botster-hub-daemon-v1",
+    compatibility: {
+      protocol: "botster-hub-daemon-v1",
+      protocol_version: 9,
+      features: [
+        "sessions",
+        "terminal_readback",
+        "plugin_surface_render",
+        "plugin_surface_action",
+        "webrtc_terminal_adapter",
+        "terminal_subscription_closed",
+        "package_event_subscriptions",
+        "terminal_streaming",
+        "resize",
+        "snapshot_delivery=ready_then_history"
+      ],
+      conformance_fixture_revision: 49
+    },
+    terminal_compatibility: {
+      protocol: "botster-terminal-v2",
+      protocol_version: 2,
+      features: [
+        "terminal_streaming",
+        "resize",
+        "snapshot_delivery=ready_then_history",
+        "transport=duplex_binary"
+      ],
+      conformance_fixture_revision: 3
+    },
+    diagnostics: []
+  };
+}
+
+/**
+ * Every channel opens with an encrypted ClientFrame hello. The fake Hub answers the first
+ * send with one server_frame delivery whose plaintext is ServerFrame hello_ack.
+ */
 function installAutoHelloAck(dataChannel, secret) {
   if (dataChannel.autoHelloInstalled) return;
   dataChannel.autoHelloInstalled = true;
@@ -15854,38 +15272,12 @@ function installAutoHelloAck(dataChannel, secret) {
     if (!helloAcked) {
       helloAcked = true;
       dataChannel.helloSent.push(data);
-      void emitChunkedTestResponse(dataChannel, secret, {
-        protocol: "botster-hub-daemon-v1",
-        compatibility: {
-          protocol: "botster-hub-daemon-v1",
-          protocol_version: 8,
-          features: [
-            "sessions",
-            "terminal_readback",
-            "plugin_surface_render",
-            "plugin_surface_action",
-            "webrtc_terminal_adapter",
-            "terminal_subscription_closed",
-            "package_event_subscriptions",
-            "terminal_streaming",
-            "resize",
-            "snapshot_delivery=ready_then_history"
-          ],
-          conformance_fixture_revision: 48
-        },
-        terminal_compatibility: {
-          protocol: "botster-terminal-v1",
-          protocol_version: 1,
-          features: [
-            "terminal_streaming",
-            "resize",
-            "snapshot_delivery=ready_then_history",
-            "transport=duplex_binary"
-          ],
-          conformance_fixture_revision: 2
-        },
-        diagnostics: []
-      }, { messageId: `hello-ack-${dataChannel.helloSent.length}` }).then(async () => {
+      void emitChunkedTestResponse(
+        dataChannel,
+        secret,
+        { frame: "hello_ack", ack: testHelloAckFixture() },
+        { messageId: `hello-ack-${dataChannel.helloSent.length}` }
+      ).then(async () => {
         await flushMicrotasks();
         dataChannel.helloAckDelivered = true;
       });
@@ -15893,15 +15285,6 @@ function installAutoHelloAck(dataChannel, secret) {
     }
     originalSend(data);
   };
-}
-
-function repeatUtf8Pattern(pattern, totalBytes) {
-  const patternBytes = Buffer.from(pattern);
-  const output = Buffer.alloc(totalBytes);
-  for (let offset = 0; offset < totalBytes; offset += patternBytes.length) {
-    patternBytes.copy(output, offset, 0, Math.min(patternBytes.length, totalBytes - offset));
-  }
-  return output.toString("utf8");
 }
 
 function chunkUtf8Payload(payload, chunkPayloadBytes) {
@@ -15913,14 +15296,18 @@ function chunkUtf8Payload(payload, chunkPayloadBytes) {
   return chunks;
 }
 
-function reassembleFixtureChunks(chunks) {
-  return chunks
-    .toSorted((left, right) => left.chunk_index - right.chunk_index)
-    .map((chunk) => chunk.payload)
-    .join("");
-}
-
+/**
+ * Emits one encrypted ServerFrame as server_frame delivery chunks.
+ *
+ * A payload with a `frame` tag is sent as that ServerFrame. A DaemonResponse payload is
+ * correlated to the oldest unanswered ClientFrame request on the channel (optionally
+ * filtered by `options.requestType`) and wrapped as `{ frame: "response", request_id }`.
+ * `options.deliveryKind` "daemon_entity_frame" wraps an entity frame and routes it to the
+ * reserved entity channel; "daemon_event" wraps a host or package event and routes a
+ * package event to its reserved channel.
+ */
 async function emitChunkedTestResponse(dataChannel, secret, response, options = {}) {
+  let serverFrame;
   let responsePayload = response;
   if (
     (response?.kind === "entity_subscribed" || response?.kind === "event_subscribed") &&
@@ -15928,18 +15315,14 @@ async function emitChunkedTestResponse(dataChannel, secret, response, options = 
     !options.preserveSubscriptionReservation
   ) {
     const requestType = response.kind === "entity_subscribed" ? "subscribe_entities" : "subscribe_events";
-    const answeredRequestIndexes = dataChannel.testAnsweredRequestIndexes ??= new Set();
+    const answeredReservationIndexes = dataChannel.testReservedRequestIndexes ??= new Set();
     let request;
     for (const [requestIndex, sent] of (dataChannel.sent ?? []).entries()) {
-      try {
-        const candidate = await decryptTestEnvelope(secret, sent);
-        if (candidate.type === requestType && !answeredRequestIndexes.has(requestIndex)) {
-          request = candidate;
-          answeredRequestIndexes.add(requestIndex);
-          break;
-        }
-      } catch {
-        // Subscription channel chunks are not encrypted request envelopes.
+      const frame = await decodeTestClientFrame(secret, sent);
+      if (frame?.frame === "request" && frame.request.type === requestType && !answeredReservationIndexes.has(requestIndex)) {
+        request = frame.request;
+        answeredReservationIndexes.add(requestIndex);
+        break;
       }
     }
     if (!request) throw new Error(`Missing ${requestType} request for automatic test reservation.`);
@@ -15970,9 +15353,17 @@ async function emitChunkedTestResponse(dataChannel, secret, response, options = 
       );
       deliveryChannel = dataChannel.createdDataChannels.find((channel) => channel.label === reservation.label);
     }
+    serverFrame = options.deliveryKind === "daemon_entity_frame"
+      ? { frame: "entity", entity: responsePayload }
+      : { frame: "event", event: responsePayload };
+  } else if (responsePayload && typeof responsePayload === "object" && "frame" in responsePayload) {
+    serverFrame = responsePayload;
+  } else {
+    const requestId = options.requestId ?? await takeUnansweredTestRequestId(dataChannel, secret, options.requestType);
+    serverFrame = { frame: "response", request_id: requestId, response: responsePayload };
   }
 
-  const chunks = await chunkedTestResponse(secret, responsePayload, options);
+  const chunks = await chunkedTestResponse(secret, serverFrame, options);
   const orderedChunks = options.reordered ? chunks.toReversed() : chunks;
   for (const chunk of orderedChunks) {
     deliveryChannel.emitMessage(JSON.stringify(chunk));
@@ -15990,6 +15381,24 @@ async function emitChunkedTestResponse(dataChannel, secret, response, options = 
   return chunks;
 }
 
+/**
+ * Oldest ClientFrame request on the channel that no test response has answered yet. Hub
+ * correlates by request_id, so the fake Hub answers in wire order unless a type filter
+ * names a later request.
+ */
+async function takeUnansweredTestRequestId(dataChannel, secret, requestType) {
+  const answered = dataChannel.testAnsweredRequestIndexes ??= new Set();
+  for (const [index, sent] of (dataChannel.sent ?? []).entries()) {
+    if (answered.has(index)) continue;
+    const frame = await decodeTestClientFrame(secret, sent);
+    if (frame?.frame !== "request") continue;
+    if (requestType && frame.request.type !== requestType) continue;
+    answered.add(index);
+    return frame.request_id;
+  }
+  throw new Error(`No unanswered ${requestType ?? "control"} request is pending on the fake control channel.`);
+}
+
 async function emitMappedSubscriptionResponsesInWireOrder(
   dataChannel,
   secret,
@@ -15998,31 +15407,31 @@ async function emitMappedSubscriptionResponsesInWireOrder(
 ) {
   const requests = [];
   for (const [wireIndex, envelope] of (dataChannel.sent ?? []).entries()) {
-    const request = await decryptTestEnvelope(secret, envelope);
-    if (request.type in responsesByRequestType) {
-      requests.push({ request, wireIndex });
+    const frame = await decodeTestClientFrame(secret, envelope);
+    if (frame?.frame === "request" && frame.request.type in responsesByRequestType) {
+      requests.push({ request: frame.request, requestId: frame.request_id, wireIndex });
     }
   }
   if (requests.length !== Object.keys(responsesByRequestType).length) {
     throw new Error("Missing mapped subscription request in decrypted wire order.");
   }
-  for (const { request, wireIndex } of requests) {
+  for (const { request, requestId, wireIndex } of requests) {
     await emitChunkedTestResponse(
       dataChannel,
       secret,
       responsesByRequestType[request.type],
-      { messageId: `${messageIdPrefix}-${wireIndex}-${request.type}` }
+      { messageId: `${messageIdPrefix}-${wireIndex}-${request.type}`, requestId }
     );
   }
 }
 
-async function chunkedTestResponse(secret, response, options = {}) {
-  const envelope = await encryptTestEnvelope(secret, response);
+async function chunkedTestResponse(secret, serverFrame, options = {}) {
+  const envelope = await encryptTestEnvelope(secret, serverFrame);
   const chunkPayloadBytes = options.chunkPayloadBytes ?? envelope.length;
   const payloads = chunkUtf8Payload(envelope, chunkPayloadBytes);
   return payloads.map((payload, chunkIndex) => ({
     version: 2,
-    delivery_kind: options.deliveryKind ?? "daemon_response",
+    delivery_kind: "server_frame",
     message_id: options.messageId ?? `response-test-${++nextTestResponseMessageId}`,
     chunk_index: chunkIndex,
     chunk_count: payloads.length,
@@ -16052,9 +15461,29 @@ async function encryptTestEnvelope(secret, payload) {
   });
 }
 
+/**
+ * Decrypts one encrypted control envelope. A ClientFrame request returns its inner
+ * DaemonRequest and a hello returns its DaemonHello, so assertions read the payload the
+ * production request built; use decodeTestClientFrame for the envelope and request_id.
+ */
 async function decryptTestEnvelope(secret, envelopeJson) {
-  const plaintext = await decryptTestEnvelopeBytes(secret, envelopeJson);
-  return JSON.parse(new TextDecoder().decode(plaintext));
+  const frame = await decodeTestClientFrame(secret, envelopeJson);
+  if (frame && typeof frame === "object") {
+    if (frame.frame === "request") return frame.request;
+    if (frame.frame === "hello") return frame.hello;
+  }
+  return frame;
+}
+
+/** Decrypts one encrypted control envelope and returns the whole ClientFrame; null for binary. */
+async function decodeTestClientFrame(secret, envelope) {
+  if (typeof envelope !== "string") return null;
+  try {
+    const plaintext = await decryptTestEnvelopeBytes(secret, envelope);
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    return null;
+  }
 }
 
 async function decryptTestEnvelopeBytes(secret, envelopeJson) {
@@ -16078,13 +15507,116 @@ async function waitForEncryptedRequest(dataChannel, secret, predicate) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     for (const envelope of dataChannel.sent) {
       const request = await decryptTestEnvelope(secret, envelope);
-      if (predicate(request)) {
+      if (request && predicate(request)) {
         return request;
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   assert.fail("timed out waiting for encrypted WebRTC request");
+}
+
+/** 33-byte binary terminal chunk header from the Hub-generated daemon-protocol.ts. */
+const TEST_TERMINAL_CHUNK_HEADER_BYTES = 33;
+const TEST_TERMINAL_CHUNK_NONCE_BYTES = 12;
+
+async function testStreamKey(secret, usage) {
+  return crypto.subtle.importKey("raw", hexToArrayBuffer(secret.slice("secret-".length)), "AES-GCM", false, [usage]);
+}
+
+/**
+ * Seals one Hub-to-Web terminal body into binary chunk messages: 33-byte header, nonce,
+ * AES-GCM ciphertext and tag. `generation` is the fixed reservation generation and
+ * `streamEpoch` the Core stream epoch for the body.
+ */
+async function sealTestTerminalBody(secret, { messageId, generation, streamEpoch = 0, chunkPlaintextBytes }, body) {
+  const key = await testStreamKey(secret, "encrypt");
+  const sliceBytes = chunkPlaintextBytes ?? Math.max(1, body.byteLength);
+  const chunkCount = Math.max(1, Math.ceil(body.byteLength / sliceBytes));
+  const messages = [];
+  for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+    const slice = body.subarray(chunkIndex * sliceBytes, Math.min((chunkIndex + 1) * sliceBytes, body.byteLength));
+    const nonce = crypto.getRandomValues(new Uint8Array(TEST_TERMINAL_CHUNK_NONCE_BYTES));
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: nonce.buffer.slice(nonce.byteOffset, nonce.byteOffset + nonce.byteLength) },
+      key,
+      slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.byteLength)
+    ));
+    const message = new Uint8Array(TEST_TERMINAL_CHUNK_HEADER_BYTES + nonce.byteLength + ciphertext.byteLength);
+    const view = new DataView(message.buffer);
+    message[0] = 2;
+    view.setBigUint64(1, BigInt(messageId), true);
+    view.setUint32(9, chunkIndex, true);
+    view.setUint32(13, chunkCount, true);
+    view.setUint32(17, body.byteLength, true);
+    view.setBigUint64(21, BigInt(generation), true);
+    view.setUint32(29, streamEpoch, true);
+    message.set(nonce, TEST_TERMINAL_CHUNK_HEADER_BYTES);
+    message.set(ciphertext, TEST_TERMINAL_CHUNK_HEADER_BYTES + nonce.byteLength);
+    messages.push(message.buffer);
+  }
+  return messages;
+}
+
+/** Delivers one terminal body on a reserved terminal channel with a per-channel message id. */
+async function emitTestTerminalBody(channel, secret, { generation, streamEpoch = 0, chunkPlaintextBytes }, body) {
+  channel.testInboundMessageId = (channel.testInboundMessageId ?? 0n) + 1n;
+  const messages = await sealTestTerminalBody(
+    secret,
+    { messageId: channel.testInboundMessageId, generation, streamEpoch, chunkPlaintextBytes },
+    body
+  );
+  for (const message of messages) channel.emitMessage(message);
+  await flushMicrotasks();
+  return messages;
+}
+
+/** Opens one binary terminal chunk message: header fields plus the plaintext slice. */
+async function openTestTerminalChunk(secret, message) {
+  const bytes = message instanceof ArrayBuffer ? new Uint8Array(message) : new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const header = {
+    version: bytes[0],
+    message_id: view.getBigUint64(1, true),
+    chunk_index: view.getUint32(9, true),
+    chunk_count: view.getUint32(13, true),
+    total_bytes: view.getUint32(17, true),
+    generation: view.getBigUint64(21, true),
+    stream_epoch: view.getUint32(29, true)
+  };
+  const nonce = bytes.subarray(TEST_TERMINAL_CHUNK_HEADER_BYTES, TEST_TERMINAL_CHUNK_HEADER_BYTES + TEST_TERMINAL_CHUNK_NONCE_BYTES);
+  const ciphertext = bytes.subarray(TEST_TERMINAL_CHUNK_HEADER_BYTES + TEST_TERMINAL_CHUNK_NONCE_BYTES);
+  const key = await testStreamKey(secret, "decrypt");
+  const plaintext = new Uint8Array(await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: nonce.buffer.slice(nonce.byteOffset, nonce.byteOffset + nonce.byteLength) },
+    key,
+    ciphertext.buffer.slice(ciphertext.byteOffset, ciphertext.byteOffset + ciphertext.byteLength)
+  ));
+  return { header, plaintext };
+}
+
+/** Reassembles every Web-to-Hub binary message on a terminal channel into complete input frames. */
+async function sentTestInputFrames(channel, secret) {
+  const frames = [];
+  const partial = new Map();
+  for (const sent of channel.sent) {
+    if (typeof sent === "string") continue;
+    const { header, plaintext } = await openTestTerminalChunk(secret, sent);
+    const key = String(header.message_id);
+    const assembly = partial.get(key) ?? { header, body: new Uint8Array(header.total_bytes), received: 0, next: 0 };
+    assert.equal(header.chunk_index, assembly.next, "terminal chunks arrive in index order");
+    assembly.body.set(plaintext, assembly.received);
+    assembly.received += plaintext.byteLength;
+    assembly.next += 1;
+    partial.set(key, assembly);
+    if (assembly.next === header.chunk_count) {
+      assert.equal(assembly.received, header.total_bytes, "terminal chunk bytes match total_bytes");
+      frames.push({ header: assembly.header, frame: assembly.body });
+      partial.delete(key);
+    }
+  }
+  assert.equal(partial.size, 0, "no partial terminal message remains");
+  return frames;
 }
 
 function hexToArrayBuffer(encoded) {

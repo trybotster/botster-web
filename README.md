@@ -104,7 +104,7 @@ BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
 npm run smoke:live-packaged-protocol:shared-session
 ```
 
-Each keep-alive pass must print `live-shared-session-terminal-lane`, `live-shared-session-cancel-passed`, and `live-shared-session-keep-alive-passed` for the same session id. Each keep-alive pass returns the producer to the primary screen before it prints the keep-alive marker. The exit pass must print `live-shared-session-exit-passed`. Page reload is not reconnect on this lane; reconnect proof closes the DataChannel on the surviving document. `BOTSTER_LIVE_ABLATE_CANCEL_DETACH=1` skips only the production `detach` request for the held subscription and marks the once-owner. It does not skip the reader cancel or stream close, so the cancel oracle is the first failure.
+Each keep-alive pass must print `live-shared-session-terminal-lane`, `live-shared-session-cancel-passed`, and `live-shared-session-keep-alive-passed` for the same session id. Each keep-alive pass returns the producer to the primary screen before it prints the keep-alive marker. The exit pass must print `live-shared-session-exit-passed`. Page reload is not reconnect on this lane; reconnect proof closes the DataChannel on the surviving document. The cancel pass holds no attach with a hook. It navigates Home as soon as the new attach request is recorded and records whether the cancel landed before or after `attached`.
 
 A caller-owned coordinator must spawn the shared session with a producer that implements this command contract. The canonical script is `productionSessionScriptSource()` in `scripts/live-packaged-protocol-helpers.mjs`. Print it with:
 

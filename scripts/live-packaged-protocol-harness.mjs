@@ -7,13 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { chromium } from "playwright";
+import ts from "typescript";
 import { createServer as createViteServer } from "vite";
-import {
-  encodeModeGatedInput,
-  encodePaste,
-  encodeResize,
-  MAX_PASTE_BYTES
-} from "@trybotster/terminal-protocol";
 import {
   assertDurableStateOwnership,
   assertPackageReused,
@@ -63,6 +58,19 @@ const proofNotes = [];
 function recordProofNote(kind, payload) {
   proofNotes.push({ kind, payload, at: Date.now() });
 }
+
+/**
+ * The vendored Core-generated terminal codec (src/botster/generated/terminal-protocol.ts),
+ * transpiled in place. It is the only terminal protocol source the harness uses.
+ */
+const terminalProtocol = await (async () => {
+  const source = readFileSync(new URL("../src/botster/generated/terminal-protocol.ts", import.meta.url), "utf8");
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
+})();
+const { decodeModeFlags, encodePaste, encodeRawBytes, encodeResize, MAX_PASTE_BYTES } = terminalProtocol;
 
 
 const protocol = "botster-hub-daemon-v1";
@@ -460,25 +468,31 @@ try {
     });
   }
 
-  // Mounted keyboard must use the Core binary mode-gated frame on its subscription channel.
-  const modeGatedBeforeEcho = await terminalTelemetryCount(page, "mode_gated_input");
+  // Mounted keyboard travels as semantic KEY operations on the subscription channel; the
+  // worker encodes the bytes and answers every operation with one INPUT_RESULT.
+  const keyOperationsBeforeEcho = await inputOperationCount(page, "key");
+  const resultsBeforeEcho = await terminalTelemetryCount(page, "input_result");
   await typeThroughMountedTerminal(page, `${echoProbe}\n`);
   await waitForTerminalOutput(page, `botster-web-production-echo:${echoProbe}`);
   await waitForTerminalRendererWrite(page, `botster-web-production-echo:${echoProbe}`);
   await proveByteFaithfulLiveTerminal(page);
-  const modeGatedAfterEcho = await terminalTelemetryCount(page, "mode_gated_input");
-  if (modeGatedAfterEcho <= modeGatedBeforeEcho) {
+  const keyOperationsAfterEcho = await inputOperationCount(page, "key");
+  if (keyOperationsAfterEcho <= keyOperationsBeforeEcho) {
     throw new Error(
-      `expected a binary mode_gated_input for mounted echo ${echoProbe}, observed delta ${modeGatedAfterEcho - modeGatedBeforeEcho}`
+      `expected KEY operations for mounted echo ${echoProbe}, observed delta ${keyOperationsAfterEcho - keyOperationsBeforeEcho}`
     );
   }
-  const fallbackSeen = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
-      (entry) => entry.kind === "mode_gated_input_fallback"
-    )
-  );
-  if (fallbackSeen) {
-    throw new Error("mode_gated_input_fallback must not appear after JSON-safe token fix");
+  await page.waitForFunction(
+    ({ before, expected }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "input_result").length >= before + expected,
+    { before: resultsBeforeEcho, expected: keyOperationsAfterEcho - keyOperationsBeforeEcho },
+    { timeout: 30_000 }
+  ).catch((error) => {
+    throw new Error(`every KEY operation must receive one INPUT_RESULT: ${error.message}`);
+  });
+  const uncapturedSeen = await terminalTelemetryCount(page, "restty_input_uncaptured");
+  if (uncapturedSeen !== 0) {
+    throw new Error(`Restty produced ${uncapturedSeen} uncaptured input records during the mounted echo`);
   }
 
   const readScreen = await callTerminalControl(page, "readScreen");
@@ -490,19 +504,13 @@ try {
     throw new Error(`unexpected read_screen response: ${JSON.stringify(readScreen)}`);
   }
 
+  // Readback is paged host control: CaptureSnapshot then ReadSnapshotPage per page.
   const captureSnapshot = await callTerminalControl(page, "captureSnapshot");
   await waitForHarnessEvent(page, { kind: "daemon_request", type: "capture_snapshot" }, "capture_snapshot request");
-  if (
-    captureSnapshot?.session_id !== productionSessionId ||
-    !Number.isInteger(captureSnapshot.rows) ||
-    captureSnapshot.rows <= 0 ||
-    !Number.isInteger(captureSnapshot.cols) ||
-    captureSnapshot.cols <= 0 ||
-    !Number.isInteger(captureSnapshot.payload_bytes) ||
-    captureSnapshot.payload_bytes < 0 ||
-    (captureSnapshot.payload_format != null && typeof captureSnapshot.payload_format !== "string")
-  ) {
-    throw new Error(`unexpected capture_snapshot response: ${JSON.stringify(captureSnapshot)}`);
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_snapshot_page" }, "read_snapshot_page request");
+  const captureBytes = captureSnapshot ? Object.keys(captureSnapshot).length : 0;
+  if (!captureSnapshot || captureBytes <= 8 || captureSnapshot[0] !== "G".charCodeAt(0)) {
+    throw new Error(`unexpected capture_snapshot bytes: ${JSON.stringify({ bytes: captureBytes })}`);
   }
   await waitForTerminalAttachState(page, ["attached"]);
 
@@ -518,7 +526,7 @@ try {
   if (livePasteCasesMode) {
     await proveLivePasteCases(page);
   }
-  await proveMountedMouseModeGatedInput(page);
+  await proveMountedMouseInput(page);
   await proveZeroBrowserOscColorReplies(page);
   await provePaletteProjectionAfterOsc(page, productionSessionId);
   await proveRetainedHistoryAfterEcho(page, echoProbe);
@@ -655,11 +663,12 @@ try {
       entry.kind === "attach_failed" ||
       entry.kind === "terminal_attach_timeout" ||
       entry.kind === "stale_control_response" ||
-      entry.kind === "before_input" ||
-      entry.kind === "input" ||
-      entry.kind === "mode_gated_input" ||
-      entry.kind === "mode_gated_input_failed" ||
-      entry.kind === "input_result"
+      entry.kind === "input_sent" ||
+      entry.kind === "input_result" ||
+      entry.kind === "restty_input_uncaptured" ||
+      entry.kind === "modes" ||
+      entry.kind === "route_resync" ||
+      entry.kind === "frame_stale_epoch"
     ).slice(-120);
     diagnosticMessage += `\nterminal lifecycle tail:\n${JSON.stringify(terminalLifecycleTail, null, 2)}`;
     const terminalStreamEvents = harnessState.events?.filter((entry) => entry.kind.startsWith("terminal_stream_")) ?? [];
@@ -2065,8 +2074,8 @@ async function exercisePackageEvents(page, { forceGap }) {
     return {
       daemon_event: events.filter((entry) => entry.kind === "daemon_event").length,
       terminal_from_event: events.filter((entry) =>
-        entry.kind === "daemon_terminal_event" &&
-        (entry.payload?.type === "package_event" || entry.payload?.type === "event_gap")
+        entry.kind === "terminal_route_frame" &&
+        !["output", "snapshot_ready", "snapshot_history", "snapshot_finish", "process_exit", "modes", "attach_state", "input_result", "history_unavailable", "route_resync"].includes(entry.payload?.frame?.kind)
       ).length
     };
   });
@@ -7081,13 +7090,12 @@ async function waitForDaemonTerminalOutputBytes(page, expectedBytes, label) {
   await page.waitForFunction(
     ({ expected }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
-        const event = entry.payload;
-        if (entry.kind !== "daemon_terminal_event" || event?.type !== "terminal_output") return false;
-        if (event.payload_encoding !== "base64" || typeof event.payload_base64 !== "string") return false;
-        if ("data" in event) return false;
+        const frame = entry.payload?.frame;
+        if (entry.kind !== "terminal_route_frame" || frame?.kind !== "output") return false;
+        if (typeof frame.payload_base64 !== "string") return false;
         try {
-          const raw = globalThis.atob(event.payload_base64);
-          if (raw.length !== event.bytes || raw.length !== expected.length) return false;
+          const raw = globalThis.atob(frame.payload_base64);
+          if (raw.length !== frame.bytes || raw.length !== expected.length) return false;
           return expected.every((value, index) => raw.charCodeAt(index) === value);
         } catch {
           return false;
@@ -7096,7 +7104,7 @@ async function waitForDaemonTerminalOutputBytes(page, expectedBytes, label) {
     { expected: expectedBytes },
     { timeout: 45_000 }
   ).catch((error) => {
-    throw new Error(`timed out waiting for daemon terminal_output bytes ${label}: ${error.message}`);
+    throw new Error(`timed out waiting for daemon OUTPUT bytes ${label}: ${error.message}`);
   });
 }
 
@@ -7117,91 +7125,77 @@ async function countExactTerminalKind(page, kind, expectedBytes) {
 }
 
 async function proveHydrationBuffersUntilGhostsnpInstall(page) {
-  const armed = await page.evaluate(() => {
-    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    if (typeof harness?.armSnapshotInstallHold !== "function") return false;
-    harness.armSnapshotInstallHold();
-    return true;
-  });
-  if (!armed) {
-    throw new Error("snapshot-install hold unavailable: expose armSnapshotInstallHold on the live harness");
-  }
-
-  const heldBefore = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
-      (entry) => entry.kind === "snapshot_install_held"
-    ).length
-  );
+  // Close the real DataChannel. The surviving document reattaches with a fresh subscription.
+  // Input sent during the reattach is delivered after ATTACH_STATE attached, and the route's
+  // live OUTPUT is painted only after the fresh READY install and SNAPSHOT_FINISH.
+  const attachesBefore = await terminalTelemetryCount(page, "attach");
+  const terminalIndexBefore = await page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).length);
   await page.evaluate(() => {
     const closed = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.();
-    if (!closed) throw new Error("hydration hold requires closing the real RTCDataChannel");
+    if (!closed) throw new Error("hydration ordering proof requires closing the real RTCDataChannel");
   });
-
-  const hold = await page.waitForFunction(
+  const attach = await page.waitForFunction(
     ({ before }) => {
-      const held = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
-        (entry) => entry.kind === "snapshot_install_held"
-      );
-      if (held.length <= before) return null;
-      const latest = held.at(-1)?.payload ?? {};
+      const attaches = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "attach");
+      if (attaches.length <= before) return null;
+      const latest = attaches.at(-1)?.payload ?? {};
       if (typeof latest.subscription_id !== "string" || !Number.isInteger(latest.generation)) return null;
       return latest;
     },
-    { before: heldBefore },
+    { before: attachesBefore },
     { timeout: 30_000 }
   ).then((handle) => handle.jsonValue()).catch((error) => {
-    throw new Error(`timed out waiting for snapshot_install_held: ${error.message}`);
+    throw new Error(`timed out waiting for the reattach after the channel close: ${error.message}`);
   });
 
-  // The ready snapshot and the later attached event use the same ordered
-  // channel. The held snapshot blocks that event. Core queues this input until
-  // incremental attach completes, so send it while snapshot install is held.
-
+  // Input queued during the reattach: the data plane sends it once the route is attached.
   await page.evaluate(() => {
     const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
     if (!harness?.terminalControl?.writeInput) {
       throw new Error("terminalControl.writeInput unavailable");
     }
-    harness.holdInputPromise = harness.terminalControl.writeInput(
-      "botster-web-production-bytes-hold\n"
-    );
-  });
-  const flushedEarly = {
-    output: await countExactTerminalKind(page, "output", hydrateHoldBytes),
-    renderer_write: await countExactTerminalKind(page, "renderer_write", hydrateHoldBytes)
-  };
-  if (flushedEarly.output !== 0 || flushedEarly.renderer_write !== 0) {
-    throw new Error(
-      `hydration hold leaked bytes before GHOSTSNP install: ${JSON.stringify({ hold, flushedEarly })}`
-    );
-  }
-
-  await page.evaluate(() => {
-    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.releaseSnapshotInstall?.();
+    harness.holdInputPromise = harness.terminalControl.writeInput("botster-web-production-bytes-hold\n");
   });
   await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.holdInputPromise);
-
   await waitForDaemonTerminalOutputBytes(page, hydrateHoldBytes, "hydration hold");
-
   await page.waitForFunction(
     ({ expectedGeneration, expectedSubscription }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) =>
         entry.kind === "ghostsnp_install" &&
+        entry.payload?.progress === "ready" &&
         entry.payload?.generation === expectedGeneration &&
         entry.payload?.subscription_id === expectedSubscription
       ),
-    { expectedGeneration: hold.generation, expectedSubscription: hold.subscription_id },
+    { expectedGeneration: attach.generation, expectedSubscription: attach.subscription_id },
     { timeout: 20_000 }
   ).catch((error) => {
-    throw new Error(
-      `timed out waiting for generation-scoped ghostsnp_install after hold release: ${error.message}`
-    );
+    throw new Error(`timed out waiting for the generation-scoped READY install after the reattach: ${error.message}`);
   });
   await waitForResttyBoundBytes(page, hydrateHoldBytes, "hydration flush");
-  recordProofNote("hydration_hold", {
-    generation: hold.generation,
-    subscription_id: hold.subscription_id,
-    bytes: hydrateHoldBytes
+  const chronology = await page.evaluate(({ from, expectedGeneration, expectedSubscription }) => {
+    const terminal = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).slice(from);
+    const attachIndex = terminal.findIndex((entry) => entry.kind === "attach" && entry.payload?.subscription_id === expectedSubscription);
+    const readyIndex = terminal.findIndex((entry, index) =>
+      index > attachIndex && entry.kind === "ghostsnp_install" && entry.payload?.progress === "ready" && entry.payload?.generation === expectedGeneration
+    );
+    const attachedIndex = terminal.findIndex((entry, index) =>
+      index > attachIndex && entry.kind === "status" && entry.payload?.state === "attached"
+    );
+    const firstOutputIndex = terminal.findIndex((entry, index) => index > attachIndex && entry.kind === "output");
+    const firstInputIndex = terminal.findIndex((entry, index) => index > attachIndex && entry.kind === "input_sent");
+    return { attachIndex, readyIndex, attachedIndex, firstOutputIndex, firstInputIndex };
+  }, { from: terminalIndexBefore, expectedGeneration: attach.generation, expectedSubscription: attach.subscription_id });
+  if (chronology.readyIndex < 0 || chronology.attachedIndex < 0 || chronology.firstOutputIndex < 0) {
+    throw new Error(`hydration ordering proof missing READY, attached, or output: ${JSON.stringify({ attach, chronology })}`);
+  }
+  if (chronology.firstOutputIndex < chronology.attachedIndex || chronology.firstOutputIndex < chronology.readyIndex) {
+    throw new Error(`live output was painted before the fresh READY install completed: ${JSON.stringify({ attach, chronology })}`);
+  }
+  recordProofNote("hydration_ordering", {
+    generation: attach.generation,
+    subscription_id: attach.subscription_id,
+    bytes: hydrateHoldBytes,
+    chronology
   });
 }
 
@@ -7242,24 +7236,24 @@ async function proveRendererWriteOracleIsLoadBearing(page) {
 
 async function proveByteFaithfulLiveTerminal(page) {
   const envelopeProof = await page.evaluate(() => {
-    const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "daemon_terminal_event")
-      .map((entry) => entry.payload)
-      .filter((event) => event?.type === "terminal_output");
-    if (events.length === 0) return { error: "no_terminal_output_events" };
-    const invalid = events.find((event) =>
-      event.payload_encoding !== "base64" ||
-      typeof event.payload_base64 !== "string" ||
-      !Number.isInteger(event.bytes) ||
-      "data" in event
+    const frames = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "terminal_route_frame")
+      .map((entry) => entry.payload);
+    const outputs = frames.filter((frame) => frame?.frame?.kind === "output");
+    if (outputs.length === 0) return { error: "no_output_frames" };
+    const invalid = frames.find((frame) =>
+      typeof frame.route !== "string" ||
+      !Number.isInteger(frame.generation) ||
+      !Number.isInteger(frame.stream_epoch) ||
+      (frame.frame?.kind === "output" && (typeof frame.frame.payload_base64 !== "string" || !Number.isInteger(frame.frame.bytes)))
     );
     if (invalid) {
-      return { error: "legacy_or_invalid_envelope", keys: Object.keys(invalid) };
+      return { error: "invalid_route_frame", keys: Object.keys(invalid) };
     }
-    return { count: events.length };
+    return { count: outputs.length };
   });
   if (envelopeProof.error) {
-    throw new Error(`live terminal_output envelope invalid: ${JSON.stringify(envelopeProof)}`);
+    throw new Error(`live route frames invalid: ${JSON.stringify(envelopeProof)}`);
   }
 
   await proveHydrationBuffersUntilGhostsnpInstall(page);
@@ -7299,12 +7293,22 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
     const heldTerminalOutputSeen = new Promise((resolve) => {
       reportHeldTerminalOutput = resolve;
     });
+    const decode = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.decodeTerminalBody;
+    if (typeof decode !== "function") {
+      return { ok: false, reason: "harness decodeTerminalBody missing" };
+    }
     const stream = control.streamTerminal(floodSessionId, floodSubscriptionId, (event) => {
-      events.push(event);
-      if (event.type === "terminal_output") {
-        reportHeldTerminalOutput();
-        return heldTerminalOutput;
+      if ("body" in event) {
+        const decoded = decode(event.body);
+        events.push({ type: decoded.kind, route: event.route, generation: event.generation, stream_epoch: event.streamEpoch });
+        if (decoded.kind === "output") {
+          reportHeldTerminalOutput();
+          return heldTerminalOutput;
+        }
+        return undefined;
       }
+      events.push(event);
+      return undefined;
     });
     await stream.ready;
     const deadline = Date.now() + 20_000;
@@ -7360,7 +7364,8 @@ async function proveLiveTerminalAfterAttach(page, probe) {
     const hello = events.find((entry) => entry.kind === "daemon_hello")?.payload;
     const terminalFrame = events.some((entry) =>
       entry.kind === "terminal_data_channel_receive" &&
-      entry.payload?.delivery_kind === "daemon_terminal_frame"
+      Number.isInteger(entry.payload?.total_bytes) &&
+      Number.isInteger(entry.payload?.message_id)
     );
     const drainBodies = events.some((entry) =>
       entry.kind === "daemon_request" &&
@@ -7381,13 +7386,14 @@ async function proveLiveTerminalAfterAttach(page, probe) {
     throw new Error("terminal Hello omitted Core snapshot_delivery token");
   }
   if (!helloProof.terminalFrame) {
-    throw new Error("production attach never assembled a daemon_terminal_frame");
+    throw new Error("production attach never received a binary terminal chunk");
   }
   if (helloProof.drainBodies) {
     throw new Error("production attach still requested Drain");
   }
+  const rawBefore = await inputOperationCount(page, "raw");
   await callTerminalControl(page, "writeInput", `${probe}\n`);
-  await waitForTerminalInputTelemetry(page, "input", `${probe}\n`, `post-attach live input ${probe}`);
+  await waitForInputOperation(page, "raw", rawBefore, `post-attach live input ${probe}`);
   await waitForTerminalOutput(page, `botster-web-production-echo:${probe}`);
   await waitForTerminalRendererWrite(page, `botster-web-production-echo:${probe}`);
 }
@@ -7408,24 +7414,31 @@ async function waitForTerminalCanvas(page) {
 }
 
 
-async function proveMountedMouseModeGatedInput(page) {
-  // Enable normal + SGR mouse tracking in the session, then require ModeGatedInput
-  // for a real pointer event (proves cache refresh after mouse_mode 0 → 9).
+async function proveMountedMouseInput(page) {
+  // Enable normal + SGR mouse tracking in the session. The authoritative MODES frame must
+  // reach the data plane, and a real pointer press and release must become MOUSE operations.
+  const modesBefore = await terminalTelemetryCount(page, "modes");
   await callTerminalControl(page, "writeInput", "botster-web-production-mouse-on\n");
   await waitForDaemonTerminalOutputBytes(
     page,
     [0x1b, 0x5b, 0x3f, 0x31, 0x30, 0x30, 0x30, 0x68, 0x1b, 0x5b, 0x3f, 0x31, 0x30, 0x30, 0x36, 0x68],
     "mouse DECSET"
   );
-  // Confirm authoritative modes see mouse tracking when ReadModeFlags is available.
-  const modes = await page.evaluate(() => {
-    // Mode flags land via attach hydration telemetry when available.
-    const modeEntry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
-      .filter((entry) => entry.kind === "mode_flags")
-      .at(-1);
-    return modeEntry?.payload ?? null;
+  const modes = await page.waitForFunction(
+    ({ before, normalBit, sgrBit }) => {
+      const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "modes");
+      if (entries.length <= before) return null;
+      const latest = entries.at(-1)?.payload ?? {};
+      if ((latest.modeBits & normalBit) === 0 || (latest.modeBits & sgrBit) === 0) return null;
+      return latest;
+    },
+    { before: modesBefore, normalBit: terminalProtocol.ModeBits.MOUSE_NORMAL, sgrBit: terminalProtocol.ModeBits.MOUSE_SGR },
+    { timeout: 15_000 }
+  ).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(`authoritative MODES did not report mouse tracking after DECSET 1000/1006: ${error.message}`);
   });
-  const before = await terminalTelemetryCount(page, "mode_gated_input");
+  const before = await inputOperationCount(page, "mouse");
+  const resultsBefore = await terminalTelemetryCount(page, "input_result");
   // Real Playwright pointer path (synthetic PointerEvent trips setPointerCapture).
   const canvas = page.locator(".terminal-view-container canvas").first();
   await canvas.waitFor({ state: "visible", timeout: 10_000 });
@@ -7436,28 +7449,27 @@ async function proveMountedMouseModeGatedInput(page) {
   await page.mouse.move(x, y);
   await page.mouse.down();
   await page.mouse.up();
-  await page.waitForFunction(
-    ({ beforeCount }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
-        (entry) => entry.kind === "mode_gated_input"
-      ).length > beforeCount,
-    { beforeCount: before },
-    { timeout: 8_000 }
-  ).catch(async (error) => {
-    const after = await terminalTelemetryCount(page, "mode_gated_input");
+  await waitForInputOperation(page, "mouse", before + 1, "mouse press and release operations").catch(async (error) => {
     const telemetry = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).slice(-12)
     );
-    throw new Error(
-      `mouse DECSET 1000/1006 path did not produce mode_gated_input (before=${before} after=${after} modes=${JSON.stringify(modes)}): ${error.message}; telemetry=${JSON.stringify(telemetry)}`
-    );
+    throw new Error(`pointer press did not produce MOUSE operations (modes=${JSON.stringify(modes)}): ${error.message}; telemetry=${JSON.stringify(telemetry)}`);
   });
-  const after = await terminalTelemetryCount(page, "mode_gated_input");
-  if (after <= before) {
-    throw new Error(`expected mode_gated_input after enabled mouse; delta=${after - before}`);
+  const after = await inputOperationCount(page, "mouse");
+  await page.waitForFunction(
+    ({ before: resultsBeforeCount, expected }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "input_result").length >= resultsBeforeCount + expected,
+    { before: resultsBefore, expected: after - before },
+    { timeout: 15_000 }
+  ).catch((error) => {
+    throw new Error(`every MOUSE operation must receive one INPUT_RESULT: ${error.message}`);
+  });
+  const uncaptured = await terminalTelemetryCount(page, "restty_input_uncaptured");
+  if (uncaptured !== 0) {
+    throw new Error(`Restty produced ${uncaptured} uncaptured input records during the mouse proof`);
   }
   recordProofNote("mouse_path", {
-    mode_gated_delta: after - before,
+    mouse_operations: after - before,
     modes,
     decset: ["1000", "1006"]
   });
@@ -7473,8 +7485,8 @@ async function proveMountedMouseModeGatedInput(page) {
 async function daemonTerminalOutputSince(page, since) {
   return page.evaluate((from) =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from)
-      .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
-      .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+      .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
+      .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
       .join(""),
   since);
 }
@@ -7485,8 +7497,8 @@ async function waitForDaemonOutputLine(page, since, pattern, label, timeout = 45
     ({ from, source }) =>
       new RegExp(source).test(
         (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from)
-          .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
-          .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+          .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
+          .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
           .join("")
       ),
     { from: since, source: pattern.source },
@@ -7580,23 +7592,23 @@ async function proveMountedClipboardPaste(page) {
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
         .filter((entry) => entry.kind === "paste_outcome")
         .slice(beforeCount)
-        .some((entry) => entry.payload?.outcome === "admitted" && entry.payload?.requestedBytes === bytes && entry.payload?.deliveredBytes === bytes),
+        .some((entry) => entry.payload?.outcome === "written" && entry.payload?.requestedBytes === bytes && entry.payload?.acceptedPayloadBytes === bytes),
     { beforeCount: outcomesBefore, bytes: expectedBytes },
     { timeout: 45_000 }
   ).catch(async (error) => {
     const telemetry = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
-        .filter((entry) => ["paste", "paste_outcome", "paste_committed", "paste_settled", "clipboard_paste", "paste_routed", "input_result"].includes(entry.kind))
+        .filter((entry) => ["paste", "paste_outcome", "input_sent", "clipboard_paste", "paste_routed", "input_result", "restty_input_uncaptured"].includes(entry.kind))
         .slice(-12)
     );
-    throw new Error(`mounted clipboard paste did not reach an admitted outcome: ${error.message}; telemetry=${JSON.stringify(telemetry)}`);
+    throw new Error(`mounted clipboard paste did not reach a written outcome: ${error.message}; telemetry=${JSON.stringify(telemetry)}`);
   });
   await page.waitForFunction(
     ({ since, marker }) => {
       const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since);
       const text = events
-        .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
-        .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+        .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
+        .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
         .join("");
       return text.includes(marker);
     },
@@ -7611,30 +7623,26 @@ async function proveMountedClipboardPaste(page) {
         `output chars=${output.length} echo_lines=${JSON.stringify(echoes.slice(0, 5))} tail=${JSON.stringify(output.slice(-300))}`
     );
   });
-  const leaks = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
-      .filter((entry) => entry.kind === "pty_send_input" || entry.kind === "mode_gated_input" || entry.kind === "input")
-      .map((entry) => String(entry.payload?.data ?? entry.payload?.bytes ?? ""))
-      .filter((data) => data.includes("botster-web-production-large-paste:"))
-  );
-  if (leaks.length !== 0) {
-    throw new Error(`mounted paste leaked into the key path: ${leaks.length} entries`);
+  // Paste text that reached Restty's key path would surface as an uncaptured input report.
+  const leaks = await terminalTelemetryCount(page, "restty_input_uncaptured");
+  if (leaks !== 0) {
+    throw new Error(`mounted paste leaked into the key path: ${leaks} uncaptured input records`);
   }
   const pasteResult = await page.evaluate(({ bytes }) =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
-      .filter((entry) => entry.kind === "input_result" && entry.payload?.kind === "paste")
+      .filter((entry) => entry.kind === "input_result")
       .map((entry) => entry.payload)
-      .find((result) => result.admitted === true && result.bytes_written === bytes) ?? null,
+      .find((result) => result.outcome === "written" && result.accepted_payload_bytes === bytes) ?? null,
   { bytes: expectedBytes });
-  if (!pasteResult) throw new Error("no admitted paste input_result with the exact byte count was recorded");
+  if (!pasteResult) throw new Error("no written paste input_result with the exact accepted byte count was recorded");
   // A key typed after the paste is delivered and echoed in order.
   await typeThroughMountedTerminal(page, "after-paste\n");
   await page.waitForFunction(
     ({ since, marker }) => {
       const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since);
       const text = events
-        .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
-        .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+        .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
+        .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
         .join("");
       return text.indexOf("botster-web-production-large-paste-ok") < text.indexOf(marker);
     },
@@ -7646,7 +7654,8 @@ async function proveMountedClipboardPaste(page) {
   recordProofNote("mounted_clipboard_paste", {
     bytes: expectedBytes,
     operation_id: pasteResult.operation_id ?? null,
-    bracketed_paste: pasteResult.mode_flags?.bracketed_paste ?? null,
+    written_pty_bytes: pasteResult.written_pty_bytes ?? null,
+    bracketed_paste: decodeModeFlags(pasteResult.mode_bits ?? 0).bracketed_paste,
     key_after_paste: "botster-web-production-echo:after-paste"
   });
 }
@@ -7674,8 +7683,8 @@ async function proveLivePasteCases(page) {
   const daemonOutputSince = (since) =>
     page.evaluate((from) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from)
-        .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
-        .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+        .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
+        .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
         .join(""),
     since);
   // Waits until the concatenated daemon output since `since` matches a complete line pattern,
@@ -7686,7 +7695,7 @@ async function proveLivePasteCases(page) {
       ({ from, expected }) =>
         new RegExp(expected).test(
           (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from)
-            .filter((entry) => entry.kind === "daemon_terminal_event" && entry.payload?.type === "terminal_output")
+            .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
             .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
             .join("")
         ),
@@ -7728,7 +7737,7 @@ async function proveLivePasteCases(page) {
     ).catch(async (error) => {
       const telemetry = await page.evaluate(() =>
         (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
-          .filter((entry) => ["paste", "paste_outcome", "paste_committed", "paste_settled", "paste_stale_retry", "clipboard_paste", "paste_routed", "input_result", "mode_flags"].includes(entry.kind))
+          .filter((entry) => ["paste", "paste_outcome", "input_sent", "clipboard_paste", "paste_routed", "input_result", "modes", "restty_input_uncaptured"].includes(entry.kind))
           .slice(-12)
       );
       throw new Error(`${label}: no paste outcome: ${error.message}; telemetry=${JSON.stringify(telemetry)}`);
@@ -7743,29 +7752,19 @@ async function proveLivePasteCases(page) {
     page.evaluate(
       (id) =>
         (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
-          .filter((entry) => entry.kind === "input_result" && entry.payload?.kind === "paste" && entry.payload?.operation_id === id)
+          .filter((entry) => entry.kind === "input_result" && entry.payload?.operation_id === id)
           .at(-1)?.payload ?? null,
       operationId
     );
-  const keyPathLeaks = (needle) =>
-    page.evaluate(
-      (marker) =>
-        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
-          .filter((entry) => entry.kind === "pty_send_input" || entry.kind === "mode_gated_input" || entry.kind === "input")
-          .map((entry) => String(entry.payload?.data ?? entry.payload?.bytes ?? ""))
-          .filter((data) => data.includes(marker)).length,
-      needle
-    );
+  // Paste text that reached Restty's key path would surface as an uncaptured input report.
+  const keyPathLeaks = () => terminalTelemetryCount(page, "restty_input_uncaptured");
   const sha256Hex = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
   // Bracketed paste is an application mode. The session script emits DECSET/DECRST 2004 and
   // then a done marker. Waiting for the done marker only synchronizes with the shell; it is
   // not proof that Core's parser applied the mode, because terminal output delivery is not
-  // parser acknowledgement. The authoritative confirmation is the admitted paste
-  // input_result, whose mode_flags.bracketed_paste receivePaste asserts equals the target.
-  // A single deliberate toggle changes the mode once, so the paste's one stale retry converges
-  // under the token Core returns; the assertion on the admitted result is the observed
-  // condition, never the output bytes.
+  // parser acknowledgement. The authoritative confirmation is the written paste input_result,
+  // whose mode_bits receivePaste asserts carry the target bracketed-paste bit.
   const setBracketedPaste = async (enabled) => {
     const since = await readEventsLength();
     const name = enabled ? "on" : "off";
@@ -7773,12 +7772,10 @@ async function proveLivePasteCases(page) {
     await waitForLine(since, new RegExp(`botster-web-production-bracket-${name}-done\\r?\\n`), `bracket ${name}`);
   };
 
-  // Authoritative worker mode observation, reusing the existing direct read_mode_flags helper.
-  // It queries Core for the current mode token and flags, so waiting until bracketed_paste
-  // equals the case's target confirms Core has applied and settled the deliberate mode change
-  // before the paste is dispatched. This is an observed condition, not output delivery, and it
-  // changes no production cache logic. A settled Core mode means Web's single stale retry
-  // converges against a stable authoritative token.
+  // Authoritative worker mode observation through host-control read_mode_flags: waiting until
+  // bracketed_paste equals the case's target confirms Core has applied and settled the
+  // deliberate mode change before the paste is dispatched. This is an observed condition, not
+  // output delivery, and it changes no production logic.
   const waitForBracketedMode = async (target, label) => {
     const boundMs = 8_000;
     const startedAt = Date.now();
@@ -7820,7 +7817,7 @@ async function proveLivePasteCases(page) {
     const preFlags = await waitForBracketedMode(bracketed, `${label} pre-paste mode`);
 
     const outcomesBefore = await terminalTelemetryCount(page, "paste_outcome");
-    const retriesBefore = await terminalTelemetryCount(page, "paste_stale_retry");
+    const leaksBefore = await keyPathLeaks();
     const receiptSince = await readEventsLength();
     const dispatched = await dispatchClipboardPaste(text);
     if (!dispatched.defaultPrevented) {
@@ -7828,29 +7825,28 @@ async function proveLivePasteCases(page) {
     }
 
     const outcome = await nextPasteOutcome(outcomesBefore, label);
-    if (outcome?.outcome !== "admitted") {
-      throw new Error(`${label}: expected an admitted outcome, observed ${JSON.stringify(outcome)}`);
+    if (outcome?.outcome !== "written") {
+      throw new Error(`${label}: expected a written outcome, observed ${JSON.stringify(outcome)}`);
     }
-    if (outcome.minimumBytes !== text.length || outcome.requestedBytes !== payload.length) {
+    if (outcome.requestedBytes !== payload.length || outcome.acceptedPayloadBytes !== payload.length) {
       throw new Error(`${label}: size accounting mismatch: ${JSON.stringify({ outcome, utf16: text.length, utf8: payload.length })}`);
     }
-    const retries = (await terminalTelemetryCount(page, "paste_stale_retry")) - retriesBefore;
-    if (retries > 1) throw new Error(`${label}: more than one stale-mode retry observed (${retries})`);
     const result = await pasteInputResult(outcome.operationId);
-    if (!result?.admitted) throw new Error(`${label}: no admitted input_result for operation ${outcome.operationId}: ${JSON.stringify(result)}`);
-    if (result.mode_flags?.bracketed_paste !== bracketed) {
-      throw new Error(`${label}: input_result bracketed_paste=${String(result.mode_flags?.bracketed_paste)} but the case set ${bracketed}`);
+    if (result?.outcome !== "written") throw new Error(`${label}: no written input_result for operation ${outcome.operationId}: ${JSON.stringify(result)}`);
+    const resultBracketed = decodeModeFlags(result.mode_bits ?? 0).bracketed_paste;
+    if (resultBracketed !== bracketed) {
+      throw new Error(`${label}: input_result bracketed_paste=${String(resultBracketed)} but the case set ${bracketed}`);
     }
-    if (outcome.deliveredBytes !== result.bytes_written) {
-      throw new Error(`${label}: deliveredBytes ${outcome.deliveredBytes} differs from Core bytes_written ${result.bytes_written}`);
+    if (outcome.writtenPtyBytes !== result.written_pty_bytes) {
+      throw new Error(`${label}: writtenPtyBytes ${outcome.writtenPtyBytes} differs from Core written_pty_bytes ${result.written_pty_bytes}`);
     }
-    // Pinned Core 93acae3: managed_session_runtime.rs prepends ESC[200~ and appends ESC[201~
-    // before the mode-gated PTY write, and bytes_written reports the actual PTY write count,
-    // so an admitted bracketed paste reports payload + 12 and an unbracketed one reports the
-    // payload. Web forwards that count as deliveredBytes; requestedBytes stays the payload.
+    // The worker's paste encoder adds ESC[200~ and ESC[201~ under bracketed paste, and
+    // written_pty_bytes reports the actual PTY write, so a bracketed paste reports payload
+    // plus 12 and an unbracketed one reports the payload. requestedBytes stays the payload.
+    // This expectation is unverified against the v9 worker until the live lane runs.
     const expectedBytesWritten = bracketed ? payload.length + MARKER_BYTES : payload.length;
-    if (result.bytes_written !== expectedBytesWritten) {
-      throw new Error(`${label}: bytes_written ${result.bytes_written}, expected ${expectedBytesWritten} (${bracketed ? "payload plus markers" : "payload"})`);
+    if (result.written_pty_bytes !== expectedBytesWritten) {
+      throw new Error(`${label}: written_pty_bytes ${result.written_pty_bytes}, expected ${expectedBytesWritten} (${bracketed ? "payload plus markers" : "payload"})`);
     }
     const bytesWrittenAccounting = bracketed ? "payload_plus_markers" : "payload";
 
@@ -7860,21 +7856,21 @@ async function proveLivePasteCases(page) {
     const receivedCount = Number.parseInt(receipt[1], 10);
     const receivedDigest = receipt[2];
 
-    // Exactly one outcome and one settlement for this operation id, and exactly one new
+    // Exactly one outcome and one INPUT_RESULT for this operation id, and exactly one new
     // outcome overall since the dispatch.
     const uniqueness = await page.evaluate(
       ({ id, before }) => {
         const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
         return {
           outcomes_for_operation: terminal.filter((entry) => entry.kind === "paste_outcome" && entry.payload?.operationId === id).length,
-          settled_for_operation: terminal.filter((entry) => entry.kind === "paste_settled" && entry.payload?.operation_id === id).length,
+          results_for_operation: terminal.filter((entry) => entry.kind === "input_result" && entry.payload?.operation_id === id).length,
           new_outcomes: terminal.filter((entry) => entry.kind === "paste_outcome").length - before
         };
       },
       { id: outcome.operationId, before: outcomesBefore }
     );
-    if (uniqueness.outcomes_for_operation !== 1 || uniqueness.settled_for_operation !== 1 || uniqueness.new_outcomes !== 1) {
-      throw new Error(`${label}: expected exactly one outcome and one settlement for operation ${outcome.operationId}: ${JSON.stringify(uniqueness)}`);
+    if (uniqueness.outcomes_for_operation !== 1 || uniqueness.results_for_operation !== 1 || uniqueness.new_outcomes !== 1) {
+      throw new Error(`${label}: expected exactly one outcome and one result for operation ${outcome.operationId}: ${JSON.stringify(uniqueness)}`);
     }
     const wireDigest = sha256Hex(wire);
     if (receivedCount !== wire.length) {
@@ -7883,8 +7879,8 @@ async function proveLivePasteCases(page) {
     if (receivedDigest !== wireDigest) {
       throw new Error(`${label}: receiver digest ${receivedDigest} differs from expected wire digest ${wireDigest}`);
     }
-    const leaks = await keyPathLeaks(leakMarker);
-    if (leaks !== 0) throw new Error(`${label}: paste text reached the key path in ${leaks} entries`);
+    const leaks = (await keyPathLeaks()) - leaksBefore;
+    if (leaks !== 0) throw new Error(`${label}: paste text reached the key path in ${leaks} uncaptured input records`);
 
     // A key typed after the receipt is echoed after it.
     const afterSince = await readEventsLength();
@@ -7901,12 +7897,9 @@ async function proveLivePasteCases(page) {
       wire_sha256: wireDigest,
       received_bytes: receivedCount,
       received_sha256: receivedDigest,
-      bytes_written: result.bytes_written,
-      bytes_written_accounting: bytesWrittenAccounting,
-      stale_retries: retries,
+      written_pty_bytes: result.written_pty_bytes,
+      written_pty_bytes_accounting: bytesWrittenAccounting,
       operation_id: outcome.operationId,
-      pre_paste_mode_generation: preFlags.mode_generation,
-      pre_paste_mode_revision: preFlags.mode_revision,
       pre_paste_bracketed_paste: preFlags.bracketed_paste,
       pre_paste_mouse_mode: preFlags.mouse_mode
     });
@@ -7923,87 +7916,62 @@ async function proveLivePasteCases(page) {
   await receivePaste({ label: "bracket-off", text: `botster-web-live-paste-bracket-off:${"r".repeat(4_096)}`, bracketed: false });
 
   // Oversized clipboard text is refused before encoding. What the harness observes directly:
-  // a rejected/too_large outcome without requestedBytes, no new paste, paste_committed, or
-  // paste_settled telemetry, and no key-path input carrying the text. The plane records no
-  // per-frame telemetry, so "no protocol frames were sent" is an inference from the plane
-  // source (the too_large return precedes encoding and the transaction), not an observation.
+  // a rejected_locally/too_large outcome without requestedBytes, no new paste or input_sent
+  // telemetry, and no uncaptured key-path input.
   {
     const label = "too-large";
     const outcomesBefore = await terminalTelemetryCount(page, "paste_outcome");
     const pasteBefore = await terminalTelemetryCount(page, "paste");
-    const committedBefore = await terminalTelemetryCount(page, "paste_committed");
-    const settledBefore = await terminalTelemetryCount(page, "paste_settled");
+    const leaksBefore = await keyPathLeaks();
     const text = `botster-web-live-paste-too-large:${"x".repeat(MAX_PASTE_BYTES)}`;
     await focusMountedTerminal(page);
     await assertCleanInputBoundary(page, `${label} before dispatch`);
+    const sentBefore = await terminalTelemetryCount(page, "input_sent");
     const dispatched = await dispatchClipboardPaste(text);
     if (!dispatched.defaultPrevented) throw new Error(`${label}: paste gesture was not consumed`);
     const outcome = await nextPasteOutcome(outcomesBefore, label);
-    if (outcome?.outcome !== "rejected" || outcome.reason !== "too_large") {
-      throw new Error(`${label}: expected rejected/too_large, observed ${JSON.stringify(outcome)}`);
+    if (outcome?.outcome !== "rejected_locally" || outcome.reason !== "too_large") {
+      throw new Error(`${label}: expected rejected_locally/too_large, observed ${JSON.stringify(outcome)}`);
     }
     if (outcome.requestedBytes !== undefined) throw new Error(`${label}: oversized text must be refused before encoding, observed requestedBytes ${outcome.requestedBytes}`);
     const pasteAfter = await terminalTelemetryCount(page, "paste");
-    const committedAfter = await terminalTelemetryCount(page, "paste_committed");
-    const settledAfter = await terminalTelemetryCount(page, "paste_settled");
+    const sentAfter = await terminalTelemetryCount(page, "input_sent");
     const newOutcomes = (await terminalTelemetryCount(page, "paste_outcome")) - outcomesBefore;
-    if (pasteAfter !== pasteBefore || committedAfter !== committedBefore || settledAfter !== settledBefore || newOutcomes !== 1) {
-      throw new Error(`${label}: refused paste produced transaction telemetry: ${JSON.stringify({ pasteBefore, pasteAfter, committedBefore, committedAfter, settledBefore, settledAfter, newOutcomes })}`);
+    if (pasteAfter !== pasteBefore || sentAfter !== sentBefore || newOutcomes !== 1) {
+      throw new Error(`${label}: refused paste produced operation telemetry: ${JSON.stringify({ pasteBefore, pasteAfter, sentBefore, sentAfter, newOutcomes })}`);
     }
-    const leaks = await keyPathLeaks("botster-web-live-paste-too-large:");
-    if (leaks !== 0) throw new Error(`${label}: refused paste reached the key path in ${leaks} entries`);
+    const leaks = (await keyPathLeaks()) - leaksBefore;
+    if (leaks !== 0) throw new Error(`${label}: refused paste reached the key path in ${leaks} uncaptured input records`);
     recordProofNote("live_paste_case", {
       label,
       outcome: outcome.outcome,
       reason: outcome.reason,
-      minimum_bytes: outcome.minimumBytes,
-      observed: "rejected outcome; no new paste, paste_committed, or paste_settled telemetry; no key-path input",
-      frames_not_sent: "inferred from plane source, not observed"
+      observed: "rejected_locally outcome; no new paste or input_sent telemetry; no uncaptured key-path input"
     });
   }
 }
 
 async function proveZeroBrowserOscColorReplies(page) {
-  const replies = await page.evaluate(() => {
-    const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
-    const inputs = terminal
-      .filter((entry) => entry.kind === "pty_send_input" || entry.kind === "input" || entry.kind === "mode_gated_input")
-      .map((entry) => String(entry.payload?.data ?? entry.payload?.bytes ?? ""));
-    // OSC color replies look like ESC ] 10/11/12 ; ... BEL or ST
-    const oscColor = inputs.filter((data) => data.includes("]10;") || data.includes("]11;") || data.includes("]12;"));
-    return { total_inputs: inputs.length, osc_color_replies: oscColor };
-  });
-  if (replies.osc_color_replies.length > 0) {
-    throw new Error(`browser emitted OSC color replies: ${JSON.stringify(replies.osc_color_replies)}`);
+  // Restty runs readOnly with query replies suppressed, and its PTY sink forwards nothing.
+  // Any reply Restty still produced would be reported as uncaptured input; none may exist.
+  const uncapturedBefore = await terminalTelemetryCount(page, "restty_input_uncaptured");
+  if (uncapturedBefore !== 0) {
+    throw new Error(`browser produced ${uncapturedBefore} uncaptured input records before the OSC stimulus`);
   }
-
-  // Stimulus: feed OSC color queries through the renderer write path (as PTY output).
-  // readOnly + suppressQueryReplies must keep replies off the PTY input sink.
-  const before = await terminalTelemetryCount(page, "mode_gated_input");
-  const beforeSend = await terminalTelemetryCount(page, "input");
+  // Stimulus: the live session prints OSC color queries; the renderer parses them as output.
   await page.evaluate(() => {
-    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    // Directly exercise Restty write path if exposed via last renderer write sink.
-    const container = globalThis.document.querySelector(".terminal-view-container");
-    if (!container) throw new Error("terminal container missing for OSC stimulus");
-    // Inject as if PTY produced queries by using terminal control if available.
-    harness?.terminal?.push({ kind: "osc_stimulus", payload: { queries: ["10", "11", "12"] } });
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal?.push({ kind: "osc_stimulus", payload: { queries: ["10", "11", "12"] } });
   });
-  // Write OSC queries into the live session via shell printf if the session is a shell,
-  // otherwise rely on the absence of prior replies. Production sessions echo markers.
   await callTerminalControl(page, "writeInput", "printf '\\033]10;?\\007\\033]11;?\\007\\033]12;?\\007'\n").catch(() => undefined);
-  await new Promise((r) => setTimeout(r, 400));
-  const afterInputs = await page.evaluate(() => {
-    const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
-    return terminal
-      .filter((entry) => entry.kind === "pty_send_input" || entry.kind === "input" || entry.kind === "mode_gated_input")
-      .map((entry) => String(entry.payload?.data ?? entry.payload?.bytes ?? ""))
-      .filter((data) => (data.includes("]10;") || data.includes("]11;") || data.includes("]12;")) && (data.includes("rgb:") || data.includes("#")));
-  });
-  if (afterInputs.length > 0) {
-    throw new Error(`OSC color query stimulus produced browser replies: ${JSON.stringify(afterInputs)}`);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const uncapturedAfter = await terminalTelemetryCount(page, "restty_input_uncaptured");
+  if (uncapturedAfter !== 0) {
+    const records = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "restty_input_uncaptured")
+    );
+    throw new Error(`OSC color query stimulus produced browser replies: ${JSON.stringify(records)}`);
   }
-  recordProofNote("osc_color_mute", { before_mode_gated: before, before_send: beforeSend, replies: 0 });
+  recordProofNote("osc_color_mute", { uncaptured_replies: 0 });
 }
 
 async function provePaletteProjectionAfterOsc(page, sessionId) {
@@ -8423,16 +8391,17 @@ async function assertSuppliedSessionRunningOnDaemon() {
 async function proveDirectBinaryTerminalLane(page, sessionId) {
   const subscriptionId = `direct-terminal-${Date.now().toString(36)}`;
   const first = await openDirectTerminalStream(page, sessionId, subscriptionId, "first");
-  const modeFlags = await readDirectTerminalModeFlags(page, sessionId);
+  await readDirectTerminalModeFlags(page, sessionId);
   const typing = new TextEncoder().encode("direct-typing\n");
   const paste = new TextEncoder().encode(
     `botster-web-production-large-paste:${"p".repeat(70_000)}\n`
   );
-  const operationId = 1;
+  // Operation ids start at 1 per attachment and increase: RESIZE 1, RAW_BYTES 2, paste 3.
+  const operationId = 3;
   const frames = [
-    encodeResize(31, 111),
-    encodeModeGatedInput(modeFlags.mode_generation, modeFlags.mode_revision, typing),
-    ...encodePaste(operationId, modeFlags.mode_generation, modeFlags.mode_revision, paste)
+    encodeResize(1, 31, 111, 0, 0),
+    encodeRawBytes(2, typing),
+    ...encodePaste(operationId, false, paste)
   ].map((frame) => [...frame]);
 
   await page.evaluate(async ({ frames: encodedFrames }) => {
@@ -8446,20 +8415,19 @@ async function proveDirectBinaryTerminalLane(page, sessionId) {
       const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
       const events = harness?.directTerminalEvents ?? [];
       const outputText = events
-        .filter((event) => event?.type === "terminal_output")
-        .map((event) => globalThis.atob(event.payload_base64 ?? ""))
+        .filter((event) => event?.kind === "output")
+        .map((event) => new TextDecoder("latin1").decode(event.payload))
         .join("");
       const typingResult = events.find((event) =>
-        event?.type === "input_result" &&
-        event.kind === "mode_gated_input" &&
-        event.admitted === true
+        event?.kind === "input_result" &&
+        Number(event.result.operation_id) === 2 &&
+        event.result.outcome === "written"
       );
       const pasteResult = events.find((event) =>
-        event?.type === "input_result" &&
-        event.kind === "paste" &&
-        event.operation_id === expectedOperationId &&
-        event.admitted === true &&
-        event.bytes_written === expectedPasteBytes
+        event?.kind === "input_result" &&
+        Number(event.result.operation_id) === expectedOperationId &&
+        event.result.outcome === "written" &&
+        Number(event.result.accepted_payload_bytes) === expectedPasteBytes
       );
       const outboundChunks = (harness?.events ?? [])
         .filter((entry) =>
@@ -8477,9 +8445,10 @@ async function proveDirectBinaryTerminalLane(page, sessionId) {
       return {
         session_id: expectedSessionId,
         subscription_id: expectedSubscriptionId,
-        typing_bytes: typingResult.bytes_written,
-        paste_bytes: pasteResult.bytes_written,
-        paste_operation_id: pasteResult.operation_id,
+        typing_bytes: Number(typingResult.result.written_pty_bytes),
+        paste_bytes: Number(pasteResult.result.written_pty_bytes),
+        paste_accepted_bytes: Number(pasteResult.result.accepted_payload_bytes),
+        paste_operation_id: Number(pasteResult.result.operation_id),
         outbound_large_delivery: largeDelivery
       };
     },
@@ -8505,15 +8474,12 @@ async function proveDirectBinaryTerminalLane(page, sessionId) {
     );
   }
 
-  const secondModeFlags = await readDirectTerminalModeFlags(page, sessionId);
+  await readDirectTerminalModeFlags(page, sessionId);
   const closeCommand = sharedSessionMode && !sharedSessionProveExit
     ? "direct-reconnect\n"
     : "botster-web-production-exit\n";
-  const closeFrame = [...encodeModeGatedInput(
-    secondModeFlags.mode_generation,
-    secondModeFlags.mode_revision,
-    new TextEncoder().encode(closeCommand)
-  )];
+  // A fresh attachment restarts operation ids at 1.
+  const closeFrame = [...encodeRawBytes(1, new TextEncoder().encode(closeCommand))];
   await page.evaluate(async ({ frame }) => {
     const stream = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.directTerminalStream;
     if (!stream) throw new Error("reconnected direct terminal stream is unavailable");
@@ -8522,16 +8488,12 @@ async function proveDirectBinaryTerminalLane(page, sessionId) {
   await page.waitForFunction(
     ({ shouldExit }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.directTerminalEvents ?? [];
+      const outputIncludes = (marker) => events.some((event) =>
+        event?.kind === "output" && new TextDecoder("latin1").decode(event.payload).includes(marker)
+      );
       return shouldExit
-        ? events.some((event) => event?.type === "process_exit") ||
-          events.some((event) =>
-            event?.type === "terminal_output" &&
-            globalThis.atob(event.payload_base64 ?? "").includes("botster-web-production-exiting")
-          )
-        : events.some((event) =>
-            event?.type === "terminal_output" &&
-            globalThis.atob(event.payload_base64 ?? "").includes("botster-web-production-echo:direct-reconnect")
-          );
+        ? events.some((event) => event?.kind === "process_exit") || outputIncludes("botster-web-production-exiting")
+        : outputIncludes("botster-web-production-echo:direct-reconnect");
     },
     { shouldExit: !sharedSessionMode || sharedSessionProveExit },
     { timeout: 20_000 }
@@ -8561,15 +8523,21 @@ async function openDirectTerminalStream(page, sessionId, subscriptionId, cycle) 
       throw new Error("live harness transport control does not expose terminal streaming");
     }
     harness.directTerminalEvents = [];
+    const decode = harness.decodeTerminalBody;
+    if (typeof decode !== "function") throw new Error("live harness decodeTerminalBody is unavailable");
     const stream = control.streamTerminal(expectedSessionId, expectedSubscriptionId, (event) => {
-      harness.directTerminalEvents.push(event);
+      if ("body" in event) {
+        harness.directTerminalEvents.push({ ...decode(event.body), route: event.route, generation: event.generation, stream_epoch: event.streamEpoch });
+      } else {
+        harness.directTerminalEvents.push(event);
+      }
     });
     harness.directTerminalStream = stream;
     await stream.ready;
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
       if (harness.directTerminalEvents.some((event) =>
-        event?.type === "attach_state" && event.state === "attached"
+        event?.kind === "attach_state" && event.state === "attached"
       )) {
         return {
           cycle: cycleName,
@@ -8596,8 +8564,9 @@ async function readDirectTerminalModeFlags(page, sessionId) {
   }, { expectedSessionId: sessionId });
   if (
     response.kind !== "read_mode_flags" ||
-    !Number.isSafeInteger(response.mode_flags?.mode_generation) ||
-    !Number.isSafeInteger(response.mode_flags?.mode_revision)
+    typeof response.mode_flags?.bracketed_paste !== "boolean" ||
+    !Number.isSafeInteger(response.mode_flags?.rows) ||
+    !Number.isSafeInteger(response.mode_flags?.cols)
   ) {
     throw new Error(`direct terminal mode flags are invalid: ${JSON.stringify(response)}`);
   }
@@ -8742,8 +8711,6 @@ async function proveAlternateScreenExit(page, sessionId) {
     session_id: sessionId,
     before_alt_screen: beforeFlags.alt_screen,
     after_alt_screen: afterFlags.alt_screen,
-    before_mode_generation: beforeFlags.mode_generation,
-    after_mode_generation: afterFlags.mode_generation,
     last_alt_final_row: finalRowMarker,
     keys_echo_visible_after_exit: afterText.includes("botster-web-production-echo:keys"),
     before_screen: summarizeScreenForAltExit(beforeScreen),
@@ -8753,12 +8720,12 @@ async function proveAlternateScreenExit(page, sessionId) {
   return note;
 }
 
-async function collectHeldCancelChronology(page, { subscriptionId, generation, holdIndex }) {
-  return page.evaluate(({ expectedSubscriptionId, fromIndex }) => {
+async function collectHeldCancelChronology(page, { subscriptionId, fromIndex }) {
+  return page.evaluate(({ expectedSubscriptionId, startIndex }) => {
     const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
     const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
     const terminalRecords = [];
-    for (let index = Math.max(fromIndex, 0); index < terminal.length; index += 1) {
+    for (let index = Math.max(startIndex, 0); index < terminal.length; index += 1) {
       const entry = terminal[index];
       const payload = entry?.payload ?? {};
       if (
@@ -8781,24 +8748,22 @@ async function collectHeldCancelChronology(page, { subscriptionId, generation, h
         entry.payload?.type === "detach" &&
         entry.payload?.subscription_id === expectedSubscriptionId
       ) {
-        detachRecords.push({
-          kind: entry.kind,
-          type: entry.payload.type,
-          subscription_id: entry.payload.subscription_id,
-          index
-        });
+        detachRecords.push({ kind: entry.kind, type: entry.payload.type, subscription_id: entry.payload.subscription_id, index });
       }
     }
     return { terminal: terminalRecords, detach: detachRecords };
-  }, {
-    expectedSubscriptionId: subscriptionId,
-    expectedGeneration: generation,
-    fromIndex: holdIndex
-  });
+  }, { expectedSubscriptionId: subscriptionId, startIndex: fromIndex });
 }
 
+/**
+ * Cancel an in-flight attach: open the session terminal and navigate Home as soon as the
+ * attach request for the new subscription is recorded. The held subscription must receive
+ * exactly one Detach, the reader must be cancelled, no shutdown may be sent, the session
+ * must stay running, and a later remount must use a fresh subscription id. No production
+ * hook holds the attach; the race is observed through the recorded chronology. Whether the
+ * cancel lands before or after ATTACH_STATE attached is recorded, not forced.
+ */
 async function proveInFlightAttachCancellation(page, sessionId) {
-  const ablate = process.env.BOTSTER_LIVE_ABLATE_CANCEL_DETACH === "1";
   if (await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).count() > 0) {
     await openHomeView(page);
     await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor({ state: "detached" });
@@ -8822,172 +8787,118 @@ async function proveInFlightAttachCancellation(page, sessionId) {
   const baseline = await page.evaluate(() => {
     const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
     const attaches = terminal.filter((entry) => entry.kind === "attach" && entry.payload?.subscription_id);
-    return {
-      subscription_id: attaches.at(-1)?.payload?.subscription_id ?? null,
-      held_count: terminal.filter((entry) => entry.kind === "snapshot_install_held").length
-    };
+    return { subscription_id: attaches.at(-1)?.payload?.subscription_id ?? null, attach_count: attaches.length, terminal_index: terminal.length };
   });
 
-  const armed = await page.evaluate(() => {
-    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    if (typeof harness?.armSnapshotInstallHold !== "function") return false;
-    harness.armSnapshotInstallHold();
-    return true;
-  });
-  if (!armed) {
-    throw new Error("snapshot-install hold unavailable: expose armSnapshotInstallHold on the live harness");
-  }
-
-  try {
-    await openSessionTerminal(page, sessionId);
-    const hold = await page.waitForFunction(
-      ({ baselineSubscriptionId, heldBefore }) => {
-        const held = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
-          (entry) => entry.kind === "snapshot_install_held"
-        );
-        if (held.length <= heldBefore) return null;
-        const latest = held.at(-1)?.payload ?? {};
-        if (typeof latest.subscription_id !== "string" || !Number.isInteger(latest.generation)) return null;
-        if (baselineSubscriptionId && latest.subscription_id === baselineSubscriptionId) return null;
-        return latest;
-      },
-      { baselineSubscriptionId: baseline.subscription_id, heldBefore: baseline.held_count },
-      { timeout: 30_000 }
-    ).then((handle) => handle.jsonValue()).catch((error) => {
-      throw new Error(`timed out waiting for a new snapshot_install_held after remount: ${error.message}`);
-    });
-
-    if (ablate) {
-      await page.evaluate(() => {
-        const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-        if (harness) harness.ablateCancelDetach = true;
-      });
-    }
-
-    const holdIndex = await page.evaluate(({ subscriptionId }) => {
-      const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
-      return terminal.findLastIndex((entry) =>
-        entry.kind === "snapshot_install_held" &&
-        entry.payload?.subscription_id === subscriptionId
+  await openSessionTerminal(page, sessionId);
+  const held = await page.waitForFunction(
+    ({ baselineSubscriptionId, attachesBefore }) => {
+      const attaches = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+        (entry) => entry.kind === "attach" && entry.payload?.subscription_id
       );
-    }, { subscriptionId: hold.subscription_id });
+      if (attaches.length <= attachesBefore) return null;
+      const latest = attaches.at(-1)?.payload ?? {};
+      if (baselineSubscriptionId && latest.subscription_id === baselineSubscriptionId) return null;
+      return latest;
+    },
+    { baselineSubscriptionId: baseline.subscription_id, attachesBefore: baseline.attach_count },
+    { timeout: 30_000 }
+  ).then((handle) => handle.jsonValue()).catch((error) => {
+    throw new Error(`timed out waiting for a new attach after remount: ${error.message}`);
+  });
+  const detachBefore = await page.evaluate(({ subscriptionId }) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) =>
+      entry.kind === "daemon_request" &&
+      entry.payload?.type === "detach" &&
+      entry.payload?.subscription_id === subscriptionId
+    ).length, { subscriptionId: held.subscription_id });
+  const attachedBeforeCancel = await page.evaluate(({ from }) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).slice(from).some(
+      (entry) => entry.kind === "status" && entry.payload?.state === "attached"
+    ), { from: baseline.terminal_index });
 
-    const detachBefore = await page.evaluate(({ subscriptionId }) =>
+  // Cancel now: navigating Home unmounts the view and detaches the plane.
+  await openHomeView(page);
+  await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor({ state: "detached" });
+  await page.waitForFunction(
+    ({ subscriptionId, before }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) =>
         entry.kind === "daemon_request" &&
         entry.payload?.type === "detach" &&
         entry.payload?.subscription_id === subscriptionId
-      ).length, { subscriptionId: hold.subscription_id });
+      ).length > before,
+    { subscriptionId: held.subscription_id, before: detachBefore },
+    { timeout: 15_000 }
+  ).catch(() => undefined);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 100));
 
-    await openHomeView(page);
-    await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor({ state: "detached" });
-
-    await page.waitForFunction(
-      ({ subscriptionId, before }) => {
-        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-        return events.filter((entry) =>
-          entry.kind === "daemon_request" &&
-          entry.payload?.type === "detach" &&
-          entry.payload?.subscription_id === subscriptionId
-        ).length > before;
-      },
-      { subscriptionId: hold.subscription_id, before: detachBefore },
-      { timeout: 15_000 }
-    ).catch(() => undefined);
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-
-    const detachEvidence = await page.evaluate(({ subscriptionId, expectedSessionId, detachBefore: before }) => {
-      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      const detach_count = events.filter((entry) =>
+  const detachEvidence = await page.evaluate(({ subscriptionId, expectedSessionId, before }) => {
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    return {
+      detach_count: events.filter((entry) =>
         entry.kind === "daemon_request" &&
         entry.payload?.type === "detach" &&
         entry.payload?.subscription_id === subscriptionId
-      ).length - before;
-      return {
-        detach_count,
-        shutdown_count: events.filter((entry) =>
-          entry.kind === "daemon_request" &&
-          entry.payload?.type === "shutdown_session" &&
-          entry.payload?.session_id === expectedSessionId
-        ).length
-      };
-    }, { subscriptionId: hold.subscription_id, expectedSessionId: sessionId, detachBefore });
-    const chronology = await collectHeldCancelChronology(page, {
-      subscriptionId: hold.subscription_id,
-      generation: hold.generation,
-      holdIndex
-    });
-    if (detachEvidence.detach_count !== 1) {
-      throw new Error(
-        `expected exactly one detach for held subscription ${hold.subscription_id}, got ${detachEvidence.detach_count}; chronology=${JSON.stringify(chronology)}`
-      );
-    }
-    if (detachEvidence.shutdown_count !== 0) {
-      throw new Error(`cancel unmount sent shutdown_session for ${sessionId}`);
-    }
-
-    await page.waitForFunction(
-      ({ subscriptionId, generation }) =>
-        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) =>
-          (entry.kind === "reader_cancel" || entry.kind === "event_delivery_failed") &&
-          (entry.payload?.subscription_id === subscriptionId || entry.payload?.generation === generation)
-        ),
-      { subscriptionId: hold.subscription_id, generation: hold.generation },
-      { timeout: 15_000 }
-    ).catch((error) => {
-      throw new Error(
-        `cancel oracle missing decoder abort for held generation ${hold.generation}: ${error.message}`
-      );
-    });
-
-    await waitForSessionStatus(page, "running");
-    const lifecycle = await page.evaluate(({ expectedSessionId }) => {
-      const sessions = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("session") ?? [];
-      return sessions.find((row) =>
-        row.id === expectedSessionId ||
-        row.session_uuid === expectedSessionId ||
-        row.session_id === expectedSessionId
-      )?.lifecycle ?? null;
-    }, { expectedSessionId: sessionId });
-    if (lifecycle !== "running") {
-      throw new Error(`supplied session ${sessionId} lifecycle after cancel is ${lifecycle}`);
-    }
-
-    await openSessionTerminal(page, sessionId);
-    await waitForTerminalSession(page, sessionId);
-    await waitForAutomaticTerminalRestore(page);
-    const newSubscriptionId = await page.evaluate(() => {
-      const attaches = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
-        (entry) => entry.kind === "attach" && entry.payload?.subscription_id
-      );
-      return attaches.at(-1)?.payload?.subscription_id ?? null;
-    });
-    if (!newSubscriptionId || newSubscriptionId === hold.subscription_id) {
-      throw new Error(`cancel remount reused subscription ${newSubscriptionId}`);
-    }
-
-    const marker = {
-      session_id: sessionId,
-      old_subscription_id: hold.subscription_id,
-      new_subscription_id: newSubscriptionId,
-      held_generation: hold.generation,
-      detach_count: detachEvidence.detach_count,
-      chronology: await collectHeldCancelChronology(page, {
-        subscriptionId: hold.subscription_id,
-        generation: hold.generation,
-        holdIndex
-      })
+      ).length - before,
+      shutdown_count: events.filter((entry) =>
+        entry.kind === "daemon_request" &&
+        entry.payload?.type === "shutdown_session" &&
+        entry.payload?.session_id === expectedSessionId
+      ).length
     };
-    console.log(`live-shared-session-cancel-passed ${JSON.stringify(marker)}`);
-    recordProofNote("in_flight_attach_cancellation", marker);
-    return marker;
-  } finally {
-    await page.evaluate(() => {
-      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.releaseSnapshotInstall?.();
-      const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-      if (harness) harness.ablateCancelDetach = false;
-    });
+  }, { subscriptionId: held.subscription_id, expectedSessionId: sessionId, before: detachBefore });
+  const chronology = await collectHeldCancelChronology(page, { subscriptionId: held.subscription_id, fromIndex: baseline.terminal_index });
+  if (detachEvidence.detach_count !== 1) {
+    throw new Error(
+      `expected exactly one detach for subscription ${held.subscription_id}, got ${detachEvidence.detach_count}; chronology=${JSON.stringify(chronology)}`
+    );
   }
+  if (detachEvidence.shutdown_count !== 0) {
+    throw new Error(`cancel unmount sent shutdown_session for ${sessionId}`);
+  }
+  const recoveredAfterCancel = chronology.terminal.some((entry) => entry.kind === "snapshot_lost_recover" || entry.kind === "transport_recovered");
+  if (recoveredAfterCancel) {
+    throw new Error(`a cancelled attach recovered its route: ${JSON.stringify(chronology)}`);
+  }
+
+  await waitForSessionStatus(page, "running");
+  const lifecycle = await page.evaluate(({ expectedSessionId }) => {
+    const sessions = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.("session") ?? [];
+    return sessions.find((row) =>
+      row.id === expectedSessionId ||
+      row.session_uuid === expectedSessionId ||
+      row.session_id === expectedSessionId
+    )?.lifecycle ?? null;
+  }, { expectedSessionId: sessionId });
+  if (lifecycle !== "running") {
+    throw new Error(`supplied session ${sessionId} lifecycle after cancel is ${lifecycle}`);
+  }
+
+  await openSessionTerminal(page, sessionId);
+  await waitForTerminalSession(page, sessionId);
+  await waitForAutomaticTerminalRestore(page);
+  const newSubscriptionId = await page.evaluate(() => {
+    const attaches = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+      (entry) => entry.kind === "attach" && entry.payload?.subscription_id
+    );
+    return attaches.at(-1)?.payload?.subscription_id ?? null;
+  });
+  if (!newSubscriptionId || newSubscriptionId === held.subscription_id) {
+    throw new Error(`cancel remount reused subscription ${newSubscriptionId}`);
+  }
+
+  const marker = {
+    session_id: sessionId,
+    old_subscription_id: held.subscription_id,
+    new_subscription_id: newSubscriptionId,
+    held_generation: held.generation ?? null,
+    cancelled_before_attached: !attachedBeforeCancel,
+    detach_count: detachEvidence.detach_count,
+    chronology: await collectHeldCancelChronology(page, { subscriptionId: held.subscription_id, fromIndex: baseline.terminal_index })
+  };
+  console.log(`live-shared-session-cancel-passed ${JSON.stringify(marker)}`);
+  recordProofNote("in_flight_attach_cancellation", marker);
+  return marker;
 }
 
 async function proveSharedSessionExit(page, sessionId) {
@@ -9001,9 +8912,7 @@ async function proveSharedSessionExit(page, sessionId) {
     ({ expectedSessionId }) => {
       const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ ?? {};
       const processExit = (harness.events ?? []).some((entry) =>
-        entry.kind === "daemon_terminal_event" &&
-        entry.payload?.type === "process_exit" &&
-        entry.payload?.session_id === expectedSessionId
+        entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "process_exit"
       );
       const producerExiting = (harness.terminal ?? []).some((entry) => {
         const encoded = entry.payload?.payload_bytes_base64;
@@ -9059,12 +8968,8 @@ async function proveSharedSessionExitDetach(page, sessionId, detachWait) {
     );
     const processExitEvents = [];
     (harness.events ?? []).forEach((entry, index) => {
-      if (
-        entry?.kind === "daemon_terminal_event" &&
-        entry.payload?.type === "process_exit" &&
-        entry.payload?.session_id === expectedSessionId
-      ) {
-        processExitEvents.push({ source: "daemon_terminal_event", index, payload: entry.payload });
+      if (entry?.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "process_exit") {
+        processExitEvents.push({ source: "terminal_route_frame", index, payload: entry.payload });
       }
     });
     const entityLifecycleEvents = [];
@@ -9362,9 +9267,7 @@ async function waitForAutomaticTerminalRestore(page) {
     () => {
       const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
       const install = terminal.findLast((entry) => entry.kind === "ghostsnp_install" || entry.kind === "restty_load_binary_snapshot");
-      const modeFlags =
-        terminal.findLast((entry) => entry.kind === "mode_flags") ??
-        terminal.findLast((entry) => entry.kind === "mode_flags_failed");
+      const modeFlags = terminal.findLast((entry) => entry.kind === "modes");
       const status = terminal.findLast(
         (entry) =>
           entry.kind === "status" &&
@@ -9375,8 +9278,9 @@ async function waitForAutomaticTerminalRestore(page) {
       if (!install || !modeFlags || !status) return null;
       return {
         bytes: install.payload?.bytes ?? null,
-        mode_generation: modeFlags.payload?.mode_generation ?? null,
-        mode_revision: modeFlags.payload?.mode_revision ?? null,
+        mode_bits: modeFlags.payload?.mode_bits ?? null,
+        rows: modeFlags.payload?.rows ?? null,
+        cols: modeFlags.payload?.cols ?? null,
         message: status.payload.message
       };
     },
@@ -9387,24 +9291,24 @@ async function waitForAutomaticTerminalRestore(page) {
   });
 
   // Web validates only the transport envelope. Restty owns the opaque snapshot bytes.
+  // A complete hydration is one SNAPSHOT_READY page, zero or more SNAPSHOT_HISTORY pages,
+  // and one SNAPSHOT_FINISH.
   const snapshotProof = await page.evaluate(() => {
-    const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "daemon_terminal_event")
-      .map((entry) => entry.payload)
-      .filter((event) => event?.type === "snapshot" && typeof event.payload_base64 === "string");
-    if (events.length < 2) return null;
+    const frames = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "terminal_route_frame")
+      .map((entry) => entry.payload.frame)
+      .filter((frame) => ["snapshot_ready", "snapshot_history", "snapshot_finish"].includes(frame?.kind));
+    if (!frames.some((frame) => frame.kind === "snapshot_ready") || !frames.some((frame) => frame.kind === "snapshot_finish")) return null;
     try {
-      const frames = events.map((event) => ({
-        bytes: event.bytes,
-        decoded_bytes: globalThis.atob(event.payload_base64).length,
-        payload_encoding: event.payload_encoding
+      const pages = frames.map((frame) => ({
+        kind: frame.kind,
+        bytes: frame.bytes ?? 0,
+        decoded_bytes: typeof frame.payload_base64 === "string" ? globalThis.atob(frame.payload_base64).length : 0
       }));
       return {
-        frame_count: frames.length,
-        frames,
-        valid_envelopes: frames.every(
-          (frame) => frame.payload_encoding === "base64" && frame.decoded_bytes === frame.bytes
-        )
+        frame_count: pages.length,
+        frames: pages,
+        valid_envelopes: pages.every((page) => page.decoded_bytes === page.bytes)
       };
     } catch {
       return { error: "base64_decode_failed" };
@@ -9422,140 +9326,73 @@ async function waitForAutomaticTerminalRestore(page) {
 }
 
 async function assertTerminalAttachChronology(page, sessionId, requiredSubscriptionId) {
+  // Route order: ATTACH_STATE attached, MODES, SNAPSHOT_READY, live OUTPUT interleaved with
+  // SNAPSHOT_HISTORY, SNAPSHOT_FINISH, then OUTPUT. The route id is the subscription id.
   const chronology = await page.waitForFunction(
-    ({ expectedSessionId, requiredSubscriptionId: requiredSub }) => {
-      const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-        .filter((entry) => entry.kind === "daemon_terminal_event")
+    ({ requiredSubscriptionId: requiredSub }) => {
+      const frames = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .filter((entry) => entry.kind === "terminal_route_frame")
         .map((entry) => entry.payload)
-        .filter((event) =>
-          event?.session_id === expectedSessionId &&
-          typeof event.subscription_id === "string" &&
-          ["attach_state", "snapshot", "scrollback", "terminal_output"].includes(event.type) &&
-          (!requiredSub || event.subscription_id === requiredSub)
-        );
-      const subscriptionIds = [...new Set(events.map((event) => event.subscription_id))];
-      if (requiredSub && !subscriptionIds.includes(requiredSub)) {
-        return null;
-      }
+        .filter((payload) => typeof payload?.route === "string" && (!requiredSub || payload.route === requiredSub));
+      const routes = [...new Set(frames.map((payload) => payload.route))];
+      if (requiredSub && !routes.includes(requiredSub)) return null;
 
-      for (const subscriptionId of subscriptionIds) {
-        const subscriptionEvents = events.filter((event) => event.subscription_id === subscriptionId);
-        for (let attachingIndex = 0; attachingIndex < subscriptionEvents.length; attachingIndex += 1) {
-          const attaching = subscriptionEvents[attachingIndex];
-          if (attaching.type !== "attach_state" || attaching.state !== "attaching") continue;
+      for (const route of routes) {
+        const routeFrames = frames.filter((payload) => payload.route === route).map((payload) => payload.frame);
+        const attachedIndex = routeFrames.findIndex((frame) => frame.kind === "attach_state" && frame.state === "attached");
+        if (attachedIndex < 0) continue;
+        const finishIndex = routeFrames.findIndex((frame, index) => index > attachedIndex && frame.kind === "snapshot_finish");
+        if (finishIndex < 0) continue;
+        const liveIndex = routeFrames.findIndex((frame, index) => index > finishIndex && frame.kind === "output" && frame.bytes > 0);
+        if (liveIndex < 0) continue;
 
-          const attachedIndex = subscriptionEvents.findIndex(
-            (event, index) =>
-              index > attachingIndex && event.type === "attach_state" && event.state === "attached"
-          );
-          if (attachedIndex < 0) continue;
-
-          const liveIndex = subscriptionEvents.findIndex(
-            (event, index) =>
-              index > attachedIndex && event.type === "terminal_output" &&
-              event.payload_encoding === "base64" &&
-              typeof event.payload_base64 === "string" &&
-              Number.isInteger(event.bytes) &&
-              event.bytes > 0 &&
-              !("data" in event)
-          );
-          if (liveIndex < 0) continue;
-
-          const initialEvents = subscriptionEvents.slice(attachingIndex, liveIndex + 1);
-          const attachedOffset = attachedIndex - attachingIndex;
-          // Core may emit terminal_output before Attached. Web must buffer it.
-          const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
-          const attachedStatusIndex = terminal.findIndex(
-            (entry) =>
-              entry.kind === "status" &&
-              entry.payload?.state === "attached" &&
-              typeof entry.payload?.message === "string" &&
-              entry.payload.message.includes("snapshot")
-          );
-          const earlyRendered = terminal.findIndex(
-            (entry, index) =>
-              attachedStatusIndex >= 0 &&
-              index < attachedStatusIndex &&
-              entry.kind === "output"
-          );
-          if (earlyRendered >= 0) {
-            return {
-              error: "renderer output arrived before attached status",
-              subscription_id: subscriptionId,
-              observed: initialEvents
-            };
-          }
-          const lateHistory = initialEvents.findIndex(
-            (event, index) => index > attachedOffset &&
-              (event.type === "snapshot" || event.type === "scrollback")
-          );
-          if (lateHistory >= 0) {
-            return {
-              error: "snapshot/scrollback arrived after attached and before live output",
-              subscription_id: subscriptionId,
-              observed: initialEvents
-            };
-          }
-          const unexpectedScrollback = initialEvents.find((event) => event.type === "scrollback");
-          if (unexpectedScrollback) {
-            return {
-              error: "incremental attach used the retired scrollback event",
-              subscription_id: subscriptionId,
-              observed: initialEvents
-            };
-          }
-          const snapshotCount = initialEvents.filter((event) => event.type === "snapshot").length;
-          if (snapshotCount < 2) {
-            return {
-              error: "incremental attach did not deliver READY and FINISH Snapshot events",
-              subscription_id: subscriptionId,
-              observed: initialEvents
-            };
-          }
-          const invalidHistory = initialEvents.find((event) => {
-            if (event.type !== "snapshot") return false;
-            if (event.payload_encoding !== "base64" || typeof event.payload_base64 !== "string") return true;
-            try {
-              const raw = globalThis.atob(event.payload_base64);
-              if (raw.length !== event.bytes) return true;
-              return false;
-            } catch {
-              return true;
-            }
-          });
-          if (invalidHistory) {
-            return {
-              error: "snapshot payload has an invalid binary-safe envelope",
-              subscription_id: subscriptionId,
-              observed: initialEvents.map((event) => ({ type: event.type, state: event.state, bytes: event.bytes }))
-            };
-          }
-
-          return {
-            subscription_id: subscriptionId,
-            sequence: initialEvents.map((event) =>
-              event.type === "attach_state" ? `${event.type}:${event.state}` : event.type
-            ),
-            history: initialEvents
-              .filter((event) => event.type === "snapshot")
-              .map((event) => ({
-                type: event.type,
-                bytes: event.bytes ?? null,
-                payload_encoding: event.payload_encoding
-              }))
-          };
+        const initial = routeFrames.slice(attachedIndex, liveIndex + 1);
+        const kinds = initial.map((frame) => (frame.kind === "attach_state" ? `attach_state:${frame.state}` : frame.kind));
+        const readyIndex = initial.findIndex((frame) => frame.kind === "snapshot_ready");
+        const modesIndex = initial.findIndex((frame) => frame.kind === "modes");
+        const finishOffset = finishIndex - attachedIndex;
+        const fail = (error) => ({ error, subscription_id: route, observed: kinds });
+        if (readyIndex < 0) return fail("attach did not deliver SNAPSHOT_READY");
+        if (modesIndex < 0 || modesIndex > readyIndex) return fail("MODES did not precede SNAPSHOT_READY");
+        if (initial.filter((frame) => frame.kind === "snapshot_ready").length !== 1) return fail("attach delivered more than one SNAPSHOT_READY");
+        if (initial.findIndex((frame) => frame.kind === "output") < readyIndex) return fail("OUTPUT arrived before SNAPSHOT_READY");
+        if (initial.some((frame, index) => frame.kind === "snapshot_history" && (index < readyIndex || index > finishOffset))) {
+          return fail("SNAPSHOT_HISTORY arrived outside the READY..FINISH window");
         }
-      }
+        if (initial.some((frame) => frame.kind === "history_unavailable")) return fail("history was unavailable during the attach");
+        const invalidPage = initial.find((frame) => {
+          if (!["snapshot_ready", "snapshot_history"].includes(frame.kind)) return false;
+          try {
+            return globalThis.atob(frame.payload_base64 ?? "").length !== frame.bytes;
+          } catch {
+            return true;
+          }
+        });
+        if (invalidPage) return fail("snapshot page has an invalid binary-safe envelope");
 
+        // Web must not paint live output before the READY screen is installed.
+        const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+        const installIndex = terminal.findIndex((entry) => entry.kind === "ghostsnp_install" || entry.kind === "restty_load_binary_snapshot");
+        const earlyRendered = terminal.findIndex((entry, index) => installIndex >= 0 && index < installIndex && entry.kind === "output");
+        if (earlyRendered >= 0) return fail("renderer output arrived before the READY screen was installed");
+
+        return {
+          subscription_id: route,
+          sequence: kinds,
+          history: initial
+            .filter((frame) => ["snapshot_ready", "snapshot_history", "snapshot_finish"].includes(frame.kind))
+            .map((frame) => ({ kind: frame.kind, bytes: frame.bytes ?? 0 }))
+        };
+      }
       return null;
     },
-    { expectedSessionId: sessionId, requiredSubscriptionId: requiredSubscriptionId ?? null },
+    { requiredSubscriptionId: requiredSubscriptionId ?? null },
     { timeout: 45_000 }
   ).then((handle) => handle.jsonValue()).catch((error) => {
     throw new Error(
       `timed out waiting for subscription-scoped attach chronology${
         requiredSubscriptionId ? ` for ${requiredSubscriptionId}` : ""
-      }: ${error.message}`
+      } on session ${sessionId}: ${error.message}`
     );
   });
 
@@ -9751,12 +9588,8 @@ async function proveEntityDrivenProductionDetach(page, sessionId, detachWait) {
     );
     const processExitEvents = [];
     (harness.events ?? []).forEach((entry, index) => {
-      if (
-        entry?.kind === "daemon_terminal_event" &&
-        entry.payload?.type === "process_exit" &&
-        entry.payload?.session_id === expectedSessionId
-      ) {
-        processExitEvents.push({ source: "daemon_terminal_event", index, payload: entry.payload });
+      if (entry?.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "process_exit") {
+        processExitEvents.push({ source: "terminal_route_frame", index, payload: entry.payload });
       }
     });
     const entityLifecycleEvents = [];
@@ -9896,13 +9729,23 @@ async function terminalTelemetryCount(page, kind) {
   );
 }
 
-async function waitForTerminalInputTelemetry(page, kind, data, label) {
+async function inputOperationCount(page, kind) {
+  return page.evaluate(
+    ({ expectedKind }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+        (entry) => entry.kind === "input_sent" && entry.payload?.kind === expectedKind
+      ).length,
+    { expectedKind: kind }
+  );
+}
+
+async function waitForInputOperation(page, kind, minimumCount, label) {
   await page.waitForFunction(
-    ({ expectedKind, expectedData }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
-        (entry) => entry.kind === expectedKind && entry.payload?.data === expectedData
-      ),
-    { expectedKind: kind, expectedData: data },
+    ({ expectedKind, expected }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
+        (entry) => entry.kind === "input_sent" && entry.payload?.kind === expectedKind
+      ).length > expected,
+    { expectedKind: kind, expected: minimumCount },
     { timeout: 45_000 }
   ).catch((error) => {
     throw new Error(`timed out waiting for ${label}: ${error.message}`);
