@@ -147,7 +147,7 @@ Correction (harness and report only; `src/` and `dist/` unchanged, no rebuild): 
 
 ## Live run 5 (settled-mode observation): the full live paste lane passed
 
-Against the corrected rc1 Hub (final HEAD `1a0df65`, Core `bf6e7d9`, transport `0.21.0-rc.1`, dev binaries `hub 0db7ea0e…`, `worker 59760bd1…`, provenance recorded in the log as checkout clean), the whole harness exited 0 and all six paste cases passed byte-exact:
+Against the corrected rc1 Hub (final HEAD `1a0df65`, Core `bf6e7d9`, transport `0.21.0-rc.1`, dev binaries `hub 0db7ea0e…`, `worker 59760bd1…`, provenance recorded in the log as checkout clean), the whole harness exited 0. Five admitted cases delivered byte-exact, and the sixth was refused before encoding:
 
 | Case | Payload bytes | Wire bytes | Receiver == wire | bytes_written | Accounting | Pre-paste bracketed | Retries |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -160,7 +160,7 @@ Against the corrected rc1 Hub (final HEAD `1a0df65`, Core `bf6e7d9`, transport `
 
 The bracketed case confirms the marker accounting exactly: the wire is the payload plus the 12 bracket bytes, the raw receiver's SHA-256 matches that wire, and Core's `bytes_written` equals it. The unbracketed and bracket-off cases carry no markers. Each admitted case converged after one stale retry against the settled authoritative token that the pre-paste `read_mode_flags` observation waited for; the recorded pre-paste revisions advanced 1, 1, 1, 2, 3 as the deliberate bracket toggles were applied. The mounted paste proof and the key-after-paste ordering also passed. The harness cleaned up its own session on the success path; no owned process or Chromium survived and both binary hashes were unchanged.
 
-This validates the live clipboard paste lane end to end against the corrected Core: byte-exact delivery for ASCII, Unicode, CRLF, bracketed on and off, and the oversize rejection, with the receiver digest, Web accounting, and Core `bytes_written` all agreeing. It remains candidate validation against the rc.1 Hub, not the final full matrix.
+This validates the live clipboard paste lane end to end against the corrected Core. Five admitted cases delivered byte-exact, with the receiver digest, Web accounting, and Core `bytes_written` all agreeing: ASCII, Unicode, CRLF, bracketed on, and bracketed off. The sixth case, the oversize paste, was refused before encoding, evidenced by a rejected outcome, no paste transaction telemetry, and no key-path input; that no protocol frame was sent is an inference from the plane source, not a delivered byte count. It remains candidate validation against the rc.1 Hub, not the final full matrix.
 
 ## Not yet covered
 
