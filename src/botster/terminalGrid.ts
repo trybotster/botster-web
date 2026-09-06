@@ -1,17 +1,24 @@
-import type { TerminalDataPlaneAttachment } from "./terminal";
+import type { TerminalDataPlaneAttachment, TerminalResizeGeometry } from "./terminal";
 
 export interface TerminalGrid {
   rows: number;
   columns: number;
+  widthPx: number;
+  heightPx: number;
 }
 
 type TerminalGridTarget = Pick<TerminalDataPlaneAttachment, "resize">;
 
 function sameGrid(left: TerminalGrid | undefined, right: TerminalGrid): boolean {
-  return left?.rows === right.rows && left.columns === right.columns;
+  return (
+    left?.rows === right.rows &&
+    left.columns === right.columns &&
+    left.widthPx === right.widthPx &&
+    left.heightPx === right.heightPx
+  );
 }
 
-function validGrid(rows: number, columns: number): TerminalGrid | undefined {
+function validGrid(rows: number, columns: number, widthPx: number, heightPx: number): TerminalGrid | undefined {
   const normalizedRows = Math.floor(rows);
   const normalizedColumns = Math.floor(columns);
   if (
@@ -25,12 +32,19 @@ function validGrid(rows: number, columns: number): TerminalGrid | undefined {
 
   return {
     rows: normalizedRows,
-    columns: normalizedColumns
+    columns: normalizedColumns,
+    widthPx: Number.isFinite(widthPx) && widthPx > 0 ? Math.floor(widthPx) : 0,
+    heightPx: Number.isFinite(heightPx) && heightPx > 0 ? Math.floor(heightPx) : 0
   };
 }
 
+export function resizeGeometryFromGrid(grid: TerminalGrid): TerminalResizeGeometry {
+  return { rows: grid.rows, cols: grid.columns, widthPx: grid.widthPx, heightPx: grid.heightPx };
+}
+
 /**
- * Own the latest browser grid and synchronize it with the current Hub data plane.
+ * Own the latest browser grid and pixel size and synchronize them with the current Hub data
+ * plane. RESIZE carries pixel geometry so the worker mouse encoder can report pixel formats.
  */
 export class TerminalGridState {
   private grid?: TerminalGrid;
@@ -53,8 +67,8 @@ export class TerminalGridState {
     this.sentGrid = undefined;
   }
 
-  measure(columns: number, rows: number): boolean {
-    const grid = validGrid(rows, columns);
+  measure(columns: number, rows: number, widthPx = 0, heightPx = 0): boolean {
+    const grid = validGrid(rows, columns, widthPx, heightPx);
     if (!grid) return false;
 
     this.grid = grid;
@@ -76,7 +90,7 @@ export class TerminalGridState {
     if (!grid || !this.target?.resize || (!force && sameGrid(this.sentGrid, grid))) return;
 
     this.sentGrid = { ...grid };
-    void this.target.resize(grid.rows, grid.columns);
+    this.target.resize(resizeGeometryFromGrid(grid));
   }
 }
 

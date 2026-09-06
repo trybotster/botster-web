@@ -1,13 +1,23 @@
 import { createHubTerminalDataPlane } from "./hubTerminalDataPlane";
-import type { SnapshotPhase, TerminalEvent } from "@trybotster/terminal-protocol";
 import type { DaemonRequest } from "./realHubDaemonDto";
 import type { TerminalStreamEvent } from "./hubTransport";
 import { ResttyTerminalRenderer } from "./resttyRenderer";
 import { ResttyWasm } from "../vendor/restty/internal.js";
-import type { TerminalAttachmentStatus } from "./terminal";
+import type { TerminalAttachmentStatus, TerminalInputOutcome } from "./terminal";
+import {
+  encodeTerminalBody,
+  type HistoryUnavailableReasonName,
+  type TerminalEvent
+} from "./generated/terminal-protocol";
 
+/**
+ * Browser smoke fixture: one real HubTerminalDataPlane and one real ResttyTerminalRenderer
+ * over a fake bridge. The driver script feeds authentic scheme 2 frames (encoded by the
+ * Core-generated test encoder) in the route order and reads the painted viewport.
+ */
 const sessionId = "incremental-browser-proof-session";
 const subscriptionId = "incremental-browser-proof-subscription";
+const routeGeneration = 1;
 const root = document.getElementById("root");
 if (!root) throw new Error("Incremental attach smoke root is missing.");
 
@@ -28,30 +38,13 @@ let deliverEvent: ((event: TerminalStreamEvent) => void | Promise<void>) | undef
 const requests: DaemonRequest[] = [];
 const sentFrames: Uint8Array[] = [];
 const statuses: TerminalAttachmentStatus[] = [];
+const outcomes: TerminalInputOutcome[] = [];
 const dataPlane = createHubTerminalDataPlane({
   sessionId,
   subscriptionId,
   bridge: {
     async request(request) {
       requests.push(structuredClone(request));
-      if (request.type === "read_mode_flags") {
-        return {
-          kind: "read_mode_flags",
-          mode_flags: {
-            session_id: sessionId,
-            kitty_enabled: false,
-            cursor_visible: true,
-            bracketed_paste: false,
-            mouse_mode: 0,
-            alt_screen: false,
-            focus_reporting: false,
-            application_cursor: false,
-            mode_generation: 1,
-            mode_revision: 1
-          },
-          events: []
-        } as never;
-      }
       if (request.type === "read_screen") {
         return {
           kind: "read_screen",
@@ -68,6 +61,7 @@ const dataPlane = createHubTerminalDataPlane({
       deliverEvent = onEvent;
       return {
         ready: Promise.resolve(),
+        generation: routeGeneration,
         async sendFrame(frame) {
           sentFrames.push(frame.slice());
         },
@@ -82,33 +76,11 @@ const renderer = new ResttyTerminalRenderer({ sessionId, renderer: "restty" });
 renderer.mount(root);
 renderer.attachDataPlane(dataPlane);
 dataPlane.subscribeStatus?.((status) => statuses.push({ ...status }));
+dataPlane.subscribeInputOutcomes?.((outcome) => outcomes.push({ ...outcome }));
 
-function snapshotEvent(bytes: Uint8Array, phase: SnapshotPhase): TerminalEvent {
-  return {
-    type: "snapshot",
-    session_id: sessionId,
-    subscription_id: subscriptionId,
-    payload_base64: bytesToBase64(bytes),
-    payload_encoding: "base64",
-    bytes: bytes.byteLength,
-    phase
-  };
-}
-
-function outputEvent(bytes: Uint8Array): TerminalEvent {
-  return {
-    type: "terminal_output",
-    session_id: sessionId,
-    subscription_id: subscriptionId,
-    payload_base64: bytesToBase64(bytes),
-    payload_encoding: "base64",
-    bytes: bytes.byteLength
-  };
-}
-
-async function deliver(event: TerminalStreamEvent): Promise<void> {
+async function deliver(event: TerminalEvent, streamEpoch = 0): Promise<void> {
   if (!deliverEvent) throw new Error("Incremental attach stream is not ready.");
-  await deliverEvent(event);
+  await deliverEvent({ route: subscriptionId, generation: routeGeneration, streamEpoch, body: encodeTerminalBody(event) });
 }
 
 function readViewportRows(): string[] {
@@ -126,38 +98,52 @@ function readViewportRows(): string[] {
   return rows;
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const value of bytes) binary += String.fromCharCode(value);
-  return btoa(binary);
-}
-
 type IncrementalAttachSmoke = {
   attached(): Promise<void>;
-  deliverAttached(): Promise<void>;
-  deliverHistoryIncomplete(): Promise<void>;
-  deliverOutput(bytes: number[]): Promise<void>;
-  deliverSnapshot(bytes: number[]): Promise<void>;
   deliverAttaching(): Promise<void>;
+  deliverAttached(): Promise<void>;
+  deliverModes(modeBits: number, rows: number, cols: number): Promise<void>;
+  deliverSnapshotReady(bytes: number[]): Promise<void>;
+  deliverSnapshotHistory(bytes: number[]): Promise<void>;
+  deliverSnapshotFinish(): Promise<void>;
+  deliverHistoryUnavailable(reason: HistoryUnavailableReasonName): Promise<void>;
+  deliverOutput(bytes: number[]): Promise<void>;
+  deliverProcessExit(code: number | null): Promise<void>;
+  deliverRouteResync(fromEpoch: number, toEpoch: number): Promise<void>;
+  /** Deliver one frame under an explicit stream epoch, for stale-epoch proofs. */
+  deliverOutputInEpoch(bytes: number[], streamEpoch: number): Promise<void>;
   getRequests(): DaemonRequest[];
   getSentFrames(): number[][];
+  getOutcomes(): TerminalInputOutcome[];
   getRenderGrid(): { columns: number; rows: number } | null;
   getStatuses(): TerminalAttachmentStatus[];
   readViewportRows(): string[];
   resize(rows: number, columns: number): Promise<void>;
+  /** Explicit RAW_BYTES input; the smoke intends raw bytes here. */
   writeInput(data: string): Promise<void>;
 };
 
 const harness: IncrementalAttachSmoke = {
-  deliverAttaching: () => deliver({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attaching" }),
-  deliverSnapshot: (bytes) => deliver(snapshotEvent(Uint8Array.from(bytes), "ready")),
-  deliverHistoryIncomplete: () => deliver({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "snapshot_history_incomplete" }),
-  deliverAttached: () => deliver({ type: "attach_state", session_id: sessionId, subscription_id: subscriptionId, state: "attached" }),
-  deliverOutput: (bytes) => deliver(outputEvent(Uint8Array.from(bytes))),
-  writeInput: (data) => Promise.resolve(dataPlane.writeInput(data)),
+  deliverAttaching: () => deliver({ kind: "attach_state", state: "attaching" }),
+  deliverAttached: () => deliver({ kind: "attach_state", state: "attached" }),
+  deliverModes: (modeBits, rows, cols) => deliver({ kind: "modes", mode_bits: modeBits, rows, cols }),
+  deliverSnapshotReady: (bytes) => deliver({ kind: "snapshot_ready", payload: Uint8Array.from(bytes) }),
+  deliverSnapshotHistory: (bytes) => deliver({ kind: "snapshot_history", payload: Uint8Array.from(bytes) }),
+  deliverSnapshotFinish: () => deliver({ kind: "snapshot_finish" }),
+  deliverHistoryUnavailable: (reason) => deliver({ kind: "history_unavailable", reason }),
+  deliverOutput: (bytes) => deliver({ kind: "output", payload: Uint8Array.from(bytes) }),
+  deliverProcessExit: (code) => deliver({ kind: "process_exit", code }),
+  deliverRouteResync: (fromEpoch, toEpoch) =>
+    deliver({ kind: "route_resync", from_epoch: fromEpoch, to_epoch: toEpoch }, toEpoch),
+  deliverOutputInEpoch: (bytes, streamEpoch) => deliver({ kind: "output", payload: Uint8Array.from(bytes) }, streamEpoch),
+  writeInput: (data) => {
+    dataPlane.sendInput({ kind: "raw", bytes: new TextEncoder().encode(data) });
+    return Promise.resolve();
+  },
   resize: (rows, columns) => Promise.resolve(renderer.resize(rows, columns)),
   getRequests: () => requests.map((request) => structuredClone(request)),
   getSentFrames: () => sentFrames.map((frame) => Array.from(frame)),
+  getOutcomes: () => outcomes.map((outcome) => ({ ...outcome })),
   getRenderGrid: () => {
     const state = runtime?.getRenderState(activeHandle);
     return state ? { columns: state.cols, rows: state.rows } : null;

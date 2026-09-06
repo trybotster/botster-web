@@ -12,7 +12,6 @@ import type {
   HubControlFrameHandler,
   HubControlTransport
 } from "./protocol";
-import type { TerminalEvent } from "@trybotster/terminal-protocol";
 import type {
   DaemonApp,
   DaemonDiagnostic,
@@ -43,7 +42,21 @@ export type TerminalSubscriptionClosedEvent = Extract<
   { type: "terminal_subscription_closed" }
 >;
 
-export type TerminalStreamEvent = TerminalEvent | TerminalSubscriptionClosedEvent;
+/**
+ * One routed terminal frame from the terminal DataChannel. Hub supplies the route and
+ * generation from adapter identity; `body` is the complete Core scheme 2 `TerminalBody`
+ * bytes, never inspected by the transport.
+ */
+export interface TerminalRouteFrame {
+  route: string;
+  /** Fixed attachment generation from the terminal reservation. */
+  generation: number;
+  /** Core stream epoch for snapshot and live continuity within the attachment. */
+  streamEpoch: number;
+  body: Uint8Array;
+}
+
+export type TerminalStreamEvent = TerminalRouteFrame | TerminalSubscriptionClosedEvent;
 
 const sessionFamily = "session";
 const sessionTypeFamily = "session_type";

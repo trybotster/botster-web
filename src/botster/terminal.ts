@@ -1,8 +1,5 @@
-import type {
-  DaemonCaptureSnapshot,
-  DaemonModeFlags,
-  DaemonReadScreen
-} from "./realHubDaemonDto";
+import type { DaemonReadScreen } from "./realHubDaemonDto";
+import type { TerminalSemanticInput } from "./terminalInputEvents";
 
 export interface TerminalViewDescriptor {
   sessionId: string;
@@ -14,7 +11,6 @@ export interface TerminalViewMount {
   mountId: number;
 }
 
-export type TerminalInput = string;
 export type TerminalOutput = Uint8Array;
 export type TerminalSnapshotProgress = "ready" | "page" | "finish";
 
@@ -23,83 +19,102 @@ export interface TerminalSnapshotReader {
   cancel(): void;
 }
 
-/**
- * Mode-dependent Kitty/mouse input retained as a semantic encoder until Hub admits.
- * On ModeGatedInput stale reject, callers must discard prior bytes and re-encode
- * under the fresh authoritative modes (never pair stale bytes with a new token).
- */
-export interface ModeDependentTerminalInput {
-  encode(modes: DaemonModeFlags): string;
-}
-
 export interface TerminalSubscription {
   unsubscribe(): void;
 }
 
 export interface TerminalAttachmentStatus {
-  state: "attaching" | "attached" | "live_only" | "exited" | "failed";
+  state: "attaching" | "attached" | "exited" | "failed";
   message: string;
 }
 
-/**
- * Outcome of one explicit terminal input operation. Paste is the first operation.
- *
- * Sizes are never ambiguous: `minimumBytes` is the UTF-16 length, a cheap lower bound on
- * the UTF-8 size that is always known; `requestedBytes` is the exact UTF-8 size and is
- * present only once the content was encoded; `deliveredBytes` is Core's authoritative
- * count of bytes written to the PTY. That count includes the bracketed-paste markers Core
- * adds when the fenced mode has `bracketed_paste`, so it is a PTY byte count, not clipboard
- * progress: an admitted bracketed paste reports requestedBytes plus 12, and a partial count
- * may include marker bytes. Web never subtracts markers. No outcome allocates the clipboard
- * to fill a size.
- * - admitted: Core delivered the operation; deliveredBytes is the full PTY write.
- * - rejected: Core or Web refused before delivery; Core proves zero PTY bytes.
- * - partial: Core reports that the PTY write began and stopped after deliveredBytes.
- * - cancelled: Web stopped the operation before its Commit reached Core; zero PTY bytes.
- * - unknown: no authoritative result proves delivery either way (result bound reached,
- *   stream lost after Commit, or a Core timeout that may follow a completed write).
- */
-export interface TerminalInputSizes {
-  minimumBytes: number;
-  requestedBytes?: number;
+/** Authoritative terminal modes and grid from the latest Core MODES frame. */
+export interface TerminalModes {
+  modeBits: number;
+  rows: number;
+  cols: number;
 }
 
-export type TerminalInputOutcome =
-  | (TerminalInputSizes & { kind: "paste"; outcome: "admitted"; deliveredBytes: number; operationId: number; detail: string })
-  | (TerminalInputSizes & { kind: "paste"; outcome: "rejected"; operationId?: number; reason: string; detail: string })
-  | (TerminalInputSizes & { kind: "paste"; outcome: "partial"; deliveredBytes: number; operationId: number; detail: string })
-  | (TerminalInputSizes & { kind: "paste"; outcome: "cancelled"; operationId?: number; detail: string })
-  | (TerminalInputSizes & { kind: "paste"; outcome: "unknown"; operationId?: number; reason?: string; detail: string });
+export type TerminalInputOperationKind = "raw" | "key" | "mouse" | "focus" | "resize" | "paste";
+
+/**
+ * Outcome names for one terminal input operation. The Core names are the snake_case
+ * `InputOutcome` values reported in INPUT_RESULT. `rejected_locally` is Web's own refusal
+ * before any frame was sent; its `reason` names the local bound or condition.
+ */
+export type TerminalInputOutcomeName =
+  | "written"
+  | "partial_write"
+  | "write_failed"
+  | "cancelled"
+  | "rejected_not_writable"
+  | "rejected_too_large"
+  | "rejected_unsafe_paste"
+  | "rejected_lane_full"
+  | "rejected_protocol"
+  | "session_ended"
+  | "outcome_unknown"
+  | "rejected_locally";
+
+/**
+ * Outcome of one explicit terminal input operation.
+ *
+ * `requestedBytes` is the client payload size Web sent (for paste, the UTF-8 size).
+ * `acceptedPayloadBytes` is the client payload the worker admitted. `writtenPtyBytes` is
+ * Core's authoritative count of bytes written to the PTY including encoder-added bytes such
+ * as bracketed-paste markers, so it is never presented as "N of M" against the clipboard
+ * size. Unknown counts are absent, never zero.
+ */
+export interface TerminalInputOutcome {
+  kind: TerminalInputOperationKind;
+  outcome: TerminalInputOutcomeName;
+  operationId?: number;
+  requestedBytes?: number;
+  acceptedPayloadBytes?: number;
+  writtenPtyBytes?: number;
+  reason?: string;
+  detail: string;
+}
+
+export interface TerminalResizeGeometry {
+  rows: number;
+  cols: number;
+  widthPx: number;
+  heightPx: number;
+}
 
 export interface TerminalDataPlaneAttachment {
   sessionId: string;
-  writeInput(data: TerminalInput): void | Promise<void>;
   /**
-   * Race-free mode-dependent input via ModeGatedInput + freshness tokens.
-   * Implementations re-encode the semantic event once after a stale reject.
+   * Queue one semantic input operation in order. The plane assigns the operation id,
+   * encodes the Core input frame, bounds the in-flight window, and reports the outcome
+   * through `subscribeInputOutcomes`. Never waits on an acknowledgement.
    */
-  writeModeGatedInput?(semantic: ModeDependentTerminalInput): void | Promise<void>;
+  sendInput(input: TerminalSemanticInput): void;
   /**
-   * Explicit clipboard paste as one Core-owned transaction. The plane encodes the
-   * protocol frames, supplies the mode token, and reports the authoritative outcome.
-   * It never adds bracketed-paste markers; Core emits them under the fenced mode.
+   * Explicit clipboard paste as one Core operation (PASTE_BEGIN, chunks, PASTE_COMMIT).
+   * Resolves with the authoritative outcome. Web never adds bracketed-paste markers.
    */
-  writePaste?(text: string): Promise<TerminalInputOutcome>;
+  writePaste(text: string): Promise<TerminalInputOutcome>;
   /** Bind the Restty incremental snapshot decoder for one subscription. */
   bindIncrementalSnapshotReader?(createReader: () => TerminalSnapshotReader): void;
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription;
   subscribeStatus?(listener: (status: TerminalAttachmentStatus) => void): TerminalSubscription;
-  resize?(rows: number, columns: number): void | Promise<void>;
+  subscribeModes?(listener: (modes: TerminalModes) => void): TerminalSubscription;
+  subscribeInputOutcomes?(listener: (outcome: TerminalInputOutcome) => void): TerminalSubscription;
+  resize?(geometry: TerminalResizeGeometry): void;
   readScreen?(): Promise<DaemonReadScreen | undefined>;
-  captureSnapshot?(): Promise<DaemonCaptureSnapshot | undefined>;
+  /** Paged host-control readback assembled into one GHOSTSNP buffer; low-rate control only. */
+  captureSnapshot?(): Promise<Uint8Array | undefined>;
   detach?(): void | Promise<void>;
 }
 
 export interface TerminalRendererAdapter {
   mount(container: HTMLElement): void | Promise<void>;
   attachDataPlane?(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription | void | Promise<TerminalSubscription | void>;
-  onInput(listener: (data: TerminalInput) => void): TerminalSubscription;
-  /** Outcomes of explicit input operations the renderer routed (paste). */
+  /** Generic renderers without a data-plane attachment report typed input here. */
+  onInput?(listener: (input: TerminalSemanticInput) => void): TerminalSubscription;
+  /** Outcomes of explicit input operations the renderer routed. */
   onInputOutcome?(listener: (outcome: TerminalInputOutcome) => void): TerminalSubscription;
   write(data: TerminalOutput): void | Promise<void>;
   resize(rows: number, columns: number): void | Promise<void>;
@@ -121,8 +136,9 @@ export interface TerminalViewBridge {
   unmount(descriptor: TerminalViewDescriptor, mount?: TerminalViewMount): Promise<void>;
   resize(descriptor: TerminalViewDescriptor, rows: number, columns: number): Promise<void>;
   focus(descriptor: TerminalViewDescriptor): Promise<void>;
-  writeInput(descriptor: TerminalViewDescriptor, data: TerminalInput): Promise<void>;
-  /** Subscribe to explicit input outcomes from the mounted renderer, if it reports them. */
+  /** Explicit raw bytes for harness and diagnostics paths only. */
+  writeRawInput(descriptor: TerminalViewDescriptor, data: string): Promise<void>;
+  /** Subscribe to explicit input outcomes for the mounted session. */
   subscribeInputOutcomes?(
     descriptor: TerminalViewDescriptor,
     listener: (outcome: TerminalInputOutcome) => void
@@ -185,8 +201,7 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     const state = this.requireMount(descriptor);
     if (
       state.dataPlane === dataPlane &&
-      state.inputSubscription &&
-      state.outputSubscription
+      (state.rendererDataPlaneSubscription || (state.inputSubscription && state.outputSubscription))
     ) {
       return;
     }
@@ -202,8 +217,8 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
       return;
     }
 
-    state.inputSubscription = state.renderer.onInput((data) => {
-      void dataPlane.writeInput(data);
+    state.inputSubscription = state.renderer.onInput?.((input) => {
+      dataPlane.sendInput(input);
     });
     const observeRender = createRendererWriteObserver(descriptor.sessionId);
     state.outputSubscription = dataPlane.subscribeOutput((data) => {
@@ -274,7 +289,7 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
 
     await state.renderer.resize(rows, columns);
     if (!state.renderer.attachDataPlane && state.dataPlane?.resize) {
-      await state.dataPlane.resize(rows, columns);
+      state.dataPlane.resize({ rows, cols: columns, widthPx: 0, heightPx: 0 });
     }
   }
 
@@ -290,10 +305,10 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     }
   }
 
-  async writeInput(descriptor: TerminalViewDescriptor, data: TerminalInput): Promise<void> {
+  async writeRawInput(descriptor: TerminalViewDescriptor, data: string): Promise<void> {
     const state = this.mounts.get(descriptor.sessionId);
-    if (!state) return;
-    await state.dataPlane?.writeInput(data);
+    if (!state?.dataPlane) return;
+    state.dataPlane.sendInput({ kind: "raw", bytes: new TextEncoder().encode(data) });
   }
 
   subscribeInputOutcomes(
@@ -301,8 +316,15 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
     listener: (outcome: TerminalInputOutcome) => void
   ): TerminalSubscription {
     const state = this.mounts.get(descriptor.sessionId);
-    const subscription = state?.renderer.onInputOutcome?.(listener);
-    return subscription ?? { unsubscribe() {} };
+    if (!state) return { unsubscribe() {} };
+    const rendererSubscription = state.renderer.onInputOutcome?.(listener);
+    const planeSubscription = state.dataPlane?.subscribeInputOutcomes?.(listener);
+    return {
+      unsubscribe() {
+        rendererSubscription?.unsubscribe();
+        planeSubscription?.unsubscribe();
+      }
+    };
   }
 
   private requireMount(descriptor: TerminalViewDescriptor): TerminalMountState {
@@ -315,13 +337,13 @@ export class DefaultTerminalViewBridge implements TerminalViewBridge {
 }
 
 export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
-  readonly inputs: TerminalInput[] = [];
-  readonly resizes: Array<{ rows: number; columns: number }> = [];
+  readonly inputs: TerminalSemanticInput[] = [];
+  readonly resizes: TerminalResizeGeometry[] = [];
+  readonly pastes: string[] = [];
   private readonly listeners = new Set<(data: TerminalOutput) => void>();
   private readonly statusListeners = new Set<(status: TerminalAttachmentStatus) => void>();
   private detached = false;
   detachCount = 0;
-  inputSubscriptionCount = 0;
   outputSubscriptionCount = 0;
   outputUnsubscribeCount = 0;
 
@@ -330,27 +352,31 @@ export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
     private readonly initialOutput: TerminalOutput[] = []
   ) {}
 
-  writeInput(data: TerminalInput): void {
+  sendInput(input: TerminalSemanticInput): void {
     if (!this.detached) {
-      this.inputs.push(data);
+      this.inputs.push(input);
     }
   }
 
-  readonly pastes: string[] = [];
-
   async writePaste(text: string): Promise<TerminalInputOutcome> {
     if (this.detached) {
-      return { kind: "paste", outcome: "rejected", minimumBytes: text.length, reason: "detached", detail: "Mock terminal data plane is detached." };
+      return {
+        kind: "paste",
+        outcome: "rejected_locally",
+        requestedBytes: text.length,
+        reason: "detached",
+        detail: "Mock terminal data plane is detached."
+      };
     }
     this.pastes.push(text);
     const bytes = new TextEncoder().encode(text).byteLength;
     return {
       kind: "paste",
-      outcome: "admitted",
-      minimumBytes: text.length,
-      requestedBytes: bytes,
-      deliveredBytes: bytes,
+      outcome: "written",
       operationId: this.pastes.length,
+      requestedBytes: bytes,
+      acceptedPayloadBytes: bytes,
+      writtenPtyBytes: bytes,
       detail: "Mock paste recorded."
     };
   }
@@ -388,9 +414,9 @@ export class MockTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
   }
 
-  resize(rows: number, columns: number): void {
+  resize(geometry: TerminalResizeGeometry): void {
     if (!this.detached) {
-      this.resizes.push({ rows, columns });
+      this.resizes.push(geometry);
     }
   }
 
@@ -419,7 +445,10 @@ function bytesToBase64(bytes: Uint8Array): string {
   throw new Error("No base64 encoder is available in this runtime.");
 }
 
-/** Install payload collection only when a harness has explicitly created its terminal recorder. */
+/**
+ * Install payload collection only when an operator harness has explicitly created its
+ * terminal recorder before mount. Production mounts have no recorder and no observer.
+ */
 export function createRendererWriteObserver(sessionId: string): ((data: TerminalOutput) => void) | undefined {
   const runtime = globalThis as typeof globalThis & {
     __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {

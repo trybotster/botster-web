@@ -1,18 +1,18 @@
 import {
   DefaultTerminalViewBridge,
   MockTerminalDataPlane,
-  type TerminalInput,
   type TerminalOutput,
   type TerminalRendererAdapter,
   type TerminalSubscription,
   type TerminalViewDescriptor
 } from "./terminal";
+import type { TerminalSemanticInput } from "./terminalInputEvents";
 
 class FakeTerminalRenderer implements TerminalRendererAdapter {
   readonly writes: TerminalOutput[] = [];
   readonly resizes: Array<{ rows: number; columns: number }> = [];
   readonly lifecycle: string[];
-  private inputListener?: (data: TerminalInput) => void;
+  private inputListener?: (input: TerminalSemanticInput) => void;
   onFocus?: () => void;
 
   constructor(lifecycle: string[]) {
@@ -24,7 +24,7 @@ class FakeTerminalRenderer implements TerminalRendererAdapter {
     this.lifecycle.push("mount");
   }
 
-  onInput(listener: (data: TerminalInput) => void): TerminalSubscription {
+  onInput(listener: (input: TerminalSemanticInput) => void): TerminalSubscription {
     this.inputListener = listener;
 
     return {
@@ -35,8 +35,8 @@ class FakeTerminalRenderer implements TerminalRendererAdapter {
     };
   }
 
-  emitInput(data: TerminalInput): void {
-    this.inputListener?.(data);
+  emitInput(data: string): void {
+    this.inputListener?.({ kind: "raw", bytes: new TextEncoder().encode(data) });
   }
 
   write(data: TerminalOutput): void {
@@ -76,7 +76,7 @@ export async function runTerminalViewBridgeSmokeFixture() {
 
   await bridge.focus(descriptor);
   await bridge.resize(descriptor, 1, 1);
-  await bridge.writeInput(descriptor, "premount\n");
+  await bridge.writeRawInput(descriptor, "premount\n");
 
   await bridge.mount(container, descriptor);
   await bridge.attach(descriptor, dataPlane);

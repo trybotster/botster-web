@@ -1,11 +1,19 @@
-import type { TerminalEvent } from "@trybotster/terminal-protocol";
+import {
+  LOCAL_WEBRTC_DELIVERY_CHUNK_VERSION,
+  LOCAL_WEBRTC_MAX_DELIVERY_BYTES,
+  LOCAL_WEBRTC_MAX_FRAME_BYTES,
+  LOCAL_WEBRTC_TERMINAL_CHUNK_HEADER_BYTES,
+  LOCAL_WEBRTC_TERMINAL_CHUNK_NONCE_BYTES,
+  LOCAL_WEBRTC_TERMINAL_CHUNK_TAG_BYTES
+} from "./generated/daemon-protocol";
 import type {
   AesGcmEnvelope,
+  ClientFrame,
   DaemonBridgeRequestEnvelope,
   DaemonBridgeResponseEnvelope,
+  DaemonCloseReason,
   DaemonEntityFrame,
   DaemonEvent,
-  DaemonHello,
   DaemonHelloAck,
   DaemonLocalWebrtcBootstrap,
   DaemonLocalWebrtcDeliveryChunk,
@@ -14,7 +22,8 @@ import type {
   DaemonResponse,
   DaemonSubscriptionReservation,
   DaemonTerminalReservation,
-  JsonValue
+  JsonValue,
+  ServerFrame
 } from "./realHubDaemonDto";
 import type { DaemonBridgeClient, TerminalStreamEvent } from "./hubTransport";
 import {
@@ -67,15 +76,25 @@ export type WebrtcDaemonLifecycleEvent =
 export const webRtcDaemonLifecycleEventName = "botster:webrtc-daemon-lifecycle";
 
 /**
- * Reconnect policy after a transport loss while reconnect demand exists. Retries continue at
- * the capped delay until an authenticated Hello or an explicit disconnect. Each attempt has
- * an absolute deadline measured from attempt start; the deadline rejects the caller even
- * when a bootstrap provider or fetch ignores cancellation.
+ * Reconnect policy after a transport loss while the user's connection intent exists. One
+ * retry loop with capped exponential delay, 250 ms to 8 s, continues until an authenticated
+ * Hello or an explicit disconnect cancels it. Each attempt has an absolute deadline measured
+ * from attempt start; the deadline rejects the caller even when a bootstrap provider or
+ * fetch ignores cancellation.
  */
 export const localWebrtcReconnectPolicy = Object.freeze({
-  initialDelayMs: 500,
-  maxDelayMs: 10_000,
+  initialDelayMs: 250,
+  maxDelayMs: 8_000,
   attemptTimeoutMs: 10_000
+});
+
+/**
+ * Host-control v9 request bounds. Hub answers a valid 33rd outstanding request with a
+ * correlated `too_many_requests` error, so the client holds the 33rd locally until a slot
+ * frees. Request ids are decimal u64 strings, strictly increasing per connection generation.
+ */
+export const hostControlRequestLimits = Object.freeze({
+  maxOutstandingRequests: 32
 });
 
 /**
@@ -99,13 +118,17 @@ type PendingKind = "hello" | "request";
 
 type PendingRequest = {
   generation: number;
+  /** Decimal u64 envelope id; the Hello has no id and uses the empty string. */
+  requestId: string;
   requestType: string;
   kind: PendingKind;
-  request: DaemonRequest | DaemonHello;
-  messageId?: string;
   resolve(response: DaemonResponse | DaemonHelloAck): void;
   reject(error: unknown): void;
 };
+
+function pendingKey(generation: number, requestId: string): string {
+  return `${generation}:${requestId}`;
+}
 
 type TerminalStreamListener = {
   sessionId: string;
@@ -116,12 +139,16 @@ type TerminalStreamListener = {
   onEvent(event: TerminalStreamEvent): void | Promise<void>;
 };
 
+/** One in-progress binary terminal message: decrypted slices land in place, in order. */
 type TerminalChannelAssembly = {
-  messageId: string;
+  messageId: bigint;
   chunkCount: number;
   totalBytes: number;
+  /** Fixed attachment generation and stream epoch; every chunk of one message repeats both. */
+  generation: bigint;
+  streamEpoch: number;
   nextIndex: number;
-  payloads: string[];
+  body: Uint8Array;
   receivedBytes: number;
   timeout: number;
 };
@@ -135,8 +162,9 @@ type TerminalChannelBinding = {
   label: string;
   closed: boolean;
   admitted: boolean;
-  outboundCounter: number;
-  completedMessageIds: Set<string>;
+  /** Per-channel, per-direction message counters; strictly increasing. */
+  outboundMessageId: bigint;
+  lastInboundMessageId: bigint;
   assembly?: TerminalChannelAssembly;
   resolveReady(): void;
   rejectReady(error: unknown): void;
@@ -192,7 +220,6 @@ export function setApplyAssemblyTimeoutCleanup(enabled: boolean): void {
 type ResponseAssembly = {
   generation: number;
   deliveryKind: DaemonLocalWebrtcDeliveryKind;
-  pending?: PendingRequest;
   chunkCount: number;
   totalBytes: number;
   chunks: Map<number, string>;
@@ -355,7 +382,23 @@ export const localWebrtcResponseChunkLimits = Object.freeze({
 });
 
 const requestTimeoutMs = localWebrtcResponseChunkLimits.requestTimeoutMs;
-const terminalChunkPayloadBytes = 12_288;
+
+/**
+ * Binary terminal chunk layout (Hub host-control v9), 33-byte header:
+ * offset 0 `u8 version=2`; 1 `u64 LE message_id` (per channel, per direction, from 1);
+ * 9 `u32 LE chunk_index`; 13 `u32 LE chunk_count`; 17 `u32 LE total_bytes` (plaintext length);
+ * 21 `u64 LE generation` (fixed attachment generation from the reservation);
+ * 29 `u32 LE stream_epoch` (Core routing metadata; 0 in the input direction);
+ * 33 12-byte nonce; 45 AES-GCM ciphertext || 16-byte tag.
+ * The route is the subscription DataChannel label. Every chunk of one message repeats
+ * generation and stream_epoch; reassembly identity is (channel, direction, message_id).
+ */
+const terminalChunkHeaderBytes = LOCAL_WEBRTC_TERMINAL_CHUNK_HEADER_BYTES;
+const terminalChunkNonceBytes = LOCAL_WEBRTC_TERMINAL_CHUNK_NONCE_BYTES;
+const terminalChunkTagBytes = LOCAL_WEBRTC_TERMINAL_CHUNK_TAG_BYTES;
+/** Plaintext bytes per outbound terminal chunk so the sealed message stays under the frame limit. */
+const terminalChunkPlaintextBytes =
+  LOCAL_WEBRTC_MAX_FRAME_BYTES - 1 - terminalChunkHeaderBytes - terminalChunkNonceBytes - terminalChunkTagBytes;
 
 function createRequestIdGenerator(prefix: string) {
   let counter = 0;
@@ -403,7 +446,6 @@ export function createLocalWebrtcBootstrapRefresher({
 
 export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): DaemonBridgeClient {
   const transport = new WebrtcDaemonTransport(options);
-  const eventListeners = new Set<(event: DaemonEvent) => void>();
   const client: DaemonBridgeClient = {
     async request(request) {
       return transport.request(request);
@@ -412,12 +454,7 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
       transport.disconnect();
     },
     subscribeEvents(onEvent) {
-      eventListeners.add(onEvent);
-      return {
-        unsubscribe: () => {
-          eventListeners.delete(onEvent);
-        }
-      };
+      return transport.subscribeHostEvents(onEvent);
     },
     subscribeEntityFrames(entityType, onFrame) {
       return transport.subscribeEntityFrames(entityType, onFrame);
@@ -429,9 +466,6 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
       let closed = false;
       const listener = transport.addTerminalStreamListener(sessionId, subscriptionId, async (event) => {
         if (closed) return;
-        if (event.type !== "terminal_subscription_closed") {
-          eventListeners.forEach((subscriber) => subscriber(event as unknown as DaemonEvent));
-        }
         await onEvent(event);
       });
 
@@ -507,12 +541,17 @@ class WebrtcDaemonTransport {
   private readonly fetchImpl: typeof fetch;
   private readonly peerConnectionFactory: () => RTCPeerConnection;
   private readonly pageHideHandler: (() => void) | undefined;
-  private readonly pendingRequests: PendingRequest[] = [];
+  /** Pending host requests keyed by `(connection generation, request_id)`. */
+  private readonly pendingRequests = new Map<string, PendingRequest>();
+  /** Requests waiting for one of the 32 outstanding slots, in submission order. */
+  private readonly requestSlotWaiters: Array<{ generation: number; grant(): void; cancel(error: unknown): void }> = [];
+  private nextRequestId = 1;
   private peerFailed = false;
   private readonly responseAssemblies = new Map<string, ResponseAssembly>();
   private readonly completedMessageIds = new Set<string>();
   private readonly entitySubscriptions = new Set<EntitySubscription>();
   private readonly packageEventHolders = new Set<PackageEventHolder>();
+  private readonly hostEventListeners = new Set<(event: DaemonEvent) => void>();
   private readonly terminalStreamListeners = new Set<TerminalStreamListener>();
   private readonly terminalChannels = new Set<TerminalChannelBinding>();
   private readonly subscriptionChannels = new Set<SubscriptionChannelBinding>();
@@ -563,16 +602,73 @@ class WebrtcDaemonTransport {
     }
 
     recordLiveHarnessEvent("daemon_request", request);
+    const generation = this.peerGeneration;
+    await this.acquireRequestSlot(generation);
+    const requestId = String(this.nextRequestId++);
+    const envelope: ClientFrame = { frame: "request", request_id: requestId, request };
     const response = await this.sendEncrypted<DaemonResponse>(
-      request,
+      envelope,
+      requestId,
       request.type,
       "request",
       (payload) => payload as DaemonResponse
     );
-    if (request.type === "drain" && (response.events ?? []).some(isTerminalBodyEvent)) {
-      throw webrtcFailure("data-plane", "host drain returned a terminal body");
-    }
     return response;
+  }
+
+  private outstandingRequests(generation: number): number {
+    let count = 0;
+    for (const pending of this.pendingRequests.values()) {
+      if (pending.generation === generation && pending.kind === "request") count += 1;
+    }
+    return count;
+  }
+
+  /** Holds the caller until fewer than 32 requests are outstanding on this generation. */
+  private acquireRequestSlot(generation: number): Promise<void> {
+    if (
+      this.requestSlotWaiters.length === 0 &&
+      this.outstandingRequests(generation) < hostControlRequestLimits.maxOutstandingRequests
+    ) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      this.requestSlotWaiters.push({ generation, grant: resolve, cancel: reject });
+    });
+  }
+
+  private releaseRequestSlot(generation: number): void {
+    while (this.requestSlotWaiters.length > 0) {
+      const waiter = this.requestSlotWaiters[0];
+      if (waiter.generation !== this.peerGeneration) {
+        this.requestSlotWaiters.shift();
+        waiter.cancel(webrtcFailure("transport", "local WebRTC connection generation changed while waiting for a request slot"));
+        continue;
+      }
+      if (this.outstandingRequests(generation) >= hostControlRequestLimits.maxOutstandingRequests) return;
+      this.requestSlotWaiters.shift();
+      waiter.grant();
+      return;
+    }
+  }
+
+  private cancelRequestSlotWaiters(error: unknown, generation?: number): void {
+    const keep: typeof this.requestSlotWaiters = [];
+    for (const waiter of this.requestSlotWaiters.splice(0)) {
+      if (generation === undefined || waiter.generation === generation) waiter.cancel(error);
+      else keep.push(waiter);
+    }
+    this.requestSlotWaiters.push(...keep);
+  }
+
+  /** Host lifecycle events delivered as control-channel `ServerFrame::Event` frames. */
+  subscribeHostEvents(onEvent: (event: DaemonEvent) => void): { unsubscribe(): void } {
+    this.hostEventListeners.add(onEvent);
+    return {
+      unsubscribe: () => {
+        this.hostEventListeners.delete(onEvent);
+      }
+    };
   }
 
   addTerminalStreamListener(
@@ -616,6 +712,8 @@ class WebrtcDaemonTransport {
     let channel: RTCDataChannel;
     try {
       channel = peerConnection.createDataChannel(reservation.label, { ordered: true });
+      // Terminal bodies arrive as binary chunks; ArrayBuffer avoids Blob reads per message.
+      channel.binaryType = "arraybuffer";
     } catch (error) {
       throw webrtcFailure("transport", `terminal DataChannel creation failed: ${errorMessage(error)}`);
     }
@@ -632,8 +730,8 @@ class WebrtcDaemonTransport {
         label: reservation.label,
         closed: false,
         admitted: false,
-        outboundCounter: 0,
-        completedMessageIds: new Set(),
+        outboundMessageId: 0n,
+        lastInboundMessageId: 0n,
         resolveReady: resolve,
         rejectReady: reject,
         expiryTimeout: window.setTimeout(() => {
@@ -666,10 +764,13 @@ class WebrtcDaemonTransport {
       if (listener.closed || binding.closed || transportGeneration !== this.peerGeneration) {
         throw webrtcFailure("transport", "terminal DataChannel opened for a stale reservation");
       }
-      const hello: DaemonHello = {
-        protocol: hostHelloProtocol,
-        compatibility: hostCompatibilityRequirement,
-        terminal_compatibility: terminalCompatibilityRequirement
+      const hello: ClientFrame = {
+        frame: "hello",
+        hello: {
+          protocol: hostHelloProtocol,
+          compatibility: hostCompatibilityRequirement,
+          terminal_compatibility: terminalCompatibilityRequirement
+        }
       };
       channel.send(JSON.stringify(await encryptJsonPayload(key, hello)));
       await ready;
@@ -684,20 +785,23 @@ class WebrtcDaemonTransport {
     }
   }
 
+  /**
+   * Sends one Core input frame as binary terminal chunks. Each chunk seals one contiguous
+   * plaintext slice; no JSON or base64 touches the bytes.
+   */
   async sendTerminalFrame(binding: TerminalChannelBinding, frame: Uint8Array): Promise<void> {
     const key = this.cryptoKey;
     if (binding.closed || !binding.admitted || !key || binding.channel.readyState !== "open") {
       throw webrtcFailure("transport", "terminal subscription channel is not ready");
     }
-    const envelopeJson = JSON.stringify(await encryptBytesPayload(key, frame));
-    const totalBytes = utf8ByteLength(envelopeJson);
-    const chunkCount = Math.ceil(totalBytes / terminalChunkPayloadBytes);
-    const messageId = `${binding.peerGeneration}:${binding.generation}:${++binding.outboundCounter}`;
+    const totalBytes = frame.byteLength;
+    const chunkCount = Math.max(1, Math.ceil(totalBytes / terminalChunkPlaintextBytes));
+    const messageId = ++binding.outboundMessageId;
     recordLiveHarnessEvent("terminal_data_channel_send", {
       label: binding.label,
       generation: binding.generation,
       peer_generation: binding.peerGeneration,
-      message_id: messageId,
+      message_id: Number(messageId),
       chunk_count: chunkCount,
       total_bytes: totalBytes,
       frame_kind: frame[1] ?? null
@@ -706,24 +810,20 @@ class WebrtcDaemonTransport {
       if (binding.closed || binding.channel.readyState !== "open") {
         throw webrtcFailure("transport", "terminal subscription channel closed during send");
       }
-      const payload = envelopeJson.slice(
-        chunkIndex * terminalChunkPayloadBytes,
-        (chunkIndex + 1) * terminalChunkPayloadBytes
+      const slice = frame.subarray(
+        chunkIndex * terminalChunkPlaintextBytes,
+        Math.min((chunkIndex + 1) * terminalChunkPlaintextBytes, totalBytes)
       );
-      const chunk: DaemonLocalWebrtcDeliveryChunk = {
-        version: 2,
-        delivery_kind: "daemon_terminal_frame",
-        message_id: messageId,
-        chunk_index: chunkIndex,
-        chunk_count: chunkCount,
-        total_bytes: totalBytes,
-        payload
-      };
-      const serialized = JSON.stringify(chunk);
-      if (utf8ByteLength(serialized) >= localWebrtcResponseChunkLimits.maximumFrameBytesExclusive) {
+      // Input carries the fixed attachment identity only; stream_epoch is reserved as 0.
+      const message = await sealTerminalChunk(
+        key,
+        { messageId, chunkIndex, chunkCount, totalBytes, generation: BigInt(binding.generation), streamEpoch: 0 },
+        slice
+      );
+      if (message.byteLength >= LOCAL_WEBRTC_MAX_FRAME_BYTES) {
         throw webrtcFailure("data-plane", "terminal delivery chunk exceeds the transport limit");
       }
-      binding.channel.send(serialized);
+      binding.channel.send(message);
     }
   }
 
@@ -755,77 +855,31 @@ class WebrtcDaemonTransport {
     }
   }
 
+  /**
+   * Terminal DataChannel messages. The reserved channel admits with one JSON delivery chunk
+   * carrying the encrypted `ServerFrame::hello_ack`; after admission every message is one
+   * binary terminal chunk whose sealed slice decrypts in place into the message body.
+   */
   private async handleTerminalChannelMessage(binding: TerminalChannelBinding, data: unknown): Promise<void> {
-    if (typeof data !== "string" || utf8ByteLength(data) >= localWebrtcResponseChunkLimits.maximumFrameBytesExclusive) {
-      throw webrtcFailure("data-plane", "terminal DataChannel delivery must be a bounded string chunk");
-    }
-    const chunk = parseDeliveryChunk(data);
-    if (binding.admitted && chunk.delivery_kind !== "daemon_terminal_frame") {
-      throw webrtcFailure("data-plane", "bound terminal channel received a non-terminal delivery");
-    }
-    if (binding.completedMessageIds.has(chunk.message_id)) {
-      throw webrtcFailure("data-plane", "terminal channel reused a completed message id");
-    }
-    let assembly = binding.assembly;
-    if (!assembly) {
-      if (chunk.chunk_index !== 0) throw webrtcFailure("data-plane", "terminal delivery did not start at chunk zero");
-      assembly = binding.assembly = {
-        messageId: chunk.message_id,
-        chunkCount: chunk.chunk_count,
-        totalBytes: chunk.total_bytes,
-        nextIndex: 0,
-        payloads: [],
-        receivedBytes: 0,
-        timeout: window.setTimeout(() => {
-          if (!binding.closed) {
-            binding.rejectReady(webrtcFailure("data-plane", "terminal delivery assembly timed out"));
-            this.closeTerminalChannel(binding, true);
-          }
-        }, requestTimeoutMs)
-      };
-    }
-    if (
-      assembly.messageId !== chunk.message_id ||
-      assembly.chunkCount !== chunk.chunk_count ||
-      assembly.totalBytes !== chunk.total_bytes ||
-      chunk.chunk_index !== assembly.nextIndex
-    ) {
-      throw webrtcFailure("data-plane", "terminal delivery chunk order or metadata was invalid");
-    }
-    recordLiveHarnessEvent("terminal_data_channel_receive", {
-      label: binding.label,
-      generation: binding.generation,
-      peer_generation: binding.peerGeneration,
-      message_id: chunk.message_id,
-      chunk_index: chunk.chunk_index,
-      chunk_count: chunk.chunk_count,
-      total_bytes: chunk.total_bytes,
-      delivery_kind: chunk.delivery_kind,
-      frame_bytes: utf8ByteLength(data)
-    });
-    assembly.payloads.push(chunk.payload);
-    assembly.receivedBytes += utf8ByteLength(chunk.payload);
-    if (assembly.receivedBytes > assembly.totalBytes) {
-      throw webrtcFailure("data-plane", "terminal delivery exceeded the declared total bytes");
-    }
-    assembly.nextIndex += 1;
-    if (assembly.nextIndex !== assembly.chunkCount) return;
-    if (assembly.receivedBytes !== assembly.totalBytes) {
-      throw webrtcFailure("data-plane", "terminal delivery bytes did not match the declared total");
-    }
-    window.clearTimeout(assembly.timeout);
-    binding.assembly = undefined;
-    if (binding.completedMessageIds.size >= localWebrtcResponseChunkLimits.maximumCompletedMessageIds) {
-      const oldestMessageId = binding.completedMessageIds.values().next().value as string;
-      binding.completedMessageIds.delete(oldestMessageId);
-    }
-    binding.completedMessageIds.add(assembly.messageId);
     const key = this.cryptoKey;
     if (!key) throw webrtcFailure("encryption", "terminal response key is unavailable");
-    const payload = await decryptDaemonPayload(key, assembly.payloads.join(""));
-    if (!binding.admitted) {
-      const ack = payload as DaemonHelloAck;
-      if (!ack || ack.protocol !== hostHelloProtocol || !isTerminalCompatibilityAccepted(ack.terminal_compatibility)) {
+    if (typeof data === "string") {
+      if (utf8ByteLength(data) >= localWebrtcResponseChunkLimits.maximumFrameBytesExclusive) {
+        throw webrtcFailure("data-plane", "terminal DataChannel control delivery exceeds the transport limit");
+      }
+      const chunk = parseDeliveryChunk(data);
+      if (chunk.chunk_index !== 0 || chunk.chunk_count !== 1) {
+        throw webrtcFailure("data-plane", "terminal DataChannel control delivery must be one chunk");
+      }
+      const frame = parseServerFrame(await decryptDaemonPayload(key, chunk.payload));
+      if (frame.frame === "close") {
+        throw webrtcFailure("data-plane", `terminal DataChannel closed by Hub: ${describeCloseReason(frame.reason)}`);
+      }
+      if (binding.admitted || frame.frame !== "hello_ack") {
+        throw webrtcFailure("data-plane", "terminal DataChannel received an unexpected control frame");
+      }
+      const ack = frame.ack;
+      if (ack.protocol !== hostHelloProtocol || !isTerminalCompatibilityAccepted(ack.terminal_compatibility)) {
         throw webrtcFailure("data-plane", "terminal DataChannel Hello was rejected");
       }
       binding.admitted = true;
@@ -839,11 +893,95 @@ class WebrtcDaemonTransport {
       });
       return;
     }
-    const event = parseTerminalEvent(payload);
-    const sessionMatches = event.type === "input_result" || event.session_id === binding.listener.sessionId;
-    if (!sessionMatches || event.subscription_id !== binding.listener.subscriptionId || binding.listener.closed) return;
-    recordLiveHarnessEvent("daemon_terminal_event", event);
-    await binding.listener.onEvent(event);
+    if (!binding.admitted) {
+      throw webrtcFailure("data-plane", "terminal DataChannel carried data before admission");
+    }
+    const message = binaryMessageBytes(data);
+    if (!message || message.byteLength >= LOCAL_WEBRTC_MAX_FRAME_BYTES) {
+      throw webrtcFailure("data-plane", "terminal DataChannel delivery must be a bounded binary chunk");
+    }
+    const parsed = parseTerminalChunk(message);
+    if (!parsed) {
+      throw webrtcFailure("data-plane", "terminal DataChannel chunk header was invalid");
+    }
+    const { header, sealed } = parsed;
+    if (header.generation !== BigInt(binding.generation)) {
+      // The reservation fixes the route generation for this attachment; any other value is
+      // data from a retired subscription and is discarded, never continued.
+      recordLiveHarnessEvent("terminal_data_channel_discarded", {
+        label: binding.label,
+        generation: binding.generation,
+        chunk_generation: Number(header.generation)
+      });
+      return;
+    }
+    let assembly = binding.assembly;
+    if (!assembly) {
+      if (header.chunkIndex !== 0) throw webrtcFailure("data-plane", "terminal delivery did not start at chunk zero");
+      if (header.messageId <= binding.lastInboundMessageId) {
+        throw webrtcFailure("data-plane", "terminal channel message id did not increase");
+      }
+      if (header.totalBytes > LOCAL_WEBRTC_MAX_DELIVERY_BYTES) {
+        throw webrtcFailure("data-plane", "terminal delivery exceeds the delivery limit");
+      }
+      assembly = binding.assembly = {
+        messageId: header.messageId,
+        chunkCount: header.chunkCount,
+        totalBytes: header.totalBytes,
+        generation: header.generation,
+        streamEpoch: header.streamEpoch,
+        nextIndex: 0,
+        body: new Uint8Array(header.totalBytes),
+        receivedBytes: 0,
+        timeout: window.setTimeout(() => {
+          if (!binding.closed) {
+            binding.rejectReady(webrtcFailure("data-plane", "terminal delivery assembly timed out"));
+            this.closeTerminalChannel(binding, true);
+          }
+        }, requestTimeoutMs)
+      };
+    }
+    if (
+      assembly.messageId !== header.messageId ||
+      assembly.chunkCount !== header.chunkCount ||
+      assembly.totalBytes !== header.totalBytes ||
+      assembly.generation !== header.generation ||
+      assembly.streamEpoch !== header.streamEpoch ||
+      header.chunkIndex !== assembly.nextIndex
+    ) {
+      throw webrtcFailure("data-plane", "terminal delivery chunk order or metadata was invalid");
+    }
+    const slice = await openTerminalChunk(key, sealed);
+    if (assembly.receivedBytes + slice.byteLength > assembly.totalBytes) {
+      throw webrtcFailure("data-plane", "terminal delivery exceeded the declared total bytes");
+    }
+    assembly.body.set(slice, assembly.receivedBytes);
+    assembly.receivedBytes += slice.byteLength;
+    assembly.nextIndex += 1;
+    recordLiveHarnessEvent("terminal_data_channel_receive", {
+      label: binding.label,
+      generation: binding.generation,
+      peer_generation: binding.peerGeneration,
+      message_id: Number(header.messageId),
+      chunk_index: header.chunkIndex,
+      chunk_count: header.chunkCount,
+      total_bytes: header.totalBytes,
+      frame_bytes: message.byteLength
+    });
+    if (assembly.nextIndex !== assembly.chunkCount) return;
+    if (assembly.receivedBytes !== assembly.totalBytes) {
+      throw webrtcFailure("data-plane", "terminal delivery bytes did not match the declared total");
+    }
+    window.clearTimeout(assembly.timeout);
+    binding.assembly = undefined;
+    binding.lastInboundMessageId = assembly.messageId;
+    if (binding.listener.closed) return;
+    await binding.listener.onEvent({
+      route: binding.listener.subscriptionId,
+      generation: Number(assembly.generation),
+      streamEpoch: assembly.streamEpoch,
+      body: assembly.body
+    });
   }
 
   private async openSubscriptionChannel(
@@ -931,9 +1069,12 @@ class WebrtcDaemonTransport {
         ...subscriptionChannelOwnerPayload(binding),
         remote: false
       });
-      const hello: DaemonHello = {
-        protocol: hostHelloProtocol,
-        compatibility: hostCompatibilityRequirement
+      const hello: ClientFrame = {
+        frame: "hello",
+        hello: {
+          protocol: hostHelloProtocol,
+          compatibility: hostCompatibilityRequirement
+        }
       };
       channel.send(JSON.stringify(await encryptJsonPayload(key, hello)));
       await ready;
@@ -990,10 +1131,6 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("data-plane", "subscription DataChannel delivery must be a bounded string chunk");
     }
     const chunk = parseDeliveryChunk(data);
-    const expectedKind = binding.channelClass === "entity" ? "daemon_entity_frame" : "daemon_event";
-    if (binding.admitted && chunk.delivery_kind !== expectedKind) {
-      throw webrtcFailure("data-plane", "bound subscription channel received a delivery for another class");
-    }
     if (binding.completedMessageIds.has(chunk.message_id)) {
       throw webrtcFailure("data-plane", "subscription channel reused a completed message id");
     }
@@ -1060,11 +1197,17 @@ class WebrtcDaemonTransport {
     binding.completedMessageIds.add(assembly.messageId);
     const key = this.cryptoKey;
     if (!key) throw webrtcFailure("encryption", "subscription response key is unavailable");
-    const payload = await decryptDaemonPayload(key, assembly.payloads.join(""));
+    const frame = parseServerFrame(await decryptDaemonPayload(key, assembly.payloads.join("")));
+    if (frame.frame === "close") {
+      throw webrtcFailure("data-plane", `subscription DataChannel closed by Hub: ${describeCloseReason(frame.reason)}`);
+    }
 
     if (!binding.admitted) {
-      const ack = payload as DaemonHelloAck;
-      if (!ack || ack.protocol !== hostHelloProtocol || !ack.compatibility) {
+      if (frame.frame !== "hello_ack") {
+        throw webrtcFailure("data-plane", "subscription DataChannel carried data before admission");
+      }
+      const ack = frame.ack;
+      if (ack.protocol !== hostHelloProtocol || !ack.compatibility) {
         throw webrtcFailure("data-plane", "subscription DataChannel Hello was rejected");
       }
       binding.admitted = true;
@@ -1085,20 +1228,25 @@ class WebrtcDaemonTransport {
 
     if (!this.isCurrentSubscriptionBinding(binding)) return;
     if (binding.channelClass === "entity") {
-      const frame = payload as DaemonEntityFrame;
+      if (frame.frame !== "entity") {
+        throw webrtcFailure("data-plane", "entity channel received a frame of another class");
+      }
       recordLiveHarnessEvent("webrtc_entity_frame_assembly", {
         generation: binding.transportGeneration,
         label: binding.label,
         total_bytes: assembly.totalBytes,
         chunk_count: assembly.chunkCount
       });
-      if (!this.maybeDropArmedInboundEntityFrame(frame, binding.transportGeneration)) {
-        this.receiveEntityFrame(frame, binding.transportGeneration);
+      if (!this.maybeDropArmedInboundEntityFrame(frame.entity, binding.transportGeneration)) {
+        this.receiveEntityFrame(frame.entity, binding.transportGeneration);
       }
       return;
     }
 
-    const event = payload as DaemonEvent;
+    if (frame.frame !== "event") {
+      throw webrtcFailure("data-plane", "package-event channel received a frame of another class");
+    }
+    const event = frame.event;
     if (event.type !== "package_event" && event.type !== "event_gap") {
       throw webrtcFailure("data-plane", "package-event channel received an unsupported event type");
     }
@@ -1157,7 +1305,8 @@ class WebrtcDaemonTransport {
   }
 
   private async sendEncrypted<T extends DaemonResponse | DaemonHelloAck>(
-    plaintext: DaemonRequest | DaemonHello,
+    plaintext: ClientFrame,
+    requestId: string,
     requestType: string,
     kind: PendingKind,
     parse: (payload: unknown) => T
@@ -1175,29 +1324,24 @@ class WebrtcDaemonTransport {
     }
     return new Promise<T>((resolve, reject) => {
       const generation = this.peerGeneration;
+      const key2 = pendingKey(generation, requestId);
       const timeout = window.setTimeout(() => {
         const error = webrtcFailure("data-plane", `local WebRTC request timed out: ${requestType}`);
         if (kind === "hello") {
           this.failPeerGeneration(generation, error);
           return;
         }
-        const index = this.pendingRequests.indexOf(pending);
-        if (index >= 0) this.pendingRequests.splice(index, 1);
         if (requestType === "attach") {
-          recordLiveHarnessEvent("terminal_attach_timeout", {
-            generation,
-            session_id: "session_id" in plaintext ? plaintext.session_id : null,
-            subscription_id: "subscription_id" in plaintext ? plaintext.subscription_id : null
-          });
+          recordLiveHarnessEvent("terminal_attach_timeout", { generation, request_id: requestId });
         }
-        pending.reject(error);
+        this.settlePending(key2, pending, (entry) => entry.reject(error));
       }, requestTimeoutMs);
 
       const pending: PendingRequest = {
         generation,
+        requestId,
         requestType,
         kind,
-        request: plaintext,
         resolve: (response) => {
           window.clearTimeout(timeout);
           resolve(parse(response));
@@ -1207,7 +1351,7 @@ class WebrtcDaemonTransport {
           reject(error);
         }
       };
-      this.pendingRequests.push(pending);
+      this.pendingRequests.set(key2, pending);
 
       try {
         channel.send(JSON.stringify(envelope));
@@ -1216,13 +1360,25 @@ class WebrtcDaemonTransport {
           this.emitLifecycle({ type: "encrypted-stream-ready", requestType });
         }
       } catch (error) {
-        const index = this.pendingRequests.indexOf(pending);
-        if (index >= 0) this.pendingRequests.splice(index, 1);
-        pending.reject(
-          webrtcFailure("data-plane", `local WebRTC data-plane send failed for ${requestType}: ${errorMessage(error)}`)
+        this.settlePending(key2, pending, (entry) =>
+          entry.reject(
+            webrtcFailure("data-plane", `local WebRTC data-plane send failed for ${requestType}: ${errorMessage(error)}`)
+          )
         );
       }
     });
+  }
+
+  /** Removes one pending entry by identity, settles it, and frees a request slot. */
+  private settlePending(
+    key: string,
+    pending: PendingRequest,
+    settle: (entry: PendingRequest) => void
+  ): void {
+    if (this.pendingRequests.get(key) !== pending) return;
+    this.pendingRequests.delete(key);
+    settle(pending);
+    if (pending.kind === "request") this.releaseRequestSlot(pending.generation);
   }
 
   private async sendHello(attempt: ConnectAttempt): Promise<DaemonHelloAck> {
@@ -1232,13 +1388,16 @@ class WebrtcDaemonTransport {
     }
     if (this.helloPromise && this.helloGeneration === generation) return this.helloPromise;
     this.helloGeneration = generation;
-    const hello: DaemonHello = {
-      protocol: hostHelloProtocol,
-      compatibility: hostCompatibilityRequirement,
-      terminal_compatibility: terminalCompatibilityRequirement
+    const hello: ClientFrame = {
+      frame: "hello",
+      hello: {
+        protocol: hostHelloProtocol,
+        compatibility: hostCompatibilityRequirement,
+        terminal_compatibility: terminalCompatibilityRequirement
+      }
     };
-    recordLiveHarnessEvent("daemon_hello", hello);
-    this.helloPromise = this.sendEncrypted<DaemonHelloAck>(hello, "hello", "hello", (payload) => {
+    recordLiveHarnessEvent("daemon_hello", hello.hello);
+    this.helloPromise = this.sendEncrypted<DaemonHelloAck>(hello, "", "hello", "hello", (payload) => {
       const ack = payload as DaemonHelloAck;
       if (!ack || typeof ack.protocol !== "string" || !ack.compatibility) {
         throw webrtcFailure("data-plane", "local WebRTC hello ack is not a DaemonHelloAck");
@@ -1370,6 +1529,9 @@ class WebrtcDaemonTransport {
     // Callers that never await this promise (retry timer, loss path) must not surface an
     // unhandled rejection; the attempt reports failure through failAttempt.
     promise.catch(() => undefined);
+    // Request ids restart at 1 on every connection generation: they are strictly
+    // increasing for the connection lifetime and the server keeps only the last id.
+    this.nextRequestId = 1;
     const attempt: ConnectAttempt = {
       generation: ++this.peerGeneration,
       promise,
@@ -1841,9 +2003,6 @@ class WebrtcDaemonTransport {
     }
     let assembly = this.responseAssemblies.get(chunk.message_id);
     if (!assembly) {
-      const pending = chunk.delivery_kind === "daemon_response"
-        ? this.pendingRequests.find((entry) => entry.generation === generation && entry.messageId === undefined)
-        : undefined;
       if (this.responseAssemblies.size >= localWebrtcResponseChunkLimits.maximumConcurrentAssemblies) {
         throw webrtcFailure("data-plane", "local WebRTC response assembly limit exceeded");
       }
@@ -1853,12 +2012,10 @@ class WebrtcDaemonTransport {
         localWebrtcResponseChunkLimits.chunkBookkeepingBytes +
         utf8ByteLength(chunk.payload);
       this.ensureAggregateBudget(retainedBytes);
-      if (pending) pending.messageId = chunk.message_id;
       const startedAt = Date.now();
       assembly = {
         generation,
         deliveryKind: chunk.delivery_kind,
-        pending,
         chunkCount: chunk.chunk_count,
         totalBytes: chunk.total_bytes,
         chunks: new Map([[chunk.chunk_index, chunk.payload]]),
@@ -1867,25 +2024,12 @@ class WebrtcDaemonTransport {
         startedAt,
         timeout: window.setTimeout(() => {
           if (!applyAssemblyTimeoutCleanup) return;
-          const error = webrtcFailure(
-            "data-plane",
-            `local WebRTC ${chunk.delivery_kind} assembly timed out${pending ? `: ${pending.requestType}` : ""}`
+          // An ordered channel that stops mid-message is a transport fault for the whole
+          // connection; the reassembly header carries no request identity before decrypt.
+          this.failPeerGeneration(
+            generation,
+            webrtcFailure("data-plane", `local WebRTC ${chunk.delivery_kind} assembly timed out`)
           );
-          if (pending?.requestType === "attach") {
-            const timedAssembly = this.responseAssemblies.get(chunk.message_id);
-            if (timedAssembly && timedAssembly === assembly) {
-              this.releaseAssembly(chunk.message_id, timedAssembly);
-            }
-            const pendingIndex = this.pendingRequests.indexOf(pending);
-            if (pendingIndex >= 0) this.pendingRequests.splice(pendingIndex, 1);
-            pending.reject(error);
-            recordLiveHarnessEvent("terminal_attach_response_timeout", {
-              generation,
-              message_id: chunk.message_id
-            });
-            return;
-          }
-          this.failPeerGeneration(generation, error);
         }, requestTimeoutMs)
       };
       this.responseAssemblies.set(chunk.message_id, assembly);
@@ -1938,13 +2082,22 @@ class WebrtcDaemonTransport {
     this.releaseAssembly(chunk.message_id, assembly);
     this.retainCompletedMessageId(chunk.message_id);
     const finishedAt = Date.now();
-    if (assembly.deliveryKind === "daemon_entity_frame") {
-      throw webrtcFailure("data-plane", "control DataChannel received an entity delivery");
+
+    const frame = parseServerFrame(payload);
+    if (frame.frame === "hello_ack") {
+      const helloKey = pendingKey(generation, "");
+      const pendingHello = this.pendingRequests.get(helloKey);
+      if (!pendingHello) {
+        throw webrtcFailure("data-plane", "control DataChannel received a Hello ack without a pending Hello");
+      }
+      this.settlePending(helloKey, pendingHello, (entry) => entry.resolve(frame.ack));
+      return;
     }
-    if (assembly.deliveryKind === "daemon_terminal_frame") {
-      throw webrtcFailure("data-plane", "control DataChannel received a terminal delivery");
+    if (frame.frame === "close") {
+      // Hub names the reason before it closes; the connection takes the ordinary loss path.
+      throw webrtcFailure("data-plane", `control DataChannel closed by Hub: ${describeCloseReason(frame.reason)}`);
     }
-    if (assembly.deliveryKind === "daemon_event") {
+    if (frame.frame === "event") {
       recordLiveHarnessEvent("webrtc_daemon_event_assembly", {
         generation,
         total_bytes: assembly.totalBytes,
@@ -1953,38 +2106,26 @@ class WebrtcDaemonTransport {
         finished_at: finishedAt,
         duration_ms: finishedAt - assembly.startedAt
       });
-      await this.receiveHostEvent(payload, generation);
+      await this.receiveHostEvent(frame.event, generation);
       return;
     }
-
-    let pending = assembly.pending;
-    if (pending && !pendingMatchesResponse(pending, payload)) {
-      pending.messageId = undefined;
-      pending = undefined;
+    if (frame.frame === "entity") {
+      throw webrtcFailure("data-plane", "control DataChannel received an entity delivery");
     }
-    pending ??= this.pendingRequests.find(
-      (entry) =>
-        entry.generation === generation &&
-        entry.messageId === undefined &&
-        pendingMatchesResponse(entry, payload)
-    );
+    const key2 = pendingKey(generation, frame.request_id);
+    const pending = this.pendingRequests.get(key2);
     if (!pending) {
-      if (isStaleTerminalReservationResponse(payload)) {
-        recordLiveHarnessEvent("stale_control_response", {
-          response_kind: payload.kind,
-          session_id: payload.terminal_reservation?.session_id ?? null,
-          subscription_id: payload.terminal_reservation?.subscription_id ?? null,
-          generation: payload.terminal_reservation?.generation ?? null,
-          peer_generation: payload.terminal_reservation?.peer_generation ?? null
-        });
-        return;
-      }
-      throw webrtcFailure("data-plane", "local WebRTC daemon response assembly lost its pending request");
+      // Unknown or already-settled id on this generation: discard this completion only.
+      recordLiveHarnessEvent("stale_control_response", {
+        request_id: frame.request_id,
+        response_kind: frame.response.kind,
+        generation
+      });
+      return;
     }
-    const pendingIndex = this.pendingRequests.indexOf(pending);
-    if (pendingIndex >= 0) this.pendingRequests.splice(pendingIndex, 1);
     recordLiveHarnessEvent("webrtc_response_assembly", {
       request_type: pending.requestType,
+      request_id: frame.request_id,
       generation,
       total_bytes: assembly.totalBytes,
       chunk_count: assembly.chunkCount,
@@ -1992,7 +2133,7 @@ class WebrtcDaemonTransport {
       finished_at: finishedAt,
       duration_ms: finishedAt - assembly.startedAt
     });
-    pending.resolve(payload as DaemonResponse | DaemonHelloAck);
+    this.settlePending(key2, pending, (entry) => entry.resolve(frame.response));
   }
 
   private validateAssemblyChunk(
@@ -2085,21 +2226,17 @@ class WebrtcDaemonTransport {
 
   /** Rejects pending requests; with a generation, only that peer generation's requests. */
   private failPending(error: unknown, generation?: number): void {
-    let failing: PendingRequest[];
-    if (generation === undefined) {
-      failing = this.pendingRequests.splice(0);
-    } else {
-      failing = [];
-      const keep: PendingRequest[] = [];
-      for (const pending of this.pendingRequests) {
-        (pending.generation === generation ? failing : keep).push(pending);
+    const failing: PendingRequest[] = [];
+    for (const [key, pending] of this.pendingRequests) {
+      if (generation === undefined || pending.generation === generation) {
+        this.pendingRequests.delete(key);
+        failing.push(pending);
       }
-      this.pendingRequests.length = 0;
-      this.pendingRequests.push(...keep);
     }
     for (const pending of failing) {
       pending.reject(error);
     }
+    this.cancelRequestSlotWaiters(error, generation);
   }
 
   private hasReconnectDemand(): boolean {
@@ -2395,6 +2532,9 @@ class WebrtcDaemonTransport {
       }
       return;
     }
+    for (const listener of this.hostEventListeners) {
+      listener(event);
+    }
   }
 
   private receivePackageEvent(binding: PackageEventChannelBinding, event: PackageEvent): void {
@@ -2594,12 +2734,7 @@ function parseDeliveryChunk(frame: string): DaemonLocalWebrtcDeliveryChunk {
   if (chunk.version !== 2) {
     throw webrtcFailure("data-plane", "local WebRTC delivery chunk version is unsupported");
   }
-  if (
-    chunk.delivery_kind !== "daemon_response" &&
-    chunk.delivery_kind !== "daemon_entity_frame" &&
-    chunk.delivery_kind !== "daemon_terminal_frame" &&
-    chunk.delivery_kind !== "daemon_event"
-  ) {
+  if (chunk.delivery_kind !== "server_frame") {
     throw webrtcFailure("data-plane", "local WebRTC delivery chunk kind is unsupported");
   }
   if (typeof chunk.message_id !== "string" || chunk.message_id.length === 0) {
@@ -2647,85 +2782,122 @@ async function encryptJsonPayload(key: CryptoKey, payload: unknown): Promise<Aes
   };
 }
 
-async function encryptBytesPayload(key: CryptoKey, payload: Uint8Array): Promise<AesGcmEnvelope> {
-  const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: toArrayBuffer(nonce) },
-    key,
-    toArrayBuffer(payload)
-  );
-  return {
-    nonce: base64Encode(nonce),
-    ciphertext: base64Encode(new Uint8Array(ciphertext)),
-    version: 1
+type TerminalChunkHeader = {
+  messageId: bigint;
+  chunkIndex: number;
+  chunkCount: number;
+  totalBytes: number;
+  generation: bigint;
+  streamEpoch: number;
+};
+
+function binaryMessageBytes(data: unknown): Uint8Array | undefined {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  return undefined;
+}
+
+/** Split one binary terminal chunk into its header and sealed slice; `undefined` when malformed. */
+function parseTerminalChunk(message: Uint8Array): { header: TerminalChunkHeader; sealed: Uint8Array } | undefined {
+  const sealedMinimum = terminalChunkNonceBytes + terminalChunkTagBytes;
+  if (message.byteLength < terminalChunkHeaderBytes + sealedMinimum) return undefined;
+  if (message[0] !== LOCAL_WEBRTC_DELIVERY_CHUNK_VERSION) return undefined;
+  const view = new DataView(message.buffer, message.byteOffset, message.byteLength);
+  const header: TerminalChunkHeader = {
+    messageId: view.getBigUint64(1, true),
+    chunkIndex: view.getUint32(9, true),
+    chunkCount: view.getUint32(13, true),
+    totalBytes: view.getUint32(17, true),
+    generation: view.getBigUint64(21, true),
+    streamEpoch: view.getUint32(29, true)
   };
-}
-
-function parseTerminalEvent(value: unknown): TerminalEvent {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw webrtcFailure("data-plane", "terminal frame must be a JSON object");
-  }
-  const type = (value as { type?: unknown }).type;
   if (
-    type !== "snapshot" &&
-    type !== "terminal_output" &&
-    type !== "process_exit" &&
-    type !== "attach_state" &&
-    type !== "input_result"
+    header.chunkCount === 0 ||
+    header.chunkIndex >= header.chunkCount ||
+    header.totalBytes > LOCAL_WEBRTC_MAX_DELIVERY_BYTES ||
+    header.chunkCount > Math.max(1, header.totalBytes)
   ) {
-    throw webrtcFailure("data-plane", `unsupported terminal frame type ${String(type)}`);
+    return undefined;
   }
-  return value as TerminalEvent;
+  return { header, sealed: message.subarray(terminalChunkHeaderBytes) };
 }
 
-function pendingMatchesResponse(pending: PendingRequest, value: unknown): boolean {
-  if (pending.kind === "hello") {
-    return Boolean(value && typeof value === "object" && "protocol" in value && "compatibility" in value);
-  }
-  if (pending.requestType !== "attach") {
-    return !isStaleTerminalReservationResponse(value);
-  }
-  if (!("type" in pending.request) || pending.request.type !== "attach") {
-    return false;
-  }
-  if (isOperatorErrorResponse(value)) return true;
-  if (!isStaleTerminalReservationResponse(value)) return false;
-  const reservation = value.terminal_reservation;
-  return Boolean(
-    reservation &&
-    reservation.session_id === pending.request.session_id &&
-    reservation.subscription_id === pending.request.subscription_id
+async function sealTerminalChunk(
+  key: CryptoKey,
+  header: TerminalChunkHeader,
+  plaintext: Uint8Array
+): Promise<ArrayBuffer> {
+  const nonce = crypto.getRandomValues(new Uint8Array(terminalChunkNonceBytes));
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: toArrayBuffer(nonce) }, key, toArrayBuffer(plaintext))
   );
+  const message = new Uint8Array(terminalChunkHeaderBytes + nonce.byteLength + ciphertext.byteLength);
+  const view = new DataView(message.buffer);
+  message[0] = LOCAL_WEBRTC_DELIVERY_CHUNK_VERSION;
+  view.setBigUint64(1, header.messageId, true);
+  view.setUint32(9, header.chunkIndex, true);
+  view.setUint32(13, header.chunkCount, true);
+  view.setUint32(17, header.totalBytes, true);
+  view.setBigUint64(21, header.generation, true);
+  view.setUint32(29, header.streamEpoch, true);
+  message.set(nonce, terminalChunkHeaderBytes);
+  message.set(ciphertext, terminalChunkHeaderBytes + nonce.byteLength);
+  return message.buffer;
 }
 
-function isOperatorErrorResponse(value: unknown): value is DaemonResponse {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    "kind" in value &&
-    value.kind === "operator_error" &&
-    "error" in value &&
-    value.error
-  );
+async function openTerminalChunk(key: CryptoKey, sealed: Uint8Array): Promise<Uint8Array> {
+  const nonce = sealed.subarray(0, terminalChunkNonceBytes);
+  const ciphertext = sealed.subarray(terminalChunkNonceBytes);
+  try {
+    return new Uint8Array(
+      await crypto.subtle.decrypt({ name: "AES-GCM", iv: toArrayBuffer(nonce) }, key, toArrayBuffer(ciphertext))
+    );
+  } catch (error) {
+    throw webrtcFailure("encryption", `terminal chunk decryption failed: ${errorMessage(error)}`);
+  }
 }
 
-function isStaleTerminalReservationResponse(value: unknown): value is DaemonResponse {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    "kind" in value &&
-    value.kind === "terminal_reservation"
-  );
+function describeCloseReason(reason: DaemonCloseReason): string {
+  return reason.reason === "protocol_error" ? `protocol error ${reason.code}` : reason.reason;
 }
 
-function isTerminalBodyEvent(event: DaemonEvent): boolean {
-  return (
-    event.type === "snapshot" ||
-    event.type === "terminal_output" ||
-    event.type === "process_exit" ||
-    event.type === "attach_state" ||
-    event.type === "scrollback"
-  );
+/**
+ * Decodes one host-control v9 `ServerFrame`. A payload without a known `frame` tag, or a
+ * response without a decimal `request_id`, is a protocol error: the caller closes the
+ * connection, because a frame the client cannot correlate cannot be answered or ignored safely.
+ */
+function parseServerFrame(value: unknown): ServerFrame {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw webrtcFailure("data-plane", "host control frame must be a JSON object");
+  }
+  const frame = value as Record<string, unknown>;
+  const isObject = (candidate: unknown) => Boolean(candidate && typeof candidate === "object");
+  switch (frame.frame) {
+    case "hello_ack":
+      if (isObject(frame.ack)) return value as ServerFrame;
+      break;
+    case "response":
+      if (
+        typeof frame.request_id === "string" &&
+        /^[1-9][0-9]{0,19}$/.test(frame.request_id) &&
+        isObject(frame.response)
+      ) {
+        return value as ServerFrame;
+      }
+      break;
+    case "event":
+      if (isObject(frame.event)) return value as ServerFrame;
+      break;
+    case "entity":
+      if (isObject(frame.entity)) return value as ServerFrame;
+      break;
+    case "close":
+      if (isObject(frame.reason)) return value as ServerFrame;
+      break;
+    default:
+      break;
+  }
+  throw webrtcFailure("data-plane", `host control frame is malformed: ${String(frame.frame)}`);
 }
 
 function isTerminalCompatibilityAccepted(

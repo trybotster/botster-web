@@ -72,8 +72,8 @@ export const generatedModeFlagsResponseFixture = {
     alt_screen: false,
     focus_reporting: false,
     application_cursor: false,
-    mode_generation: 1,
-    mode_revision: 2
+    rows: 24,
+    cols: 80
   },
   packages: [],
   package_decision: null,

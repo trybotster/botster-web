@@ -1,0 +1,17 @@
+{
+  "description": "Exact generated protocol artifacts vendored into botster-web. Each entry records the owning repository revision, the source path at that revision, and the SHA-256 of the vendored copy. Copies are verbatim; never edit them by hand.",
+  "artifacts": {
+    "terminal-protocol.ts": {
+      "owner": "botster-core",
+      "revision": "e0c07f9100955c9c32261afc42c4297e3cea54a0",
+      "source_path": "crates/botster-terminal-protocol-client/generated/terminal-protocol.ts",
+      "sha256": "ca470c8638b1c1cde8dc6251c12418afcf87180f2d87241383615314aaa02148"
+    },
+    "daemon-protocol.ts": {
+      "owner": "botster-hub",
+      "revision": "481408928647c9ffcb2829efdcceb6c385ea093a",
+      "source_path": "crates/botster-hub-client/generated/daemon-protocol.ts",
+      "sha256": "621caf22ab7ee22045f0f7c64cd30daae1ad700b82dcbf53e9d21f2c631a9765"
+    }
+  }
+}

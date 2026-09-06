@@ -45,8 +45,8 @@ export function TerminalViewHost({
   const onExitRef = useRef(onExit);
   const [mountDiagnostic, setMountDiagnostic] = useState<string | undefined>();
   const [attachmentStatus, setAttachmentStatus] = useState<TerminalAttachmentStatus | undefined>();
-  // Persistent input message: a non-admitted paste outcome stays visible until the user
-  // dismisses it or a later paste is admitted. Attachment lifecycle is not involved.
+  // Persistent input message: an input outcome other than `written` stays visible until the
+  // user dismisses it or a later operation is written. Attachment lifecycle is not involved.
   const [inputMessage, setInputMessage] = useState<TerminalInputOutcome | undefined>();
   const terminalDataPlane = useMemo(
     () =>
@@ -116,7 +116,7 @@ export function TerminalViewHost({
         }
         inputOutcomeSubscription = bridge.subscribeInputOutcomes?.(descriptor, (outcome) => {
           if (cancelled) return;
-          setInputMessage(outcome.outcome === "admitted" ? undefined : outcome);
+          setInputMessage(outcome.outcome === "written" ? undefined : outcome);
           onInputOutcomeRef.current?.(descriptor.sessionId, outcome);
         });
         uninstallLiveHarnessTerminalControls = installLiveHarnessTerminalControls(bridge, descriptor, terminalDataPlane);
@@ -205,6 +205,7 @@ function installLiveHarnessTerminalControls(
     __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
       terminalControl?: {
         focus(): Promise<void>;
+        /** Explicit raw bytes (RAW_BYTES); harness-only path. */
         writeInput(data: string): Promise<void>;
         resize(rows: number, columns: number): Promise<void>;
         readScreen(): ReturnType<NonNullable<TerminalDataPlaneAttachment["readScreen"]>>;
@@ -217,7 +218,7 @@ function installLiveHarnessTerminalControls(
 
   const terminalControl = {
     focus: () => bridge.focus(descriptor),
-    writeInput: (data: string) => bridge.writeInput(descriptor, data),
+    writeInput: (data: string) => bridge.writeRawInput(descriptor, data),
     resize: (rows: number, columns: number) => bridge.resize(descriptor, rows, columns),
     readScreen: async () => dataPlane.readScreen?.(),
     captureSnapshot: async () => dataPlane.captureSnapshot?.()

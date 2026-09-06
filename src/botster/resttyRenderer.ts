@@ -1,13 +1,12 @@
-import { createInputHandler, Restty } from "../vendor/restty/internal.js";
+import { Restty } from "../vendor/restty/internal.js";
 import type {
   ResttyFontSource,
   ResttySnapshotReader
 } from "../vendor/restty/internal.js";
 import type {
-  ModeDependentTerminalInput,
   TerminalDataPlaneAttachment,
-  TerminalInput,
   TerminalInputOutcome,
+  TerminalModes,
   TerminalOutput,
   TerminalRendererAdapter,
   TerminalSnapshotReader,
@@ -15,29 +14,16 @@ import type {
   TerminalViewDescriptor
 } from "./terminal";
 import { createRendererWriteObserver } from "./terminal";
-import type { DaemonModeFlags } from "./realHubDaemonDto";
-import { BotsterTerminalPtyTransport } from "./botsterTerminalPtyTransport";
+import { BotsterTerminalPtyTransport, looksLikeResttyFocusReport } from "./botsterTerminalPtyTransport";
 import type { TerminalGrid } from "./terminalGrid";
 import {
-  coreMouseTrackingEnabled,
-  mouseTrackingBitsFromCoreMode
-} from "./mouseMode";
-import {
-  encodeWheelDecision,
-  MountScopedWheelReencoder,
-  shouldRouteWheelToAppMouse,
-  unmatchedWheelBytesShouldDrop,
-  type WheelDecision
-} from "./mountScopedWheelReencoder";
-
-export {
-  CORE_MOUSE_NORMAL,
-  CORE_MOUSE_ANY,
-  CORE_MOUSE_BUTTON,
-  CORE_MOUSE_SGR,
-  coreMouseTrackingEnabled,
-  mouseTrackingBitsFromCoreMode
-} from "./mouseMode";
+  installTerminalInputCapture,
+  noMouseCapture,
+  type TerminalInputCapture,
+  type TerminalMouseCapturePolicy
+} from "./terminalInputCapture";
+import type { TerminalCellGeometry } from "./terminalInputEvents";
+import { mouseCapturePolicyFromModes } from "./mouseMode";
 
 const botsterResttyFontSources: ResttyFontSource[] = [
   {
@@ -48,98 +34,46 @@ const botsterResttyFontSources: ResttyFontSource[] = [
 ];
 
 /**
- * Kitty flag used when Hub reports kitty_enabled without bit-level detail.
- * DisambiguateEscapeCodes (0x1) is the common baseline for protocol-enabled sessions.
+ * Restty as a render-only terminal model.
+ *
+ * Output bytes and GHOSTSNP snapshots feed Restty's terminal state and paint. Every user
+ * gesture is captured at the container and sent to the data plane as semantic input; the
+ * worker's Ghostty encoder produces the PTY bytes. Restty's own encoders still run for its
+ * local behavior but their bytes stop at the PTY transport sink. Authoritative MODES frames
+ * drive mouse capture and keep Restty's local mouse tracking state in step.
  */
-const kittyEnabledBaselineFlags = 0x1;
-
-type MouseReportKind = "down" | "up" | "move" | "wheel";
-
-type PendingSemanticInput =
-  | { kind: "key"; event: KeyboardEvent }
-  | { kind: "mouse"; event: PointerEvent | WheelEvent; reportKind: MouseReportKind }
-  | { kind: "bytes"; data: string };
-
 export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   private readonly ptyTransport = new BotsterTerminalPtyTransport({
-    createModeDependentInput: (data) => this.createModeDependentInput(data),
-    record: recordLiveHarnessTerminal
+    record: recordLiveHarnessTerminal,
+    onUncapturedInput: (source, data) => this.reportUncapturedResttyInput(source, data)
   });
-  private readonly inputListeners = new Set<(data: TerminalInput) => void>();
   private readonly inputOutcomeListeners = new Set<(outcome: TerminalInputOutcome) => void>();
   private terminal?: Restty;
   private container?: HTMLElement;
-  private pendingSemantic: PendingSemanticInput | undefined;
-  private removeDomListeners?: () => void;
+  private inputCapture?: TerminalInputCapture;
   private uninstallPaletteProbe?: () => void;
-  private wheelAlive = true;
-  private readonly wheelReencoder = new MountScopedWheelReencoder({
-    isCurrent: () => this.wheelAlive,
-    onDrain: (decision) => this.sendWheelDecision(decision)
-  });
+  private modesSubscription?: TerminalSubscription;
+  private outcomeSubscription?: TerminalSubscription;
+  private mousePolicy: TerminalMouseCapturePolicy = noMouseCapture;
   constructor(readonly descriptor: TerminalViewDescriptor) {}
 
   mount(container: HTMLElement): void {
     this.container = container;
     this.ptyTransport.setRenderObserver(createRendererWriteObserver(this.descriptor.sessionId));
-    const onKeyDown = (event: KeyboardEvent) => {
-      // One-shot keyboard semantic; cleared when sendInput consumes it.
-      this.pendingSemantic = { kind: "key", event };
-    };
-    const onPointerDown = (event: PointerEvent) => {
-      this.pendingSemantic = { kind: "mouse", event, reportKind: "down" };
-    };
-    const onPointerUp = (event: PointerEvent) => {
-      this.pendingSemantic = { kind: "mouse", event, reportKind: "up" };
-    };
-    const onPointerMove = (event: PointerEvent) => {
-      // Only track motion when buttons are down or Restty is in any-motion mode;
-      // still retain the event so a subsequent sendInput is not a stale key.
-      if (event.buttons !== 0) {
-        this.pendingSemantic = { kind: "mouse", event, reportKind: "move" };
-      }
-    };
-    const onWheel = (event: WheelEvent) => {
-      const decision = this.wheelReencoder.consumeWheelEvent(event, {
-        cellHeight: this.liveCellHeight(),
-        rows: this.liveRows(),
-        cell: this.positionToCell(event),
-        applicationMouseActive: shouldRouteWheelToAppMouse(event, this.applicationMouseTrackingActive())
-      });
-      if (decision && decision.steps > 0) {
-        this.sendWheelDecision(decision);
-      }
-    };
-
-    // Clipboard paste is an explicit semantic operation. Capture it on the container
-    // before Restty's textarea listeners so the text never enters Restty's key path,
-    // which would format bracketed-paste markers and submit one oversized key input.
-    // Detection is by DOM event type only: never by payload length or marker bytes.
-    const onPaste = (event: ClipboardEvent) => {
-      this.handleClipboardPaste(event, event.clipboardData, "clipboard_event");
-    };
-    const onBeforeInput = (event: Event) => {
-      const input = event as InputEvent;
-      if (input.inputType !== "insertFromPaste") return;
-      this.handleClipboardPaste(input, input.dataTransfer, "beforeinput");
-    };
-
-    container.addEventListener("keydown", onKeyDown, true);
-    container.addEventListener("pointerdown", onPointerDown, true);
-    container.addEventListener("pointerup", onPointerUp, true);
-    container.addEventListener("pointermove", onPointerMove, true);
-    container.addEventListener("wheel", onWheel, true);
-    container.addEventListener("paste", onPaste, true);
-    container.addEventListener("beforeinput", onBeforeInput, true);
-    this.removeDomListeners = () => {
-      container.removeEventListener("keydown", onKeyDown, true);
-      container.removeEventListener("pointerdown", onPointerDown, true);
-      container.removeEventListener("pointerup", onPointerUp, true);
-      container.removeEventListener("pointermove", onPointerMove, true);
-      container.removeEventListener("wheel", onWheel, true);
-      container.removeEventListener("paste", onPaste, true);
-      container.removeEventListener("beforeinput", onBeforeInput, true);
-    };
+    this.inputCapture = installTerminalInputCapture({
+      container,
+      sink: (input) => {
+        if (!this.ptyTransport.sendSemantic(input)) {
+          recordLiveHarnessTerminal("input_dropped_unattached", { kind: input.kind, sessionId: this.descriptor.sessionId });
+        }
+      },
+      onPaste: (text, source) => {
+        void this.routePaste(text, source);
+      },
+      geometry: () => this.canvasGeometry(),
+      mousePolicy: () => this.mousePolicy,
+      record: (kind, payload) => recordLiveHarnessTerminal(kind, { ...(payload as object), sessionId: this.descriptor.sessionId })
+    });
 
     this.terminal = new Restty({
       root: container,
@@ -149,20 +83,17 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       // to the explicit paste owner through the pane app's paste entry point.
       onPaneCreated: (pane) => this.installContextMenuPasteOwner(pane),
       appOptions: {
-        // Pure renderer: session owns PTY queries including OSC color replies.
-        // Restty ≥448497041 wires readOnly → suppressQueryReplies (OSC 10/11/12).
+        // Pure renderer: the session owns PTY queries including OSC color replies.
         readOnly: true,
         ptyTransport: this.ptyTransport,
+        // Restty's own key, IME, paste, and focus encodings are render-only: the container
+        // capture already reported the gesture. A source the capture does not cover is
+        // reported to the user rather than dropped in silence.
         beforeInput: ({ text, source }) => {
-          recordLiveHarnessTerminal("before_input", {
-            text,
-            source,
-            sessionId: this.descriptor.sessionId
-          });
-          if (source !== "pty" && text) {
-            this.emitInput(text);
-          }
-          return text;
+          if (source === "key" || source === "paste" || source === "ime") return null;
+          if (source === "program" && looksLikeResttyFocusReport(text)) return null;
+          this.reportUncapturedResttyInput(source, text);
+          return null;
         }
       }
     });
@@ -184,7 +115,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
 
     // Pane construction starts Restty init without awaiting. Snapshot import requires
-    // wasmReady + wasmHandle; poll until ready rather than re-entering init().
+    // wasmReady + wasmHandle; wait for readiness rather than re-entering init().
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
         const ok = await this.ptyTransport.installSnapshot(
@@ -219,11 +150,47 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   attachDataPlane(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription {
-    this.wheelReencoder.reset();
+    this.releaseDataPlaneSubscriptions();
+    this.inputCapture?.resetWheel();
+    this.mousePolicy = noMouseCapture;
     dataPlane.bindIncrementalSnapshotReader?.(() => this.createIncrementalSnapshotReader());
     const subscription = this.ptyTransport.attach(dataPlane);
+    this.modesSubscription = dataPlane.subscribeModes?.((modes) => this.applyModes(modes));
+    this.outcomeSubscription = dataPlane.subscribeInputOutcomes?.((outcome) => this.publishInputOutcome(outcome));
     this.terminal?.connectPty();
-    return subscription;
+    return {
+      unsubscribe: () => {
+        this.releaseDataPlaneSubscriptions();
+        subscription.unsubscribe();
+      }
+    };
+  }
+
+  private releaseDataPlaneSubscriptions(): void {
+    this.modesSubscription?.unsubscribe();
+    this.modesSubscription = undefined;
+    this.outcomeSubscription?.unsubscribe();
+    this.outcomeSubscription = undefined;
+  }
+
+  /**
+   * Authoritative modes drive the mouse capture policy for the container listeners. Restty
+   * keeps its own local tracking state from the same output bytes and snapshot import for
+   * selection versus application-mouse routing; it does not expose a rehydrate entry point.
+   */
+  private applyModes(modes: TerminalModes): void {
+    const previous = this.mousePolicy;
+    this.mousePolicy = mouseCapturePolicyFromModes(modes);
+    if (previous.tracking !== this.mousePolicy.tracking) {
+      this.inputCapture?.resetWheel();
+    }
+    recordLiveHarnessTerminal("modes_applied", {
+      mode_bits: modes.modeBits,
+      rows: modes.rows,
+      cols: modes.cols,
+      mouse_tracking: this.mousePolicy.tracking,
+      sessionId: this.descriptor.sessionId
+    });
   }
 
   private createIncrementalSnapshotReader(): TerminalSnapshotReader {
@@ -255,6 +222,9 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
           throw new Error(`Restty rejected an incremental snapshot frame: ${result.error}`);
         }
         firstFrame = false;
+        if (result.status === "ready") {
+          this.ptyTransport.currentGrid();
+        }
         recordLiveHarnessTerminal("restty_incremental_snapshot", {
           bytes: bytes.byteLength,
           status: result.status,
@@ -269,23 +239,13 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     };
   }
 
-  onInput(listener: (data: TerminalInput) => void): TerminalSubscription {
-    this.inputListeners.add(listener);
-
-    return {
-      unsubscribe: () => {
-        this.inputListeners.delete(listener);
-      }
-    };
-  }
-
   write(data: TerminalOutput): void {
     this.ptyTransport.deliverOutput(data);
-    this.wheelReencoder.syncApplicationMouseActive(this.applicationMouseTrackingActive());
   }
 
   resize(rows: number, columns: number): void {
-    if (!this.ptyTransport.resize(columns, rows)) return;
+    const current = this.ptyTransport.currentGrid();
+    if (!this.ptyTransport.resize(columns, rows, { widthPx: current?.widthPx, heightPx: current?.heightPx })) return;
     const grid = this.ptyTransport.currentGrid();
     if (grid) {
       this.applyGridToRestty(grid);
@@ -297,29 +257,25 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 
   destroy(): void {
-    this.wheelAlive = false;
-    this.wheelReencoder.reset();
-    this.removeDomListeners?.();
-    this.removeDomListeners = undefined;
-    this.pendingSemantic = undefined;
+    this.releaseDataPlaneSubscriptions();
+    this.inputCapture?.uninstall();
+    this.inputCapture = undefined;
     this.uninstallPaletteProbe?.();
     this.uninstallPaletteProbe = undefined;
     this.ptyTransport.destroy();
-    this.inputListeners.clear();
+    this.inputOutcomeListeners.clear();
     this.terminal?.destroy();
     this.terminal = undefined;
     this.container = undefined;
   }
 
-  private livePaneGrid(): { cols: number; rows: number; cellHeight?: number } {
+  private livePaneGrid(): { cols: number; rows: number } {
     const pane = this.terminal?.activePane?.() as
       | {
           cols?: number;
           rows?: number;
-          cellH?: number;
           getCols?: () => number;
           getRows?: () => number;
-          getCellHeight?: () => number;
         }
       | null
       | undefined;
@@ -334,51 +290,25 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       (typeof pane?.rows === "number" ? pane.rows : undefined) ??
       measuredGrid?.rows ??
       24;
-    const cellHeight =
-      (typeof pane?.getCellHeight === "function" ? pane.getCellHeight() : undefined) ??
-      (typeof pane?.cellH === "number" ? pane.cellH : undefined);
-    return { cols: Math.max(1, cols), rows: Math.max(1, rows), cellHeight };
+    return { cols: Math.max(1, cols), rows: Math.max(1, rows) };
   }
 
-  private liveRows(): number {
-    return this.livePaneGrid().rows;
-  }
-
-  /**
-   * Restty `isMouseActive` / `getMouseStatus().active` only. Shift is a separate
-   * override in `shouldRouteWheelToAppMouse`, matching
-   * `shouldRoutePointerToAppMouse`.
-   */
-  private applicationMouseTrackingActive(): boolean {
-    const status = this.terminal?.getMouseStatus?.() as { active?: boolean } | undefined;
-    return status?.active === true;
-  }
-
-  private liveCellHeight(): number {
-    const paneHeight = this.livePaneGrid().cellHeight;
-    if (typeof paneHeight === "number" && paneHeight > 0) return paneHeight;
+  /** Mounted canvas rectangle, grid, and backing-store scale for pointer mapping. */
+  private canvasGeometry(): TerminalCellGeometry | undefined {
     const canvas = this.container?.querySelector?.("canvas");
     const rect = canvas?.getBoundingClientRect?.();
-    const rows = this.liveRows();
-    if (rect && rect.height > 0 && rows > 0) return rect.height / rows;
-    return 20;
-  }
-
-  /** Zero-based cell under a pointer/wheel event using the mounted canvas + current grid. */
-  private positionToCell(event: MouseEvent | PointerEvent | WheelEvent): { col: number; row: number } {
-    const canvas =
-      (event.target instanceof HTMLElement && event.target.closest?.("canvas")) ||
-      this.container?.querySelector?.("canvas") ||
-      null;
-    const rect = canvas?.getBoundingClientRect?.();
-    if (!rect || rect.width <= 0 || rect.height <= 0) {
-      return { col: 0, row: 0 };
-    }
+    if (!canvas || !rect || rect.width <= 0 || rect.height <= 0) return undefined;
     const { cols, rows } = this.livePaneGrid();
-    // Restty MouseController adds 1 to col/row; supply zero-based grid coords.
-    const col = Math.min(cols - 1, Math.max(0, Math.floor(((event.clientX - rect.left) / rect.width) * cols)));
-    const row = Math.min(rows - 1, Math.max(0, Math.floor(((event.clientY - rect.top) / rect.height) * rows)));
-    return { col, row };
+    return {
+      cols,
+      rows,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+      scaleX: canvas.width > 0 ? canvas.width / rect.width : 1,
+      scaleY: canvas.height > 0 ? canvas.height / rect.height : 1
+    };
   }
 
   private installPaletteProbe(): void {
@@ -407,18 +337,6 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     };
   }
 
-  private takePendingSemantic(): PendingSemanticInput | undefined {
-    const pending = this.pendingSemantic;
-    this.pendingSemantic = undefined;
-    return pending;
-  }
-
-  private emitInput(data: TerminalInput): void {
-    for (const listener of this.inputListeners) {
-      listener(data);
-    }
-  }
-
   private applyGridToRestty(grid: TerminalGrid): void {
     this.terminal?.resize(grid.columns, grid.rows);
   }
@@ -430,30 +348,6 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
         this.inputOutcomeListeners.delete(listener);
       }
     };
-  }
-
-  /**
-   * Consumes a DOM paste gesture only when it carries non-empty text/plain. Once consumed
-   * the gesture is a paste: it is routed to the paste owner and its outcome, including an
-   * explicit unsupported rejection, is reported. Empty or non-text clipboard payloads are
-   * left to Restty's existing handling. A consumed paste event is default-prevented, so no
-   * duplicate insertFromPaste beforeinput follows it.
-   */
-  private handleClipboardPaste(
-    event: Event,
-    transfer: DataTransfer | null | undefined,
-    source: "clipboard_event" | "beforeinput"
-  ): void {
-    const text = transfer?.getData("text/plain") ?? "";
-    if (!text) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    recordLiveHarnessTerminal("clipboard_paste", {
-      source,
-      chars: text.length,
-      sessionId: this.descriptor.sessionId
-    });
-    void this.routePaste(text, source);
   }
 
   private async routePaste(text: string, source: string): Promise<TerminalInputOutcome> {
@@ -468,8 +362,6 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
    * format and submit the text as key input. Redirect that one entry point to the explicit
    * paste owner; every other menu item stays as shipped. The clipboard is read exactly
    * once: an empty read is inert, and a failed read is reported as an explicit outcome.
-   * Restty's original handler is never invoked, so a clipboard that changes between reads
-   * cannot reach the key path.
    */
   private installContextMenuPasteOwner(pane: { app?: { pasteFromClipboard?: () => Promise<boolean> } }): void {
     const app = pane.app;
@@ -483,8 +375,7 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
         recordLiveHarnessTerminal("clipboard_read_failed", { message: detail, sessionId: this.descriptor.sessionId });
         this.publishInputOutcome({
           kind: "paste",
-          outcome: "rejected",
-          minimumBytes: 0,
+          outcome: "rejected_locally",
           reason: "clipboard_unavailable",
           detail: `Clipboard could not be read: ${detail}`
         });
@@ -500,8 +391,24 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
         sessionId: this.descriptor.sessionId
       });
       const outcome = await this.routePaste(text, "context_menu");
-      return outcome.outcome === "admitted";
+      return outcome.outcome === "written";
     };
+  }
+
+  /** Restty produced input the capture does not cover; the user sees the gap as an outcome. */
+  private reportUncapturedResttyInput(source: string, data: string): void {
+    recordLiveHarnessTerminal("restty_input_uncaptured", {
+      source,
+      bytes: data.length,
+      sessionId: this.descriptor.sessionId
+    });
+    this.publishInputOutcome({
+      kind: "raw",
+      outcome: "rejected_locally",
+      requestedBytes: data.length,
+      reason: "uncaptured_restty_input",
+      detail: `Restty produced ${data.length} bytes of ${source} input that the terminal does not capture; nothing was sent.`
+    });
   }
 
   private publishInputOutcome(outcome: TerminalInputOutcome): void {
@@ -509,96 +416,12 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       listener(outcome);
     }
   }
-
-  private sendWheelDecision(decision: WheelDecision): void {
-    if (!this.wheelAlive || decision.steps <= 0) return;
-    this.ptyTransport.writeSemantic({
-      encode: (modes: DaemonModeFlags) => encodeWheelDecision(decision, modes)
-    });
-  }
-
-  private createModeDependentInput(initialBytes: string): ModeDependentTerminalInput {
-    // Unmatched mounted Restty wheel drain bytes must not reach raw PTY input.
-    if (unmatchedWheelBytesShouldDrop(initialBytes)) {
-      return { encode: () => "" };
-    }
-    // Consume one-shot semantic state so a later mouse report cannot reuse a key event.
-    let pending = this.takePendingSemantic() ?? { kind: "bytes" as const, data: initialBytes };
-    // insertText / IME paths may not fire keydown, while canvas.click leaves a pending mouse
-    // semantic. Only honor a pending kind when the Restty-encoded bytes match that kind.
-    if (pending.kind === "mouse" && !looksLikeMouseReport(initialBytes)) {
-      pending = { kind: "bytes", data: initialBytes };
-    } else if (pending.kind === "key" && looksLikeMouseReport(initialBytes)) {
-      pending = { kind: "bytes", data: initialBytes };
-    }
-    const positionToCell = (event: MouseEvent | PointerEvent | WheelEvent) => this.positionToCell(event);
-    return {
-      encode: (modes: DaemonModeFlags) =>
-        encodeSemanticInput(pending, modes, initialBytes, positionToCell)
-    };
-  }
 }
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
-}
-
-function encodeSemanticInput(
-  pending: PendingSemanticInput,
-  modes: DaemonModeFlags,
-  initialBytes: string,
-  positionToCell?: (event: MouseEvent | PointerEvent | WheelEvent) => { col: number; row: number }
-): string {
-  if (pending.kind === "key") {
-    let kittyFlags = 0;
-    const inputHandler = createInputHandler({
-      getKittyKeyboardFlags: () => kittyFlags,
-      suppressQueryReplies: true
-    });
-    kittyFlags = kittyFlagsFromModeFlags(modes);
-    return inputHandler.encodeKeyEvent(pending.event) || initialBytes;
-  }
-
-  if (pending.kind === "mouse") {
-    // Fresh modes may disable mouse tracking: discard without ModeGatedInput payload.
-    if (!coreMouseTrackingEnabled(modes.mouse_mode)) {
-      return "";
-    }
-    const replies: string[] = [];
-    const inputHandler = createInputHandler({
-      sendReply: (data) => {
-        replies.push(data);
-      },
-      suppressQueryReplies: true,
-      // Restty adds 1 to col/row; supply zero-based grid coordinates.
-      positionToCell: positionToCell ?? (() => ({ col: 0, row: 0 }))
-    });
-    // Keep Restty mouse mode in "auto" so enablement follows rehydrated tracking bits only.
-    inputHandler.setMouseMode?.("auto");
-    inputHandler.rehydrateMouseFromTrackingBits?.(mouseTrackingBitsFromCoreMode(modes.mouse_mode));
-    const sent = inputHandler.sendMouseEvent?.(pending.reportKind, pending.event as PointerEvent);
-    if (sent && replies.length > 0) {
-      return replies.join("");
-    }
-    // Modes claim tracking but Restty could not encode — discard rather than send stale key bytes.
-    return "";
-  }
-
-  return pending.data || initialBytes;
-}
-
-function looksLikeMouseReport(data: string): boolean {
-  return (
-    data.startsWith("\u001b[<") ||
-    data.startsWith("\u001b[M") ||
-    data.startsWith("\u001b[>")
-  );
-}
-
-function kittyFlagsFromModeFlags(modes: DaemonModeFlags): number {
-  return modes.kitty_enabled ? kittyEnabledBaselineFlags : 0;
 }
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {

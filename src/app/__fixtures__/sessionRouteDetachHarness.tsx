@@ -6,6 +6,7 @@ import type { EntityFrame, EntityFrameStore } from "../../botster/entities";
 import type {
   TerminalAttachmentStatus,
   TerminalDataPlaneAttachment,
+  TerminalInputOutcome,
   TerminalSubscription,
   TerminalViewBridge,
   TerminalViewDescriptor,
@@ -59,7 +60,17 @@ export class SessionDetachTestDataPlane implements TerminalDataPlaneAttachment {
     private readonly ledger: SessionDetachTeardownLedger
   ) {}
 
-  writeInput(): void {}
+  sendInput(): void {}
+
+  async writePaste(text: string): Promise<TerminalInputOutcome> {
+    return {
+      kind: "paste",
+      outcome: "rejected_locally",
+      requestedBytes: text.length,
+      reason: "test_data_plane",
+      detail: "Session detach test data plane does not deliver paste."
+    };
+  }
 
   subscribeOutput(): TerminalSubscription {
     return { unsubscribe() {} };
@@ -115,7 +126,7 @@ export function createSessionDetachTestBridge(
     },
     async resize(): Promise<void> {},
     async focus(): Promise<void> {},
-    async writeInput(): Promise<void> {}
+    async writeRawInput(): Promise<void> {}
   };
 }
 

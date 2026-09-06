@@ -9,6 +9,7 @@ import type {
   TerminalSubscription,
   TerminalViewDescriptor
 } from "./terminal";
+import type { TerminalSemanticInput } from "./terminalInputEvents";
 
 let runtime: ResttyWasm | undefined;
 let activeHandle = 0;
@@ -140,10 +141,12 @@ type MountedKeyboardHarness = {
   emitStatus(status: TerminalAttachmentStatus): void;
   exitSessions: string[];
   inputs: string[];
+  /** Semantic inputs received by the fake data plane, in order. */
+  semanticInputs: TerminalSemanticInput[];
   /** Explicit paste operations received by the fake data plane, byte-identical text. */
   pastes: string[];
-  /** Outcomes reported to the view host; `unsupported` when the paste owner is disabled. */
-  pasteOutcomes: Array<{ sessionId: string; outcome: string; minimumBytes: number; requestedBytes?: number; deliveredBytes?: number; reason?: string }>;
+  /** Outcomes reported to the view host, including the local rejection when the paste owner is disabled. */
+  pasteOutcomes: Array<{ sessionId: string; kind: string; outcome: string; requestedBytes?: number; writtenPtyBytes?: number; reason?: string }>;
   statuses: Array<{ sessionId: string; state: TerminalAttachmentStatus["state"] }>;
   terminal: Array<{ kind: string; payload: unknown }>;
   outputSubscribers: number;
@@ -174,6 +177,7 @@ const harness: MountedKeyboardHarness = {
   },
   exitSessions: [],
   inputs: [],
+  semanticInputs: [],
   pastes: [],
   pasteOutcomes: [],
   statuses: [],
@@ -212,38 +216,61 @@ if (new URLSearchParams(window.location.search).get("rendererTelemetry") !== "of
 const pasteOwnerEnabled = new URLSearchParams(window.location.search).get("pasteOwner") !== "off";
 const pasteEchoPrefix = "botster-web-mounted-paste-echo:";
 
+/**
+ * The fake data plane echoes each committed key's text as a line so the smoke can prove
+ * that container capture, not Restty's encoder, produced the input. Key events without
+ * committed text (modifiers, releases, navigation) are recorded but not echoed.
+ */
 const dataPlane: TerminalDataPlaneAttachment = {
   sessionId: descriptor.sessionId,
-  writeInput(data) {
+  sendInput(input) {
+    harness.semanticInputs.push(input);
+    if (input.kind === "raw") {
+      const data = new TextDecoder().decode(input.bytes);
+      harness.inputs.push(data);
+      harness.callbackOrder.push(`input:${data}`);
+      const output = new TextEncoder().encode(`${echoPrefix}${data.trimEnd()}\r\n`);
+      for (const listener of outputListeners) listener(output);
+      return;
+    }
+    if (input.kind !== "key" || input.action === "release") return;
+    const data = input.text || (input.code === "Enter" ? "\n" : "");
+    if (!data) return;
     harness.inputs.push(data);
     harness.callbackOrder.push(`input:${data}`);
-    const output = new TextEncoder().encode(`${echoPrefix}${data.trimEnd()}\r\n`);
+    if (data === "\n") {
+      const line = harness.inputs.join("").split("\n").at(-2) ?? "";
+      const output = new TextEncoder().encode(`${echoPrefix}${line}\r\n`);
+      for (const listener of outputListeners) listener(output);
+    }
+  },
+  async writePaste(text: string) {
+    if (!pasteOwnerEnabled) {
+      return {
+        kind: "paste" as const,
+        outcome: "rejected_locally" as const,
+        requestedBytes: text.length,
+        reason: "unsupported",
+        detail: "Mounted smoke data plane has no paste owner; paste was not delivered."
+      };
+    }
+    harness.pastes.push(text);
+    const bytes = new TextEncoder().encode(text).byteLength;
+    harness.callbackOrder.push(`paste:${bytes}`);
+    const output = new TextEncoder().encode(`${pasteEchoPrefix}${bytes}\r\n`);
     for (const listener of outputListeners) {
       listener(output);
     }
+    return {
+      kind: "paste" as const,
+      outcome: "written" as const,
+      requestedBytes: bytes,
+      acceptedPayloadBytes: bytes,
+      writtenPtyBytes: bytes,
+      operationId: harness.pastes.length,
+      detail: `Mounted smoke recorded ${bytes} bytes.`
+    };
   },
-  ...(pasteOwnerEnabled
-    ? {
-        async writePaste(text: string) {
-          harness.pastes.push(text);
-          const bytes = new TextEncoder().encode(text).byteLength;
-          harness.callbackOrder.push(`paste:${bytes}`);
-          const output = new TextEncoder().encode(`${pasteEchoPrefix}${bytes}\r\n`);
-          for (const listener of outputListeners) {
-            listener(output);
-          }
-          return {
-            kind: "paste" as const,
-            outcome: "admitted" as const,
-            minimumBytes: text.length,
-            requestedBytes: bytes,
-            deliveredBytes: bytes,
-            operationId: harness.pastes.length,
-            detail: `Mounted smoke recorded ${bytes} bytes.`
-          };
-        }
-      }
-    : {}),
   subscribeOutput(listener) {
     outputListeners.add(listener);
     harness.outputSubscribers = outputListeners.size;
@@ -295,11 +322,11 @@ createRoot(rootElement).render(
     onInputOutcome={(sessionId, outcome) => {
       harness.pasteOutcomes.push({
         sessionId,
+        kind: outcome.kind,
         outcome: outcome.outcome,
-        minimumBytes: outcome.minimumBytes,
         ...(outcome.requestedBytes !== undefined ? { requestedBytes: outcome.requestedBytes } : {}),
-        ...("deliveredBytes" in outcome ? { deliveredBytes: outcome.deliveredBytes } : {}),
-        ...(outcome.outcome === "rejected" ? { reason: outcome.reason } : {})
+        ...(outcome.writtenPtyBytes !== undefined ? { writtenPtyBytes: outcome.writtenPtyBytes } : {}),
+        ...(outcome.reason !== undefined ? { reason: outcome.reason } : {})
       });
     }}
     onExit={(sessionId) => {

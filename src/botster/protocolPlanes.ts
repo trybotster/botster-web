@@ -1,4 +1,8 @@
-import hubMetadata from "@trybotster/hub-test-support/metadata";
+import {
+  CONFORMANCE_FIXTURE_REVISION as HOST_CONFORMANCE,
+  PROTOCOL as HOST_PROTOCOL,
+  PROTOCOL_VERSION as HOST_PROTOCOL_VERSION
+} from "./generated/daemon-protocol";
 import {
   CONFORMANCE_FIXTURE_REVISION as TERMINAL_CONFORMANCE,
   FEATURE_RESIZE,
@@ -7,9 +11,9 @@ import {
   FEATURE_TRANSPORT_DUPLEX_BINARY,
   PROTOCOL as TERMINAL_PROTOCOL,
   PROTOCOL_VERSION as TERMINAL_PROTOCOL_VERSION
-} from "@trybotster/terminal-protocol";
+} from "./generated/terminal-protocol";
 import type { DaemonCompatibilityRequirement } from "./realHubDaemonDto";
-import type { TerminalCompatibilityRequirement } from "@trybotster/terminal-protocol";
+import type { TerminalCompatibilityRequirement } from "./generated/terminal-protocol";
 
 export const webClientName = "botster-web";
 
@@ -31,10 +35,10 @@ export const requiredTerminalFeatures = [
 ] as const;
 
 export const hostCompatibilityRequirement: DaemonCompatibilityRequirement = {
-  protocol: hubMetadata.protocol,
-  protocol_version: hubMetadata.protocol_version,
+  protocol: HOST_PROTOCOL,
+  protocol_version: HOST_PROTOCOL_VERSION,
   required_features: [...requiredHostFeatures],
-  minimum_conformance_fixture_revision: hubMetadata.conformance_fixture_revision,
+  minimum_conformance_fixture_revision: HOST_CONFORMANCE,
   client_name: webClientName
 };
 
@@ -46,6 +50,6 @@ export const terminalCompatibilityRequirement: TerminalCompatibilityRequirement 
   client_name: webClientName
 };
 
-export const hostHelloProtocol = hubMetadata.protocol;
-export const hostHelloProtocolVersion = hubMetadata.protocol_version;
-export const hostHelloConformanceRevision = hubMetadata.conformance_fixture_revision;
+export const hostHelloProtocol = HOST_PROTOCOL;
+export const hostHelloProtocolVersion = HOST_PROTOCOL_VERSION;
+export const hostHelloConformanceRevision = HOST_CONFORMANCE;

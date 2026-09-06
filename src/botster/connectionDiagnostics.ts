@@ -279,36 +279,58 @@ export function terminalUnavailableDiagnostic(error: unknown): ConnectionDiagnos
   };
 }
 
+function terminalInputOperationLabel(kind: TerminalInputOutcome["kind"]): string {
+  switch (kind) {
+    case "paste":
+      return "Paste";
+    case "key":
+      return "Key input";
+    case "mouse":
+      return "Mouse input";
+    case "focus":
+      return "Focus report";
+    case "resize":
+      return "Resize";
+    case "raw":
+      return "Input";
+  }
+}
+
 /**
  * Durable diagnostic for one explicit terminal input outcome. One row per session,
- * replaced by each later outcome, so the panel keeps the latest paste result.
+ * replaced by each later outcome, so the panel keeps the latest input result.
  */
 export function terminalInputOutcomeDiagnostic(
   sessionId: string,
   outcome: TerminalInputOutcome
 ): ConnectionDiagnostic {
+  const label = terminalInputOperationLabel(outcome.kind);
   const severity: ConnectionDiagnosticSeverity =
-    outcome.outcome === "admitted"
+    outcome.outcome === "written"
       ? "success"
-      : outcome.outcome === "rejected" || outcome.outcome === "partial"
-        ? "danger"
-        : "warning";
+      : outcome.outcome === "cancelled" || outcome.outcome === "outcome_unknown"
+        ? "warning"
+        : "danger";
   const title =
-    outcome.outcome === "admitted"
-      ? "Paste delivered"
-      : outcome.outcome === "rejected"
-        ? "Paste rejected"
-        : outcome.outcome === "partial"
-          ? "Paste partially delivered"
-          : outcome.outcome === "cancelled"
-            ? "Paste cancelled before delivery"
-            : "Paste delivery unknown";
+    outcome.outcome === "written"
+      ? `${label} delivered`
+      : outcome.outcome === "partial_write"
+        ? `${label} partially delivered`
+        : outcome.outcome === "cancelled"
+          ? `${label} cancelled`
+          : outcome.outcome === "outcome_unknown"
+            ? `${label} delivery unknown`
+            : `${label} rejected (${outcome.outcome})`;
+  const sizes = [
+    outcome.requestedBytes !== undefined ? `${outcome.requestedBytes} bytes requested` : undefined,
+    outcome.acceptedPayloadBytes !== undefined ? `${outcome.acceptedPayloadBytes} bytes accepted` : undefined,
+    outcome.writtenPtyBytes !== undefined ? `${outcome.writtenPtyBytes} PTY bytes written` : undefined,
+    outcome.operationId !== undefined ? `operation ${outcome.operationId}` : undefined
+  ].filter((entry): entry is string => Boolean(entry));
   return {
     id: `terminal-input-${sessionId}`,
     title,
-    detail: `${outcome.detail} (session ${sessionId}, ${
-      outcome.requestedBytes !== undefined ? `${outcome.requestedBytes} bytes requested` : `at least ${outcome.minimumBytes} bytes`
-    }${"deliveredBytes" in outcome ? `, ${outcome.deliveredBytes} PTY bytes written` : ""}${outcome.operationId !== undefined ? `, operation ${outcome.operationId}` : ""})`,
+    detail: `${outcome.detail} (session ${sessionId}${sizes.length > 0 ? `, ${sizes.join(", ")}` : ""})`,
     severity,
     source: "terminal"
   };

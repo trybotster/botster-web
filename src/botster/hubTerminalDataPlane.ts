@@ -1,40 +1,44 @@
 import type {
-  ModeDependentTerminalInput,
   TerminalAttachmentStatus,
   TerminalDataPlaneAttachment,
   TerminalInputOutcome,
+  TerminalInputOutcomeName,
+  TerminalModes,
   TerminalOutput,
+  TerminalResizeGeometry,
   TerminalSnapshotReader,
   TerminalSubscription
 } from "./terminal";
-import {
-  encodeModeGatedInput,
-  encodePaste,
-  encodePasteAbort,
-  encodeResize,
-  encodeTerminalInput,
-  MAX_INPUT_DATA_BYTES,
-  MAX_PASTE_BYTES,
-  type TerminalInputResult
-} from "@trybotster/terminal-protocol";
+import type { TerminalSemanticInput } from "./terminalInputEvents";
 import type {
   DaemonBridgeClient,
   DaemonTerminalStreamSubscription,
+  TerminalRouteFrame,
   TerminalStreamEvent
 } from "./hubTransport";
 import { hubTerminalSubscriptionId } from "./hubTransport";
-import type {
-  DaemonCaptureSnapshot,
-  DaemonModeFlags,
-  DaemonReadScreen
-} from "./realHubDaemonDto";
+import type { DaemonReadScreen } from "./realHubDaemonDto";
 import {
   localWebrtcResponseChunkLimits,
   webRtcDaemonLifecycleEventName,
   type WebrtcDaemonLifecycleEvent
 } from "./webrtcDaemonClient";
+import {
+  decodeTerminalBody,
+  MAX_INPUT_OPERATIONS_PER_SESSION,
+  MAX_PASTE_BYTES,
+  MAX_RETAINED_INPUT_BYTES_PER_SESSION,
+  type AttachStateCodeName,
+  type HistoryUnavailableReasonName,
+  type InputResultBody,
+  type TerminalEvent
+} from "./generated/terminal-protocol";
+import {
+  encodePasteOperation,
+  encodeSemanticInput,
+  type EncodedInputOperation
+} from "./terminalInputEncoding";
 
-const maxHydrationBufferBytes = 16_777_216;
 let nextSubscriptionSequence = 1;
 
 /**
@@ -44,45 +48,36 @@ let nextSubscriptionSequence = 1;
 export const DETACH_REQUEST_BOUND_MS = localWebrtcResponseChunkLimits.requestTimeoutMs;
 
 /**
- * Bounds on clipboard paste operations retained by one plane. Core bounds one paste at
- * MAX_PASTE_BYTES; Web additionally bounds the UTF-8 bytes and the count of pastes that
- * are queued or in flight, so serialization cannot retain unbounded clipboard strings.
+ * Client loop bounds from the implementation contract. Pending terminal frames are the
+ * live OUTPUT bytes held while snapshot history installs; overflow detaches and re-attaches
+ * this route only. Input operations wait locally up to the retained-byte bound once 32 are
+ * in flight; beyond that the operation is refused to the user.
  */
-export const MAX_QUEUED_PASTE_BYTES = 2 * MAX_PASTE_BYTES;
-export const MAX_QUEUED_PASTE_OPERATIONS = 16;
-
-/**
- * Bound on the wait for an authoritative paste result after Commit. Core waits its
- * gated-input timeout (5 s) plus 1 s before it reports Timeout; this bound adds margin
- * so a late result still lands as authoritative rather than as unknown delivery.
- */
-export const PASTE_RESULT_BOUND_MS = 8_000;
-
-/** Bound on a best-effort Abort send so an outcome never waits on a sender that never settles. */
-export const PASTE_ABORT_BOUND_MS = 1_000;
+export const MAX_PENDING_TERMINAL_ITEMS = 256;
+export const MAX_PENDING_TERMINAL_BYTES = 8 * 1024 * 1024;
+export const MAX_INFLIGHT_INPUT_OPERATIONS: number = MAX_INPUT_OPERATIONS_PER_SESSION;
+export const MAX_QUEUED_INPUT_BYTES: number = MAX_RETAINED_INPUT_BYTES_PER_SESSION;
 
 /**
  * Optional hooks that pause ownership-creating async boundaries so isolation
- * tests can destroy or switch sessions mid-flight.
+ * tests can destroy or switch sessions mid-flight. Injected by construction only.
  */
 export interface HubTerminalDataPlaneTestHooks {
   beforeAttachAcquire?: () => Promise<void> | void;
   beforeSnapshotInstall?: () => Promise<void> | void;
-  beforeReadModeFlags?: () => Promise<void> | void;
-  beforeResize?: () => Promise<void> | void;
-  beforeModeGatedInput?: () => Promise<void> | void;
+  beforeInputSend?: () => Promise<void> | void;
   beforeListenerDelivery?: () => Promise<void> | void;
-  /** Test-only gate before a settled paste transaction removes its result entry. */
-  beforePasteFinalize?: () => Promise<void> | void;
   /** Test-only shorter race for the public Detach hang bound. */
   detachRequestBoundMs?: number;
   /** Test-only shorter bound for admitted terminal hydration progress. */
   hydrationProgressBoundMs?: number;
 }
 
-interface PendingPasteResult {
-  generation: number;
-  resolve(result: TerminalInputResult | "lost"): void;
+export interface HubTerminalDataPlaneOptions {
+  bridge: DaemonBridgeClient;
+  sessionId?: string;
+  subscriptionId?: string;
+  testHooks?: HubTerminalDataPlaneTestHooks;
 }
 
 interface ScreenHydration {
@@ -91,23 +86,27 @@ interface ScreenHydration {
   bufferedBytes: number;
   pendingExit?: number | null;
   readyReceived: boolean;
+  /** The renderer's history decoder reported its GHOSTSNP finish record. */
+  decoderFinished: boolean;
   finishReceived: boolean;
   historyIncomplete: boolean;
-  attachedReceived: boolean;
   completed: boolean;
-  retryQueuedFrames: boolean;
   progressTimeout?: ReturnType<typeof setTimeout>;
   reader?: TerminalSnapshotReader;
-  resolveBarrier(): void;
-  barrier: Promise<void>;
 }
 
-export interface HubTerminalDataPlaneOptions {
-  bridge: DaemonBridgeClient;
-  sessionId?: string;
-  subscriptionId?: string;
-  /** Test-only pause points for request-race isolation matrix. */
-  testHooks?: HubTerminalDataPlaneTestHooks;
+interface QueuedInputOperation {
+  operation: EncodedInputOperation;
+  kind: TerminalInputOutcome["kind"];
+  requestedBytes: number;
+  resolve?: (outcome: TerminalInputOutcome) => void;
+}
+
+interface InflightInputOperation extends QueuedInputOperation {
+  generation: number;
+  operationId: number;
+  /** Client payload bytes still counted against the retained-input bound until the result lands. */
+  retainedBytes: number;
 }
 
 export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
@@ -118,42 +117,45 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private readonly testHooks: HubTerminalDataPlaneTestHooks | undefined;
   private readonly listeners = new Set<(data: TerminalOutput) => void>();
   private readonly statusListeners = new Set<(status: TerminalAttachmentStatus) => void>();
+  private readonly modesListeners = new Set<(modes: TerminalModes) => void>();
+  private readonly outcomeListeners = new Set<(outcome: TerminalInputOutcome) => void>();
   private currentStatus: TerminalAttachmentStatus = {
     state: "attaching",
     message: "Attaching terminal stream."
   };
+  private currentModes: TerminalModes | undefined;
   private streamSubscription: DaemonTerminalStreamSubscription | undefined;
   private attachPromise: Promise<void> | undefined;
-  private pendingResize: { rows: number; columns: number } | undefined;
   private detached = false;
   private transportLost = false;
   private attachmentGeneration = 0;
+  private attachedReceived = false;
+  /** Fixed route generation of this attachment, from the terminal reservation. */
+  private routeGeneration: number | undefined;
+  /**
+   * Accepted stream epoch: 0 once ATTACH_STATE attached arrives, then only the to_epoch of
+   * a ROUTE_RESYNC whose from_epoch equals the accepted epoch. Never assigned from a data frame.
+   */
+  private acceptedEpoch: number | undefined;
   private detachSentFor: { subscriptionId: string; generation: number } | undefined;
   private lastAbandonedDetach: { subscriptionId: string; generation: number } | undefined;
   private hydration: ScreenHydration | undefined;
-  private restoredVisibleScreenGeneration: number | undefined;
-  private modeFlags: DaemonModeFlags | undefined;
   private incrementalSnapshotReaderFactory: (() => TerminalSnapshotReader) | undefined;
   private terminalEventQueue: Promise<void> = Promise.resolve();
-  private terminalFrameQueue: Promise<void> = Promise.resolve();
-  private readonly pendingModeGatedInputs: Array<{
-    semantic: ModeDependentTerminalInput;
-    encoded: string;
-    retried: boolean;
-    resolve: () => void;
-  }> = [];
-  private nextPasteOperationId = 1;
-  private queuedPasteBytes = 0;
-  private queuedPasteOperations = 0;
-  /**
-   * Resolvers for committed paste operations awaiting their authoritative result, keyed by
-   * operation id. Operation ids restart at 1 on every attachment change, so entries carry
-   * their attachment generation and are removed only by identity: a settled old transaction
-   * can never remove a newer operation's resolver that reuses its id.
-   */
-  private readonly pendingPasteResults = new Map<number, PendingPasteResult>();
   private snapshotRecoveries = 0;
   private readonly onWebrtcLifecycle?: (event: Event) => void;
+
+  /** Input operation ids start at 1 after each attach and increase within the generation. */
+  private nextOperationId = 1;
+  private readonly queuedInputs: QueuedInputOperation[] = [];
+  private queuedInputBytes = 0;
+  /** Payload bytes of operations sent but not yet resulted; Core retains them until then. */
+  private inflightInputBytes = 0;
+  private readonly inflightInputs = new Map<number, InflightInputOperation>();
+  private inputSendChain: Promise<void> = Promise.resolve();
+  private pendingResize: TerminalResizeGeometry | undefined;
+  private pasteAssembling = false;
+  private readonly pasteWaiters: Array<() => void> = [];
 
   constructor(private readonly options: HubTerminalDataPlaneOptions) {
     if (!options.sessionId) throw new Error("Hub terminal data plane requires a session id.");
@@ -161,9 +163,9 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.fixedSubscriptionId = Boolean(options.subscriptionId);
     this.subscriptionId = options.subscriptionId ?? createTerminalSubscriptionId();
     this.testHooks = options.testHooks;
-    // Surviving-document DataChannel recovery must mint a fresh terminal subscription
-    // and re-run H0–H5 without unmounting the renderer. Wait for encrypted-stream-ready
-    // so attach RPCs are not issued against a half-open peer.
+    // Surviving-document DataChannel recovery mints a fresh terminal subscription and
+    // re-runs the attach ordering without unmounting the renderer. Wait for
+    // encrypted-stream-ready so attach RPCs are not issued against a half-open peer.
     if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
       this.onWebrtcLifecycle = (event: Event) => {
         const detail = (event as CustomEvent<WebrtcDaemonLifecycleEvent>).detail;
@@ -178,425 +180,285 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
           this.handleTransportLost();
           queueMicrotask(() => this.handleTransportRecovered());
         } else if (detail.type === "encrypted-stream-ready") {
-          // Wait for HelloAck, not only the first encrypted send.
           this.handleTransportRecovered();
         }
       };
       window.addEventListener(webRtcDaemonLifecycleEventName, this.onWebrtcLifecycle);
-      registerTerminalTransportRecoveryPlane(this);
     }
-  }
-
-  /** Test/live harness: stop listening for WebRTC recovery (reconnect-listener ablation). */
-  disableTransportRecovery(): void {
-    this.uninstallLifecycleListener();
-    unregisterTerminalTransportRecoveryPlane(this);
   }
 
   bindIncrementalSnapshotReader(createReader: () => TerminalSnapshotReader): void {
     this.incrementalSnapshotReaderFactory = createReader;
   }
 
-  writeInput(data: string): Promise<void> {
-    recordLiveHarnessTerminal("input", { data, path: "subscription_data_channel" });
-    return this.enqueueTerminalFrame(async () => {
-      const bytes = new TextEncoder().encode(data);
-      if (bytes.byteLength <= MAX_INPUT_DATA_BYTES) {
-        await this.sendTerminalFrame(encodeTerminalInput(bytes));
-        return;
-      }
-      const operationId = this.nextPasteOperationId++;
-      const modes = this.modeFlags ?? await this.refreshModeFlags(this.attachmentGeneration);
-      if (!modes) throw new Error("Authoritative mode flags are unavailable for terminal paste.");
-      let committed = false;
-      try {
-        for (const frame of encodePaste(
-          operationId,
-          modes.mode_generation,
-          modes.mode_revision,
-          bytes
-        )) {
-          await this.sendTerminalFrame(frame);
-        }
-        committed = true;
-      } finally {
-        if (!committed) {
-          await this.sendTerminalFrame(encodePasteAbort(operationId)).catch(() => undefined);
-        }
-      }
-    });
+  // ---------------------------------------------------------------------------
+  // Input: bounded in-flight window, in order, no acknowledgement serialization.
+  // ---------------------------------------------------------------------------
+
+  sendInput(input: TerminalSemanticInput): void {
+    if (this.detached) return;
+    if (input.kind === "resize") {
+      this.resize({ rows: input.rows, cols: input.cols, widthPx: input.widthPx, heightPx: input.heightPx });
+      return;
+    }
+    if (input.kind === "paste") {
+      void this.writePaste(input.text);
+      return;
+    }
+    const encoded = encodeSemanticInput(input);
+    if (!encoded) return;
+    const requestedBytes = input.kind === "raw" ? input.bytes.byteLength : encoded.bodyBytes;
+    if (!this.enqueueInput({ operation: encoded, kind: input.kind, requestedBytes })) {
+      this.publishOutcome({
+        kind: input.kind,
+        outcome: "rejected_locally",
+        requestedBytes,
+        reason: "queue_bounds",
+        detail: `Input refused: ${MAX_INFLIGHT_INPUT_OPERATIONS} operations are in flight and ${this.queuedInputBytes} bytes are already queued.`
+      });
+    }
   }
 
-  writeModeGatedInput(semantic: ModeDependentTerminalInput): Promise<void> {
-    return this.enqueueTerminalFrame((attachmentGeneration) =>
-      this.writeModeGatedInputAfterBarrier(semantic, attachmentGeneration)
-    );
+  resize(geometry: TerminalResizeGeometry): void {
+    if (this.detached) return;
+    recordLiveHarnessTerminal("resize", geometry);
+    // Coalesce: only the latest geometry is sent, ahead of the next queued operation.
+    this.pendingResize = geometry;
+    void this.ensureAttached().catch(() => undefined);
+    this.pumpInputs();
   }
 
   /**
-   * Explicit clipboard paste as one Core transaction (Begin, chunks, Commit).
-   *
-   * Web encodes the protocol frames, supplies the mode token, and reports the outcome.
-   * Core validates assembly, bounds, in-flight, and mode; emits bracketed-paste markers
-   * under the fenced mode; and delivers. Web never adds markers.
-   *
-   * Ordering: the operation joins the same terminalFrameQueue as keys and mode-gated
-   * input. Keys queued after the paste cannot overtake it. A resize is coalesced into
-   * pendingResize and flushed before the next queued send, never between Begin and Commit.
-   *
-   * Outcomes: rejected (zero PTY bytes), cancelled before Commit reached Core (zero PTY
-   * bytes, best-effort Abort on the still-live stream), admitted, or unknown when the
-   * operation was committed and no authoritative result arrived within PASTE_RESULT_BOUND_MS
-   * or the stream was lost. Only StaleMode is retried, once, because Core proves zero
-   * PTY bytes for that rejection; Timeout and PartialWrite are never retried.
+   * Explicit clipboard paste as one Core operation: PASTE_BEGIN, chunks, PASTE_COMMIT under
+   * one operation id. One paste assembles per route at a time; later pastes wait in order.
+   * Web never adds bracketed-paste markers and never retries a paste.
    */
   async writePaste(text: string): Promise<TerminalInputOutcome> {
     const outcome = await this.writePasteOperation(text);
     recordLiveHarnessTerminal("paste_outcome", { ...outcome, sessionId: this.sessionId });
+    this.publishOutcome(outcome);
     return outcome;
   }
 
   private async writePasteOperation(text: string): Promise<TerminalInputOutcome> {
-    const minimumBytes = text.length;
-    const rejected = (
-      reason: string,
-      detail: string,
-      requestedBytes?: number
-    ): TerminalInputOutcome => ({
+    const rejected = (reason: string, detail: string, requestedBytes?: number): TerminalInputOutcome => ({
       kind: "paste",
-      outcome: "rejected",
-      minimumBytes,
+      outcome: "rejected_locally",
       ...(requestedBytes !== undefined ? { requestedBytes } : {}),
       reason,
       detail
     });
     // Every check that does not need the UTF-8 size runs before the single encoding, so an
     // oversized or refused clipboard string is never allocated as bytes.
-    if (text.length === 0) {
-      return rejected("empty", "Clipboard paste was empty.");
-    }
-    if (this.detached) {
-      return rejected("detached", "Terminal is detached; paste was not delivered.");
-    }
-    if (this.queuedPasteOperations >= MAX_QUEUED_PASTE_OPERATIONS) {
-      return rejected(
-        "queue_bounds",
-        `Paste refused: ${this.queuedPasteOperations} paste operations are already queued.`
-      );
-    }
+    if (text.length === 0) return rejected("empty", "Clipboard paste was empty.");
+    if (this.detached) return rejected("detached", "Terminal is detached; paste was not delivered.");
     // UTF-16 units never exceed UTF-8 bytes: reject before encoding an oversized string.
     if (text.length > MAX_PASTE_BYTES) {
-      return rejected(
-        "too_large",
-        `Paste of at least ${text.length} bytes exceeds the ${MAX_PASTE_BYTES}-byte paste limit.`
-      );
+      return rejected("too_large", `Paste of at least ${text.length} bytes exceeds the ${MAX_PASTE_BYTES}-byte paste limit.`);
     }
     const data = new TextEncoder().encode(text);
     const bytes = data.byteLength;
     if (bytes > MAX_PASTE_BYTES) {
       return rejected("too_large", `Paste of ${bytes} bytes exceeds the ${MAX_PASTE_BYTES}-byte paste limit.`, bytes);
     }
-    if (this.queuedPasteBytes + bytes > MAX_QUEUED_PASTE_BYTES) {
-      return rejected(
-        "queue_bounds",
-        `Paste refused: queued paste bytes would exceed ${MAX_QUEUED_PASTE_BYTES}.`,
-        bytes
-      );
+    if (this.retainedInputBytes() + bytes > MAX_QUEUED_INPUT_BYTES) {
+      return rejected("queue_bounds", `Paste refused: retained input bytes would exceed ${MAX_QUEUED_INPUT_BYTES}.`, bytes);
     }
-    this.queuedPasteOperations += 1;
-    this.queuedPasteBytes += bytes;
+    await this.acquirePasteSlot();
+    if (this.detached) {
+      this.releasePasteSlot();
+      return rejected("detached", "Terminal is detached; paste was not delivered.");
+    }
     recordLiveHarnessTerminal("paste", { bytes, path: "subscription_data_channel" });
-    let outcome: TerminalInputOutcome | undefined;
-    try {
-      await this.enqueueTerminalFrame(async (attachmentGeneration) => {
-        outcome = await this.sendPasteTransaction({ minimumBytes, requestedBytes: bytes }, data, attachmentGeneration);
-      });
-    } catch (error: unknown) {
-      outcome ??= {
+    const operation = encodePasteOperation(data);
+    return new Promise<TerminalInputOutcome>((resolve) => {
+      const entry: QueuedInputOperation = {
+        operation,
         kind: "paste",
-        outcome: "cancelled",
-        minimumBytes,
         requestedBytes: bytes,
-        detail: `Paste was not delivered: ${error instanceof Error ? error.message : String(error)}`
+        resolve: (outcome) => {
+          this.releasePasteSlot();
+          resolve(outcome);
+        }
       };
-    } finally {
-      this.queuedPasteOperations -= 1;
-      this.queuedPasteBytes -= bytes;
-    }
-    return outcome ?? {
-      kind: "paste",
-      outcome: "cancelled",
-      minimumBytes,
-      requestedBytes: bytes,
-      detail: "Paste was cancelled before the terminal was attached."
-    };
+      if (!this.enqueueInput(entry)) {
+        entry.resolve?.(rejected("queue_bounds", `Paste refused: ${this.queuedInputs.length} operations are already queued.`, bytes));
+      }
+    });
   }
 
-  private async sendPasteTransaction(
-    sizes: { minimumBytes: number; requestedBytes: number },
-    data: Uint8Array,
-    attachmentGeneration: number
-  ): Promise<TerminalInputOutcome> {
-    const bytes = data.byteLength;
+  private acquirePasteSlot(): Promise<void> {
+    if (!this.pasteAssembling) {
+      this.pasteAssembling = true;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.pasteWaiters.push(() => {
+        this.pasteAssembling = true;
+        resolve();
+      });
+    });
+  }
+
+  private releasePasteSlot(): void {
+    this.pasteAssembling = false;
+    const next = this.pasteWaiters.shift();
+    next?.();
+  }
+
+  /** Queued plus in-flight client payload bytes, mirroring Core's per-session retained bound. */
+  private retainedInputBytes(): number {
+    return this.queuedInputBytes + this.inflightInputBytes;
+  }
+
+  private enqueueInput(entry: QueuedInputOperation): boolean {
+    const bytes = entry.operation.bodyBytes;
+    if (this.retainedInputBytes() + bytes > MAX_QUEUED_INPUT_BYTES) {
+      return false;
+    }
+    this.queuedInputs.push(entry);
+    this.queuedInputBytes += bytes;
+    void this.ensureAttached().catch(() => undefined);
+    this.pumpInputs();
+    return true;
+  }
+
+  /** Sends queued operations in order while the route is attached and the window has room. */
+  private pumpInputs(): void {
     const stream = this.streamSubscription;
-    if (!stream?.sendFrame) {
-      return { kind: "paste", outcome: "cancelled", ...sizes, detail: "Terminal stream is not attached; paste was not delivered." };
+    if (!stream?.sendFrame || !this.attachedReceived || this.detached) return;
+    const generation = this.attachmentGeneration;
+    while (this.inflightInputs.size < MAX_INFLIGHT_INPUT_OPERATIONS) {
+      const resize = this.pendingResize;
+      let entry: QueuedInputOperation | undefined;
+      if (resize) {
+        this.pendingResize = undefined;
+        const encoded = encodeSemanticInput({ kind: "resize", ...resize });
+        if (!encoded) continue;
+        entry = { operation: encoded, kind: "resize", requestedBytes: encoded.bodyBytes };
+      } else {
+        entry = this.queuedInputs.shift();
+        if (!entry) return;
+        this.queuedInputBytes -= entry.operation.bodyBytes;
+      }
+      const operationId = this.nextOperationId++;
+      const inflight: InflightInputOperation = {
+        ...entry,
+        generation,
+        operationId,
+        retainedBytes: entry.operation.bodyBytes
+      };
+      this.inflightInputs.set(operationId, inflight);
+      this.inflightInputBytes += inflight.retainedBytes;
+      this.inputSendChain = this.inputSendChain
+        .then(async () => {
+          await this.testHooks?.beforeInputSend?.();
+          if (!this.isCurrentAttachment(generation) || this.streamSubscription !== stream) {
+            this.settleInflight(inflight, "cancelled", "Terminal attachment changed before the operation was sent.");
+            return;
+          }
+          // Frames are built once, sent in order, and released; the payload closure goes
+          // with them so a paste holds no third copy while Core retains the operation.
+          const frames = inflight.operation.frames(operationId);
+          const frameCount = frames.length;
+          inflight.operation = releasedOperation(inflight.retainedBytes);
+          for (const frame of frames) {
+            await stream.sendFrame!(frame);
+          }
+          recordLiveHarnessTerminal("input_sent", {
+            kind: inflight.kind,
+            operation_id: operationId,
+            frames: frameCount,
+            bytes: inflight.retainedBytes,
+            generation
+          });
+        })
+        .catch((error: unknown) => {
+          this.settleInflight(
+            inflight,
+            "cancelled",
+            `Input was not sent: ${error instanceof Error ? error.message : String(error)}`
+          );
+        });
     }
-    let modes = this.modeFlags ?? await this.refreshModeFlags(attachmentGeneration);
-    if (!modes || !this.isCurrentAttachment(attachmentGeneration)) {
-      return {
-        kind: "paste",
-        outcome: modes ? "cancelled" : "rejected",
-        ...sizes,
-        ...(modes ? {} : { reason: "mode_unavailable" }),
-        detail: modes
-          ? "Terminal attachment changed before the paste started."
-          : "Authoritative terminal modes are unavailable; paste was not delivered."
-      } as TerminalInputOutcome;
-    }
-    const stillLive = () => this.isCurrentAttachment(attachmentGeneration) && this.streamSubscription === stream;
-    const abortBestEffort = async (operationId: number) => {
-      // Never send an abort on a recovered generation: only on the stream that carried Begin.
-      // The send is bounded so an outcome never waits on a sender that never settles.
-      if (!stillLive()) return;
-      let timer: number | undefined;
-      const bound = new Promise<void>((resolve) => {
-        timer = window.setTimeout(resolve, PASTE_ABORT_BOUND_MS);
-      });
-      await Promise.race([stream.sendFrame!(encodePasteAbort(operationId)).catch(() => undefined), bound]);
-      if (timer !== undefined) window.clearTimeout(timer);
+  }
+
+  private settleInflight(
+    inflight: InflightInputOperation,
+    outcome: TerminalInputOutcomeName,
+    detail: string,
+    counts: { acceptedPayloadBytes?: number; writtenPtyBytes?: number } = {}
+  ): void {
+    if (this.inflightInputs.get(inflight.operationId) !== inflight) return;
+    this.inflightInputs.delete(inflight.operationId);
+    this.inflightInputBytes -= inflight.retainedBytes;
+    const result: TerminalInputOutcome = {
+      kind: inflight.kind,
+      outcome,
+      operationId: inflight.operationId,
+      requestedBytes: inflight.requestedBytes,
+      ...counts,
+      detail
     };
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      if (!isJsonSafeModeToken(modes)) {
-        return {
-          kind: "paste",
-          outcome: "rejected",
-          ...sizes,
-          reason: "mode_token",
-          detail: "Mode freshness token is not JSON-safe; paste was not delivered."
-        };
-      }
-      const operationId = this.nextPasteOperationId++;
-      const frames = encodePaste(operationId, modes.mode_generation, modes.mode_revision, data);
-      const commitIndex = frames.length - 1;
-      let committed = false;
-      let entry!: PendingPasteResult;
-      const resultPromise = new Promise<TerminalInputResult | "lost">((resolve) => {
-        entry = { generation: attachmentGeneration, resolve };
-        this.pendingPasteResults.set(operationId, entry);
-      });
-      try {
-        for (const [index, frame] of frames.entries()) {
-          if (!stillLive()) {
-            await abortBestEffort(operationId);
-            return { kind: "paste", outcome: "cancelled", ...sizes, operationId, detail: "Terminal attachment changed; paste was cancelled before Commit." };
-          }
-          try {
-            await stream.sendFrame(frame);
-          } catch (error: unknown) {
-            await abortBestEffort(operationId);
-            return {
-              kind: "paste",
-              outcome: "cancelled",
-              ...sizes,
-              operationId,
-              detail: `Paste frame ${index + 1} of ${frames.length} was not sent: ${error instanceof Error ? error.message : String(error)}`
-            };
-          }
-          if (index === commitIndex) committed = true;
-        }
-        recordLiveHarnessTerminal("paste_committed", { operation_id: operationId, bytes, frames: frames.length, attempt });
-        let timer: number | undefined;
-        const bound = new Promise<"bound">((resolve) => {
-          timer = window.setTimeout(() => resolve("bound"), PASTE_RESULT_BOUND_MS);
-        });
-        const result = await Promise.race([resultPromise, bound]);
-        if (timer !== undefined) window.clearTimeout(timer);
-        if (result === "bound") {
-          // Core can still cancel an operation that is assembling or queued before its gated
-          // submission. Attempt that only on the stream that carried Begin. Abort never
-          // retracts a completed PTY write, so the outcome stays unknown.
-          await abortBestEffort(operationId);
-          return {
-            kind: "paste",
-            outcome: "unknown",
-            ...sizes,
-            operationId,
-            reason: "result_bound",
-            detail: `No paste result within ${PASTE_RESULT_BOUND_MS} ms; an abort was attempted and delivery of ${bytes} bytes is unknown.`
-          };
-        }
-        if (result === "lost") {
-          return {
-            kind: "paste",
-            outcome: "unknown",
-            ...sizes,
-            operationId,
-            reason: "stream_lost",
-            detail: `Terminal stream was lost after Commit; delivery of ${bytes} bytes is unknown.`
-          };
-        }
-        // bytes_written is Core's actual PTY write. Under bracketed paste it includes the
-        // marker bytes Core adds, so it is never compared with the clipboard size as "N of M".
-        const markerNote = result.mode_flags?.bracketed_paste ? ", including bracketed-paste markers" : "";
-        if (result.admitted) {
-          return {
-            kind: "paste",
-            outcome: "admitted",
-            ...sizes,
-            deliveredBytes: result.bytes_written,
-            operationId,
-            detail: `Terminal wrote ${result.bytes_written} PTY bytes for a ${bytes}-byte clipboard paste${markerNote}.`
-          };
-        }
-        if (result.rejection === "partial_write" || (!result.admitted && result.bytes_written > 0)) {
-          // Authoritative partial delivery: Core reports the bytes that reached the PTY.
-          return {
-            kind: "paste",
-            outcome: "partial",
-            ...sizes,
-            deliveredBytes: result.bytes_written,
-            operationId,
-            detail: `Terminal wrote ${result.bytes_written} PTY bytes for a ${bytes}-byte clipboard paste before the write stopped${markerNote}.`
-          };
-        }
-        if (result.rejection === "timeout") {
-          // Core's Timeout can follow its post-submit wait after a completed write, so zero
-          // delivery is not proven. Never retried.
-          return {
-            kind: "paste",
-            outcome: "unknown",
-            ...sizes,
-            operationId,
-            reason: "timeout",
-            detail: `Terminal reported a timeout for the paste; delivery of ${bytes} bytes is unknown.`
-          };
-        }
-        if (result.rejection === "stale_mode" && attempt === 0 && this.modeFlags && stillLive()) {
-          // Core proves zero PTY bytes for stale_mode at both its own stage and the worker
-          // stage, so one re-encode under the returned authoritative mode cannot duplicate.
-          modes = this.modeFlags;
-          recordLiveHarnessTerminal("paste_stale_retry", { operation_id: operationId, bytes });
-          continue;
-        }
-        return {
-          kind: "paste",
-          outcome: "rejected",
-          ...sizes,
-          operationId,
-          reason: result.rejection ?? "rejected",
-          detail: `Paste rejected by the terminal: ${result.rejection ?? "rejected"}${result.bytes_written > 0 ? ` after ${result.bytes_written} PTY bytes` : ""}.`
-        };
-      } finally {
-        await this.testHooks?.beforePasteFinalize?.();
-        // Remove only this transaction's own entry: ids restart on attachment change.
-        if (this.pendingPasteResults.get(operationId) === entry) {
-          this.pendingPasteResults.delete(operationId);
-        }
-        recordLiveHarnessTerminal("paste_settled", { operation_id: operationId, committed });
-      }
+    if (inflight.resolve) {
+      inflight.resolve(result);
+    } else {
+      this.publishOutcome(result);
     }
-    return { kind: "paste", outcome: "rejected", ...sizes, reason: "stale_mode", detail: "Paste rejected: terminal modes changed twice." };
+    this.pumpInputs();
   }
 
-  private settlePendingPasteResults(): void {
-    for (const entry of this.pendingPasteResults.values()) entry.resolve("lost");
-    this.pendingPasteResults.clear();
+  /** Every in-flight operation on the lost generation ends `outcome_unknown`; unsent ones are cancelled. */
+  private abandonInputs(reason: string): void {
+    for (const inflight of [...this.inflightInputs.values()]) {
+      this.settleInflight(inflight, "outcome_unknown", reason);
+    }
+    for (const entry of this.queuedInputs.splice(0)) {
+      const result: TerminalInputOutcome = {
+        kind: entry.kind,
+        outcome: "cancelled",
+        requestedBytes: entry.requestedBytes,
+        detail: reason
+      };
+      if (entry.resolve) entry.resolve(result);
+      else this.publishOutcome(result);
+    }
+    this.queuedInputBytes = 0;
+    this.inflightInputBytes = 0;
+    this.pendingResize = undefined;
+    this.nextOperationId = 1;
   }
 
-  private async writeModeGatedInputAfterBarrier(
-    semantic: ModeDependentTerminalInput,
-    attachmentGeneration: number
-  ): Promise<void> {
-    if (!this.isCurrentAttachment(attachmentGeneration)) return;
-
-    await this.testHooks?.beforeModeGatedInput?.();
-    if (!this.isCurrentAttachment(attachmentGeneration)) return;
-
-    let modes = this.modeFlags;
-    if (!modes) {
-      modes = await this.refreshModeFlags(attachmentGeneration);
-    }
-    if (!modes || !this.isCurrentAttachment(attachmentGeneration)) {
-      throw new Error("Authoritative mode flags are unavailable for mode-gated terminal input.");
-    }
-
-    // Producer must emit JSON-safe mode tokens (≤ 2^53-1). Core ticket_1786517156_512585 /
-    // botster-core#121 bounds session-worker generations. Fail closed if a non-safe token
-    // still arrives so we never silently admit via send_input.
-    if (!isJsonSafeModeToken(modes)) {
-      recordLiveHarnessTerminal("mode_gated_input_failed", {
-        reason: "unsafe_json_integer_token",
-        mode_generation: modes.mode_generation,
-        mode_revision: modes.mode_revision
-      });
-      throw new Error(
-        `Mode freshness token is not JSON-safe (generation=${modes.mode_generation}, revision=${modes.mode_revision}); browser ModeGatedInput requires tokens ≤ 2^53-1.`
-      );
-    }
-
-    // First encode under current authoritative modes.
-    let encoded = semantic.encode(modes);
-    // Empty encode may mean modes disabled the event (mouse_mode=0) — but cached
-    // mode flags can be stale if the session later enabled mouse. Refresh once
-    // before treating empty as authoritative discard.
-    if (!encoded) {
-      const refreshed = await this.refreshModeFlags(attachmentGeneration);
-      if (!refreshed || !this.isCurrentAttachment(attachmentGeneration)) return;
-      this.modeFlags = refreshed;
-      modes = refreshed;
-      if (!isJsonSafeModeToken(modes)) {
-        recordLiveHarnessTerminal("mode_gated_input_failed", {
-          reason: "unsafe_json_integer_token_after_refresh",
-          mode_generation: modes.mode_generation,
-          mode_revision: modes.mode_revision
-        });
-        throw new Error(
-          `Mode freshness token is not JSON-safe (generation=${modes.mode_generation}, revision=${modes.mode_revision}); browser ModeGatedInput requires tokens ≤ 2^53-1.`
-        );
-      }
-      encoded = semantic.encode(modes);
-      if (!encoded) {
-        recordLiveHarnessTerminal("mode_gated_input_skipped", {
-          reason: "encode_empty_after_mode_refresh",
-          mode_generation: modes.mode_generation,
-          mode_revision: modes.mode_revision,
-          mouse_mode: modes.mouse_mode
-        });
-        return;
-      }
-      recordLiveHarnessTerminal("mode_flags_refreshed_for_encode", {
-        mode_generation: modes.mode_generation,
-        mode_revision: modes.mode_revision,
-        mouse_mode: modes.mouse_mode
-      });
-    }
-    let resolveInputResult!: () => void;
-    const inputResult = new Promise<void>((resolve) => {
-      resolveInputResult = resolve;
+  private handleInputResult(result: InputResultBody): void {
+    recordLiveHarnessTerminal("input_result", {
+      operation_id: Number(result.operation_id),
+      outcome: result.outcome,
+      accepted_payload_bytes: result.accepted_payload_bytes === null ? null : Number(result.accepted_payload_bytes),
+      written_pty_bytes: result.written_pty_bytes === null ? null : Number(result.written_pty_bytes),
+      mode_bits: result.mode_bits,
+      detail: result.detail
     });
-    const pending = { semantic, encoded, retried: false, resolve: resolveInputResult };
-    this.pendingModeGatedInputs.push(pending);
-    try {
-      await this.sendTerminalFrame(
-        encodeModeGatedInput(
-          modes.mode_generation,
-          modes.mode_revision,
-          new TextEncoder().encode(encoded)
-        )
-      );
-    } catch (error) {
-      this.removePendingModeGatedInput(pending);
-      throw error;
+    // Operation ids are client-chosen small integers, so the u64 converts exactly.
+    const inflight = this.inflightInputs.get(Number(result.operation_id));
+    if (!inflight || inflight.generation !== this.attachmentGeneration) {
+      // Unknown or already completed id: reported, never retained.
+      recordLiveHarnessTerminal("input_result_unmatched", {
+        operation_id: Number(result.operation_id),
+        outcome: result.outcome
+      });
+      return;
     }
-    recordLiveHarnessTerminal("mode_gated_input", {
-      bytes: encoded,
-      mode_generation: modes.mode_generation,
-      mode_revision: modes.mode_revision,
-      path: "subscription_data_channel"
-    });
-    await inputResult;
+    const counts = {
+      ...(result.accepted_payload_bytes !== null ? { acceptedPayloadBytes: Number(result.accepted_payload_bytes) } : {}),
+      ...(result.written_pty_bytes !== null ? { writtenPtyBytes: Number(result.written_pty_bytes) } : {})
+    };
+    const detail = result.detail || describeOutcome(inflight.kind, result.outcome, counts);
+    this.settleInflight(inflight, result.outcome, detail, counts);
   }
+
+  // ---------------------------------------------------------------------------
+  // Subscriptions.
+  // ---------------------------------------------------------------------------
 
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription {
     this.listeners.add(listener);
@@ -609,10 +471,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         }
       };
     }
-    this.emitStatus({
-      state: "attaching",
-      message: "Attaching terminal stream."
-    });
+    this.emitStatus({ state: "attaching", message: "Attaching terminal stream." });
     void this.ensureAttached().catch((error: unknown) => {
       this.emitStatus({
         state: "failed",
@@ -636,7 +495,6 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   subscribeStatus(listener: (status: TerminalAttachmentStatus) => void): TerminalSubscription {
     this.statusListeners.add(listener);
     listener(this.currentStatus);
-
     return {
       unsubscribe: () => {
         this.statusListeners.delete(listener);
@@ -644,12 +502,28 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     };
   }
 
-  async resize(rows: number, columns: number): Promise<void> {
-    recordLiveHarnessTerminal("resize", { rows, columns });
-    this.pendingResize = { rows, columns };
-    await this.ensureAttached();
-    await this.enqueueTerminalFrame(async () => undefined);
+  subscribeModes(listener: (modes: TerminalModes) => void): TerminalSubscription {
+    this.modesListeners.add(listener);
+    if (this.currentModes) listener(this.currentModes);
+    return {
+      unsubscribe: () => {
+        this.modesListeners.delete(listener);
+      }
+    };
   }
+
+  subscribeInputOutcomes(listener: (outcome: TerminalInputOutcome) => void): TerminalSubscription {
+    this.outcomeListeners.add(listener);
+    return {
+      unsubscribe: () => {
+        this.outcomeListeners.delete(listener);
+      }
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Host-control readback (low-rate control, paged).
+  // ---------------------------------------------------------------------------
 
   async readScreen(): Promise<DaemonReadScreen | undefined> {
     const attachmentGeneration = this.attachmentGeneration;
@@ -664,18 +538,46 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return readScreen;
   }
 
-  async captureSnapshot(): Promise<DaemonCaptureSnapshot | undefined> {
+  async captureSnapshot(): Promise<Uint8Array | undefined> {
     const attachmentGeneration = this.attachmentGeneration;
     const response = await this.options.bridge.request({
       type: "capture_snapshot",
       session_id: this.sessionId
     });
-    const captureSnapshot = response.capture_snapshot ?? undefined;
-    if (!this.isCurrentAttachment(attachmentGeneration) || captureSnapshot?.session_id !== this.sessionId) {
+    const capture = response.capture_snapshot ?? undefined;
+    if (!capture || !this.isCurrentAttachment(attachmentGeneration) || capture.unavailable) {
       return undefined;
     }
-    return captureSnapshot;
+    const assembled = new Uint8Array(Number(capture.total_bytes));
+    let offset = 0;
+    for (let page = 0; page < capture.pages; page += 1) {
+      const pageResponse = await this.options.bridge.request({
+        type: "read_snapshot_page",
+        session_id: this.sessionId,
+        capture_id: capture.capture_id,
+        page
+      });
+      const body = pageResponse.snapshot_page;
+      if (!body || body.capture_id !== capture.capture_id || body.page !== page) {
+        throw new Error(`Snapshot page ${page} of capture ${capture.capture_id} was not returned.`);
+      }
+      const bytes = base64ToBytes(body.payload_base64);
+      if (offset + bytes.byteLength > assembled.byteLength) {
+        throw new Error(`Snapshot pages exceed the declared ${capture.total_bytes} bytes.`);
+      }
+      assembled.set(bytes, offset);
+      offset += bytes.byteLength;
+      if (!this.isCurrentAttachment(attachmentGeneration)) return undefined;
+    }
+    if (offset !== assembled.byteLength) {
+      throw new Error(`Snapshot pages delivered ${offset} of ${capture.total_bytes} bytes.`);
+    }
+    return assembled;
   }
+
+  // ---------------------------------------------------------------------------
+  // Attachment lifecycle.
+  // ---------------------------------------------------------------------------
 
   async detach(): Promise<void> {
     if (this.detached) return;
@@ -683,23 +585,12 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.transportLost = false;
     const heldSubscriptionId = this.subscriptionId;
     const heldGeneration = this.hydration?.generation ?? this.attachmentGeneration;
-    const ablateCancelDetach = liveHarness()?.ablateCancelDetach === true;
-    if (ablateCancelDetach) {
-      recordLiveHarnessTerminal("cancel_detach_ablated", {
-        sessionId: this.sessionId,
-        subscription_id: heldSubscriptionId
-      });
-    }
-    this.closeStreamWithoutDetachRequest();
+    this.closeStreamWithoutDetachRequest("Terminal detached before the operation completed.");
     this.listeners.clear();
     this.statusListeners.clear();
+    this.modesListeners.clear();
+    this.outcomeListeners.clear();
     this.uninstallLifecycleListener();
-    if (ablateCancelDetach) {
-      // Skip only the Detach request. Mark the once-owner so later closeStream()
-      // paths cannot satisfy the cancel oracle for this held subscription.
-      this.detachSentFor = { subscriptionId: heldSubscriptionId, generation: heldGeneration };
-      return;
-    }
     // One Detach owner for the held subscription generation. Public cancel also
     // blocks later Detach for this subscription id even after generation bump.
     await this.sendDetachRequestOnce(heldSubscriptionId, heldGeneration);
@@ -709,11 +600,10 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     if (this.onWebrtcLifecycle && typeof window !== "undefined") {
       window.removeEventListener(webRtcDaemonLifecycleEventName, this.onWebrtcLifecycle);
     }
-    unregisterTerminalTransportRecoveryPlane(this);
   }
 
   /**
-   * DataChannel lost: abandon the current stream/subscription generation but keep
+   * DataChannel lost: abandon the current stream and subscription generation but keep
    * mounted listeners so recovery can re-attach without unmounting the renderer.
    */
   private handleTransportLost(): void {
@@ -721,11 +611,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.transportLost = true;
     const previousSubscriptionId = this.subscriptionId;
     const previousGeneration = this.hydration?.generation ?? this.attachmentGeneration;
-    this.lastAbandonedDetach = {
-      subscriptionId: previousSubscriptionId,
-      generation: previousGeneration
-    };
-    this.closeStreamWithoutDetachRequest();
+    this.lastAbandonedDetach = { subscriptionId: previousSubscriptionId, generation: previousGeneration };
+    this.closeStreamWithoutDetachRequest("Terminal stream was lost; delivery is unknown.");
     this.emitStatus({
       state: "attaching",
       message: "WebRTC data channel lost; waiting to reattach terminal stream."
@@ -739,12 +626,10 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   /**
    * DataChannel recovered on a surviving document: mint a fresh subscription id and
-   * re-run H0–H5 attach for the still-mounted view.
+   * re-run the attach ordering for the still-mounted view.
    */
   private handleTransportRecovered(): void {
     if (this.detached || !this.transportLost || this.listeners.size === 0) return;
-    // Only reattach once the encrypted stream is usable. data-channel-open may fire first;
-    // keep transportLost until encrypted-stream-ready (or a later open after crypto is up).
     this.transportLost = false;
     this.snapshotRecoveries = 0;
     const previousSubscriptionId = this.subscriptionId;
@@ -761,15 +646,12 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       message: "Reattaching terminal stream after WebRTC recovery."
     });
     void (async () => {
-      // Best-effort detach of the abandoned subscription now that the channel is alive.
       if (previousSubscriptionId && previousSubscriptionId !== this.subscriptionId) {
         try {
           const abandoned = this.lastAbandonedDetach;
           await this.sendDetachRequestOnce(
             previousSubscriptionId,
-            abandoned?.subscriptionId === previousSubscriptionId
-              ? abandoned.generation
-              : this.attachmentGeneration
+            abandoned?.subscriptionId === previousSubscriptionId ? abandoned.generation : this.attachmentGeneration
           );
         } catch (error: unknown) {
           recordLiveHarnessTerminal("stale_detach_ignored", {
@@ -792,58 +674,62 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     });
   }
 
-  private closeStreamWithoutDetachRequest(): void {
-    // Drop the local stream handle without owning the Detach request. Prefer typed
-    // abandon(); fall back to unsubscribe for older test bridges. Do not set the
-    // once-flag here — public detach / closeStream own sendDetachRequestOnce.
+  private closeStreamWithoutDetachRequest(inputReason: string): void {
     const sub = this.streamSubscription;
-    if (sub) {
-      if (typeof sub.abandon === "function") {
-        sub.abandon();
-      } else {
-        try {
-          sub.unsubscribe();
-        } catch (unsubscribeError: unknown) {
-          recordLiveHarnessTerminal("stream_unsubscribe_error", {
-            message:
-              unsubscribeError instanceof Error ? unsubscribeError.message : String(unsubscribeError)
-          });
-        }
-      }
+    sub?.abandon();
+    this.resetAttachmentState(inputReason);
+  }
+
+  private closeStream(): void {
+    const stream = this.streamSubscription;
+    const subscriptionId = this.subscriptionId;
+    const generation = this.hydration?.generation ?? this.attachmentGeneration;
+    if (stream) {
+      stream.abandon();
+      // Last-listener and fail paths share the same Detach owner as public detach.
+      void this.sendDetachRequestOnce(subscriptionId, generation).catch(() => undefined);
     }
+    this.resetAttachmentState("Terminal stream closed before the operation completed.");
+  }
+
+  /** Drops the stream handle, hydration, modes, and every input operation for this generation. */
+  private resetAttachmentState(inputReason: string): void {
     this.streamSubscription = undefined;
     this.attachPromise = undefined;
     this.attachmentGeneration += 1;
-    if (this.hydration?.reader) {
+    this.attachedReceived = false;
+    this.routeGeneration = undefined;
+    this.acceptedEpoch = undefined;
+    this.cancelHydration();
+    this.terminalEventQueue = Promise.resolve();
+    this.inputSendChain = Promise.resolve();
+    this.abandonInputs(inputReason);
+    this.currentModes = undefined;
+  }
+
+  private cancelHydration(): void {
+    const hydration = this.hydration;
+    if (!hydration) return;
+    if (hydration.reader) {
       recordLiveHarnessTerminal("reader_cancel", {
-        generation: this.hydration.generation,
+        generation: hydration.generation,
         subscription_id: this.subscriptionId,
         sessionId: this.sessionId
       });
-      this.hydration.reader.cancel();
+      hydration.reader.cancel();
     }
-    if (this.hydration?.progressTimeout !== undefined) {
-      clearTimeout(this.hydration.progressTimeout);
+    if (hydration.progressTimeout !== undefined) {
+      clearTimeout(hydration.progressTimeout);
     }
-    this.hydration?.resolveBarrier();
     this.hydration = undefined;
-    this.terminalEventQueue = Promise.resolve();
-    this.terminalFrameQueue = Promise.resolve();
-    this.clearPendingModeGatedInputs();
-    this.settlePendingPasteResults();
-    this.nextPasteOperationId = 1;
-    this.restoredVisibleScreenGeneration = undefined;
-    this.modeFlags = undefined;
   }
 
   private ensureAttached(): Promise<void> {
     if (this.detached && this.listeners.size === 0) {
       return Promise.resolve();
     }
-
     if (this.attachPromise) return this.attachPromise;
     if (this.streamSubscription) return Promise.resolve();
-
     if (!this.options.bridge.streamTerminal) {
       throw new Error("WebRTC client does not expose terminal streaming.");
     }
@@ -856,7 +742,6 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       }
     };
     void attachPromise.then(clearAttachPromise, clearAttachPromise);
-
     return attachPromise;
   }
 
@@ -865,16 +750,17 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   private async attachToAuthoritativeSession(): Promise<void> {
-    if (this.streamSubscription || (this.detached && this.listeners.size === 0) || this.listeners.size === 0) {
+    if (this.streamSubscription || this.listeners.size === 0) {
       return;
     }
 
     const attachmentGeneration = ++this.attachmentGeneration;
+    this.nextOperationId = 1;
+    this.attachedReceived = false;
     await this.testHooks?.beforeAttachAcquire?.();
     if (!this.isCurrentAttachment(attachmentGeneration) || this.listeners.size === 0) {
       return;
     }
-
     if (!this.options.bridge.streamTerminal) {
       throw new Error("WebRTC client does not expose terminal streaming.");
     }
@@ -886,33 +772,28 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       (event) => this.enqueueTerminalEvent(event, attachmentGeneration)
     );
     if (!this.isCurrentAttachment(attachmentGeneration)) {
-      // Public cancel owns Detach. Abandon the leftover stream; do not unsubscribe
-      // as a second Detach emitter for this subscription id.
-      if (typeof streamSubscription.abandon === "function") {
-        streamSubscription.abandon();
-      } else if (!this.hasSentDetachFor(this.subscriptionId, attachmentGeneration)) {
-        this.abandonStreamHandle(streamSubscription, attachmentGeneration);
-      }
+      // Public cancel owns Detach. Abandon the leftover stream; do not emit a second Detach.
+      streamSubscription.abandon();
       if (!this.detached && !this.hasSentDetachFor(this.subscriptionId, attachmentGeneration)) {
         void this.sendDetachRequestOnce(this.subscriptionId, attachmentGeneration).catch(() => undefined);
       }
       return;
     }
     this.streamSubscription = streamSubscription;
-    // A newly admitted generation while the plane is not publicly detached must
-    // own its own Detach. Public cancel keeps the once-flag for this subscription id.
+    this.routeGeneration = undefined;
+    this.acceptedEpoch = undefined;
     if (!this.detached) {
       this.detachSentFor = undefined;
     }
     recordLiveHarnessTerminal("attach", {
-      attempt: 1,
       generation: attachmentGeneration,
       subscription_id: this.subscriptionId,
       sessionId: this.sessionId
     });
-    if (streamSubscription.ready) {
-      await streamSubscription.ready;
-      if (!this.isCurrentAttachment(attachmentGeneration)) return;
+    await streamSubscription.ready;
+    if (!this.isCurrentAttachment(attachmentGeneration)) return;
+    if (typeof streamSubscription.generation === "number") {
+      this.routeGeneration = streamSubscription.generation;
     }
     const hydration = this.hydration;
     if (hydration?.generation === attachmentGeneration && !hydration.completed) {
@@ -920,32 +801,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
   }
 
-  private enqueueTerminalFrame(
-    send: (attachmentGeneration: number) => Promise<void>
-  ): Promise<void> {
-    const queued = this.terminalFrameQueue.then(async () => {
-      while (!this.detached && this.listeners.size > 0) {
-        await this.ensureAttached();
-        const hydration = this.hydration;
-        if (!hydration) return;
-        const attachmentGeneration = hydration.generation;
-        await hydration.barrier;
-        if (this.isCurrentAttachment(attachmentGeneration) && hydration.completed) {
-          await this.flushPendingResize(attachmentGeneration);
-          await send(attachmentGeneration);
-          return;
-        }
-        if (!hydration.retryQueuedFrames) return;
-      }
-    });
-    this.terminalFrameQueue = queued.catch(() => undefined);
-    return queued;
-  }
-
   private enqueueTerminalEvent(event: TerminalStreamEvent, attachmentGeneration: number): Promise<void> {
-    const delivery = this.terminalEventQueue.then(() =>
-      this.emitTerminalEvent(event, attachmentGeneration)
-    );
+    const delivery = this.terminalEventQueue.then(() => this.emitTerminalEvent(event, attachmentGeneration));
     this.terminalEventQueue = delivery.catch((error: unknown) => {
       recordLiveHarnessTerminal("event_delivery_failed", {
         message: error instanceof Error ? error.message : String(error),
@@ -956,65 +813,13 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return delivery;
   }
 
-  private closeStream(preserveTerminalFrameQueue = false): void {
-    const stream = this.streamSubscription;
-    const subscriptionId = this.subscriptionId;
-    const generation = this.hydration?.generation ?? this.attachmentGeneration;
-    if (stream) {
-      if (typeof stream.abandon === "function") {
-        stream.abandon();
-        // Last-listener and fail paths share the same Detach owner as public detach.
-        void this.sendDetachRequestOnce(subscriptionId, generation).catch(() => undefined);
-      } else {
-        // Older bridges without abandon: unsubscribe stops delivery and is the
-        // historical Detach emitter. Mark once so public detach does not double.
-        this.detachSentFor = { subscriptionId, generation };
-        try {
-          stream.unsubscribe();
-        } catch (unsubscribeError: unknown) {
-          recordLiveHarnessTerminal("stream_unsubscribe_error", {
-            message:
-              unsubscribeError instanceof Error ? unsubscribeError.message : String(unsubscribeError)
-          });
-        }
-      }
-    }
-    this.streamSubscription = undefined;
-    this.attachPromise = undefined;
-    this.attachmentGeneration += 1;
-    if (this.hydration?.reader) {
-      recordLiveHarnessTerminal("reader_cancel", {
-        generation: this.hydration.generation,
-        subscription_id: this.subscriptionId,
-        sessionId: this.sessionId
-      });
-      this.hydration.reader.cancel();
-    }
-    if (this.hydration?.progressTimeout !== undefined) {
-      clearTimeout(this.hydration.progressTimeout);
-    }
-    this.hydration?.resolveBarrier();
-    this.hydration = undefined;
-    this.terminalEventQueue = Promise.resolve();
-    if (!preserveTerminalFrameQueue) {
-      this.terminalFrameQueue = Promise.resolve();
-    }
-    this.clearPendingModeGatedInputs();
-    this.settlePendingPasteResults();
-    this.nextPasteOperationId = 1;
-    this.restoredVisibleScreenGeneration = undefined;
-    this.modeFlags = undefined;
-  }
-
   /**
    * One Detach owner for a subscription generation. Marks the once-flag before await
    * so concurrent emitters skip. Public cancel also suppresses later Detach for that
    * subscription id. Races the bridge request against DETACH_REQUEST_BOUND_MS.
    */
   private async sendDetachRequestOnce(subscriptionId: string, generation: number): Promise<void> {
-    if (this.hasSentDetachFor(subscriptionId, generation)) {
-      return;
-    }
+    if (this.hasSentDetachFor(subscriptionId, generation)) return;
     this.detachSentFor = { subscriptionId, generation };
     const boundMs = this.testHooks?.detachRequestBoundMs ?? DETACH_REQUEST_BOUND_MS;
     const requestPromise = this.options.bridge.request({
@@ -1035,271 +840,327 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       void requestPromise.catch(() => undefined);
       throw error;
     } finally {
-      if (timeoutId !== undefined) {
-        clearTimeout(timeoutId);
-      }
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
     }
   }
 
   private hasSentDetachFor(subscriptionId: string, generation: number): boolean {
     if (!this.detachSentFor) return false;
-    if (this.detached && this.detachSentFor.subscriptionId === subscriptionId) {
-      return true;
-    }
-    return (
-      this.detachSentFor.subscriptionId === subscriptionId &&
-      this.detachSentFor.generation === generation
-    );
+    if (this.detached && this.detachSentFor.subscriptionId === subscriptionId) return true;
+    return this.detachSentFor.subscriptionId === subscriptionId && this.detachSentFor.generation === generation;
   }
 
-  private abandonStreamHandle(sub: DaemonTerminalStreamSubscription, generation: number): void {
-    if (typeof sub.abandon === "function") {
-      sub.abandon();
-      return;
-    }
-    // Older test bridges only implement unsubscribe. When the once-owner already
-    // sent Detach for this generation, skip unsubscribe so it cannot emit a second request.
-    if (this.hasSentDetachFor(this.subscriptionId, generation)) {
-      return;
-    }
-    try {
-      sub.unsubscribe();
-      this.detachSentFor = { subscriptionId: this.subscriptionId, generation };
-    } catch (unsubscribeError: unknown) {
-      recordLiveHarnessTerminal("stream_unsubscribe_error", {
-        message:
-          unsubscribeError instanceof Error ? unsubscribeError.message : String(unsubscribeError)
-      });
-    }
-  }
-
-  private async flushPendingResize(attachmentGeneration: number): Promise<void> {
-    if (!this.streamSubscription || !this.pendingResize) return;
-
-    const resize = this.pendingResize;
-    this.pendingResize = undefined;
-
-    await this.testHooks?.beforeResize?.();
-    if (!this.isCurrentAttachment(attachmentGeneration)) {
-      return;
-    }
-
-    await this.sendTerminalFrame(encodeResize(resize.rows, resize.columns));
-  }
-
-  private async flushPendingResizeBestEffort(attachmentGeneration: number): Promise<void> {
-    try {
-      await this.flushPendingResize(attachmentGeneration);
-    } catch (error: unknown) {
-      recordLiveHarnessTerminal("resize_after_finish_failed", {
-        message: error instanceof Error ? error.message : String(error),
-        generation: attachmentGeneration
-      });
-    }
-  }
+  // ---------------------------------------------------------------------------
+  // Route frames: ATTACH_STATE attached, MODES, SNAPSHOT_READY, live OUTPUT interleaved
+  // with SNAPSHOT_HISTORY, SNAPSHOT_FINISH, then OUTPUT, PROCESS_EXIT last.
+  // ---------------------------------------------------------------------------
 
   private async emitTerminalEvent(event: TerminalStreamEvent, attachmentGeneration: number): Promise<void> {
-    if (!this.isCurrentAttachment(attachmentGeneration)) {
-      return;
-    }
+    if (!this.isCurrentAttachment(attachmentGeneration)) return;
 
-    if (
-      event.subscription_id !== this.subscriptionId ||
-      (event.type !== "input_result" && event.session_id !== this.sessionId)
-    ) {
-      return;
-    }
-
-    await this.testHooks?.beforeListenerDelivery?.();
-    if (!this.isCurrentAttachment(attachmentGeneration)) {
-      return;
-    }
-
-    if (event.type === "input_result") {
-      await this.handleInputResult(event, attachmentGeneration);
-      return;
-    }
-
-    if (event.type === "terminal_subscription_closed") {
+    if ("type" in event) {
+      if (event.subscription_id !== this.subscriptionId || event.session_id !== this.sessionId) return;
       recordLiveHarnessTerminal("terminal_subscription_closed", {
         reason: event.reason,
         generation: event.generation,
         subscription_id: event.subscription_id
       });
       if (event.reason === "core_adapter_closed") {
-        this.hydration?.reader?.cancel();
-        this.emitStatus({
-          state: "failed",
-          message: "Terminal subscription closed by Core write-budget."
-        });
+        this.emitStatus({ state: "failed", message: "Terminal subscription closed by Core write-budget." });
         this.closeStream();
       }
       return;
     }
 
-    if (event.type === "attach_state") {
-      const hydration = this.ensureHydration(attachmentGeneration);
-      if (event.state === "snapshot_history_incomplete") {
-        if (!hydration.readyReceived) {
-          this.failHydration(hydration, "Terminal snapshot history failed before READY.");
-          return;
-        }
-        hydration.historyIncomplete = true;
-        hydration.finishReceived = true;
-        hydration.reader?.cancel();
-        this.emitStatus({
-          state: "attaching",
-          message: "Terminal screen is ready with incomplete snapshot history."
-        });
-        await this.completeIncrementalHydration(hydration);
-      } else if (event.state === "attached") {
-        hydration.attachedReceived = true;
-        await this.completeIncrementalHydration(hydration);
-      } else if (event.state === "attach_failed") {
-        if (!hydration.readyReceived) {
-          this.recoverLostSnapshot(hydration, "Terminal attach failed before READY.");
-          return;
-        }
-        this.failHydration(hydration, "Terminal attach failed after READY.");
-      } else {
-        this.emitStatus(attachStateStatus(event.state));
-      }
-      recordLiveHarnessTerminal("attach_state", { state: event.state });
+    if (event.route !== this.subscriptionId) return;
+    await this.testHooks?.beforeListenerDelivery?.();
+    if (!this.isCurrentAttachment(attachmentGeneration)) return;
+    await this.receiveRouteFrame(event, attachmentGeneration);
+  }
+
+  private async receiveRouteFrame(frame: TerminalRouteFrame, attachmentGeneration: number): Promise<void> {
+    let decoded: TerminalEvent;
+    try {
+      decoded = decodeTerminalBody(frame.body);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Invalid terminal frame.";
+      recordLiveHarnessTerminal("frame_decode_failed", { message, generation: attachmentGeneration });
+      this.failRoute(`Terminal frame could not be decoded: ${message}`);
       return;
     }
-
-    if (event.type === "process_exit") {
-      const code = event.code ?? null;
-      if (this.hydration?.generation === attachmentGeneration && !this.hydration.completed) {
-        this.hydration.pendingExit = code;
-        return;
-      }
-      this.emitProcessExit(code);
-      return;
-    }
-
-    if (event.type === "snapshot") {
-      recordLiveHarnessTerminal("snapshot", {
-        bytes: event.bytes,
-        payload_encoding: event.payload_encoding,
-        phase: event.phase
+    if (!this.admitRouteGeneration(frame.generation)) {
+      recordLiveHarnessTerminal("frame_stale_generation", {
+        frame_generation: frame.generation,
+        route_generation: this.routeGeneration,
+        kind: decoded.kind
       });
-      const hydration = this.ensureHydration(attachmentGeneration);
-      try {
-        const snapshotBytes = decodeDaemonByteEnvelope(
-          event.payload_base64,
-          event.payload_encoding,
-          event.bytes
-        );
-        await this.installIncrementalSnapshotFrame(hydration, snapshotBytes);
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : "Invalid terminal snapshot payload.";
-        if (isLostSnapshotProgress(message)) {
-          this.recoverLostSnapshot(hydration, message);
-          return;
-        }
-        this.failHydration(hydration, message);
-      }
       return;
     }
-
-    if (event.type === "terminal_output") {
-      let outputBytes: Uint8Array;
-      try {
-        outputBytes = decodeTerminalOutputEvent(event);
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : "Invalid terminal output payload.";
-        if (this.hydration?.generation === attachmentGeneration && !this.hydration.completed) {
-          this.failHydration(this.hydration, message);
-          return;
-        }
-        this.emitStatus({
-          state: "failed",
-          message
-        });
-        recordLiveHarnessTerminal("output_decode_failed", { message });
-        return;
-      }
-      if (this.hydration?.generation === attachmentGeneration && !this.hydration.completed) {
-        this.bufferHydratingOutput(outputBytes, this.hydration);
-        return;
-      }
-      if (
-        this.currentStatus.state === "attaching" ||
-        (this.currentStatus.state === "attached" && this.restoredVisibleScreenGeneration !== attachmentGeneration)
-      ) {
-        this.emitStatus({
-          state: "live_only",
-          message: "Terminal stream attached live; no snapshot was restored."
-        });
-      }
-      this.emitOutput(outputBytes, "output");
+    if (!this.admitStreamEpoch(frame.streamEpoch, decoded)) {
+      recordLiveHarnessTerminal("frame_stale_epoch", {
+        frame_epoch: frame.streamEpoch,
+        accepted_epoch: this.acceptedEpoch,
+        kind: decoded.kind
+      });
+      return;
     }
+    switch (decoded.kind) {
+      case "output":
+        // The payload is a view of the transport buffer; the renderer copies it once.
+        this.receiveOutput(decoded.payload, attachmentGeneration);
+        return;
+      case "snapshot_ready":
+      case "snapshot_history":
+        await this.installIncrementalSnapshotFrame(
+          this.ensureHydration(attachmentGeneration),
+          decoded.payload,
+          decoded.kind === "snapshot_ready"
+        );
+        return;
+      case "snapshot_finish":
+        this.receiveSnapshotFinish(this.ensureHydration(attachmentGeneration));
+        return;
+      case "process_exit":
+        this.receiveProcessExit(decoded.code, attachmentGeneration);
+        return;
+      case "modes":
+        this.receiveModes({ modeBits: decoded.mode_bits, rows: decoded.rows, cols: decoded.cols });
+        return;
+      case "attach_state":
+        this.receiveAttachState(decoded.state, attachmentGeneration);
+        return;
+      case "input_result":
+        this.handleInputResult(decoded.result);
+        return;
+      case "history_unavailable":
+        this.receiveHistoryUnavailable(decoded.reason, attachmentGeneration);
+        return;
+      case "route_resync":
+        this.receiveRouteResync(decoded.to_epoch, attachmentGeneration);
+        return;
+    }
+  }
+
+  /**
+   * Attachment identity fence. The reservation fixes the route generation for the life of
+   * this attachment; a frame with any other generation is stale data from a retired
+   * subscription and is discarded, never continued. Snapshot and live continuity across
+   * ROUTE_RESYNC is a separate stream epoch that Core defines on the data frames.
+   */
+  private admitRouteGeneration(generation: number): boolean {
+    if (this.routeGeneration === undefined) {
+      this.routeGeneration = generation;
+      return true;
+    }
+    return generation === this.routeGeneration;
+  }
+
+  /**
+   * Stream epoch fence within the attachment. Before ATTACH_STATE attached only attach-state
+   * frames are admitted. ROUTE_RESYNC is accepted only when its from_epoch equals the
+   * accepted epoch and its envelope epoch equals its to_epoch. Stream state kinds (OUTPUT,
+   * MODES, snapshot frames, HISTORY_UNAVAILABLE, PROCESS_EXIT) must carry the accepted
+   * epoch; a stale frame is dropped, never continued. INPUT_RESULT is correlated by
+   * operation id within the attachment regardless of epoch: Core preserves accepted results
+   * across a resync and re-stamps them, so exactly one result reaches each operation.
+   */
+  private admitStreamEpoch(streamEpoch: number, decoded: TerminalEvent): boolean {
+    if (decoded.kind === "attach_state" || decoded.kind === "input_result") return true;
+    if (this.acceptedEpoch === undefined) return false;
+    if (decoded.kind === "route_resync") {
+      return (
+        decoded.from_epoch === this.acceptedEpoch &&
+        decoded.to_epoch !== decoded.from_epoch &&
+        decoded.to_epoch === streamEpoch
+      );
+    }
+    return streamEpoch === this.acceptedEpoch;
+  }
+
+  private receiveAttachState(state: AttachStateCodeName, attachmentGeneration: number): void {
+    recordLiveHarnessTerminal("attach_state", { state });
+    if (state === "attached") {
+      this.attachedReceived = true;
+      // The accepted epoch is defined by the contract, not read from the frame.
+      this.acceptedEpoch = 0;
+      this.emitStatus({ state: "attaching", message: "Terminal route attached; waiting for the visible screen." });
+      this.pumpInputs();
+      return;
+    }
+    if (state === "attaching") {
+      this.emitStatus({ state: "attaching", message: "Terminal route is attaching." });
+      return;
+    }
+    if (state === "failed") {
+      const hydration = this.hydration;
+      if (hydration?.generation === attachmentGeneration && !hydration.readyReceived) {
+        this.recoverRoute(hydration, "Terminal attach failed before the visible screen.");
+        return;
+      }
+      this.failRoute("Terminal attach failed.");
+      return;
+    }
+    if (state === "detached") {
+      this.emitStatus({ state: "failed", message: "Terminal route was detached by the host." });
+      this.closeStream();
+    }
+  }
+
+  private receiveModes(modes: TerminalModes): void {
+    this.currentModes = modes;
+    recordLiveHarnessTerminal("modes", modes);
+    for (const listener of this.modesListeners) listener(modes);
+  }
+
+  private receiveOutput(bytes: Uint8Array, attachmentGeneration: number): void {
+    const hydration = this.hydration;
+    if (hydration?.generation === attachmentGeneration && !hydration.completed) {
+      this.bufferHydratingOutput(bytes, hydration);
+      return;
+    }
+    this.emitOutput(bytes);
+  }
+
+  private receiveProcessExit(code: number | null, attachmentGeneration: number): void {
+    const exitCode = code;
+    const hydration = this.hydration;
+    if (hydration?.generation === attachmentGeneration && !hydration.completed) {
+      hydration.pendingExit = exitCode;
+      return;
+    }
+    this.emitProcessExit(exitCode);
+  }
+
+  /**
+   * HISTORY_UNAVAILABLE arrives only after SNAPSHOT_READY on a live route (Core ruling): the
+   * visible screen is restored and capture_failed replaces the remaining history pages.
+   * The route stays inside its snapshot boundary until Core sends SNAPSHOT_FINISH; further
+   * history frames are ignored and the attach then completes with incomplete history. A
+   * capture failure before READY arrives as ATTACH_STATE failed instead, so a pre-READY
+   * HISTORY_UNAVAILABLE is a protocol violation and never paints live deltas blind.
+   */
+  private receiveHistoryUnavailable(reason: HistoryUnavailableReasonName, attachmentGeneration: number): void {
+    recordLiveHarnessTerminal("history_unavailable", { reason });
+    const hydration = this.ensureHydration(attachmentGeneration);
+    const label = historyUnavailableLabel(reason);
+    if (!hydration.readyReceived) {
+      hydration.reader?.cancel();
+      this.failRoute(`Terminal sent HISTORY_UNAVAILABLE (${label}) before SNAPSHOT_READY.`);
+      return;
+    }
+    hydration.historyIncomplete = true;
+    hydration.reader?.cancel();
+    this.emitStatus({
+      state: "attaching",
+      message: `Terminal screen restored; scrollback history is unavailable (${label}).`
+    });
+  }
+
+  /**
+   * Egress overflow on this route: Core opens a new stream epoch and restarts the route at
+   * MODES and a fresh SNAPSHOT_READY. Everything decoded for the old epoch is discarded;
+   * nothing is continued or replayed. In-flight input operations stay pending: their
+   * INPUT_RESULT arrives in the new epoch, or they resolve as unknown when the route closes.
+   */
+  private receiveRouteResync(toEpoch: number, attachmentGeneration: number): void {
+    recordLiveHarnessTerminal("route_resync", {
+      generation: attachmentGeneration,
+      from_epoch: this.acceptedEpoch,
+      to_epoch: toEpoch,
+      subscription_id: this.subscriptionId
+    });
+    this.acceptedEpoch = toEpoch;
+    this.cancelHydration();
+    this.ensureHydration(attachmentGeneration);
+    this.emitStatus({ state: "attaching", message: "Terminal route resynchronizing after egress overflow." });
+    this.armHydrationProgressBound(this.hydration!);
   }
 
   private ensureHydration(attachmentGeneration: number): ScreenHydration {
     if (this.hydration?.generation === attachmentGeneration) {
       return this.hydration;
     }
-
     const hydration: ScreenHydration = {
       generation: attachmentGeneration,
       bufferedOutput: [],
       bufferedBytes: 0,
       readyReceived: false,
+      decoderFinished: false,
       finishReceived: false,
       historyIncomplete: false,
-      attachedReceived: false,
       completed: false,
-      retryQueuedFrames: false,
-      reader: this.incrementalSnapshotReaderFactory?.(),
-      resolveBarrier: () => undefined,
-      barrier: Promise.resolve()
+      reader: this.incrementalSnapshotReaderFactory?.()
     };
-    hydration.barrier = new Promise<void>((resolve) => {
-      hydration.resolveBarrier = resolve;
-    });
     this.hydration = hydration;
     return hydration;
   }
 
   private async installIncrementalSnapshotFrame(
     hydration: ScreenHydration,
-    bytes: Uint8Array
+    bytes: Uint8Array,
+    ready: boolean
   ): Promise<void> {
     const attachmentGeneration = hydration.generation;
+    recordLiveHarnessTerminal("snapshot", { bytes: bytes.byteLength, phase: ready ? "ready" : "history" });
     await this.testHooks?.beforeSnapshotInstall?.();
-    await holdLiveSnapshotInstallIfArmed(attachmentGeneration, this.subscriptionId);
     if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) return;
+    if (hydration.completed) {
+      this.failRoute("Terminal snapshot frame arrived after the route completed hydration.");
+      return;
+    }
+    if (ready ? hydration.readyReceived : !hydration.readyReceived) {
+      this.failRoute(ready ? "Terminal sent SNAPSHOT_READY twice." : "Terminal sent SNAPSHOT_HISTORY before SNAPSHOT_READY.");
+      return;
+    }
+    if (hydration.historyIncomplete || hydration.decoderFinished) {
+      // History was declared unavailable or the decoder already saw its finish record; later
+      // pages are ignored until SNAPSHOT_FINISH closes the boundary.
+      recordLiveHarnessTerminal("snapshot_history_ignored", { bytes: bytes.byteLength, generation: attachmentGeneration });
+      return;
+    }
 
     const reader = hydration.reader;
     if (!reader) {
-      throw new Error("Restty incremental snapshot reader is not bound.");
+      this.failRoute("Restty incremental snapshot reader is not bound.");
+      return;
     }
-    const progress = await reader.read(bytes);
+    let progress;
+    try {
+      progress = await reader.read(bytes);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Invalid terminal snapshot payload.";
+      if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) return;
+      this.recoverRoute(hydration, message);
+      return;
+    }
     if (!this.isCurrentAttachment(attachmentGeneration) || this.hydration !== hydration) return;
 
     if (progress === "ready") {
-      if (hydration.readyReceived || hydration.finishReceived) {
-        throw new Error("Restty returned READY outside the initial snapshot frame.");
+      if (!ready) {
+        this.failRoute("Restty returned READY for a history frame.");
+        return;
       }
       hydration.readyReceived = true;
-      this.restoredVisibleScreenGeneration = attachmentGeneration;
       this.emitStatus({
         state: "attaching",
         message: "Visible terminal screen restored at snapshot READY; loading history."
       });
     } else if (progress === "page") {
-      if (!hydration.readyReceived || hydration.finishReceived) {
-        throw new Error("Restty returned PAGE outside snapshot history delivery.");
+      if (ready) {
+        this.failRoute("Restty returned PAGE for the READY frame.");
+        return;
       }
     } else if (progress === "finish") {
-      if (!hydration.readyReceived || hydration.finishReceived) {
-        throw new Error("Restty returned FINISH outside snapshot history delivery.");
+      // The GHOSTSNP finish record is the last SNAPSHOT_HISTORY page; the route closes the
+      // boundary with an empty SNAPSHOT_FINISH afterwards.
+      if (ready) {
+        this.failRoute("Restty returned FINISH for the READY frame.");
+        return;
       }
-      hydration.finishReceived = true;
+      hydration.decoderFinished = true;
     } else {
-      throw new Error(`Restty returned unknown snapshot progress: ${String(progress)}.`);
+      this.failRoute(`Restty returned unknown snapshot progress ${String(progress)}.`);
+      return;
     }
 
     recordLiveHarnessTerminal("ghostsnp_install", {
@@ -1308,114 +1169,71 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       progress,
       subscription_id: this.subscriptionId
     });
-
     this.armHydrationProgressBound(hydration);
-
-    if (hydration.attachedReceived) {
-      await this.completeIncrementalHydration(hydration);
-    }
   }
 
-  private async completeIncrementalHydration(hydration: ScreenHydration): Promise<void> {
-    const attachmentGeneration = hydration.generation;
+  private receiveSnapshotFinish(hydration: ScreenHydration): void {
     if (hydration.completed) return;
-    if (!hydration.attachedReceived) return;
     if (!hydration.readyReceived) {
-      this.failHydration(hydration, "Terminal attached before snapshot READY.");
+      this.failRoute("Terminal sent SNAPSHOT_FINISH before SNAPSHOT_READY.");
       return;
     }
-    if (!hydration.finishReceived && !hydration.historyIncomplete) {
-      this.failHydration(hydration, "Terminal attached before snapshot FINISH.");
-      return;
+    hydration.finishReceived = true;
+    if (!hydration.decoderFinished && !hydration.historyIncomplete) {
+      // SNAPSHOT_FINISH without the decoder's finish record: the history assembly ended
+      // early. Release the decoder and keep the READY screen; the attach is incomplete.
+      hydration.historyIncomplete = true;
+      hydration.reader?.cancel();
     }
+    this.completeHydration(
+      hydration,
+      hydration.historyIncomplete
+        ? "Terminal attached with incomplete snapshot history."
+        : "Terminal attached after incremental snapshot history."
+    );
+  }
 
+  private completeHydration(hydration: ScreenHydration, message: string): void {
+    const attachmentGeneration = hydration.generation;
+    if (hydration.completed || this.hydration !== hydration) return;
     hydration.completed = true;
     if (hydration.progressTimeout !== undefined) {
       clearTimeout(hydration.progressTimeout);
       hydration.progressTimeout = undefined;
     }
-    this.emitStatus({
-      state: "attached",
-      message: hydration.historyIncomplete
-        ? "Terminal attached with incomplete snapshot history."
-        : "Terminal attached after incremental snapshot history."
-    });
-    hydration.resolveBarrier();
+    this.emitStatus({ state: "attached", message });
 
     for (const data of hydration.bufferedOutput) {
-      if (!this.isCurrentAttachment(attachmentGeneration)) {
-        return;
-      }
-      this.emitOutput(data, "output");
+      if (!this.isCurrentAttachment(attachmentGeneration)) return;
+      this.emitOutput(data);
     }
+    hydration.bufferedOutput = [];
+    hydration.bufferedBytes = 0;
     if (hydration.pendingExit !== undefined) {
       this.emitProcessExit(hydration.pendingExit);
     }
-
-    // Host RPCs after adapter bind can stall. Do not hold attached on them.
-    void this.refreshModeFlags(attachmentGeneration).then((modes) => {
-      if (modes && this.isCurrentAttachment(attachmentGeneration) && this.hydration === hydration) {
-        this.modeFlags = modes;
-      }
-    });
-    void this.options.bridge
-      .request({
-        type: "read_screen",
-        session_id: this.sessionId
-      })
-      .then((response) => {
-        if (this.isCurrentAttachment(attachmentGeneration) && this.hydration === hydration) {
-          const text = response.read_screen?.text;
-          recordLiveHarnessTerminal("read_screen_supplement", {
-            text: typeof text === "string" ? text : null
-          });
-        }
-      })
-      .catch(() => {
-        // ReadScreen is an optional diagnostic supplement.
-      });
+    this.pumpInputs();
   }
 
-  private failHydration(hydration: ScreenHydration, message: string): void {
-    if (this.hydration !== hydration) return;
-    hydration.completed = true;
-    if (hydration.progressTimeout !== undefined) {
-      clearTimeout(hydration.progressTimeout);
-      hydration.progressTimeout = undefined;
-    }
-    hydration.resolveBarrier();
-    this.emitStatus({
-      state: "failed",
-      message
-    });
-    recordLiveHarnessTerminal("ghostsnp_hydrate_failed", { message });
+  private failRoute(message: string): void {
+    this.emitStatus({ state: "failed", message });
+    recordLiveHarnessTerminal("route_failed", { message });
     this.closeStream();
   }
 
-  private recoverLostSnapshot(hydration: ScreenHydration, message: string): void {
+  /** One fresh attach with a new subscription id for a lost snapshot; a second loss fails. */
+  private recoverRoute(hydration: ScreenHydration, message: string): void {
     if (this.hydration !== hydration) return;
     if (this.snapshotRecoveries >= 1 || this.fixedSubscriptionId) {
-      this.failHydration(hydration, message);
+      this.failRoute(message);
       return;
     }
     this.snapshotRecoveries += 1;
-    hydration.retryQueuedFrames = true;
-    if (hydration.progressTimeout !== undefined) {
-      clearTimeout(hydration.progressTimeout);
-      hydration.progressTimeout = undefined;
-    }
     const previousSubscriptionId = this.subscriptionId;
-    recordLiveHarnessTerminal("snapshot_lost_recover", {
-      message,
-      previous_subscription_id: previousSubscriptionId
-    });
-    hydration.reader?.cancel();
-    this.closeStream(true);
+    recordLiveHarnessTerminal("snapshot_lost_recover", { message, previous_subscription_id: previousSubscriptionId });
+    this.closeStream();
     this.subscriptionId = createTerminalSubscriptionId();
-    this.emitStatus({
-      state: "attaching",
-      message: "Lost snapshot page; starting a fresh attach."
-    });
+    this.emitStatus({ state: "attaching", message: "Lost snapshot page; starting a fresh attach." });
     void this.ensureAttached().catch((error: unknown) => {
       this.emitStatus({
         state: "failed",
@@ -1429,8 +1247,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     if (hydration.progressTimeout !== undefined) {
       clearTimeout(hydration.progressTimeout);
     }
-    const boundMs = this.testHooks?.hydrationProgressBoundMs
-      ?? localWebrtcResponseChunkLimits.requestTimeoutMs;
+    const boundMs = this.testHooks?.hydrationProgressBoundMs ?? localWebrtcResponseChunkLimits.requestTimeoutMs;
     hydration.progressTimeout = setTimeout(() => {
       hydration.progressTimeout = undefined;
       if (this.hydration !== hydration || hydration.completed) return;
@@ -1439,172 +1256,46 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         generation: hydration.generation,
         subscription_id: this.subscriptionId,
         ready_received: hydration.readyReceived,
-        finish_received: hydration.finishReceived,
-        attached_received: hydration.attachedReceived
+        finish_received: hydration.finishReceived
       });
-      this.recoverLostSnapshot(hydration, message);
+      this.recoverRoute(hydration, message);
     }, boundMs);
   }
 
+  /**
+   * Live OUTPUT before SNAPSHOT_FINISH waits for the snapshot to finish so the renderer
+   * applies one capture boundary in order. The wait is bounded by the client pending
+   * limits; overflow detaches and re-attaches this route only, never dropping bytes silently.
+   */
   private bufferHydratingOutput(data: Uint8Array, hydration: ScreenHydration): void {
     const bufferedBytes = hydration.bufferedBytes + data.byteLength;
-    if (bufferedBytes > maxHydrationBufferBytes) {
-      this.failHydration(hydration, "Terminal snapshot attach exceeded the live-output buffer limit.");
+    if (
+      bufferedBytes > MAX_PENDING_TERMINAL_BYTES ||
+      hydration.bufferedOutput.length + 1 > MAX_PENDING_TERMINAL_ITEMS
+    ) {
+      recordLiveHarnessTerminal("pending_overflow", {
+        items: hydration.bufferedOutput.length + 1,
+        bytes: bufferedBytes,
+        generation: hydration.generation
+      });
+      this.recoverRoute(hydration, "Terminal pending output exceeded the client bound during snapshot history.");
       return;
     }
-
     hydration.bufferedOutput.push(data);
     hydration.bufferedBytes = bufferedBytes;
   }
 
-  private async refreshModeFlags(attachmentGeneration: number): Promise<DaemonModeFlags | undefined> {
-    await this.testHooks?.beforeReadModeFlags?.();
-    if (!this.isCurrentAttachment(attachmentGeneration)) {
-      recordLiveHarnessTerminal("mode_flags_skipped", {
-        reason: "stale_attachment_before_request",
-        generation: attachmentGeneration
-      });
-      return undefined;
-    }
-
-    let response;
-    try {
-      response = await this.options.bridge.request({
-        type: "read_mode_flags",
-        session_id: this.sessionId
-      });
-    } catch (error: unknown) {
-      recordLiveHarnessTerminal("mode_flags_failed", {
-        reason: "request_threw",
-        message: error instanceof Error ? error.message : String(error)
-      });
-      return undefined;
-    }
-
-    if (!this.isCurrentAttachment(attachmentGeneration)) {
-      recordLiveHarnessTerminal("mode_flags_skipped", {
-        reason: "stale_attachment_after_response",
-        generation: attachmentGeneration
-      });
-      return undefined;
-    }
-
-    const modeFlags = response.mode_flags ?? undefined;
-    if (!modeFlags) {
-      recordLiveHarnessTerminal("mode_flags_failed", {
-        reason: "missing_mode_flags",
-        response_kind: response.kind,
-        error: response.error ?? null
-      });
-      return undefined;
-    }
-    if (modeFlags.session_id !== this.sessionId) {
-      recordLiveHarnessTerminal("mode_flags_failed", {
-        reason: "session_mismatch",
-        expected: this.sessionId,
-        actual: modeFlags.session_id
-      });
-      return undefined;
-    }
-    this.modeFlags = modeFlags;
-    recordLiveHarnessTerminal("mode_flags", {
-      mode_generation: modeFlags.mode_generation,
-      mode_revision: modeFlags.mode_revision,
-      kitty_enabled: modeFlags.kitty_enabled,
-      mouse_mode: modeFlags.mouse_mode
-    });
-    return modeFlags;
-  }
-
-  private async sendTerminalFrame(frame: Uint8Array): Promise<void> {
-    const stream = this.streamSubscription;
-    if (!stream?.sendFrame) {
-      throw new Error(`Terminal stream does not expose the dedicated binary sender for ${this.sessionId}.`);
-    }
-    await stream.sendFrame(frame);
-  }
-
-  private async handleInputResult(
-    result: TerminalInputResult,
-    attachmentGeneration: number
-  ): Promise<void> {
-    this.modeFlags = {
-      session_id: this.sessionId,
-      ...result.mode_flags,
-      mode_generation: result.mode_generation,
-      mode_revision: result.mode_revision
-    };
-    recordLiveHarnessTerminal("input_result", result);
-    if (result.kind === "paste" && result.operation_id !== undefined) {
-      const pending = this.pendingPasteResults.get(result.operation_id);
-      if (pending && pending.generation === attachmentGeneration) pending.resolve(result);
-      return;
-    }
-    if (result.kind !== "mode_gated_input") return;
-    const pending = this.pendingModeGatedInputs[0];
-    if (!pending) return;
-    if (result.admitted || result.rejection !== "stale_mode" || pending.retried) {
-      this.pendingModeGatedInputs.shift();
-      pending.resolve();
-      return;
-    }
-    const encoded = pending.semantic.encode(this.modeFlags);
-    if (!encoded || !this.isCurrentAttachment(attachmentGeneration)) {
-      this.pendingModeGatedInputs.shift();
-      pending.resolve();
-      return;
-    }
-    pending.retried = true;
-    pending.encoded = encoded;
-    try {
-      await this.sendTerminalFrame(
-        encodeModeGatedInput(
-          this.modeFlags.mode_generation,
-          this.modeFlags.mode_revision,
-          new TextEncoder().encode(encoded)
-        )
-      );
-    } catch (error) {
-      this.pendingModeGatedInputs.shift();
-      pending.resolve();
-      throw error;
-    }
-    recordLiveHarnessTerminal("mode_gated_input", {
-      bytes: encoded,
-      reencoded: true,
-      discarded_bytes: pending.encoded,
-      mode_generation: this.modeFlags.mode_generation,
-      mode_revision: this.modeFlags.mode_revision
-    });
-  }
-
-  private removePendingModeGatedInput(pending: (typeof this.pendingModeGatedInputs)[number]): void {
-    const index = this.pendingModeGatedInputs.indexOf(pending);
-    if (index >= 0) this.pendingModeGatedInputs.splice(index, 1);
-    pending.resolve();
-  }
-
-  private clearPendingModeGatedInputs(): void {
-    for (const pending of this.pendingModeGatedInputs.splice(0)) pending.resolve();
-  }
-
-  private emitOutput(data: TerminalOutput, kind: "output"): void {
+  private emitOutput(data: TerminalOutput): void {
     for (const listener of this.listeners) {
       listener(data);
     }
-    recordLiveHarnessTerminal("output", {
-      payload_bytes_base64: bytesToBase64(data),
-      bytes: data.byteLength,
-      source: kind
-    });
+    recordLiveHarnessTerminal("output", { bytes: data.byteLength, payload: data });
   }
 
   private emitProcessExit(code: number | null): void {
     this.emitStatus({
       state: "exited",
-      message: typeof code === "number"
-        ? `Terminal process exited with ${code}.`
-        : "Terminal process exited."
+      message: typeof code === "number" ? `Terminal process exited with ${code}.` : "Terminal process exited."
     });
     recordLiveHarnessTerminal("process_exit", { code });
   }
@@ -1616,61 +1307,55 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
     recordLiveHarnessTerminal("status", status);
   }
-}
 
-export function decodeDaemonByteEnvelope(
-  payloadBase64: string,
-  payloadEncoding: unknown,
-  declaredBytes: unknown
-): Uint8Array {
-  if (payloadEncoding !== "base64") {
-    throw new Error(`Unsupported payload encoding: ${String(payloadEncoding)}.`);
-  }
-  if (typeof payloadBase64 !== "string") {
-    throw new Error("payload_base64 is required.");
-  }
-  if (typeof declaredBytes !== "number" || !Number.isInteger(declaredBytes) || declaredBytes < 0) {
-    throw new Error("bytes must be a non-negative integer.");
-  }
-  if (payloadBase64.length % 4 !== 0 || (payloadBase64.length > 0 && !/^[A-Za-z0-9+/]+={0,2}$/.test(payloadBase64))) {
-    throw new Error("Invalid base64 payload.");
-  }
-  const bytes = base64ToBytes(payloadBase64);
-  if (bytes.byteLength !== declaredBytes) {
-    throw new Error(
-      `Payload length ${bytes.byteLength} does not match declared bytes ${declaredBytes}.`
-    );
-  }
-  return bytes;
-}
-
-export function decodeTerminalOutputEvent(event: object): Uint8Array {
-  if ("data" in event) {
-    throw new Error("Terminal output event includes retired data field.");
-  }
-  const record = event as {
-    payload_base64?: string;
-    payload_encoding?: unknown;
-    bytes?: unknown;
-  };
-  return decodeDaemonByteEnvelope(record.payload_base64 ?? "", record.payload_encoding, record.bytes);
-}
-
-export function bytesToBase64(bytes: Uint8Array): string {
-  if (typeof globalThis.btoa === "function") {
-    let binary = "";
-    for (const value of bytes) {
-      binary += String.fromCharCode(value);
+  private publishOutcome(outcome: TerminalInputOutcome): void {
+    for (const listener of this.outcomeListeners) {
+      listener(outcome);
     }
-    return globalThis.btoa(binary);
   }
+}
 
-  const buffer = (globalThis as { Buffer?: { from(data: Uint8Array): { toString(enc: string): string } } }).Buffer;
-  if (buffer) {
-    return buffer.from(bytes).toString("base64");
+/** Placeholder for a sent operation: accounting stays, the payload closure is gone. */
+function releasedOperation(bodyBytes: number): EncodedInputOperation {
+  return {
+    bodyBytes,
+    frames: () => {
+      throw new Error("Input operation frames were already sent.");
+    }
+  };
+}
+
+function describeOutcome(
+  kind: TerminalInputOutcome["kind"],
+  outcome: TerminalInputOutcomeName,
+  counts: { acceptedPayloadBytes?: number; writtenPtyBytes?: number }
+): string {
+  const written = counts.writtenPtyBytes !== undefined ? `${counts.writtenPtyBytes} PTY bytes written` : "PTY byte count unknown";
+  switch (outcome) {
+    case "written":
+      return `Terminal accepted the ${kind} operation; ${written}.`;
+    case "partial_write":
+      return `The PTY write stopped after ${written}.`;
+    case "write_failed":
+      return "The PTY write made no progress.";
+    case "cancelled":
+      return `The operation was cancelled; ${written}.`;
+    default:
+      return `Terminal reported ${outcome} for the ${kind} operation.`;
   }
+}
 
-  throw new Error("No base64 encoder is available in this runtime.");
+function historyUnavailableLabel(reason: HistoryUnavailableReasonName): string {
+  switch (reason) {
+    case "evicted":
+      return "history evicted";
+    case "restart":
+      return "hub restarted";
+    case "oversize":
+      return "history oversize";
+    case "capture_failed":
+      return "capture failed";
+  }
 }
 
 function base64ToBytes(payloadBase64: string): Uint8Array {
@@ -1682,34 +1367,11 @@ function base64ToBytes(payloadBase64: string): Uint8Array {
     }
     return bytes;
   }
-
   const buffer = (globalThis as { Buffer?: { from(data: string, encoding: string): Uint8Array } }).Buffer;
   if (buffer) {
     return new Uint8Array(buffer.from(payloadBase64, "base64"));
   }
-
   throw new Error("No base64 decoder is available in this runtime.");
-}
-
-function isJsonSafeModeToken(modes: DaemonModeFlags): boolean {
-  return Number.isSafeInteger(modes.mode_generation) && Number.isSafeInteger(modes.mode_revision);
-}
-
-function isLostSnapshotProgress(message: string): boolean {
-  return (
-    message.includes("unknown snapshot progress") ||
-    message.includes("PAGE outside snapshot history") ||
-    message.includes("READY outside the initial snapshot frame") ||
-    message.includes("FINISH outside snapshot history") ||
-    message.includes("Invalid terminal snapshot payload")
-  );
-}
-
-function attachStateStatus(state: string): TerminalAttachmentStatus {
-  return {
-    state: "attaching",
-    message: `Terminal stream state: ${state}.`
-  };
 }
 
 export function createHubTerminalDataPlane(options: HubTerminalDataPlaneOptions): TerminalDataPlaneAttachment {
@@ -1721,80 +1383,12 @@ function createTerminalSubscriptionId(): string {
   if (randomId) {
     return `${hubTerminalSubscriptionId}-${randomId}`;
   }
-
   return `${hubTerminalSubscriptionId}-${Date.now()}-${nextSubscriptionSequence++}`;
 }
 
-const terminalTransportRecoveryPlanes = new Set<HubTerminalDataPlane>();
-
-function registerTerminalTransportRecoveryPlane(plane: HubTerminalDataPlane): void {
-  terminalTransportRecoveryPlanes.add(plane);
-  installTerminalTransportRecoveryHarnessHook();
-}
-
-function unregisterTerminalTransportRecoveryPlane(plane: HubTerminalDataPlane): void {
-  terminalTransportRecoveryPlanes.delete(plane);
-}
-
-function installTerminalTransportRecoveryHarnessHook(): void {
-  if (typeof window === "undefined") return;
-  const harness = liveHarness();
-  if (!harness) return;
-  harness.disableTerminalTransportRecovery = () => {
-    for (const plane of [...terminalTransportRecoveryPlanes]) {
-      plane.disableTransportRecovery();
-    }
-  };
-  harness.armSnapshotInstallHold = () => {
-    harness.snapshotInstallHoldArmed = true;
-  };
-  harness.releaseSnapshotInstall = () => {
-    snapshotInstallHoldRelease?.();
-    snapshotInstallHoldRelease = undefined;
-  };
-}
-
-type LiveTerminalHarness = {
-  disableTerminalTransportRecovery?: () => void;
-  armSnapshotInstallHold?: () => void;
-  releaseSnapshotInstall?: () => void;
-  snapshotInstallHoldArmed?: boolean;
-  ablateCancelDetach?: boolean;
-  terminal?: Array<{ kind: string; payload: unknown }>;
-};
-
-function liveHarness(): LiveTerminalHarness | undefined {
-  if (typeof window === "undefined") return undefined;
-  return (window as typeof window & {
-    __BOTSTER_LIVE_PROTOCOL_HARNESS__?: LiveTerminalHarness;
-  }).__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-}
-
-let snapshotInstallHoldRelease: (() => void) | undefined;
-
-function holdLiveSnapshotInstallIfArmed(
-  generation: number,
-  subscriptionId: string
-): Promise<void> {
-  const harness = liveHarness();
-  if (!harness?.snapshotInstallHoldArmed) return Promise.resolve();
-  harness.snapshotInstallHoldArmed = false;
-  recordLiveHarnessTerminal("snapshot_install_held", {
-    generation,
-    subscription_id: subscriptionId
-  });
-  return new Promise((resolve) => {
-    snapshotInstallHoldRelease = resolve;
-    harness.releaseSnapshotInstall = () => {
-      snapshotInstallHoldRelease?.();
-      snapshotInstallHoldRelease = undefined;
-    };
-  });
-}
-
+/** Records only when an operator harness installed its terminal recorder; no payload copies otherwise. */
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {
   if (typeof window === "undefined") return;
-
   const harness = (window as typeof window & {
     __BOTSTER_LIVE_PROTOCOL_HARNESS__?: {
       terminal?: Array<{ kind: string; payload: unknown }>;
