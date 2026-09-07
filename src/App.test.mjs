@@ -2120,7 +2120,9 @@ assert.match(resttyRenderer, /suppressQueryReplies|readOnly:\s*true/);
 assert.match(resttyRenderer, /mouseTrackingBitsFromCoreMode|from "\.\/mouseMode"/);
 assert.match(resttyRenderer, /__BOTSTER_RESTTY_DEBUG__/);
 assert.match(hubTerminalDataPlane, /transport_recovered|handleTransportRecovered/);
-assert.match(hubTerminalDataPlane, /webRtcDaemonLifecycleEventName/);
+// The plane hears transport loss and recovery only through its own bridge, never the window.
+assert.match(hubTerminalDataPlane, /bridge\.subscribeLifecycle/);
+assert.doesNotMatch(hubTerminalDataPlane, /webRtcDaemonLifecycleEventName|onWebrtcLifecycle/);
 assert.match(liveProtocolHarnessScript, /__BOTSTER_RESTTY_DEBUG__/);
 assert.match(liveProtocolHarnessScript, /0x00ff0000|expectedColor/);
 assert.match(liveProtocolHarnessScript, /subscriptionAfter|fresh subscription/);
