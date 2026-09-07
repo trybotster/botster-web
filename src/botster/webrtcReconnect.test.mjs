@@ -761,12 +761,12 @@ export async function runWebrtcReconnectTests(helpers) {
       // Client B connects, loses its channel, and recovers on a new request: foreign events.
       const bFirst = b.client.request({ type: "status" });
       await waitCondition(() => b.channels.length === 1 && b.channels[0].sent.length >= 1);
-      await emitChunkedTestResponse(b.channels[0], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-b-first" });
+      await emitChunkedTestResponse(b.channels[0], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-b-first", requestType: "status" });
       await bFirst;
       b.channels[0].close();
       const bSecond = b.client.request({ type: "status" });
       await waitCondition(() => b.channels.length === 2 && b.channels[1].sent.length >= 1);
-      await emitChunkedTestResponse(b.channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-b-second" });
+      await emitChunkedTestResponse(b.channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-b-second", requestType: "status" });
       await bSecond;
       await flushMicrotasks();
       await flushMicrotasks();
@@ -787,7 +787,7 @@ export async function runWebrtcReconnectTests(helpers) {
       const recovered = await decryptAll(a.channels[1]);
       assert.equal(recovered[0].type, "detach", "the recovered peer first detaches the superseded subscription");
       assert.equal(recovered[0].subscription_id, firstAttach.subscription_id, "the Attach that was sent is the one detached");
-      await emitChunkedTestResponse(a.channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-detach" });
+      await emitChunkedTestResponse(a.channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-detach", requestType: "detach" });
       await waitCondition(() => a.channels[1].sent.length >= 2);
       const reattach = (await decryptAll(a.channels[1])).find((request) => request.type === "attach");
       assert.ok(reattach, "the plane re-attached on the recovered peer");
@@ -796,7 +796,7 @@ export async function runWebrtcReconnectTests(helpers) {
       // A detached plane has released its lifecycle subscription: a later loss changes nothing.
       const detaching = plane.detach();
       await waitCondition(() => a.channels[1].sent.length >= 3);
-      await emitChunkedTestResponse(a.channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-final-detach" });
+      await emitChunkedTestResponse(a.channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-final-detach", requestType: "detach" });
       await detaching;
       const statusCount = statuses.length;
       a.channels[1].error();
@@ -832,7 +832,7 @@ export async function runWebrtcReconnectTests(helpers) {
       // The transport itself stays usable: a later request goes out on the same peer.
       const later = client.request({ type: "status" });
       await waitCondition(() => channels[0].sent.length >= 1);
-      await emitChunkedTestResponse(channels[0], secret, { kind: "events", events: [] }, { messageId: "reconnect-j-status" });
+      await emitChunkedTestResponse(channels[0], secret, { kind: "events", events: [] }, { messageId: "reconnect-j-status", requestType: "status" });
       await later;
       client.disconnect();
     });
