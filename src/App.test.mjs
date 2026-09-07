@@ -2609,9 +2609,11 @@ const vendoredResttyRevision = vendorReadme.match(
 )?.[1];
 assert.equal(vendoredResttyRevision, PINNED_REVISIONS.modular_restty);
 assert.match(vendorReadme, /left `bun\.lock` and `package\.json` unchanged/);
+assert.match(vendorReadme, /bun install --frozen-lockfile/);
+assert.match(vendorReadme, /text-shaper@0\.1\.18/);
 assert.match(vendorReadme, /suppressQueryReplies|readOnly/);
 assert.match(vendorReadme, /OSC 10\/11\/12/);
-const vendorResttyChunk = await readFile(new URL("./vendor/restty/chunk-8zhnfd9h.js", import.meta.url), "utf8");
+const vendorResttyChunk = await readFile(new URL("./vendor/restty/chunk-hq13y361.js", import.meta.url), "utf8");
 assert.equal([...vendorResttyChunk.matchAll(/hintTarget \?\? "auto"/g)].length, 2);
 assert.match(vendorResttyChunk, /suppressQueryReplies:\s*options\.readOnly\s*===\s*true|suppressQueryReplies/);
 assert.match(vendorResttyChunk, /if \(options\.readOnly\)/);
