@@ -807,6 +807,35 @@ export async function runWebrtcReconnectTests(helpers) {
       a.client.disconnect();
       b.client.disconnect();
     });
+
+    // (j) An Attach queued behind a pending connect and abandoned before the write never
+    // leaves, on this peer or a later one, and reports attachSent false.
+    await runScenario("j", async () => {
+      let releaseSignal;
+      const signalGate = new Promise((resolve) => { releaseSignal = resolve; });
+      const { client, channels } = makeClient({ blockAttempts: new Map([[1, signalGate]]) });
+      const stream = client.streamTerminal("queued-session", "queued-subscription", () => undefined);
+      const rejection = assert.rejects(stream.ready, /cancelled before send: attach/);
+      await flushMicrotasks();
+      stream.abandon();
+      releaseSignal({
+        ok: true,
+        json: async () => ({
+          payload: { local_webrtc_answer: { grant_id: localWebrtcBootstrapFixture.grant_id, answer: { type: "answer", sdp: "answer-sdp" } } }
+        })
+      });
+      await waitCondition(() => channels.length === 1 && channels[0].helloAckDelivered === true);
+      await rejection;
+      await flushMicrotasks();
+      assert.equal(stream.attachSent, false, "the abandoned Attach was never written");
+      assert.equal((await decryptAll(channels[0])).some((request) => request.type === "attach"), false, "no Attach on the wire");
+      // The transport itself stays usable: a later request goes out on the same peer.
+      const later = client.request({ type: "status" });
+      await waitCondition(() => channels[0].sent.length >= 1);
+      await emitChunkedTestResponse(channels[0], secret, { kind: "events", events: [] }, { messageId: "reconnect-j-status" });
+      await later;
+      client.disconnect();
+    });
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     globalThis.window.clearTimeout = originalClearTimeout;

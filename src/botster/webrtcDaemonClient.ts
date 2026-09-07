@@ -531,7 +531,8 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
       const ready = transport
         .request(
           { type: "attach", session_id: sessionId, subscription_id: subscriptionId },
-          { onSent: () => { attachSent = true; } }
+          // Abandoned before the write: the Attach never leaves, on this peer or a later one.
+          { onSent: () => { attachSent = true; }, isCancelled: () => closed }
         )
         .then(async (response) => {
           if (closed) return;
@@ -645,7 +646,10 @@ class WebrtcDaemonTransport {
     }
   }
 
-  async request(request: DaemonRequest, options: { onSent?: () => void } = {}): Promise<DaemonResponse> {
+  async request(
+    request: DaemonRequest,
+    options: { onSent?: () => void; isCancelled?: () => boolean } = {}
+  ): Promise<DaemonResponse> {
     try {
       await this.connect();
     } catch (error) {
@@ -662,9 +666,16 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("transport", "local WebRTC data channel is not open");
     }
 
+    if (options.isCancelled?.()) {
+      throw webrtcFailure("transport", `local WebRTC request cancelled before send: ${request.type}`);
+    }
     recordLiveHarnessEvent("daemon_request", request);
     const generation = this.peerGeneration;
     await this.acquireRequestSlot(generation);
+    if (options.isCancelled?.()) {
+      this.releaseRequestSlot(generation);
+      throw webrtcFailure("transport", `local WebRTC request cancelled before send: ${request.type}`);
+    }
     const requestId = String(this.nextRequestId++);
     const envelope: ClientFrame = { frame: "request", request_id: requestId, request };
     const response = await this.sendEncrypted<DaemonResponse>(
@@ -672,7 +683,7 @@ class WebrtcDaemonTransport {
       requestId,
       request.type,
       "request",
-      options.onSent,
+      options,
       (payload) => payload as DaemonResponse
     );
     return response;
@@ -1411,7 +1422,7 @@ class WebrtcDaemonTransport {
     requestId: string,
     requestType: string,
     kind: PendingKind,
-    onSent: (() => void) | undefined,
+    sendOptions: { onSent?: () => void; isCancelled?: () => boolean } | undefined,
     parse: (payload: unknown) => T
   ): Promise<T> {
     const channel = this.dataChannel;
@@ -1424,6 +1435,11 @@ class WebrtcDaemonTransport {
       envelope = await encryptJsonPayload(key, plaintext);
     } catch (error) {
       throw webrtcFailure("encryption", `local WebRTC request encryption failed: ${errorMessage(error)}`);
+    }
+    if (sendOptions?.isCancelled?.()) {
+      // Encryption finished after the caller abandoned the request: nothing is written.
+      if (kind === "request") this.releaseRequestSlot(this.peerGeneration);
+      throw webrtcFailure("transport", `local WebRTC request cancelled before send: ${requestType}`);
     }
     return new Promise<T>((resolve, reject) => {
       const generation = this.peerGeneration;
@@ -1458,7 +1474,7 @@ class WebrtcDaemonTransport {
 
       try {
         channel.send(JSON.stringify(envelope));
-        onSent?.();
+        sendOptions?.onSent?.();
         if (!this.encryptedStreamReady && kind !== "hello") {
           this.encryptedStreamReady = true;
           this.emitLifecycle({ type: "encrypted-stream-ready", requestType });

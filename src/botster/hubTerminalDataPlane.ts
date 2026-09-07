@@ -174,7 +174,12 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     // encrypted-stream-ready so attach RPCs are not issued against a half-open peer.
     // Only this plane's own transport may drive that: the subscription is taken directly
     // from the bridge, and a bridge without one drives no loss or recovery at all.
-    this.lifecycleSubscription = options.bridge.subscribeLifecycle?.((event) => this.handleLifecycleEvent(event));
+    if (!options.bridge.subscribeLifecycle) {
+      // A bridge that streams terminals without lifecycle delivery would never recover a
+      // lost transport; refuse it here rather than degrade silently.
+      throw new Error("Terminal data plane bridge must provide subscribeLifecycle.");
+    }
+    this.lifecycleSubscription = options.bridge.subscribeLifecycle((event) => this.handleLifecycleEvent(event));
   }
 
   private handleLifecycleEvent(event: WebrtcDaemonLifecycleEvent): void {

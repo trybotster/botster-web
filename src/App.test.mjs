@@ -3609,6 +3609,9 @@ await runGhostsnpGridCase("after");
         }
         return { kind: "events", events: [] };
       },
+      subscribeLifecycle() {
+        return { unsubscribe() {} };
+      },
       streamTerminal(nextSessionId, nextSubscriptionId, onEvent) {
         queueMicrotask(() => {
           for (const frame of standardAttachFrames(nextSubscriptionId)) onEvent(frame);
@@ -4946,6 +4949,9 @@ const bridge = {
         subscription.unsubscribed = true;
       }
     };
+  },
+  subscribeLifecycle() {
+    return { unsubscribe() {} };
   },
   streamTerminal(sessionId, subscriptionId, onEvent) {
     bridgeTerminalStreams.push({ sessionId, subscriptionId });
@@ -8868,6 +8874,9 @@ function fakeRouteBridge(sessionId, options = {}) {
         return { kind: "read_screen", read_screen: { session_id: sessionId, text: "" }, events: [] };
       }
       return { kind: "events", events: [] };
+    },
+    subscribeLifecycle() {
+      return { unsubscribe() {} };
     },
     streamTerminal(nextSessionId, subscriptionId, onEvent) {
       assert.equal(nextSessionId, sessionId);

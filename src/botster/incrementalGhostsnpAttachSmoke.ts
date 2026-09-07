@@ -54,6 +54,9 @@ const dataPlane = createHubTerminalDataPlane({
       }
       return { kind: "events", events: [] } as never;
     },
+    subscribeLifecycle() {
+      return { unsubscribe() {} };
+    },
     streamTerminal(nextSessionId, nextSubscriptionId, onEvent) {
       if (nextSessionId !== sessionId || nextSubscriptionId !== subscriptionId) {
         throw new Error("Incremental attach smoke received a different subscription.");
