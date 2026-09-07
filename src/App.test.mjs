@@ -8784,7 +8784,7 @@ const outdatedConformanceDiagnostic = compatibilityDiagnosticsFromFrame({
   }
 })[0];
 assert.equal(outdatedConformanceDiagnostic.title, "Hub conformance fixture mismatch");
-assert.match(outdatedConformanceDiagnostic.detail, /revision 13 is below required revision 48/);
+assert.match(outdatedConformanceDiagnostic.detail, new RegExp(`revision 13 is below required revision ${hubTestSupportMetadata.conformance_fixture_revision}`));
 
 const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
   kind: "entity_snapshot",
@@ -8831,7 +8831,8 @@ const protocolSixHubStatusRecord = {
     protocol: "botster-hub-daemon-v1",
     protocol_version: 6,
     features: [...requiredDaemonFeatures],
-    conformance_fixture_revision: 48
+    // Current revision, so only the protocol version is behind in this fixture.
+    conformance_fixture_revision: hubTestSupportMetadata.conformance_fixture_revision
   }
 };
 const protocolSixDiagnostics = compatibilityDiagnosticsFromFrame({
