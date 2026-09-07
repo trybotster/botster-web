@@ -11,11 +11,6 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { connect } from "node:net";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
-import ts from "typescript";
-import {
-  metadata as hubTestSupportMetadata,
-  readFirstPartyClientSupportMatrix
-} from "@trybotster/hub-test-support";
 import {
   candidateBinaryProvenance,
   candidateTargetDirectoryFromHubRealPath,
@@ -23,24 +18,13 @@ import {
   packageEnsureDecision
 } from "./live-packaged-protocol-helpers.mjs";
 import { sendDaemonUnixRequest } from "./daemon-unix-client.mjs";
+import {
+  daemonProtocol,
+  daemonUnixFraming,
+  firstPartyClientCompatibilityRequirement
+} from "./daemon-unix-protocol.mjs";
 
-const daemonProtocolModule = await (async () => {
-  const source = readFileSync(new URL("../src/botster/generated/daemon-protocol.ts", import.meta.url), "utf8");
-  const compiled = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
-  return import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
-})();
-const {
-  MAX_UNIX_FRAME_BYTES,
-  MAX_UNIX_TERMINAL_ROUTE_BYTES,
-  PROTOCOL,
-  UNIX_CONTAINER_CONTROL,
-  UNIX_CONTAINER_TERMINAL,
-  UNIX_FRAME_LENGTH_PREFIX_BYTES
-} = daemonProtocolModule;
-
-export const daemonProtocol = PROTOCOL;
+export { daemonProtocol };
 
 /**
  * Verifies the candidate binaries against Hub's install-manifest.json (artifacts by name
@@ -112,36 +96,9 @@ export async function sendDaemonRequest(socketPath, request) {
     socketPath,
     request,
     protocol: daemonProtocol,
-    compatibilityRequirement: loadDaemonCompatibilityRequirement(),
-    framing: {
-      lengthPrefixBytes: UNIX_FRAME_LENGTH_PREFIX_BYTES,
-      controlContainer: UNIX_CONTAINER_CONTROL,
-      terminalContainer: UNIX_CONTAINER_TERMINAL,
-      maxTerminalRouteBytes: MAX_UNIX_TERMINAL_ROUTE_BYTES,
-      maxFrameBytes: MAX_UNIX_FRAME_BYTES
-    }
+    compatibilityRequirement: firstPartyClientCompatibilityRequirement("botster-web-live-harness"),
+    framing: daemonUnixFraming
   });
-}
-
-function loadDaemonCompatibilityRequirement() {
-  const daemonSupportMatrix = readFirstPartyClientSupportMatrix();
-  if (
-    hubTestSupportMetadata.protocol !== daemonProtocol ||
-    daemonSupportMatrix.protocol !== daemonProtocol ||
-    daemonSupportMatrix.protocol_version !== hubTestSupportMetadata.protocol_version ||
-    daemonSupportMatrix.conformance_fixture_revision !== hubTestSupportMetadata.conformance_fixture_revision ||
-    !Array.isArray(daemonSupportMatrix.required_features) ||
-    daemonSupportMatrix.required_features.some((feature) => typeof feature !== "string")
-  ) {
-    throw new Error("vendored Hub support metadata is inconsistent");
-  }
-  return {
-    protocol: daemonProtocol,
-    protocol_version: hubTestSupportMetadata.protocol_version,
-    required_features: daemonSupportMatrix.required_features,
-    minimum_conformance_fixture_revision: hubTestSupportMetadata.conformance_fixture_revision,
-    client_name: "botster-web-live-harness"
-  };
 }
 
 export async function waitForSocket(socketPath, exitMessage) {

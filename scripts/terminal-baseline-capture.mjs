@@ -64,9 +64,14 @@ import {
   waitForHashSettle,
   workspacePathHasColon
 } from "./terminal-baseline-observer.mjs";
+import { sendDaemonUnixRequest } from "./daemon-unix-client.mjs";
+import {
+  daemonCompatibilityRequirement,
+  daemonProtocol,
+  daemonUnixFraming
+} from "./daemon-unix-protocol.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const DAEMON_PROTOCOL = "botster-hub-daemon-v1";
 export const CONTROLLED_RUNNER_PROFILE = Object.freeze({
   label: "botster-ubuntu-24.04-16core",
   os: "Linux",
@@ -758,49 +763,15 @@ export async function writeBaselineRecord(outputPath, record, teardownProof) {
 }
 
 async function sendDaemonRequest(socketPath, request) {
-  const { createConnection } = await import("node:net");
-  const socket = createConnection(socketPath);
-  await once(socket, "connect");
-  socket.setEncoding("utf8");
-  socket.write(`${JSON.stringify({ protocol: DAEMON_PROTOCOL })}\n`);
-  const hello = JSON.parse(await readSocketLine(socket));
-  if (hello.protocol !== DAEMON_PROTOCOL) {
-    socket.end();
-    throw new Error("daemon hello protocol mismatch");
-  }
-  socket.write(`${JSON.stringify(request)}\n`);
-  const reply = JSON.parse(await readSocketLine(socket));
-  socket.end();
-  return reply;
-}
-
-function readSocketLine(socket) {
-  return new Promise((resolvePromise, reject) => {
-    let buffer = "";
-    const cleanup = () => {
-      socket.off("data", onData);
-      socket.off("error", onError);
-      socket.off("end", onEnd);
-    };
-    const onData = (chunk) => {
-      buffer += chunk;
-      const newline = buffer.indexOf("\n");
-      if (newline >= 0) {
-        cleanup();
-        resolvePromise(buffer.slice(0, newline));
-      }
-    };
-    const onError = (error) => {
-      cleanup();
-      reject(error);
-    };
-    const onEnd = () => {
-      cleanup();
-      reject(new Error("daemon socket closed before reply"));
-    };
-    socket.on("data", onData);
-    socket.on("error", onError);
-    socket.on("end", onEnd);
+  return sendDaemonUnixRequest({
+    socketPath,
+    request,
+    protocol: daemonProtocol,
+    compatibilityRequirement: daemonCompatibilityRequirement(
+      "botster-web-terminal-baseline-capture",
+      ["sessions", "plugin_surface_action"]
+    ),
+    framing: daemonUnixFraming
   });
 }
 

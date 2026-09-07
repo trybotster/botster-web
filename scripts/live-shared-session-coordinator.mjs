@@ -9,8 +9,13 @@ import {
   DEFAULT_SHARED_SESSION_ID,
   productionSessionScriptSource
 } from "./live-packaged-protocol-helpers.mjs";
+import { sendDaemonUnixRequest } from "./daemon-unix-client.mjs";
+import {
+  daemonCompatibilityRequirement,
+  daemonProtocol,
+  daemonUnixFraming
+} from "./daemon-unix-protocol.mjs";
 
-const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
 const hubBinary = requiredPath("BOTSTER_HUB_BIN");
 const sessionWorkerBinary = requiredPath("BOTSTER_SESSION_WORKER_BIN");
@@ -257,47 +262,15 @@ async function waitForSocket(path, processHandle) {
 }
 
 async function sendDaemonRequest(path, request) {
-  const socket = connect(path);
-  await once(socket, "connect");
-  socket.setEncoding("utf8");
-  socket.write(`${JSON.stringify({ protocol })}\n`);
-  const hello = JSON.parse(await readSocketLine(socket));
-  if (hello.protocol !== protocol) {
-    socket.end();
-    throw new Error("shared-session coordinator daemon protocol mismatch");
-  }
-  socket.write(`${JSON.stringify(request)}\n`);
-  const response = JSON.parse(await readSocketLine(socket));
-  socket.end();
-  return response;
-}
-
-async function readSocketLine(socket) {
-  return new Promise((resolveLine, reject) => {
-    let buffer = "";
-    const onData = (chunk) => {
-      buffer += chunk;
-      const newline = buffer.indexOf("\n");
-      if (newline < 0) return;
-      cleanup();
-      resolveLine(buffer.slice(0, newline));
-    };
-    const onError = (error) => {
-      cleanup();
-      reject(error);
-    };
-    const onEnd = () => {
-      cleanup();
-      reject(new Error("shared-session coordinator socket closed before reply"));
-    };
-    const cleanup = () => {
-      socket.off("data", onData);
-      socket.off("error", onError);
-      socket.off("end", onEnd);
-    };
-    socket.on("data", onData);
-    socket.on("error", onError);
-    socket.on("end", onEnd);
+  return sendDaemonUnixRequest({
+    socketPath: path,
+    request,
+    protocol: daemonProtocol,
+    compatibilityRequirement: daemonCompatibilityRequirement(
+      "botster-web-live-shared-session-coordinator",
+      ["sessions"]
+    ),
+    framing: daemonUnixFraming
   });
 }
 

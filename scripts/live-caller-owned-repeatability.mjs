@@ -4,8 +4,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-const protocol = "botster-hub-daemon-v1";
+import { sendDaemonUnixRequest } from "./daemon-unix-client.mjs";
+import {
+  daemonCompatibilityRequirement,
+  daemonProtocol,
+  daemonUnixFraming
+} from "./daemon-unix-protocol.mjs";
 
 if (!process.env.BOTSTER_HUB_BIN || !process.env.BOTSTER_SESSION_WORKER_BIN) {
   throw new Error(
@@ -175,46 +179,15 @@ async function waitForSocket(socketPath, hub) {
 }
 
 async function sendDaemonRequest(socketPath, request) {
-  const socket = connect(socketPath);
-  await once(socket, "connect");
-  socket.setEncoding("utf8");
-  socket.write(`${JSON.stringify({ protocol })}\n`);
-  const hello = JSON.parse(await readSocketLine(socket));
-  if (hello.protocol !== protocol) {
-    socket.end();
-    throw new Error("caller-owned setup daemon protocol mismatch");
-  }
-  socket.write(`${JSON.stringify(request)}\n`);
-  const response = JSON.parse(await readSocketLine(socket));
-  socket.end();
-  return response;
-}
-
-async function readSocketLine(socket) {
-  return new Promise((resolve, reject) => {
-    let buffer = "";
-    const cleanup = () => {
-      socket.off("data", onData);
-      socket.off("error", onError);
-      socket.off("end", onEnd);
-    };
-    const onData = (chunk) => {
-      buffer += chunk;
-      const newline = buffer.indexOf("\n");
-      if (newline < 0) return;
-      cleanup();
-      resolve(buffer.slice(0, newline));
-    };
-    const onError = (error) => {
-      cleanup();
-      reject(error);
-    };
-    const onEnd = () => {
-      cleanup();
-      reject(new Error("caller-owned setup daemon socket closed before reply"));
-    };
-    socket.on("data", onData);
-    socket.on("error", onError);
-    socket.on("end", onEnd);
+  return sendDaemonUnixRequest({
+    socketPath,
+    request,
+    protocol: daemonProtocol,
+    compatibilityRequirement: daemonCompatibilityRequirement(
+      "botster-web-live-caller-owned-repeatability",
+      // Package listing and configuration use no optional compatibility feature.
+      []
+    ),
+    framing: daemonUnixFraming
   });
 }
