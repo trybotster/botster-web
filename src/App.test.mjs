@@ -5160,26 +5160,34 @@ try {
     2
   );
 
+  // Host-control v9 ServerFrame shapes that belong on reserved channels, delivered on the
+  // control channel: an entity frame and a package-event host event.
   for (const [deliveryKind, payload, expectedError] of [
     [
-      "daemon_entity_frame",
+      "entity",
       {
-        type: "entity_snapshot",
-        subscription_id: "control-entity",
-        entity_type: "session",
-        snapshot_seq: 0,
-        items: []
+        frame: "entity",
+        entity: {
+          type: "entity_snapshot",
+          subscription_id: "control-entity",
+          entity_type: "session",
+          snapshot_seq: 0,
+          items: []
+        }
       },
       /control DataChannel received an entity delivery/
     ],
     [
-      "daemon_event",
+      "package_event",
       {
-        type: "package_event",
-        subscription_id: "control-event",
-        owner: "package-notice-reaction",
-        name: "sample.notice",
-        payload: { notice: "must not arrive" }
+        frame: "event",
+        event: {
+          type: "package_event",
+          subscription_id: "control-event",
+          owner: "package-notice-reaction",
+          name: "sample.notice",
+          payload: { notice: "must not arrive" }
+        }
       },
       /control DataChannel received a package-event delivery/
     ]
