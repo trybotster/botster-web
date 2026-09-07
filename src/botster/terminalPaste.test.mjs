@@ -449,7 +449,8 @@ export async function runTerminalPasteTests(helpers) {
       const refusedKeys = fixture.outcomes.filter((outcome) => outcome.kind === "key" && outcome.reason === "queue_bounds");
       assert.equal(refusedKeys.length, 0, "the keys filled the bounds exactly");
       key("z");
-      assert.equal(fixture.outcomes.filter((outcome) => outcome.reason === "queue_bounds").length, 1, "a key past the item bound is refused too");
+      // The refused paste published its own queue_bounds outcome; the key adds exactly one more.
+      assert.equal(fixture.outcomes.filter((outcome) => outcome.kind === "key" && outcome.reason === "queue_bounds").length, 1, "a key past the item bound is refused too");
       // Draining one in-flight result releases exactly one slot; the next paste is admitted
       // behind the remaining queued keys and is sent in order after them.
       await fixture.result(1, "written", { accepted: 13, written: 1 });
