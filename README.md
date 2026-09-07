@@ -56,9 +56,6 @@ transport-causality experiment. The frozen format is
 tickets must reuse that version. Version 3 supersedes version 2.
 
 ```bash
-BOTSTER_LEGACY_CHECKOUT=/path/to/clean-f598075e \
-BOTSTER_HUB_SOURCE=/path/to/botster-hub \
-npm run observe:terminal-baseline
 npm run observe:terminal-baseline:validate -- docs/reports/terminal-baseline-observation-local-<capture_id>.json
 ```
 
