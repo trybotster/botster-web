@@ -15520,6 +15520,8 @@ async function emitChunkedTestResponse(dataChannel, secret, response, options = 
       if (frame?.frame === "request" && frame.request.type === requestType && !answeredReservationIndexes.has(requestIndex)) {
         request = frame.request;
         answeredReservationIndexes.add(requestIndex);
+        // The reply answers this exact request, not the first unanswered one on the wire.
+        options = { ...options, requestId: options.requestId ?? frame.request_id };
         break;
       }
     }
@@ -15557,7 +15559,11 @@ async function emitChunkedTestResponse(dataChannel, secret, response, options = 
   } else if (responsePayload && typeof responsePayload === "object" && "frame" in responsePayload) {
     serverFrame = responsePayload;
   } else {
-    const requestId = options.requestId ?? await takeUnansweredTestRequestId(dataChannel, secret, options.requestType);
+    // An explicit request id marks its wire index answered, so a later reply without an
+    // explicit id never correlates to an already-answered request.
+    const requestId = options.requestId
+      ? await markTestRequestAnswered(dataChannel, secret, options.requestId)
+      : await takeUnansweredTestRequestId(dataChannel, secret, options.requestType);
     serverFrame = { frame: "response", request_id: requestId, response: responsePayload };
   }
 
@@ -15584,6 +15590,15 @@ async function emitChunkedTestResponse(dataChannel, secret, response, options = 
  * correlates by request_id, so the fake Hub answers in wire order unless a type filter
  * names a later request.
  */
+async function markTestRequestAnswered(dataChannel, secret, requestId) {
+  const answered = dataChannel.testAnsweredRequestIndexes ??= new Set();
+  for (const [index, sent] of (dataChannel.sent ?? []).entries()) {
+    const frame = await decodeTestClientFrame(secret, sent);
+    if (frame?.frame === "request" && frame.request_id === requestId) answered.add(index);
+  }
+  return requestId;
+}
+
 async function takeUnansweredTestRequestId(dataChannel, secret, requestType) {
   const answered = dataChannel.testAnsweredRequestIndexes ??= new Set();
   for (const [index, sent] of (dataChannel.sent ?? []).entries()) {
