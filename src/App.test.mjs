@@ -9347,12 +9347,29 @@ assert.match(productionSessionScriptSource(), /1049l/);
   assert.match(statuses.at(-1).message, /could not be decoded/);
 }
 
-// A bridge without terminal streaming fails the attach explicitly.
+// A bridge without lifecycle delivery is refused at construction: it could never recover a
+// lost transport, and the plane does not degrade silently.
+assert.throws(
+  () => createHubTerminalDataPlane({
+    sessionId: activeHubSessionId,
+    bridge: {
+      async request() {
+        return { kind: "events", events: [] };
+      }
+    }
+  }),
+  /must provide subscribeLifecycle/
+);
+
+// A bridge with lifecycle delivery but without terminal streaming fails the attach explicitly.
 const terminalWithoutStream = createHubTerminalDataPlane({
   sessionId: activeHubSessionId,
   bridge: {
     async request() {
       return { kind: "events", events: [] };
+    },
+    subscribeLifecycle() {
+      return { unsubscribe() {} };
     }
   }
 });
@@ -9364,6 +9381,7 @@ try {
 }
 assert.match(terminalAttachError.message, /does not expose terminal streaming/);
 assert.equal(terminalUnavailableDiagnostic(terminalAttachError).title, "Terminal stream unavailable");
+await terminalWithoutStream.detach();
 
 const vite = await createServer({
   configFile: false,
