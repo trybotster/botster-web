@@ -3441,7 +3441,8 @@ function terminalGridProbe() {
 
 function measureTerminalGrid(gridState, probe, rows, columns, event = "browser_resize") {
   assert.equal(gridState.measure(columns, rows), true);
-  probe.apply({ rows, columns }, event);
+  // The renderer paints the measured TerminalGrid, the full scheme 2 geometry.
+  probe.apply(gridState.current(), event);
 }
 
 function runTerminalTransportOrder(order, rows, columns) {
