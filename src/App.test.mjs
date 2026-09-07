@@ -985,6 +985,7 @@ const [
   localPackageServerScript,
   browserRuntimeSmokeScript,
   liveProtocolHarnessScript,
+  liveHubLaneScript,
   workspacesSharedHubBrowserSmokeScript,
   liveSharedSessionDriverScript,
   liveSharedSessionCoordinatorScript,
@@ -1032,6 +1033,7 @@ const [
   readFile(new URL("../scripts/local-package-server.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/browser-runtime-smoke.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-packaged-protocol-harness.mjs", import.meta.url), "utf8"),
+  readFile(new URL("../scripts/live-hub-lane.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/workspaces-shared-hub-browser-smoke.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-shared-session-browser-driver.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-shared-session-coordinator.mjs", import.meta.url), "utf8"),
@@ -2187,13 +2189,13 @@ assert.match(liveProtocolHarnessScript, /const echoProbe = "keys"/);
 assert.match(liveProtocolHarnessScript, /const attachProbe = "botster-web-production-attach-probe"/);
 assert.match(liveProtocolHarnessScript, /\$\{attachProbe\}-/);
 assert.doesNotMatch(liveProtocolHarnessScript, /unwrappedReadScreenText|replace\(\/\[\\r\\n\]\//);
-assert.match(liveProtocolHarnessScript, /lockCoreRev/);
-assert.match(liveProtocolHarnessScript, /realpathSync/);
-assert.match(liveProtocolHarnessScript, /candidateBinaryProvenance/);
-assert.match(liveProtocolHarnessScript, /candidateTargetDirectoryFromHubRealPath/);
-const loadBinaryProvenanceSource = liveProtocolHarnessScript.slice(
-  liveProtocolHarnessScript.indexOf("async function loadBinaryProvenance"),
-  liveProtocolHarnessScript.indexOf("function gitCheckoutIsClean")
+assert.match(liveHubLaneScript, /lockCoreRev/);
+assert.match(liveHubLaneScript, /realpathSync/);
+assert.match(liveHubLaneScript, /candidateBinaryProvenance/);
+assert.match(liveHubLaneScript, /candidateTargetDirectoryFromHubRealPath/);
+const loadBinaryProvenanceSource = liveHubLaneScript.slice(
+  liveHubLaneScript.indexOf("async function loadBinaryProvenance"),
+  liveHubLaneScript.indexOf("function gitCheckoutIsClean")
 );
 assert.match(loadBinaryProvenanceSource, /const hubPath = realpathSync\(suppliedHub\)/);
 assert.match(loadBinaryProvenanceSource, /const workerPath = realpathSync\(suppliedWorker\)/);
@@ -2686,7 +2688,7 @@ assert.match(liveProtocolHarnessScript, /@trybotster\/hub-test-support/);
 assert.match(liveProtocolHarnessScript, /materializePluginContractMatrixFixture/);
 assert.match(liveProtocolHarnessScript, /assertTerminalAttachChronology/);
 assert.match(liveProtocolHarnessScript, /loadBinaryProvenance/);
-assert.match(liveProtocolHarnessScript, /lockPackageRevision/);
+assert.match(liveHubLaneScript, /lockPackageRevision/);
 assert.match(liveProtocolHarnessScript, /requiredProvenanceField\(compatibility, "protocol"/);
 assert.match(liveProtocolHarnessScript, /if \(!sharedHubDriverMode && !sharedSessionMode\)/);
 assert.match(liveProtocolHarnessScript, /live packaged protocol binary provenance/);
