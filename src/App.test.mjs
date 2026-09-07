@@ -2022,6 +2022,7 @@ assert.match(webrtcDaemonClient, /frame: "hello"/);
 assert.match(webrtcDaemonClient, /frame\.frame === "hello_ack"/);
 assert.match(webrtcDaemonClient, /pendingKey\(generation, requestId\)/);
 assert.match(webrtcDaemonClient, /hostControlRequestLimits\.maxOutstandingRequests/);
+assert.match(webrtcDaemonClient, /maximumPlaintextBytes: 12 \* 1_024/);
 assert.match(webrtcDaemonClient, /initialDelayMs: 250,\s*maxDelayMs: 8_000/);
 assert.match(webrtcDaemonClient, /view\.getUint32\(29, true\)/);
 assert.match(webrtcDaemonClient, /header\.generation !== BigInt\(binding\.generation\)/);
@@ -3431,6 +3432,7 @@ const {
   localWebrtcReconnectPolicy,
   localWebrtcResponseChunkLimits,
   localWebrtcInboundAdmissionLimits,
+  localWebrtcTerminalChunkLimits,
   hostControlRequestLimits,
   setApplyAssemblyTimeoutCleanup,
   WebrtcDaemonClientError,
@@ -6806,6 +6808,7 @@ try {
     completedMessageBookkeepingBytes: 64
   });
   assert.deepEqual(localWebrtcInboundAdmissionLimits, { maximumQueuedFrames: 256, maximumQueuedBytes: 8 * 1_024 * 1_024 });
+  assert.deepEqual(localWebrtcTerminalChunkLimits, { maximumPlaintextBytes: 12 * 1_024 });
 
   const largeResponseChannel = createFakeDataChannel();
   const largeResponseClient = createWebrtcTestClient([largeResponseChannel], localWebrtcBootstrapFixture);
@@ -7278,9 +7281,23 @@ try {
   );
   const priorMessageCount = outboundMessages.length;
   await firstStream.sendFrame(largeFrame);
+  const largeFrameMessages = firstTerminalChannel.sent
+    .filter((value) => typeof value !== "string")
+    .slice(priorMessageCount);
+  const openedLargeFrameChunks = await Promise.all(
+    largeFrameMessages.map((message) => openTestTerminalChunk(localWebrtcBootstrapFixture.grant_secret, message))
+  );
   const sentFrames = await sentTestInputFrames(firstTerminalChannel, localWebrtcBootstrapFixture.grant_secret);
   assert.equal(sentFrames.length, 2);
-  assert.ok(firstTerminalChannel.sent.filter((value) => typeof value !== "string").length > priorMessageCount + 1, "a 65535-byte frame needs several chunks");
+  assert.equal(
+    openedLargeFrameChunks.length,
+    Math.ceil(largeFrame.byteLength / localWebrtcTerminalChunkLimits.maximumPlaintextBytes),
+    "a large input frame uses the Hub receiver chunk limit"
+  );
+  assert.ok(
+    openedLargeFrameChunks.every(({ plaintext }) => plaintext.byteLength <= localWebrtcTerminalChunkLimits.maximumPlaintextBytes),
+    "each outbound plaintext chunk is within the Hub receiver limit"
+  );
   assert.ok(firstTerminalChannel.sent.every((value) => (typeof value === "string" ? Buffer.byteLength(value) : value.byteLength) < 65_536));
   assert.equal(sentFrames[1].header.message_id, 2n, "message ids increase per channel per direction");
   assert.deepEqual([...sentFrames[1].frame], [...largeFrame]);

@@ -460,9 +460,11 @@ function inboundAdmissionFailure(channel: string, admission: InboundAdmission): 
 const terminalChunkHeaderBytes = LOCAL_WEBRTC_TERMINAL_CHUNK_HEADER_BYTES;
 const terminalChunkNonceBytes = LOCAL_WEBRTC_TERMINAL_CHUNK_NONCE_BYTES;
 const terminalChunkTagBytes = LOCAL_WEBRTC_TERMINAL_CHUNK_TAG_BYTES;
-/** Plaintext bytes per outbound terminal chunk so the sealed message stays under the frame limit. */
-const terminalChunkPlaintextBytes =
-  LOCAL_WEBRTC_MAX_FRAME_BYTES - 1 - terminalChunkHeaderBytes - terminalChunkNonceBytes - terminalChunkTagBytes;
+/** Match the Hub InboundTerminalChunkAssembly limit named LOCAL_WEBRTC_CHUNK_PAYLOAD_BYTES. */
+export const localWebrtcTerminalChunkLimits = Object.freeze({
+  maximumPlaintextBytes: 12 * 1_024
+});
+const terminalChunkPlaintextBytes = localWebrtcTerminalChunkLimits.maximumPlaintextBytes;
 
 function createRequestIdGenerator(prefix: string) {
   let counter = 0;
