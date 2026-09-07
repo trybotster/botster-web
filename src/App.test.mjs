@@ -6064,6 +6064,8 @@ try {
   await waitForTestCondition(() => barrierChannel.sent.length === 1);
   await emitChunkedTestResponse(barrierChannel, localWebrtcBootstrapFixture.grant_secret, { kind: "events", events: [] }, { messageId: "barrier-warmup" });
   await warmup;
+  // Completion is counted on this channel's frames relative to this baseline.
+  const wireBefore = barrierChannel.sent.length;
 
   const subtlePrototype = Object.getPrototypeOf(globalThis.crypto.subtle);
   const originalEncrypt = subtlePrototype.encrypt;
@@ -6095,7 +6097,8 @@ try {
     for (const stream of abandoned) stream.abandon();
     barrierOpen = true;
     for (const release of held.splice(0)) release();
-    await waitForTestCondition(async () => (await attachEnvelopes()).length === hostControlRequestLimits.maxOutstandingRequests);
+    // The wait helper takes a synchronous predicate: count this channel's raw frames from the baseline.
+    await waitForTestCondition(() => barrierChannel.sent.length === wireBefore + hostControlRequestLimits.maxOutstandingRequests);
     await flushMicrotasks();
     assert.equal((await attachEnvelopes()).length, hostControlRequestLimits.maxOutstandingRequests, "32 Attach envelopes on the wire: 27 holders plus 5 waiters admitted by the released slots");
     for (const stream of abandoned) assert.equal(stream.attachSent, false, "an abandoned holder never wrote its Attach");
@@ -6115,7 +6118,7 @@ try {
         { messageId: `barrier-settle-${round}`, requestId: frame.request_id }
       );
       settled += 1;
-      await waitForTestCondition(async () => (await attachEnvelopes()).length === hostControlRequestLimits.maxOutstandingRequests + settled);
+      await waitForTestCondition(() => barrierChannel.sent.length === wireBefore + hostControlRequestLimits.maxOutstandingRequests + settled);
       await flushMicrotasks();
       assert.equal((await attachEnvelopes()).length - settled, hostControlRequestLimits.maxOutstandingRequests, "outstanding Attach envelopes stay at the window");
     }
