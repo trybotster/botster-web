@@ -549,6 +549,9 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
           stopDelivery();
           throw error;
         });
+      // A stream abandoned before its reservation is never awaited again, so its attach
+      // outcome is observed here once; awaiting callers still receive the same rejection.
+      void ready.catch(() => undefined);
 
       return {
         ready,

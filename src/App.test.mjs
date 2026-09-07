@@ -3411,6 +3411,7 @@ const {
   localWebrtcReconnectPolicy,
   localWebrtcResponseChunkLimits,
   localWebrtcInboundAdmissionLimits,
+  hostControlRequestLimits,
   setApplyAssemblyTimeoutCleanup,
   WebrtcDaemonClientError,
   webRtcDaemonLifecycleEventName
@@ -5943,6 +5944,92 @@ try {
   siblingEvents.unsubscribe();
   siblingEntity.unsubscribe();
   eventSiblingClient.disconnect();
+
+// An attach stream abandoned before its reservation observes its own attach outcome: no
+// unhandled rejection, no late binding, the pending request slot released on timeout, and a
+// late reservation for the abandoned request discarded. A stream that is still awaited
+// receives the same rejection.
+{
+  const unhandledRejections = [];
+  const onUnhandledRejection = (reason) => unhandledRejections.push(reason);
+  process.on("unhandledRejection", onUnhandledRejection);
+  const abandonChannel = createFakeDataChannel();
+  const abandonClient = createWebrtcTestClient([abandonChannel], localWebrtcBootstrapFixture);
+  const originalAbandonSetTimeout = globalThis.window.setTimeout;
+  const originalAbandonClearTimeout = globalThis.window.clearTimeout;
+  const abandonTimers = new Map();
+  let nextAbandonTimer = 0;
+  globalThis.window.setTimeout = (callback) => {
+    const timer = ++nextAbandonTimer;
+    abandonTimers.set(timer, callback);
+    return timer;
+  };
+  globalThis.window.clearTimeout = (timer) => abandonTimers.delete(timer);
+  const settledLater = [];
+  try {
+    const timersBefore = abandonTimers.size;
+    const abandonedEvents = [];
+    const abandoned = abandonClient.streamTerminal("abandoned-session", "abandoned-subscription", (event) => abandonedEvents.push(event));
+    const active = abandonClient.streamTerminal("active-session", "active-subscription", () => undefined);
+    const activeRejection = assert.rejects(active.ready, /local WebRTC request timed out: attach/);
+    await waitForTestCondition(() => abandonChannel.sent.length === 2);
+    const abandonedFrame = await decodeTestClientFrame(localWebrtcBootstrapFixture.grant_secret, abandonChannel.sent[0]);
+    assert.equal(abandonedFrame.request.type, "attach");
+    assert.equal(abandonedFrame.request.subscription_id, "abandoned-subscription");
+    abandoned.abandon();
+    const attachTimeouts = [...abandonTimers.values()].slice(timersBefore);
+    assert.equal(attachTimeouts.length, 2, "one request timeout per attach");
+    for (const fire of attachTimeouts) fire();
+    await activeRejection;
+    await flushMicrotasks();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandledRejections, [], "an abandoned stream's attach timeout is observed");
+    assert.equal(abandoned.generation, undefined, "no binding for the abandoned stream");
+
+    // The two pending slots are released: the full outstanding window is available again.
+    const sentBefore = abandonChannel.sent.length;
+    for (let index = 0; index < hostControlRequestLimits.maxOutstandingRequests; index += 1) {
+      const pending = abandonClient.request({ type: "status" });
+      settledLater.push(pending);
+      pending.catch(() => undefined);
+    }
+    await waitForTestCondition(() => abandonChannel.sent.length === sentBefore + hostControlRequestLimits.maxOutstandingRequests);
+
+    // A late reservation for the abandoned request is a stale completion: no channel opens.
+    await emitChunkedTestResponse(
+      abandonChannel,
+      localWebrtcBootstrapFixture.grant_secret,
+      {
+        kind: "terminal_reservation",
+        terminal_reservation: {
+          session_id: "abandoned-session",
+          subscription_id: "abandoned-subscription",
+          generation: 9010,
+          peer_generation: 1,
+          label: "r-late-abandoned-terminal",
+          expires_in_seconds: 30
+        },
+        events: []
+      },
+      { messageId: "late-abandoned-reservation", requestId: abandonedFrame.request_id }
+    );
+    await flushMicrotasks();
+    assert.equal(
+      abandonChannel.createdDataChannels.some((channel) => channel.label === "r-late-abandoned-terminal"),
+      false,
+      "a late reservation for an abandoned attach opens no channel"
+    );
+    assert.deepEqual(abandonedEvents, []);
+    assert.deepEqual(unhandledRejections, []);
+  } finally {
+    globalThis.window.setTimeout = originalAbandonSetTimeout;
+    globalThis.window.clearTimeout = originalAbandonClearTimeout;
+    abandonClient.disconnect();
+    await Promise.allSettled(settledLater);
+    await flushMicrotasks();
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+}
 
   const strictChannels = [createFakeDataChannel()];
   const strictClient = createWebrtcTestClient(strictChannels, localWebrtcBootstrapFixture, {
