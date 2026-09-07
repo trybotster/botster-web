@@ -8815,7 +8815,8 @@ assert.deepEqual(requiredDaemonFeatures, [
   "terminal_subscription_closed",
   "package_event_subscriptions"
 ]);
-assert.equal(minimumConformanceFixtureRevision, 48);
+// Web requires exactly the conformance revision of the vendored Hub fixture package.
+assert.equal(minimumConformanceFixtureRevision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(minimumDaemonProtocolVersion, 1);
 assert.equal(compatibleDescriptorDiagnostics.length, 1);
 assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
@@ -8850,7 +8851,8 @@ assert.match(protocolSixDiagnostics[0].detail, /Protocol botster-hub-daemon-v1 v
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /mismatch/i.test(diagnostic.title)), false);
 assert.equal(protocolSixDiagnostics.some((diagnostic) => /unsupported_feature/.test(JSON.stringify(diagnostic))), false);
 assert.equal(minimumDaemonProtocolVersion, 1);
-assert.equal(minimumConformanceFixtureRevision, 48);
+// Web requires exactly the conformance revision of the vendored Hub fixture package.
+assert.equal(minimumConformanceFixtureRevision, hubTestSupportMetadata.conformance_fixture_revision);
 
 // Pre-envelope conformance revisions fail closed under the current revision floor.
 const preGhostsnpDiagnostics = compatibilityDiagnosticsFromFrame({
@@ -15639,7 +15641,8 @@ function testHelloAckFixture() {
         "resize",
         "snapshot_delivery=ready_then_history"
       ],
-      conformance_fixture_revision: 49
+      // The fake Hub reports the vendored fixture package's host conformance revision.
+      conformance_fixture_revision: hubTestSupportMetadata.conformance_fixture_revision
     },
     terminal_compatibility: {
       protocol: "botster-terminal-v2",
