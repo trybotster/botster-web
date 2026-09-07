@@ -10,6 +10,7 @@
     "smoke:browser-runtime": "npm run build && node scripts/check-react-singleton-bundle.mjs && node scripts/browser-runtime-smoke.mjs",
     "smoke:react-singleton": "npm run build && node scripts/check-react-singleton-bundle.mjs",
     "smoke:live-packaged-protocol": "npm run build && node scripts/live-packaged-protocol-harness.mjs",
+    "smoke:real-hub": "node scripts/smoke-real-hub.mjs",
     "smoke:live-packaged-protocol:paste": "npm run build && BOTSTER_LIVE_PASTE_CASES=1 node scripts/live-packaged-protocol-harness.mjs",
     "proof:paste-receiver": "node scripts/paste-receiver-proof.mjs",
     "smoke:workspaces-compat": "npm run build && BOTSTER_LIVE_REQUIRE_WORKSPACES=1 node scripts/live-packaged-protocol-harness.mjs",

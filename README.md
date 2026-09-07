@@ -64,6 +64,27 @@ npm run observe:terminal-baseline:validate -- docs/reports/terminal-baseline-obs
 
 ## Live WebRTC acceptance
 
+The focused real-Hub lane requires explicit Hub and Web prebuilds. Build the candidate
+Hub install directory with the Hub repository's `script/build-dev-artifacts --out-dir`
+command. Then build this Web package with `npm run build`.
+
+Export the two candidate binary paths and the generated manifest path. Then run:
+
+```bash
+BOTSTER_HUB_BIN=/path/to/candidate/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/candidate/botster-session-worker \
+BOTSTER_CANDIDATE_MANIFEST=/path/to/candidate/install-manifest.json \
+npm run smoke:real-hub
+```
+
+The smoke verifies the manifest before Chromium starts. It uses mounted Restty clients for
+attach, keyboard input, resize, clipboard paste, two-peer rendering, and re-attach history.
+
+The paste row records the current policy. The client writes a 65,536-byte printable paste.
+The client rejects a 65,536-byte multiline paste because it uses `allowUnsafe=false`.
+Multiline paste support remains an unresolved product requirement pending a consent follow-up.
+This smoke does not fully accept Web paste.
+
 ```bash
 BOTSTER_HUB_BIN=/path/to/botster-hub \
 BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \

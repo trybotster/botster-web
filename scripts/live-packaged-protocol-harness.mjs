@@ -1,10 +1,8 @@
-import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { connect } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { chromium } from "playwright";
 import ts from "typescript";
@@ -24,12 +22,9 @@ import {
   HOST_CHROME,
   htmlAssetUrls,
   isTerminalDetached,
-  candidateBinaryProvenance,
-  candidateTargetDirectoryFromHubRealPath,
   sessionDetachIsolationProof,
   latestAcceptedWorkspacesUiTree,
   packageRuntimeNavigation,
-  packageEnsureDecision,
   reconnectGenerationEvidence,
   assertCallerOwnedSharedSessionContract,
   classifyAltExitRendererWrites,
@@ -42,6 +37,30 @@ import {
   workspacesLifecyclePartitionExpectations,
   workspacesLifecycleRegion
 } from "./live-packaged-protocol-helpers.mjs";
+import {
+  callTerminalControl,
+  ensurePackageEnabled as ensureHubPackageEnabled,
+  installLiveHarnessPageHooks,
+  listPackages,
+  loadBinaryProvenance as loadCandidateBinaryProvenance,
+  openDirectTerminalStream,
+  openHomeView,
+  openSessionTerminal,
+  readDirectTerminalModeFlags,
+  requestDaemonShutdown as requestHubShutdown,
+  runHubCommand as runHubCliCommand,
+  sendDaemonRequest,
+  spawnHubProcess as spawnHubChild,
+  typeThroughMountedTerminal,
+  waitForDirectTerminalChannelClosed,
+  waitForHtmlShell,
+  waitForHttpOk,
+  waitForPackageAppUrl,
+  waitForSocket,
+  waitForTerminalAttachState,
+  waitForTerminalCanvas,
+  waitForTerminalSession
+} from "./live-hub-lane.mjs";
 import {
   assignmentDigest,
   assertNoRequiredSmokeSkip,
@@ -73,7 +92,6 @@ const terminalProtocol = await (async () => {
 const { decodeModeFlags, encodePaste, encodeRawBytes, encodeResize, MAX_PASTE_BYTES } = terminalProtocol;
 
 
-const protocol = "botster-hub-daemon-v1";
 const packageRoot = process.cwd();
 const durableStateMode = process.env.BOTSTER_LIVE_DURABLE_STATE === "1";
 const suppliedDataDir = process.env.BOTSTER_LIVE_DATA_DIR;
@@ -703,12 +721,55 @@ try {
   }
 }
 
+function hubLaneContext() {
+  return { hubBin: process.env.BOTSTER_HUB_BIN, workerBin: process.env.BOTSTER_SESSION_WORKER_BIN, cwd: packageRoot };
+}
+
 async function requestDaemonShutdown() {
-  await runHubCommand(["shutdown", "--data-dir", webrtcDataDir]).catch((error) => {
-    if (hubProcess?.exitCode === null) {
-      throw error;
-    }
+  await requestHubShutdown({ ...hubLaneContext(), dataDir: webrtcDataDir, hubProcess });
+}
+
+async function runHubCommand(args) {
+  return runHubCliCommand(args, hubLaneContext());
+}
+
+function spawnHubProcess(dataDir) {
+  const env = { ...process.env };
+  if (packageEventsMode && packageEventsGapMode) {
+    // Hub honors BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX only when BOTSTER_ENV=test.
+    env.BOTSTER_ENV = "test";
+    process.stdout.write(
+      `[package-events] gap lane: hub BOTSTER_ENV=test BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX=${process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX}\n`
+    );
+  }
+  return spawnHubChild(dataDir, {
+    ...hubLaneContext(),
+    env,
+    onStdout: (chunk) => { hubStdout += chunk; },
+    onStderr: (chunk) => { hubStderr += chunk; }
   });
+}
+
+async function loadBinaryProvenance() {
+  return loadCandidateBinaryProvenance({
+    ...hubLaneContext(),
+    buildReceiptPath: process.env.BOTSTER_BINARY_BUILD_RECEIPT
+  });
+}
+
+async function ensurePackageEnabled(packageName, packagePath) {
+  const { initialDecision, finalDecision, packages } = await ensureHubPackageEnabled(packageName, packagePath, {
+    ...hubLaneContext(),
+    dataDir: webrtcDataDir
+  });
+  if (!initialDecision.install && packageName === "botster-web") {
+    reusedWebPackageProvenance = await resolveReusedWebPackageProvenance(
+      join(webrtcDataDir, "botster-hub.sock"),
+      packages.find((candidate) => candidate.package_name === packageName),
+      packagePath
+    );
+  }
+  return { initialDecision, finalDecision };
 }
 
 async function resolveContractMatrixPackagePath() {
@@ -869,55 +930,12 @@ async function navigatePackageRuntimeAndAssertWebrtc(
   return { grantId, subscriptionId, beforeUrl, afterUrl, navigationMode: mode };
 }
 
-async function callTerminalControl(page, method, ...args) {
-  await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl));
-  return page.evaluate(
-    async ({ method: nextMethod, args: nextArgs }) => {
-      return globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl[nextMethod](...nextArgs);
-    },
-    { method, args }
-  );
-}
-
-async function typeThroughMountedTerminal(page, data) {
-  await waitForTerminalCanvas(page);
-  await callTerminalControl(page, "focus");
-  const canvas = page.locator(".terminal-view-container canvas").first();
-  await canvas.click();
-  await page.waitForFunction(
-    () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
-    undefined,
-    { timeout: 5_000 }
-  ).catch((error) => {
-    throw new Error(`mounted terminal did not focus the Restty textarea: ${error.message}`);
-  });
-  // Prefer key events so Restty key encoding + ModeGatedInput semantic path run.
-  // insertText alone can skip keydown and leave a stale mouse semantic from click.
-  await page.keyboard.type(data, { delay: 10 });
-}
-
 async function openAppsView(page) {
   await page
     .getByLabel(HOST_CHROME.workbenchNavLabel)
     .getByRole("button", { name: HOST_CHROME.appsNavButtonName, exact: true })
     .click();
   await page.getByTestId(HOST_CHROME.appsViewTestId).waitFor();
-}
-
-async function openHomeView(page) {
-  await page
-    .getByLabel(HOST_CHROME.workbenchNavLabel)
-    .getByRole("button", { name: HOST_CHROME.homeNavButtonName, exact: true })
-    .click();
-  await page.getByTestId(HOST_CHROME.dashboardTestId).waitFor();
-}
-
-async function openSessionTerminal(page, sessionId) {
-  const sessionRow = page.getByTestId(HOST_CHROME.dashboardTestId).locator("ion-item").filter({
-    has: page.getByText(sessionId, { exact: true })
-  });
-  await sessionRow.click();
-  await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor();
 }
 
 async function openDiagnosticsView(page) {
@@ -3827,20 +3845,6 @@ async function addWorkspacesLifecycleReference(page, state, sessionId, { histori
   await submitWorkspacesAddSession(page, form, state, sessionId, `${sessionId} via ${choice.path}`);
 }
 
-function installLiveHarnessPageHooks(targetPage) {
-  return targetPage.addInitScript(() => {
-    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {
-      events: [],
-      terminal: []
-    };
-    globalThis.window.addEventListener("botster:webrtc-daemon-lifecycle", (event) => {
-      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events?.push({
-        kind: "webrtc_lifecycle",
-        payload: event.detail
-      });
-    });
-  });
-}
 
 async function openSecondaryWorkspacesProductionClient(state) {
   if (!browser) {
@@ -7398,22 +7402,6 @@ async function proveLiveTerminalAfterAttach(page, probe) {
   await waitForTerminalRendererWrite(page, `botster-web-production-echo:${probe}`);
 }
 
-async function waitForTerminalCanvas(page) {
-  await page.waitForFunction(
-    () => {
-      const canvas = globalThis.document.querySelector(".terminal-view-container canvas");
-      if (canvas?.tagName !== "CANVAS") return false;
-      const bounds = canvas.getBoundingClientRect();
-      return bounds.width > 0 && bounds.height > 0;
-    },
-    undefined,
-    { timeout: 15_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for mounted Restty canvas: ${error.message}`);
-  });
-}
-
-
 async function proveMountedMouseInput(page) {
   // Enable normal + SGR mouse tracking in the session. The authoritative MODES frame must
   // reach the data plane, and a real pointer press and release must become MOUSE operations.
@@ -8519,89 +8507,8 @@ async function proveDirectBinaryTerminalLane(page, sessionId) {
   };
 }
 
-async function openDirectTerminalStream(page, sessionId, subscriptionId, cycle) {
-  return page.evaluate(async ({ expectedSessionId, expectedSubscriptionId, cycleName }) => {
-    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    const control = harness?.transportControl;
-    if (!harness || !control?.streamTerminal) {
-      throw new Error("live harness transport control does not expose terminal streaming");
-    }
-    harness.directTerminalEvents = [];
-    const decode = harness.decodeTerminalBody;
-    if (typeof decode !== "function") throw new Error("live harness decodeTerminalBody is unavailable");
-    const stream = control.streamTerminal(expectedSessionId, expectedSubscriptionId, (event) => {
-      if ("body" in event) {
-        harness.directTerminalEvents.push({ ...decode(event.body), route: event.route, generation: event.generation, stream_epoch: event.streamEpoch });
-      } else {
-        harness.directTerminalEvents.push(event);
-      }
-    });
-    harness.directTerminalStream = stream;
-    await stream.ready;
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-      if (harness.directTerminalEvents.some((event) =>
-        event?.kind === "attach_state" && event.state === "attached"
-      )) {
-        return {
-          cycle: cycleName,
-          label: stream.label,
-          generation: stream.generation,
-          peer_generation: stream.peerGeneration
-        };
-      }
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    throw new Error(`direct terminal ${cycleName} attach did not reach attached state`);
-  }, {
-    expectedSessionId: sessionId,
-    expectedSubscriptionId: subscriptionId,
-    cycleName: cycle
-  });
-}
 
-async function readDirectTerminalModeFlags(page, sessionId) {
-  const response = await page.evaluate(async ({ expectedSessionId }) => {
-    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
-    if (!control?.request) throw new Error("live harness transport control is unavailable");
-    return control.request({ type: "read_mode_flags", session_id: expectedSessionId });
-  }, { expectedSessionId: sessionId });
-  if (
-    response.kind !== "read_mode_flags" ||
-    typeof response.mode_flags?.bracketed_paste !== "boolean" ||
-    !Number.isSafeInteger(response.mode_flags?.rows) ||
-    !Number.isSafeInteger(response.mode_flags?.cols)
-  ) {
-    throw new Error(`direct terminal mode flags are invalid: ${JSON.stringify(response)}`);
-  }
-  return response.mode_flags;
-}
 
-async function waitForDirectTerminalChannelClosed(page, label, subscriptionId) {
-  await page.waitForFunction(
-    ({ expectedLabel, expectedSubscriptionId }) => {
-      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      const localClose = events.some((entry) =>
-        entry.kind === "terminal_data_channel" &&
-        entry.payload?.state === "closed" &&
-        entry.payload?.label === expectedLabel
-      );
-      const detachSent = events.some((entry) =>
-        entry.kind === "daemon_request" &&
-        entry.payload?.type === "detach" &&
-        entry.payload?.subscription_id === expectedSubscriptionId
-      );
-      const adapterClosed = events.some((entry) =>
-        entry.kind === "daemon_event" &&
-        entry.payload?.type === "terminal_subscription_closed" &&
-        entry.payload?.subscription_id === expectedSubscriptionId
-      );
-      return localClose || (detachSent && adapterClosed);
-    },
-    { expectedLabel: label, expectedSubscriptionId: subscriptionId },
-    { timeout: 10_000 }
-  );
-}
 
 async function assertNoSuppliedSessionShutdown(page, sessionId) {
   const shutdowns = await page.evaluate(({ expectedSessionId }) =>
@@ -9457,43 +9364,6 @@ async function waitForRunningSessionFrame(page) {
   );
 }
 
-async function waitForTerminalAttachState(page, states) {
-  const expectedStates = Array.isArray(states) ? states : [states];
-  await page.waitForFunction(
-    ({ expectedStates: nextExpectedStates, statusClass, attachStateAttr }) => {
-      const status = globalThis.document
-        .querySelector(`.${statusClass}`)
-        ?.getAttribute(attachStateAttr);
-      return nextExpectedStates.includes(status);
-    },
-    {
-      expectedStates,
-      statusClass: HOST_CHROME.terminalStatusClass,
-      attachStateAttr: HOST_CHROME.terminalAttachStateAttr
-    },
-    { timeout: 15_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for terminal attach state ${expectedStates.join(" or ")}: ${error.message}`);
-  });
-}
-
-async function waitForTerminalSession(page, sessionId) {
-  await page.waitForFunction(
-    ({ expectedSessionId, containerClass, sessionIdAttr }) =>
-      globalThis.document
-        .querySelector(`.${containerClass}`)
-        ?.getAttribute(sessionIdAttr) === expectedSessionId,
-    {
-      expectedSessionId: sessionId,
-      containerClass: HOST_CHROME.terminalContainerClass,
-      sessionIdAttr: HOST_CHROME.terminalSessionIdAttr
-    },
-    { timeout: 15_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for terminal session ${sessionId}: ${error.message}`);
-  });
-}
-
 /**
  * Wait until production release has unmounted the session terminal host and shown dashboard.
  * Uses shared HOST_CHROME constants for DOM extraction and shared isTerminalDetached decision.
@@ -9964,38 +9834,6 @@ function callerOwnedRuntimeProvenance(status, packages, servedHtml, { requireWor
   };
 }
 
-async function ensurePackageEnabled(packageName, packagePath) {
-  const socketPath = join(webrtcDataDir, "botster-hub.sock");
-  let packages = await listPackages(socketPath);
-  const initialDecision = packageEnsureDecision(packages, packageName);
-  console.log(`live package ensure ${JSON.stringify({ package_name: packageName, ...initialDecision })}`);
-
-  if (initialDecision.install) {
-    await runHubCommand(["packages", "install", "--data-dir", webrtcDataDir, "--path", packagePath]);
-    packages = await listPackages(socketPath);
-  }
-
-  const enableDecision = packageEnsureDecision(packages, packageName);
-  if (enableDecision.enable) {
-    await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, packageName]);
-    packages = await listPackages(socketPath);
-  }
-
-  const finalDecision = packageEnsureDecision(packages, packageName);
-  if (finalDecision.install || finalDecision.enable) {
-    throw new Error(
-      `package ensure did not reach enabled state for ${packageName}: ${JSON.stringify(finalDecision)}`
-    );
-  }
-  if (!initialDecision.install && packageName === "botster-web") {
-    reusedWebPackageProvenance = await resolveReusedWebPackageProvenance(
-      socketPath,
-      packages.find((candidate) => candidate.package_name === packageName),
-      packagePath
-    );
-  }
-  return { initialDecision, finalDecision };
-}
 
 async function resolveReusedWebPackageProvenance(socketPath, packageRecord, expectedPackageRoot) {
   if (!packageRecord || typeof packageRecord.version !== "string") {
@@ -10063,13 +9901,6 @@ function recordServedWebBuildProvenance(servedHtml, packageProvenance) {
   })}`);
 }
 
-async function listPackages(socketPath) {
-  const response = await sendDaemonRequest(socketPath, { type: "list_packages" });
-  if (response.error || !Array.isArray(response.packages)) {
-    throw new Error(`structured package list failed: ${JSON.stringify(response)}`);
-  }
-  return response.packages;
-}
 
 async function seedDurableExitedSessions() {
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
@@ -10133,272 +9964,18 @@ async function restartHubWithDurableState() {
   assertPackageReused(initialDecision, "botster-web");
 }
 
-async function loadBinaryProvenance() {
-  if (!process.env.BOTSTER_HUB_BIN) {
-    throw new Error("WebRTC live packaged protocol harness requires BOTSTER_HUB_BIN so it can own an isolated hub.");
-  }
-  if (!process.env.BOTSTER_SESSION_WORKER_BIN) {
-    throw new Error(
-      "WebRTC live packaged protocol harness requires BOTSTER_SESSION_WORKER_BIN so readiness evidence identifies the exact worker binary."
-    );
-  }
 
-  const suppliedHub = process.env.BOTSTER_HUB_BIN;
-  const suppliedWorker = process.env.BOTSTER_SESSION_WORKER_BIN;
-  if (!existsSync(suppliedHub)) {
-    throw new Error(`botster-hub provenance binary does not exist: path=${suppliedHub}`);
-  }
-  if (!existsSync(suppliedWorker)) {
-    throw new Error(`botster-session-worker provenance binary does not exist: path=${suppliedWorker}`);
-  }
 
-  const hubPath = realpathSync(suppliedHub);
-  const workerPath = realpathSync(suppliedWorker);
-  const targetDir = realpathSync(candidateTargetDirectoryFromHubRealPath(hubPath));
-  const checkoutRoot = dirname(targetDir);
-  const lockCoreRev = lockPackageRevision(join(checkoutRoot, "Cargo.lock"), "botster-core");
-  return candidateBinaryProvenance({
-    hubRealPath: hubPath,
-    workerRealPath: workerPath,
-    targetDirRealPath: targetDir,
-    hubGitHead: gitHeadForCargoRoot(checkoutRoot),
-    lockCoreRev,
-    checkoutClean: gitCheckoutIsClean(checkoutRoot),
-    buildReceipt: loadOptionalBuildReceipt()
-  });
-}
 
-function gitCheckoutIsClean(repoRoot) {
-  try {
-    const output = execFileSync("git", ["-C", repoRoot, "status", "--porcelain"], {
-      encoding: "utf8"
-    });
-    return output.trim() === "";
-  } catch {
-    return false;
-  }
-}
 
-function loadOptionalBuildReceipt() {
-  const receiptPath = process.env.BOTSTER_BINARY_BUILD_RECEIPT;
-  if (!receiptPath) {
-    return null;
-  }
-  if (!existsSync(receiptPath)) {
-    throw new Error(`binary build receipt does not exist: path=${receiptPath}`);
-  }
-  return JSON.parse(readFileSync(receiptPath, "utf8"));
-}
 
-function lockPackageRevision(lockPath, packageName) {
-  if (!existsSync(lockPath)) return null;
-  const text = readFileSync(lockPath, "utf8");
-  const pattern = new RegExp(
-    `name = "${packageName}"[\\s\\S]*?source = "git\\+[^"]*[?&]rev=([0-9a-f]+)`,
-    "m"
-  );
-  return text.match(pattern)?.[1] ?? null;
-}
 
-function gitHeadForCargoRoot(repoRoot) {
-  try {
-    return execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], {
-      encoding: "utf8"
-    }).trim();
-  } catch {
-    return null;
-  }
-}
 
-function spawnHubProcess(dataDir) {
-  const args = ["start", "--data-dir", dataDir];
-  if (process.env.BOTSTER_SESSION_WORKER_BIN) {
-    args.push("--session-worker-bin", process.env.BOTSTER_SESSION_WORKER_BIN);
-  }
 
-  const env = { ...process.env };
-  if (packageEventsMode && packageEventsGapMode) {
-    // Hub honors BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX only when BOTSTER_ENV=test.
-    env.BOTSTER_ENV = "test";
-    process.stdout.write(
-      `[package-events] gap lane: hub BOTSTER_ENV=test BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX=${process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX}\n`
-    );
-  }
 
-  const child = spawn(process.env.BOTSTER_HUB_BIN, args, {
-    cwd: packageRoot,
-    stdio: ["ignore", "pipe", "pipe"],
-    env
-  });
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    hubStdout += chunk;
-    process.stdout.write(`[botster-hub] ${chunk}`);
-  });
-  child.stderr.on("data", (chunk) => {
-    hubStderr += chunk;
-    process.stderr.write(`[botster-hub] ${chunk}`);
-  });
-  return child;
-}
 
-async function runHubCommand(args) {
-  const child = spawn(process.env.BOTSTER_HUB_BIN, args, {
-    cwd: packageRoot,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk;
-    process.stdout.write(`[botster-hub-cli] ${chunk}`);
-  });
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk;
-    process.stderr.write(`[botster-hub-cli] ${chunk}`);
-  });
-  const [code, signal] = await once(child, "exit");
-  if (code !== 0) {
-    throw new Error(`botster-hub ${args.join(" ")} failed (code=${code}, signal=${signal ?? "none"}):\n${stdout}${stderr}`);
-  }
-  return stdout;
-}
 
-async function waitForPackageAppUrl(socketPath) {
-  const deadline = Date.now() + 15_000;
-  let lastState = "missing";
-  let lastApp;
-  while (Date.now() < deadline) {
-    const response = await sendDaemonRequest(socketPath, { type: "list_apps" });
-    const app = response.apps?.find((candidate) => candidate.package_name === "botster-web" && candidate.entrypoint_id === "web-client");
-    lastApp = app;
-    if (app?.lifecycle_state) {
-      lastState = app.lifecycle_state;
-    }
-    if (app?.launch_target?.local_url) {
-      return app.launch_target.local_url;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(
-    `timed out waiting for botster-web/web-client local_url; lifecycle_state=${lastState}; app=${JSON.stringify(lastApp)}`
-  );
-}
 
-async function sendDaemonRequest(socketPath, request) {
-  const socket = connect(socketPath);
-  await once(socket, "connect");
-  socket.setEncoding("utf8");
-  socket.write(`${JSON.stringify({ protocol })}\n`);
-  const hello = JSON.parse(await readSocketLine(socket));
-  if (hello.protocol !== protocol) {
-    socket.end();
-    throw new Error("daemon hello protocol mismatch");
-  }
-  socket.write(`${JSON.stringify(request)}\n`);
-  const reply = JSON.parse(await readSocketLine(socket));
-  socket.end();
-  return reply;
-}
-
-async function readSocketLine(socket) {
-  return new Promise((resolve, reject) => {
-    let buffer = "";
-    const cleanup = () => {
-      socket.off("data", onData);
-      socket.off("error", onError);
-      socket.off("end", onEnd);
-    };
-    const onData = (chunk) => {
-      buffer += chunk;
-      const newline = buffer.indexOf("\n");
-      if (newline >= 0) {
-        cleanup();
-        resolve(buffer.slice(0, newline));
-      }
-    };
-    const onError = (error) => {
-      cleanup();
-      reject(error);
-    };
-    const onEnd = () => {
-      cleanup();
-      reject(new Error("daemon socket closed before reply"));
-    };
-
-    socket.on("data", onData);
-    socket.on("error", onError);
-    socket.on("end", onEnd);
-  });
-}
-
-async function waitForSocket(socketPath, exitMessage) {
-  const deadline = Date.now() + 15_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    const earlyExit = exitMessage?.();
-    if (earlyExit) {
-      throw new Error(earlyExit);
-    }
-
-    const connected = await new Promise((resolve) => {
-      const socket = connect(socketPath);
-      socket.once("connect", () => {
-        socket.end();
-        resolve(true);
-      });
-      socket.once("error", (error) => {
-        lastError = error;
-        resolve(false);
-      });
-    });
-    if (connected) return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw lastError ?? new Error(`timed out waiting for hub socket ${socketPath}`);
-}
-
-async function waitForHttpOk(url, exitMessage) {
-  const deadline = Date.now() + 15_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    const earlyExit = exitMessage?.();
-    if (earlyExit) {
-      throw new Error(earlyExit);
-    }
-    try {
-      const response = await fetch(url);
-      if (response.ok) return;
-      lastError = new Error(`HTTP ${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw lastError ?? new Error(`timed out waiting for ${url}`);
-}
-
-async function waitForHtmlShell(url) {
-  const deadline = Date.now() + 15_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      const body = await response.text();
-      if (response.ok && body.includes("<div id=\"root\"></div>") && body.includes("__BOTSTER_PACKAGE_RUNTIME__")) {
-        return body;
-      }
-      lastError = new Error(`packaged UI shell was not served from ${url}`);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-    }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  }
-  throw lastError ?? new Error(`timed out waiting for packaged UI shell from ${url}`);
-}
 
 function assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors }) {
   const message = browserFailureSummary({ consoleEvents, pageErrors, responseErrors });

@@ -570,7 +570,10 @@ export function matchCompleteLine(text, pattern) {
   return text.match(pattern);
 }
 
-export function productionSessionScriptSource() {
+export function productionSessionScriptSource({ receiverWatchdogSeconds = 30 } = {}) {
+  if (!Number.isSafeInteger(receiverWatchdogSeconds) || receiverWatchdogSeconds < 1) {
+    throw new Error("receiverWatchdogSeconds must be a positive integer");
+  }
   return [
     // Exact paste receiver. The harness announces the wire byte count N it expects the PTY to
     // receive (a positive integer bounded by MAX_PASTE_BYTES plus the 12 bracket marker bytes).
@@ -578,7 +581,7 @@ export function productionSessionScriptSource() {
     // save or the raw switch fails. Raw mode (no icrnl, no opost, no isig, no line editing)
     // with echo off is set before the ready line. The reader (dd bs=1 count=N from /dev/tty,
     // which writes each byte as it arrives so a killed reader loses nothing, unlike head) and
-    // a 30 s wall-clock watchdog are owned by pid: both are killed and reaped on success, on
+    // a caller-selected wall-clock watchdog are owned by pid: both are killed and reaped on success, on
     // timeout, and from the script's exit and signal traps, which also remove the exact
     // temporary file and restore the saved terminal state. VTIME 10 s ends an idle read (dd
     // stops on the zero-length read). The receipt line carries the announced N, the received
@@ -610,7 +613,7 @@ export function productionSessionScriptSource() {
     "  if ! stty raw -echo min 0 time 100 2>/dev/null; then receiver_cleanup; echo botster-web-production-receive-error:stty-raw; return; fi",
     "  dd bs=1 count=\"$n\" < /dev/tty > \"$receive_file\" 2>/dev/null &",
     "  reader_pid=$!",
-    "  ( trap 'kill $sleep_pid 2>/dev/null; wait $sleep_pid 2>/dev/null; exit 0' TERM; sleep 30 & sleep_pid=$!; wait $sleep_pid; kill $reader_pid 2>/dev/null ) &",
+    `  ( trap 'kill $sleep_pid 2>/dev/null; wait $sleep_pid 2>/dev/null; exit 0' TERM; sleep ${receiverWatchdogSeconds} & sleep_pid=$!; wait $sleep_pid; kill $reader_pid 2>/dev/null ) &`,
     "  watchdog_pid=$!",
     "  echo botster-web-production-receive-ready:$n",
     "  wait $reader_pid 2>/dev/null",
