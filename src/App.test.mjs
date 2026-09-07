@@ -15450,7 +15450,8 @@ function testHelloAckFixture() {
         "snapshot_delivery=ready_then_history",
         "transport=duplex_binary"
       ],
-      conformance_fixture_revision: 3
+      // The fake Hub reports the vendored Core artifact's conformance revision.
+      conformance_fixture_revision: terminalProtocolModule.CONFORMANCE_FIXTURE_REVISION
     },
     diagnostics: []
   };
