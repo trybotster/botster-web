@@ -6050,6 +6050,84 @@ try {
   }
 }
 
+// Outstanding-request slots are reserved synchronously, before encryption: with every
+// request held at an encryption barrier, no more than 32 Attach envelopes reach the wire,
+// callers past the window wait in a bounded queue, a cancellation releases its slot to the
+// next waiter, and each settled response admits exactly one more send.
+{
+  assert.equal(hostControlRequestLimits.maxWaitingRequests, 256);
+  const barrierChannel = createFakeDataChannel();
+  const barrierClient = createWebrtcTestClient([barrierChannel], localWebrtcBootstrapFixture);
+  const warmup = barrierClient.request({ type: "status" });
+  await waitForTestCondition(() => barrierChannel.sent.length === 1);
+  await emitChunkedTestResponse(barrierChannel, localWebrtcBootstrapFixture.grant_secret, { kind: "events", events: [] }, { messageId: "barrier-warmup" });
+  await warmup;
+
+  const subtlePrototype = Object.getPrototypeOf(globalThis.crypto.subtle);
+  const originalEncrypt = subtlePrototype.encrypt;
+  const held = [];
+  let barrierOpen = false;
+  subtlePrototype.encrypt = function gatedEncrypt(...args) {
+    if (barrierOpen) return originalEncrypt.apply(this, args);
+    return new Promise((resolve, reject) => {
+      held.push(() => originalEncrypt.apply(this, args).then(resolve, reject));
+    });
+  };
+  const attachEnvelopes = async () =>
+    (await Promise.all(barrierChannel.sent.map((sent) => decodeTestClientFrame(localWebrtcBootstrapFixture.grant_secret, sent))))
+      .filter((frame) => frame?.frame === "request" && frame.request.type === "attach");
+  const streams = [];
+  try {
+    const total = hostControlRequestLimits.maxOutstandingRequests + 8;
+    for (let index = 0; index < total; index += 1) {
+      const stream = barrierClient.streamTerminal(`barrier-session-${index}`, `barrier-subscription-${index}`, () => undefined);
+      stream.ready.catch(() => undefined);
+      streams.push(stream);
+    }
+    await flushMicrotasks();
+    await flushMicrotasks();
+    assert.equal(held.length, hostControlRequestLimits.maxOutstandingRequests, "exactly 32 requests hold slots and reached encryption; 8 wait for a slot");
+    assert.equal(barrierChannel.sent.length, 1, "nothing beyond the warmup is on the wire while the barrier holds");
+    // Five slot holders are abandoned while still encrypting: their slots go to waiters.
+    const abandoned = streams.slice(0, 5);
+    for (const stream of abandoned) stream.abandon();
+    barrierOpen = true;
+    for (const release of held.splice(0)) release();
+    await waitForTestCondition(async () => (await attachEnvelopes()).length === hostControlRequestLimits.maxOutstandingRequests);
+    await flushMicrotasks();
+    assert.equal((await attachEnvelopes()).length, hostControlRequestLimits.maxOutstandingRequests, "32 Attach envelopes on the wire: 27 holders plus 5 waiters admitted by the released slots");
+    for (const stream of abandoned) assert.equal(stream.attachSent, false, "an abandoned holder never wrote its Attach");
+    const sentIds = new Set((await attachEnvelopes()).map((frame) => frame.request.subscription_id));
+    for (const stream of abandoned) {
+      // Abandoned streams are the first five subscriptions; none of their ids reached the wire.
+      assert.equal(sentIds.has(`barrier-subscription-${streams.indexOf(stream)}`), false);
+    }
+    // Each settled response admits exactly one more waiter; the window never exceeds 32.
+    let settled = 0;
+    for (let round = 0; round < 3; round += 1) {
+      const frame = (await attachEnvelopes())[round];
+      await emitChunkedTestResponse(
+        barrierChannel,
+        localWebrtcBootstrapFixture.grant_secret,
+        { kind: "operator_error", error: { code: "runtime_error", message: "barrier settle" } },
+        { messageId: `barrier-settle-${round}`, requestId: frame.request_id }
+      );
+      settled += 1;
+      await waitForTestCondition(async () => (await attachEnvelopes()).length === hostControlRequestLimits.maxOutstandingRequests + settled);
+      await flushMicrotasks();
+      assert.equal((await attachEnvelopes()).length - settled, hostControlRequestLimits.maxOutstandingRequests, "outstanding Attach envelopes stay at the window");
+    }
+    assert.equal((await attachEnvelopes()).length, total - abandoned.length, "every non-abandoned request was sent exactly once");
+  } finally {
+    barrierOpen = true;
+    for (const release of held.splice(0)) release();
+    subtlePrototype.encrypt = originalEncrypt;
+    for (const stream of streams) stream.abandon();
+    barrierClient.disconnect();
+    await flushMicrotasks();
+  }
+}
+
   const strictChannels = [createFakeDataChannel()];
   const strictClient = createWebrtcTestClient(strictChannels, localWebrtcBootstrapFixture, {
     eventSubscriptionIdGenerator: () => `strict-${strictChannels[0].sent.length + 1}`

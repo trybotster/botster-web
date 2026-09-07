@@ -94,8 +94,17 @@ export const localWebrtcReconnectPolicy = Object.freeze({
  * frees. Request ids are decimal u64 strings, strictly increasing per connection generation.
  */
 export const hostControlRequestLimits = Object.freeze({
-  maxOutstandingRequests: 32
+  /** Host-control v9: at most 32 requests outstanding per connection generation. */
+  maxOutstandingRequests: 32,
+  /** Web policy: callers held for a slot beyond this count are refused, never queued without bound. */
+  maxWaitingRequests: 256
 });
+
+/** One reserved outstanding-request slot; released exactly once by whoever holds it. */
+type RequestSlot = {
+  readonly generation: number;
+  release(): void;
+};
 
 /**
  * One connection attempt. `generation` is the canonical attempt identity: it is allocated
@@ -122,6 +131,8 @@ type PendingRequest = {
   requestId: string;
   requestType: string;
   kind: PendingKind;
+  /** The outstanding slot this request holds until it settles; the Hello holds none. */
+  slot?: RequestSlot;
   resolve(response: DaemonResponse | DaemonHelloAck): void;
   reject(error: unknown): void;
 };
@@ -604,7 +615,9 @@ class WebrtcDaemonTransport {
   /** Pending host requests keyed by `(connection generation, request_id)`. */
   private readonly pendingRequests = new Map<string, PendingRequest>();
   /** Requests waiting for one of the 32 outstanding slots, in submission order. */
-  private readonly requestSlotWaiters: Array<{ generation: number; grant(): void; cancel(error: unknown): void }> = [];
+  private readonly requestSlotWaiters: Array<{ generation: number; grant(slot: RequestSlot): void; cancel(error: unknown): void }> = [];
+  /** Reserved outstanding slots per connection generation, counted at reservation, not at send. */
+  private readonly reservedSlots = new Map<number, number>();
   private nextRequestId = 1;
   private peerFailed = false;
   private readonly responseAssemblies = new Map<string, ResponseAssembly>();
@@ -671,9 +684,9 @@ class WebrtcDaemonTransport {
     }
     recordLiveHarnessEvent("daemon_request", request);
     const generation = this.peerGeneration;
-    await this.acquireRequestSlot(generation);
+    const slot = await this.acquireRequestSlot(generation);
     if (options.isCancelled?.()) {
-      this.releaseRequestSlot(generation);
+      slot.release();
       throw webrtcFailure("transport", `local WebRTC request cancelled before send: ${request.type}`);
     }
     const requestId = String(this.nextRequestId++);
@@ -683,34 +696,58 @@ class WebrtcDaemonTransport {
       requestId,
       request.type,
       "request",
+      slot,
       options,
       (payload) => payload as DaemonResponse
     );
     return response;
   }
 
-  private outstandingRequests(generation: number): number {
-    let count = 0;
-    for (const pending of this.pendingRequests.values()) {
-      if (pending.generation === generation && pending.kind === "request") count += 1;
-    }
-    return count;
+  private reservedSlotCount(generation: number): number {
+    return this.reservedSlots.get(generation) ?? 0;
   }
 
-  /** Holds the caller until fewer than 32 requests are outstanding on this generation. */
-  private acquireRequestSlot(generation: number): Promise<void> {
+  /** Reserves one slot synchronously; the reservation releases exactly once. */
+  private reserveSlot(generation: number): RequestSlot {
+    this.reservedSlots.set(generation, this.reservedSlotCount(generation) + 1);
+    let released = false;
+    return {
+      generation,
+      release: () => {
+        if (released) return;
+        released = true;
+        const remaining = this.reservedSlotCount(generation) - 1;
+        if (remaining <= 0) this.reservedSlots.delete(generation);
+        else this.reservedSlots.set(generation, remaining);
+        this.grantWaitingSlot();
+      }
+    };
+  }
+
+  /**
+   * Acquires one of the 32 outstanding slots for this generation. The slot is reserved
+   * synchronously before this method returns or a waiter is resolved, so concurrent callers
+   * still encrypting cannot all pass the check. Waiting callers are bounded.
+   */
+  private acquireRequestSlot(generation: number): Promise<RequestSlot> {
     if (
       this.requestSlotWaiters.length === 0 &&
-      this.outstandingRequests(generation) < hostControlRequestLimits.maxOutstandingRequests
+      this.reservedSlotCount(generation) < hostControlRequestLimits.maxOutstandingRequests
     ) {
-      return Promise.resolve();
+      return Promise.resolve(this.reserveSlot(generation));
     }
-    return new Promise<void>((resolve, reject) => {
+    if (this.requestSlotWaiters.length >= hostControlRequestLimits.maxWaitingRequests) {
+      return Promise.reject(
+        webrtcFailure("data-plane", `local WebRTC request queue is full: ${hostControlRequestLimits.maxWaitingRequests} callers already wait for a slot`)
+      );
+    }
+    return new Promise<RequestSlot>((resolve, reject) => {
       this.requestSlotWaiters.push({ generation, grant: resolve, cancel: reject });
     });
   }
 
-  private releaseRequestSlot(generation: number): void {
+  /** Hands a freed slot to the first waiter of the current generation, reserving it for them. */
+  private grantWaitingSlot(): void {
     while (this.requestSlotWaiters.length > 0) {
       const waiter = this.requestSlotWaiters[0];
       if (waiter.generation !== this.peerGeneration) {
@@ -718,9 +755,9 @@ class WebrtcDaemonTransport {
         waiter.cancel(webrtcFailure("transport", "local WebRTC connection generation changed while waiting for a request slot"));
         continue;
       }
-      if (this.outstandingRequests(generation) >= hostControlRequestLimits.maxOutstandingRequests) return;
+      if (this.reservedSlotCount(waiter.generation) >= hostControlRequestLimits.maxOutstandingRequests) return;
       this.requestSlotWaiters.shift();
-      waiter.grant();
+      waiter.grant(this.reserveSlot(waiter.generation));
       return;
     }
   }
@@ -1422,23 +1459,26 @@ class WebrtcDaemonTransport {
     requestId: string,
     requestType: string,
     kind: PendingKind,
+    slot: RequestSlot | undefined,
     sendOptions: { onSent?: () => void; isCancelled?: () => boolean } | undefined,
     parse: (payload: unknown) => T
   ): Promise<T> {
     const channel = this.dataChannel;
     const key = this.cryptoKey;
     if (!channel || !key || channel.readyState !== "open") {
+      slot?.release();
       throw webrtcFailure("transport", "local WebRTC data channel is not open");
     }
     let envelope: AesGcmEnvelope;
     try {
       envelope = await encryptJsonPayload(key, plaintext);
     } catch (error) {
+      slot?.release();
       throw webrtcFailure("encryption", `local WebRTC request encryption failed: ${errorMessage(error)}`);
     }
     if (sendOptions?.isCancelled?.()) {
       // Encryption finished after the caller abandoned the request: nothing is written.
-      if (kind === "request") this.releaseRequestSlot(this.peerGeneration);
+      slot?.release();
       throw webrtcFailure("transport", `local WebRTC request cancelled before send: ${requestType}`);
     }
     return new Promise<T>((resolve, reject) => {
@@ -1460,6 +1500,7 @@ class WebrtcDaemonTransport {
         generation,
         requestId,
         requestType,
+        slot,
         kind,
         resolve: (response) => {
           window.clearTimeout(timeout);
@@ -1498,7 +1539,7 @@ class WebrtcDaemonTransport {
     if (this.pendingRequests.get(key) !== pending) return;
     this.pendingRequests.delete(key);
     settle(pending);
-    if (pending.kind === "request") this.releaseRequestSlot(pending.generation);
+    pending.slot?.release();
   }
 
   private async sendHello(attempt: ConnectAttempt): Promise<DaemonHelloAck> {
@@ -1517,7 +1558,7 @@ class WebrtcDaemonTransport {
       }
     };
     recordLiveHarnessEvent("daemon_hello", hello.hello);
-    this.helloPromise = this.sendEncrypted<DaemonHelloAck>(hello, "", "hello", "hello", undefined, (payload) => {
+    this.helloPromise = this.sendEncrypted<DaemonHelloAck>(hello, "", "hello", "hello", undefined, undefined, (payload) => {
       const ack = payload as DaemonHelloAck;
       if (!ack || typeof ack.protocol !== "string" || !ack.compatibility) {
         throw webrtcFailure("data-plane", "local WebRTC hello ack is not a DaemonHelloAck");
@@ -2367,6 +2408,7 @@ class WebrtcDaemonTransport {
     }
     for (const pending of failing) {
       pending.reject(error);
+      pending.slot?.release();
     }
     this.cancelRequestSlotWaiters(error, generation);
   }
