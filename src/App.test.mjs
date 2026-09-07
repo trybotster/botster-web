@@ -6128,6 +6128,83 @@ try {
   }
 }
 
+// A request belongs to the connection it started on. With its encryption held across a
+// loss and reconnect, an ordinary request whose id the new generation reuses fails with
+// the connection change, never enters the new pending map, and never displaces the new
+// request with the same id; both requests release their slots.
+{
+  const generationChannels = [createFakeDataChannel(), createFakeDataChannel()];
+  const generationClient = createWebrtcTestClient(generationChannels, localWebrtcBootstrapFixture);
+  const warmup = generationClient.request({ type: "status" });
+  await waitForTestCondition(() => generationChannels[0].sent.length === 1);
+  await emitChunkedTestResponse(generationChannels[0], localWebrtcBootstrapFixture.grant_secret, { kind: "events", events: [] }, { messageId: "generation-warmup" });
+  await warmup;
+
+  // Gate only the client's own request frames; Hello, Hello acks, and test envelopes pass.
+  const subtlePrototype = Object.getPrototypeOf(globalThis.crypto.subtle);
+  const originalEncrypt = subtlePrototype.encrypt;
+  const heldRequests = [];
+  const isRequestFrame = (data) => {
+    try {
+      return new TextDecoder().decode(data).includes('"frame":"request"');
+    } catch {
+      return false;
+    }
+  };
+  subtlePrototype.encrypt = function gatedEncrypt(...args) {
+    if (!isRequestFrame(args[2])) return originalEncrypt.apply(this, args);
+    return new Promise((resolve, reject) => {
+      heldRequests.push(() => originalEncrypt.apply(this, args).then(resolve, reject));
+    });
+  };
+  try {
+    const stale = generationClient.request({ type: "list_sessions" });
+    const staleRejection = assert.rejects(stale, (error) => error instanceof WebrtcDaemonClientError && /connection changed while list_sessions was encrypting/.test(error.message));
+    await waitForTestCondition(() => heldRequests.length === 1);
+    // Loss: the stale request holds a slot on generation 1 and is still encrypting.
+    const lifecycleBefore = lifecycleEvents.length;
+    generationChannels[0].close();
+    await waitForTestCondition(() => lifecycleEvents.slice(lifecycleBefore).some((event) => event.detail.type === "data-channel-closed"));
+    // Reconnect on a new request; its id restarts at 1, the same id the stale request took.
+    const fresh = generationClient.request({ type: "list_apps" });
+    await waitForTestCondition(() => heldRequests.length === 2);
+    assert.equal(generationChannels[1].readyState, "open", "the replacement peer is connected");
+    // The stale encryption completes after the reconnect.
+    heldRequests[0]();
+    await staleRejection;
+    assert.equal(generationChannels[1].sent.length, 0, "the stale request wrote nothing to the new peer");
+    // The fresh request proceeds with the reused id and settles normally.
+    heldRequests[1]();
+    await waitForTestCondition(() => generationChannels[1].sent.length === 1);
+    const freshFrame = await decodeTestClientFrame(localWebrtcBootstrapFixture.grant_secret, generationChannels[1].sent[0]);
+    assert.equal(freshFrame.request.type, "list_apps");
+    assert.equal(freshFrame.request_id, "1", "request ids restart at 1 on the new generation");
+    await emitChunkedTestResponse(
+      generationChannels[1],
+      localWebrtcBootstrapFixture.grant_secret,
+      { kind: "apps", apps: [], events: [], diagnostics: [] },
+      { messageId: "generation-fresh", requestId: freshFrame.request_id }
+    );
+    assert.equal((await fresh).kind, "apps");
+    // Both slots are released: the full outstanding window is available on the new peer.
+    subtlePrototype.encrypt = originalEncrypt;
+    const sentBefore = generationChannels[1].sent.length;
+    const fill = Array.from({ length: hostControlRequestLimits.maxOutstandingRequests }, () => {
+      const pending = generationClient.request({ type: "status" });
+      pending.catch(() => undefined);
+      return pending;
+    });
+    await waitForTestCondition(() => generationChannels[1].sent.length === sentBefore + hostControlRequestLimits.maxOutstandingRequests);
+    generationClient.disconnect();
+    await Promise.allSettled(fill);
+  } finally {
+    subtlePrototype.encrypt = originalEncrypt;
+    for (const release of heldRequests.splice(0)) release();
+    generationClient.disconnect();
+    await flushMicrotasks();
+  }
+}
+
   const strictChannels = [createFakeDataChannel()];
   const strictClient = createWebrtcTestClient(strictChannels, localWebrtcBootstrapFixture, {
     eventSubscriptionIdGenerator: () => `strict-${strictChannels[0].sent.length + 1}`

@@ -100,6 +100,13 @@ export const hostControlRequestLimits = Object.freeze({
   maxWaitingRequests: 256
 });
 
+/** The connection a request belongs to, fixed before any async work and re-checked after each await. */
+type SendTarget = {
+  readonly generation: number;
+  readonly channel: RTCDataChannel;
+  readonly key: CryptoKey;
+};
+
 /** One reserved outstanding-request slot; released exactly once by whoever holds it. */
 type RequestSlot = {
   readonly generation: number;
@@ -683,15 +690,23 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("transport", `local WebRTC request cancelled before send: ${request.type}`);
     }
     recordLiveHarnessEvent("daemon_request", request);
-    const generation = this.peerGeneration;
-    const slot = await this.acquireRequestSlot(generation);
+    // The request belongs to this connection for its whole life: generation, channel, and
+    // key are fixed here and re-checked after every await. A request never migrates to a
+    // later peer; after a loss it fails and the caller decides whether to resend.
+    const target: SendTarget = { generation: this.peerGeneration, channel, key };
+    const slot = await this.acquireRequestSlot(target.generation);
     if (options.isCancelled?.()) {
       slot.release();
       throw webrtcFailure("transport", `local WebRTC request cancelled before send: ${request.type}`);
     }
+    if (!this.ownsSendTarget(target) || slot.generation !== target.generation) {
+      slot.release();
+      throw webrtcFailure("transport", `local WebRTC connection changed while ${request.type} waited for a request slot`);
+    }
     const requestId = String(this.nextRequestId++);
     const envelope: ClientFrame = { frame: "request", request_id: requestId, request };
     const response = await this.sendEncrypted<DaemonResponse>(
+      target,
       envelope,
       requestId,
       request.type,
@@ -701,6 +716,16 @@ class WebrtcDaemonTransport {
       (payload) => payload as DaemonResponse
     );
     return response;
+  }
+
+  /** True while the target's generation is current and its channel is the live open channel. */
+  private ownsSendTarget(target: SendTarget): boolean {
+    return (
+      target.generation === this.peerGeneration &&
+      this.dataChannel === target.channel &&
+      this.cryptoKey === target.key &&
+      target.channel.readyState === "open"
+    );
   }
 
   private reservedSlotCount(generation: number): number {
@@ -1455,6 +1480,7 @@ class WebrtcDaemonTransport {
   }
 
   private async sendEncrypted<T extends DaemonResponse | DaemonHelloAck>(
+    target: SendTarget,
     plaintext: ClientFrame,
     requestId: string,
     requestType: string,
@@ -1463,9 +1489,8 @@ class WebrtcDaemonTransport {
     sendOptions: { onSent?: () => void; isCancelled?: () => boolean } | undefined,
     parse: (payload: unknown) => T
   ): Promise<T> {
-    const channel = this.dataChannel;
-    const key = this.cryptoKey;
-    if (!channel || !key || channel.readyState !== "open") {
+    const { channel, key, generation } = target;
+    if (!this.ownsSendTarget(target)) {
       slot?.release();
       throw webrtcFailure("transport", "local WebRTC data channel is not open");
     }
@@ -1481,9 +1506,19 @@ class WebrtcDaemonTransport {
       slot?.release();
       throw webrtcFailure("transport", `local WebRTC request cancelled before send: ${requestType}`);
     }
+    if (!this.ownsSendTarget(target)) {
+      // The connection changed during encryption. The request stays with its own
+      // generation: it fails here, never enters the new generation's pending map, and
+      // never overwrites a newer request that reuses its id.
+      slot?.release();
+      throw webrtcFailure("transport", `local WebRTC connection changed while ${requestType} was encrypting`);
+    }
+    const key2 = pendingKey(generation, requestId);
+    if (this.pendingRequests.has(key2)) {
+      slot?.release();
+      throw webrtcFailure("data-plane", `local WebRTC request id ${requestId} is already pending on generation ${generation}`);
+    }
     return new Promise<T>((resolve, reject) => {
-      const generation = this.peerGeneration;
-      const key2 = pendingKey(generation, requestId);
       const timeout = window.setTimeout(() => {
         const error = webrtcFailure("data-plane", `local WebRTC request timed out: ${requestType}`);
         if (kind === "hello") {
@@ -1558,7 +1593,12 @@ class WebrtcDaemonTransport {
       }
     };
     recordLiveHarnessEvent("daemon_hello", hello.hello);
-    this.helloPromise = this.sendEncrypted<DaemonHelloAck>(hello, "", "hello", "hello", undefined, undefined, (payload) => {
+    const helloChannel = this.dataChannel;
+    const helloKey = this.cryptoKey;
+    if (!helloChannel || !helloKey) {
+      throw webrtcFailure("transport", "local WebRTC data channel is not open");
+    }
+    this.helloPromise = this.sendEncrypted<DaemonHelloAck>({ generation, channel: helloChannel, key: helloKey }, hello, "", "hello", "hello", undefined, undefined, (payload) => {
       const ack = payload as DaemonHelloAck;
       if (!ack || typeof ack.protocol !== "string" || !ack.compatibility) {
         throw webrtcFailure("data-plane", "local WebRTC hello ack is not a DaemonHelloAck");
