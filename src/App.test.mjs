@@ -3312,13 +3312,15 @@ const {
   MAX_INFLIGHT_INPUT_OPERATIONS,
   MAX_PENDING_TERMINAL_BYTES,
   MAX_PENDING_TERMINAL_ITEMS,
-  MAX_QUEUED_INPUT_BYTES
+  MAX_QUEUED_INPUT_BYTES,
+  MAX_QUEUED_INPUT_OPERATIONS
 } = requireRuntime("./botster/hubTerminalDataPlane.js");
 assert.equal(DETACH_REQUEST_BOUND_MS, 10_000);
 assert.equal(MAX_INFLIGHT_INPUT_OPERATIONS, 32);
 assert.equal(MAX_PENDING_TERMINAL_ITEMS, 256);
 assert.equal(MAX_PENDING_TERMINAL_BYTES, 8 * 1024 * 1024);
 assert.equal(MAX_QUEUED_INPUT_BYTES, 2 * 1024 * 1024);
+assert.equal(MAX_QUEUED_INPUT_OPERATIONS, 256);
 const { TerminalInputKind } = terminalProtocolModule;
 
 /**
@@ -3403,6 +3405,7 @@ const {
   createWebrtcDaemonClient,
   localWebrtcReconnectPolicy,
   localWebrtcResponseChunkLimits,
+  localWebrtcInboundAdmissionLimits,
   setApplyAssemblyTimeoutCleanup,
   WebrtcDaemonClientError,
   webRtcDaemonLifecycleEventName
@@ -6507,6 +6510,7 @@ try {
     chunkBookkeepingBytes: 64,
     completedMessageBookkeepingBytes: 64
   });
+  assert.deepEqual(localWebrtcInboundAdmissionLimits, { maximumQueuedFrames: 256, maximumQueuedBytes: 8 * 1_024 * 1_024 });
 
   const largeResponseChannel = createFakeDataChannel();
   const largeResponseClient = createWebrtcTestClient([largeResponseChannel], localWebrtcBootstrapFixture);
@@ -6727,6 +6731,44 @@ try {
     }));
   }
   await concurrentRejection;
+
+  // Inbound admission: raw control messages queue ahead of decode on one ordered chain. The
+  // bound acts synchronously on the message event, before any queued handler runs, so the
+  // pending request fails with the admission error rather than a decode error.
+  const admissionChunk = (index, payload = "x") => JSON.stringify({
+    version: 2,
+    delivery_kind: "server_frame",
+    message_id: `admission-${index}`,
+    chunk_index: 0,
+    chunk_count: 2,
+    total_bytes: 2,
+    payload
+  });
+  const isAdmissionFailure = (error) => error instanceof WebrtcDaemonClientError && /inbound admission exceeded/.test(error.message);
+  for (const variant of ["frames", "bytes"]) {
+    const admissionChannel = createFakeDataChannel();
+    const admissionClient = createWebrtcTestClient([admissionChannel], localWebrtcBootstrapFixture);
+    const admissionPromise = admissionClient.request({ type: "status" });
+    const admissionRejection = assert.rejects(admissionPromise, isAdmissionFailure);
+    await waitForTestCondition(() => admissionChannel.sent.length === 1);
+    const lifecycleBefore = lifecycleEvents.length;
+    if (variant === "frames") {
+      for (let index = 0; index < localWebrtcInboundAdmissionLimits.maximumQueuedFrames; index += 1) {
+        admissionChannel.emitMessage(admissionChunk(index));
+      }
+      assert.equal(lifecycleEvents.length, lifecycleBefore, "the frame bound admits every message up to the limit");
+      admissionChannel.emitMessage(admissionChunk(localWebrtcInboundAdmissionLimits.maximumQueuedFrames));
+    } else {
+      const frame = admissionChunk(0, "y".repeat(60_000));
+      const framesToOverflow = Math.floor(localWebrtcInboundAdmissionLimits.maximumQueuedBytes / frame.length);
+      for (let index = 0; index < framesToOverflow; index += 1) admissionChannel.emitMessage(frame);
+      assert.equal(lifecycleEvents.length, lifecycleBefore, "the byte bound admits every message under the limit");
+      admissionChannel.emitMessage(frame);
+    }
+    assert.equal(lifecycleEvents.at(-1)?.detail?.type, "data-channel-error", `${variant}: overflow fails the control connection synchronously`);
+    await admissionRejection;
+    admissionClient.disconnect();
+  }
 
   const mismatchChannel = createFakeDataChannel();
   const mismatchClient = createWebrtcTestClient([mismatchChannel], localWebrtcBootstrapFixture);
@@ -9056,12 +9098,15 @@ try {
         },
         contains() { return false; },
         dispatch(type, event) {
+          if (!("target" in event)) event.target = container;
           for (const listener of listeners.get(type) ?? []) listener(event);
         },
         listenerTypes: () => [...listeners.keys()].filter((type) => (listeners.get(type)?.size ?? 0) > 0)
       };
       return container;
     };
+    const { isTerminalInputSurface } = await vite.ssrLoadModule("/src/botster/terminalInputCapture.ts");
+    const elementWithClass = (...classes) => ({ classList: { contains: (name) => classes.includes(name) } });
     const geometry = { cols: 80, rows: 24, left: 0, top: 0, width: 800, height: 480, scaleX: 2, scaleY: 2 };
     const keyEvent = (overrides) => ({
       key: "a", code: "KeyA", repeat: false, isComposing: false, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false,
@@ -9155,6 +9200,43 @@ try {
       assert.deepEqual(sink.map((input) => [input.kind, input.focused]), [["focus", true], ["focus", false]]);
       handle.uninstall();
       assert.deepEqual(container.listenerTypes(), []);
+    }
+
+    // K5. Only the terminal input surface is captured: Restty's search bar and other local
+    // widgets inside the container keep their keys, paste, pointer, and focus local.
+    {
+      const tracking = { tracking: true, dragMotion: true, anyMotion: true };
+      const { container, sink, pastes } = capture(tracking);
+      assert.equal(isTerminalInputSurface(container, container), true);
+      assert.equal(isTerminalInputSurface(container, elementWithClass("pane-ime-input", "restty-pane-ime-input")), true);
+      assert.equal(isTerminalInputSurface(container, elementWithClass("pane-canvas")), true);
+      assert.equal(isTerminalInputSurface(container, elementWithClass("restty-pane-search-input")), false);
+      assert.equal(isTerminalInputSurface(container, null), false);
+      const searchInput = elementWithClass("restty-pane-search-input");
+      let prevented = 0;
+      const local = (event) => ({ ...event, target: searchInput, preventDefault() { prevented += 1; }, stopImmediatePropagation() {} });
+      container.dispatch("keydown", local(keyEvent({})));
+      container.dispatch("keyup", local(keyEvent({})));
+      container.dispatch("compositionstart", local({ data: "" }));
+      container.dispatch("compositionend", local({ data: "日本" }));
+      container.dispatch("beforeinput", local({ inputType: "insertText", data: "s", isComposing: false }));
+      container.dispatch("paste", local({ clipboardData: { getData: () => "search text" } }));
+      container.dispatch("beforeinput", local({ inputType: "insertFromPaste", dataTransfer: { getData: () => "search text" } }));
+      container.dispatch("pointerdown", local({ clientX: 25, clientY: 45, button: 0, buttons: 1, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, getModifierState: () => false }));
+      container.dispatch("pointermove", local({ clientX: 30, clientY: 45, button: 0, buttons: 0, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, getModifierState: () => false }));
+      container.dispatch("wheel", local({ deltaY: -400, deltaX: 0, deltaMode: 0, clientX: 25, clientY: 45, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, getModifierState: () => false }));
+      container.dispatch("focusin", local({}));
+      assert.deepEqual(sink, [], "nothing from the search bar reaches the PTY");
+      assert.deepEqual(pastes, [], "search-bar paste stays local");
+      assert.equal(prevented, 0, "local widget events keep their default action");
+      // The IME textarea is the keyboard surface; the canvas is the pointer surface.
+      const ime = elementWithClass("pane-ime-input", "restty-pane-ime-input");
+      container.dispatch("keydown", { ...keyEvent({}), target: ime });
+      container.dispatch("paste", { clipboardData: { getData: () => "hello" }, preventDefault() { prevented += 1; }, stopImmediatePropagation() {}, target: ime });
+      container.dispatch("pointerdown", { clientX: 25, clientY: 45, button: 0, buttons: 1, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, getModifierState: () => false, target: elementWithClass("pane-canvas") });
+      assert.deepEqual(sink.map((input) => [input.kind, input.action ?? null]), [["key", "press"], ["mouse", "press"]]);
+      assert.deepEqual(pastes, [{ text: "hello", source: "clipboard_event" }]);
+      assert.equal(prevented, 1);
     }
   }
 

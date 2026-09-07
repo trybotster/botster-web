@@ -57,6 +57,8 @@ export const MAX_PENDING_TERMINAL_ITEMS = 256;
 export const MAX_PENDING_TERMINAL_BYTES = 8 * 1024 * 1024;
 export const MAX_INFLIGHT_INPUT_OPERATIONS: number = MAX_INPUT_OPERATIONS_PER_SESSION;
 export const MAX_QUEUED_INPUT_BYTES: number = MAX_RETAINED_INPUT_BYTES_PER_SESSION;
+/** Web-local bound on unsent input operations, matching the pending output item bound. */
+export const MAX_QUEUED_INPUT_OPERATIONS: number = MAX_PENDING_TERMINAL_ITEMS;
 
 /**
  * Optional hooks that pause ownership-creating async boundaries so isolation
@@ -154,8 +156,6 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private readonly inflightInputs = new Map<number, InflightInputOperation>();
   private inputSendChain: Promise<void> = Promise.resolve();
   private pendingResize: TerminalResizeGeometry | undefined;
-  private pasteAssembling = false;
-  private readonly pasteWaiters: Array<() => void> = [];
 
   constructor(private readonly options: HubTerminalDataPlaneOptions) {
     if (!options.sessionId) throw new Error("Hub terminal data plane requires a session id.");
@@ -217,7 +217,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
         outcome: "rejected_locally",
         requestedBytes,
         reason: "queue_bounds",
-        detail: `Input refused: ${MAX_INFLIGHT_INPUT_OPERATIONS} operations are in flight and ${this.queuedInputBytes} bytes are already queued.`
+        detail: this.queueBoundsDetail("Input")
       });
     }
   }
@@ -233,7 +233,10 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   /**
    * Explicit clipboard paste as one Core operation: PASTE_BEGIN, chunks, PASTE_COMMIT under
-   * one operation id. One paste assembles per route at a time; later pastes wait in order.
+   * one operation id. The paste takes its place in the single ordered input queue at once,
+   * so it holds queue capacity from admission, keeps its order against later keys, and is
+   * cancelled with the rest of the queue when the attachment is lost. The frames of one
+   * paste are sent contiguously, so Core never sees two pastes assembling on one route.
    * Web never adds bracketed-paste markers and never retries a paste.
    */
   async writePaste(text: string): Promise<TerminalInputOutcome> {
@@ -264,49 +267,18 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     if (bytes > MAX_PASTE_BYTES) {
       return rejected("too_large", `Paste of ${bytes} bytes exceeds the ${MAX_PASTE_BYTES}-byte paste limit.`, bytes);
     }
-    if (this.retainedInputBytes() + bytes > MAX_QUEUED_INPUT_BYTES) {
-      return rejected("queue_bounds", `Paste refused: retained input bytes would exceed ${MAX_QUEUED_INPUT_BYTES}.`, bytes);
-    }
-    await this.acquirePasteSlot();
-    if (this.detached) {
-      this.releasePasteSlot();
-      return rejected("detached", "Terminal is detached; paste was not delivered.");
-    }
-    recordLiveHarnessTerminal("paste", { bytes, path: "subscription_data_channel" });
     const operation = encodePasteOperation(data);
     return new Promise<TerminalInputOutcome>((resolve) => {
-      const entry: QueuedInputOperation = {
-        operation,
-        kind: "paste",
-        requestedBytes: bytes,
-        resolve: (outcome) => {
-          this.releasePasteSlot();
-          resolve(outcome);
-        }
-      };
-      if (!this.enqueueInput(entry)) {
-        entry.resolve?.(rejected("queue_bounds", `Paste refused: ${this.queuedInputs.length} operations are already queued.`, bytes));
+      if (!this.enqueueInput({ operation, kind: "paste", requestedBytes: bytes, resolve })) {
+        resolve(rejected("queue_bounds", this.queueBoundsDetail("Paste"), bytes));
+        return;
       }
+      recordLiveHarnessTerminal("paste", { bytes, path: "subscription_data_channel" });
     });
   }
 
-  private acquirePasteSlot(): Promise<void> {
-    if (!this.pasteAssembling) {
-      this.pasteAssembling = true;
-      return Promise.resolve();
-    }
-    return new Promise<void>((resolve) => {
-      this.pasteWaiters.push(() => {
-        this.pasteAssembling = true;
-        resolve();
-      });
-    });
-  }
-
-  private releasePasteSlot(): void {
-    this.pasteAssembling = false;
-    const next = this.pasteWaiters.shift();
-    next?.();
+  private queueBoundsDetail(subject: string): string {
+    return `${subject} refused: ${this.inflightInputs.size} operations are in flight, ${this.queuedInputs.length} are queued, and ${this.retainedInputBytes()} bytes are retained against the ${MAX_QUEUED_INPUT_OPERATIONS}-operation and ${MAX_QUEUED_INPUT_BYTES}-byte bounds.`;
   }
 
   /** Queued plus in-flight client payload bytes, mirroring Core's per-session retained bound. */
@@ -314,9 +286,10 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return this.queuedInputBytes + this.inflightInputBytes;
   }
 
+  /** Reserves queue capacity for one operation, or refuses it without retaining anything. */
   private enqueueInput(entry: QueuedInputOperation): boolean {
     const bytes = entry.operation.bodyBytes;
-    if (this.retainedInputBytes() + bytes > MAX_QUEUED_INPUT_BYTES) {
+    if (this.queuedInputs.length >= MAX_QUEUED_INPUT_OPERATIONS || this.retainedInputBytes() + bytes > MAX_QUEUED_INPUT_BYTES) {
       return false;
     }
     this.queuedInputs.push(entry);

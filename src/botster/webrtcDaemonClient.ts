@@ -384,6 +384,52 @@ export const localWebrtcResponseChunkLimits = Object.freeze({
 const requestTimeoutMs = localWebrtcResponseChunkLimits.requestTimeoutMs;
 
 /**
+ * Bound on raw DataChannel messages admitted per channel ahead of decode. Each channel
+ * decodes its messages in order on one promise chain; a peer that sends faster than the
+ * client decrypts would otherwise grow that chain without limit. Overflow retires the
+ * channel's route: the terminal or subscription channel closes, or the control connection
+ * fails, and the ordinary recovery path follows.
+ */
+export const localWebrtcInboundAdmissionLimits = Object.freeze({
+  maximumQueuedFrames: 256,
+  maximumQueuedBytes: 8 * 1_024 * 1_024
+});
+
+type InboundAdmission = { frames: number; bytes: number };
+
+/** Raw message size for admission accounting; the handler still enforces the exact frame bound. */
+function inboundFrameBytes(data: unknown): number {
+  if (typeof data === "string") return data.length;
+  if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return data.byteLength;
+  return 0;
+}
+
+/** Reserves admission for one raw message; false leaves the accounting unchanged. */
+function admitInboundFrame(admission: InboundAdmission, bytes: number): boolean {
+  if (
+    admission.frames + 1 > localWebrtcInboundAdmissionLimits.maximumQueuedFrames ||
+    admission.bytes + bytes > localWebrtcInboundAdmissionLimits.maximumQueuedBytes
+  ) {
+    return false;
+  }
+  admission.frames += 1;
+  admission.bytes += bytes;
+  return true;
+}
+
+function releaseInboundFrame(admission: InboundAdmission, bytes: number): void {
+  admission.frames -= 1;
+  admission.bytes -= bytes;
+}
+
+function inboundAdmissionFailure(channel: string, admission: InboundAdmission): WebrtcDaemonClientError {
+  return webrtcFailure(
+    "data-plane",
+    `${channel} DataChannel inbound admission exceeded ${admission.frames} queued frames and ${admission.bytes} queued bytes`
+  );
+}
+
+/**
  * Binary terminal chunk layout (Hub host-control v9), 33-byte header:
  * offset 0 `u8 version=2`; 1 `u64 LE message_id` (per channel, per direction, from 1);
  * 9 `u32 LE chunk_index`; 13 `u32 LE chunk_count`; 17 `u32 LE total_bytes` (plaintext length);
@@ -748,14 +794,28 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("transport", "terminal reservation owner closed during channel creation");
     }
     let messageQueue = Promise.resolve();
+    const admission: InboundAdmission = { frames: 0, bytes: 0 };
     channel.addEventListener("message", (event) => {
       if (binding.closed) return;
+      const bytes = inboundFrameBytes(event.data);
+      if (!admitInboundFrame(admission, bytes)) {
+        recordLiveHarnessEvent("terminal_data_channel_admission_overflow", {
+          label: binding.label,
+          generation: binding.generation,
+          queued_frames: admission.frames,
+          queued_bytes: admission.bytes
+        });
+        binding.rejectReady(inboundAdmissionFailure("terminal", admission));
+        this.closeTerminalChannel(binding, true);
+        return;
+      }
       messageQueue = messageQueue
         .then(() => this.handleTerminalChannelMessage(binding, event.data))
         .catch((error: unknown) => {
           binding.rejectReady(error);
           this.closeTerminalChannel(binding, true);
-        });
+        })
+        .finally(() => releaseInboundFrame(admission, bytes));
     });
     channel.addEventListener("close", () => this.closeTerminalChannel(binding, true));
     channel.addEventListener("error", () => this.closeTerminalChannel(binding, true));
@@ -1041,15 +1101,32 @@ class WebrtcDaemonTransport {
     });
 
     let messageQueue = Promise.resolve();
+    const admission: InboundAdmission = { frames: 0, bytes: 0 };
     channel.addEventListener("message", (event) => {
       if (binding.closed) return;
+      const bytes = inboundFrameBytes(event.data);
+      if (!admitInboundFrame(admission, bytes)) {
+        const error = inboundAdmissionFailure("subscription", admission);
+        recordLiveHarnessEvent("subscription_data_channel_admission_overflow", {
+          class: binding.channelClass,
+          label: binding.label,
+          generation: binding.generation,
+          queued_frames: admission.frames,
+          queued_bytes: admission.bytes
+        });
+        this.emitSubscriptionChannelFailure(binding, "rejected", error);
+        binding.rejectReady(error);
+        this.closeSubscriptionChannel(binding, true);
+        return;
+      }
       messageQueue = messageQueue
         .then(() => this.handleSubscriptionChannelMessage(binding, event.data))
         .catch((error: unknown) => {
           this.emitSubscriptionChannelFailure(binding, "rejected", error);
           binding.rejectReady(error);
           this.closeSubscriptionChannel(binding, true);
-        });
+        })
+        .finally(() => releaseInboundFrame(admission, bytes));
     });
     channel.addEventListener("close", () => this.closeSubscriptionChannel(binding, true));
     channel.addEventListener("error", () => this.closeSubscriptionChannel(binding, true));
@@ -1866,11 +1943,23 @@ class WebrtcDaemonTransport {
     this.peerConnection = peerConnection;
     this.dataChannel = dataChannel;
     let messageQueue = Promise.resolve();
+    const admission: InboundAdmission = { frames: 0, bytes: 0 };
     dataChannel.addEventListener("message", (event) => {
       if (!this.isCurrentPeer(generation, peerConnection, dataChannel)) return;
+      const bytes = inboundFrameBytes(event.data);
+      if (!admitInboundFrame(admission, bytes)) {
+        recordLiveHarnessEvent("webrtc_data_channel_admission_overflow", {
+          generation,
+          queued_frames: admission.frames,
+          queued_bytes: admission.bytes
+        });
+        this.failPeerGeneration(generation, inboundAdmissionFailure("control", admission));
+        return;
+      }
       messageQueue = messageQueue
         .then(() => this.handleMessage(event.data, generation))
-        .catch((error: unknown) => this.failPeerGeneration(generation, error));
+        .catch((error: unknown) => this.failPeerGeneration(generation, error))
+        .finally(() => releaseInboundFrame(admission, bytes));
     });
     dataChannel.addEventListener("open", () => {
       if (!this.isCurrentPeer(generation, peerConnection, dataChannel)) return;
@@ -2774,7 +2863,7 @@ function utf8ByteLength(value: string): number {
 async function encryptJsonPayload(key: CryptoKey, payload: unknown): Promise<AesGcmEnvelope> {
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const plaintext = new TextEncoder().encode(JSON.stringify(payload));
-  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv: toArrayBuffer(nonce) }, key, plaintext);
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv: cryptoInput(nonce) }, key, plaintext);
   return {
     nonce: base64Encode(nonce),
     ciphertext: base64Encode(new Uint8Array(ciphertext)),
@@ -2829,7 +2918,7 @@ async function sealTerminalChunk(
 ): Promise<ArrayBuffer> {
   const nonce = crypto.getRandomValues(new Uint8Array(terminalChunkNonceBytes));
   const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: toArrayBuffer(nonce) }, key, toArrayBuffer(plaintext))
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: cryptoInput(nonce) }, key, cryptoInput(plaintext))
   );
   const message = new Uint8Array(terminalChunkHeaderBytes + nonce.byteLength + ciphertext.byteLength);
   const view = new DataView(message.buffer);
@@ -2850,7 +2939,7 @@ async function openTerminalChunk(key: CryptoKey, sealed: Uint8Array): Promise<Ui
   const ciphertext = sealed.subarray(terminalChunkNonceBytes);
   try {
     return new Uint8Array(
-      await crypto.subtle.decrypt({ name: "AES-GCM", iv: toArrayBuffer(nonce) }, key, toArrayBuffer(ciphertext))
+      await crypto.subtle.decrypt({ name: "AES-GCM", iv: cryptoInput(nonce) }, key, cryptoInput(ciphertext))
     );
   } catch (error) {
     throw webrtcFailure("encryption", `terminal chunk decryption failed: ${errorMessage(error)}`);
@@ -2927,9 +3016,9 @@ async function decryptDaemonPayload(
 ): Promise<unknown> {
   const envelope = JSON.parse(envelopeJson) as AesGcmEnvelope;
   const plaintext = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: toArrayBuffer(base64Decode(envelope.nonce)) },
+    { name: "AES-GCM", iv: cryptoInput(base64Decode(envelope.nonce)) },
     key,
-    toArrayBuffer(base64Decode(envelope.ciphertext))
+    cryptoInput(base64Decode(envelope.ciphertext))
   );
   return JSON.parse(new TextDecoder().decode(plaintext));
 }
@@ -2940,7 +3029,7 @@ async function importStreamKey(secret: string): Promise<CryptoKey> {
   if (keyBytes.length !== 32) {
     throw new Error("invalid local WebRTC bootstrap secret");
   }
-  return crypto.subtle.importKey("raw", toArrayBuffer(keyBytes), "AES-GCM", false, ["encrypt", "decrypt"]);
+  return crypto.subtle.importKey("raw", cryptoInput(keyBytes), "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
 function hexDecode(encoded: string): Uint8Array {
@@ -3068,8 +3157,14 @@ function base64Decode(encoded: string): Uint8Array {
   return bytes;
 }
 
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+/**
+ * WebCrypto takes any ArrayBuffer-backed view, bounded by its own offset and length, so a
+ * subarray of a received message decrypts in place. Only a view over a SharedArrayBuffer,
+ * which WebCrypto rejects, is copied into a fresh ArrayBuffer.
+ */
+function cryptoInput(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (bytes.buffer instanceof ArrayBuffer) return bytes as Uint8Array<ArrayBuffer>;
+  return new Uint8Array(bytes);
 }
 
 function waitForIceGatheringComplete(peerConnection: RTCPeerConnection): Promise<void> {

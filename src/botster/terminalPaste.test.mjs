@@ -33,7 +33,8 @@ export async function runTerminalPasteTests(helpers) {
   } = helpers;
   const secret = localWebrtcBootstrapFixture.grant_secret;
   const { MAX_PASTE_BYTES, MAX_PASTE_CHUNK_DATA_BYTES, TerminalInputKind, ModeBits, encodePaste } = terminalProtocolModule;
-  const { MAX_QUEUED_INPUT_BYTES } = requireRuntime("./botster/hubTerminalDataPlane.js");
+  const { MAX_QUEUED_INPUT_BYTES, MAX_QUEUED_INPUT_OPERATIONS, MAX_INFLIGHT_INPUT_OPERATIONS } = requireRuntime("./botster/hubTerminalDataPlane.js");
+  const { localWebrtcInboundAdmissionLimits } = requireRuntime("./botster/webrtcDaemonClient.js");
   const { BotsterTerminalPtyTransport } = requireRuntime("./botster/botsterTerminalPtyTransport.js");
 
   const realSetTimeout = setTimeout;
@@ -321,16 +322,17 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(empty.reason, "empty");
       assert.equal((await fixture.framesSince()).length, 0, "no frames for refused pastes");
 
-      // One assembling paste per route: the second waits until the first has its result.
+      // Two pastes queue in order and are sent contiguously: the second paste's BEGIN follows
+      // the first paste's COMMIT on the wire, without waiting for the first result.
       const firstPaste = fixture.plane.writePaste("first\n");
       const secondPaste = fixture.plane.writePaste("second\n");
-      await waitFrameCount(fixture, 3, "p5: first paste commit");
-      await flushMicrotasks();
-      assert.equal((await fixture.framesSince()).length, 3, "the second paste is not assembling yet");
+      const bothFrames = await waitFrameCount(fixture, 6, "p5: both paste commits");
+      assert.deepEqual(bothFrames.map((frame) => [frame.name, frame.operationId]), [
+        ["paste_begin", 1], ["paste_chunk", 1], ["paste_commit", 1],
+        ["paste_begin", 2], ["paste_chunk", 2], ["paste_commit", 2]
+      ]);
       await fixture.result(1, "written", { accepted: 6, written: 6 });
       assert.equal((await firstPaste).outcome, "written");
-      const secondFrames = await waitFrameCount(fixture, 6, "p5: second paste commit");
-      assert.equal(secondFrames[3].operationId, 2);
       await fixture.result(2, "written", { accepted: 7, written: 7 });
       assert.equal((await secondPaste).outcome, "written");
 
@@ -428,6 +430,80 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(frames[0].operationId, 1, "operation ids restart on the new attachment");
       await second.result(1, "written", { accepted: 6, written: 6 });
       assert.equal((await later).outcome, "written");
+    });
+
+    // (p11) Queue capacity is reserved at admission: a paste behind a full in-flight window
+    // and a full queue is refused at once, retains nothing, and later keys keep their order.
+    await runScenario("p11-queue-items", async () => {
+      const fixture = await attachPlane("p11");
+      const noMods = { shift: false, ctrl: false, alt: false, super: false, capsLock: false, numLock: false };
+      const key = (text) => fixture.plane.sendInput({ kind: "key", action: "press", code: "KeyK", key: text, mods: noMods, text, composing: false, unshiftedCodepoint: 107 });
+      const total = MAX_INFLIGHT_INPUT_OPERATIONS + MAX_QUEUED_INPUT_OPERATIONS;
+      for (let index = 0; index < total; index += 1) key("k");
+      await waitFrameCount(fixture, MAX_INFLIGHT_INPUT_OPERATIONS, "p11: window full");
+      const refused = await fixture.plane.writePaste("over\n");
+      assert.equal(refused.outcome, "rejected_locally");
+      assert.equal(refused.reason, "queue_bounds");
+      assert.equal(refused.requestedBytes, 5);
+      assert.match(refused.detail, new RegExp(`${MAX_QUEUED_INPUT_OPERATIONS} are queued`));
+      const refusedKeys = fixture.outcomes.filter((outcome) => outcome.kind === "key" && outcome.reason === "queue_bounds");
+      assert.equal(refusedKeys.length, 0, "the keys filled the bounds exactly");
+      key("z");
+      assert.equal(fixture.outcomes.filter((outcome) => outcome.reason === "queue_bounds").length, 1, "a key past the item bound is refused too");
+      // Draining one in-flight result releases exactly one slot; the next paste is admitted
+      // behind the remaining queued keys and is sent in order after them.
+      await fixture.result(1, "written", { accepted: 13, written: 1 });
+      const admitted = fixture.plane.writePaste("late\n");
+      for (let id = 2; id <= total; id += 1) {
+        await waitCondition(async () => (await fixture.framesSince()).length >= Math.min(total, id + MAX_INFLIGHT_INPUT_OPERATIONS - 1), `p11: drain ${id}`);
+        await fixture.result(id, "written", { accepted: 13, written: 1 });
+      }
+      const frames = await waitFrameCount(fixture, total + 3, "p11: late paste after the queue drained");
+      assert.deepEqual(frames.slice(total).map((frame) => [frame.name, frame.operationId]), [
+        ["paste_begin", total + 1], ["paste_chunk", total + 1], ["paste_commit", total + 1]
+      ]);
+      await fixture.result(total + 1, "written", { accepted: 5, written: 5 });
+      assert.equal((await admitted).outcome, "written");
+    });
+
+    // (p12) A paste queued behind a full window is fenced by its attachment: loss cancels it
+    // unsent, in-flight keys end unknown, and the replacement attachment replays nothing.
+    await runScenario("p12-queued-paste-loss", async () => {
+      const fixture = await attachPlane("p12");
+      const noMods = { shift: false, ctrl: false, alt: false, super: false, capsLock: false, numLock: false };
+      for (let index = 0; index < MAX_INFLIGHT_INPUT_OPERATIONS; index += 1) {
+        fixture.plane.sendInput({ kind: "key", action: "press", code: "KeyK", key: "k", mods: noMods, text: "k", composing: false, unshiftedCodepoint: 107 });
+      }
+      await waitFrameCount(fixture, MAX_INFLIGHT_INPUT_OPERATIONS, "p12: window full");
+      const queued = fixture.plane.writePaste("queued\n");
+      fixture.plane.sendInput({ kind: "key", action: "press", code: "KeyZ", key: "z", mods: noMods, text: "z", composing: false, unshiftedCodepoint: 122 });
+      await flushMicrotasks();
+      assert.equal((await fixture.framesSince()).length, MAX_INFLIGHT_INPUT_OPERATIONS, "the paste and the later key wait in the queue");
+      fixture.terminal.close();
+      const outcome = await queued;
+      assert.equal(outcome.outcome, "cancelled");
+      assert.equal(outcome.operationId, undefined, "an unsent paste never took an operation id");
+      const unknownKeys = fixture.outcomes.filter((entry) => entry.kind === "key" && entry.outcome === "outcome_unknown").length;
+      const cancelledKeys = fixture.outcomes.filter((entry) => entry.kind === "key" && entry.outcome === "cancelled").length;
+      assert.deepEqual([unknownKeys, cancelledKeys], [MAX_INFLIGHT_INPUT_OPERATIONS, 1]);
+      const second = await fixture.admit(1);
+      await flushMicrotasks();
+      assert.equal((await second.framesSince()).length, 0, "nothing from the lost attachment is replayed");
+    });
+
+    // (p13) Raw terminal messages queued ahead of decode are bounded: the bound acts on the
+    // message event itself, so the channel closes before any queued handler runs.
+    await runScenario("p13-inbound-admission", async () => {
+      const fixture = await attachPlane("p13");
+      const pending = fixture.plane.writePaste("pending\n");
+      await waitFrameCount(fixture, 3, "p13: commit before the flood");
+      const raw = new Uint8Array(64);
+      for (let index = 0; index < localWebrtcInboundAdmissionLimits.maximumQueuedFrames; index += 1) fixture.terminal.emitMessage(raw.buffer);
+      assert.equal(fixture.terminal.readyState, "open", "messages up to the frame bound are admitted");
+      fixture.terminal.emitMessage(raw.buffer);
+      assert.equal(fixture.terminal.readyState, "closed", "the frame past the bound retires the route synchronously");
+      const outcome = await pending;
+      assert.equal(outcome.outcome, "outcome_unknown");
     });
 
     // (p10) Transport without a data plane: explicit local rejection, no key path.

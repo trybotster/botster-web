@@ -10,6 +10,10 @@
  *
  * Clipboard paste is the one gesture this module consumes: it is default-prevented and
  * stopped before Restty's paste handler, so paste never becomes key input.
+ *
+ * Only events whose target is the terminal input surface are captured: the container
+ * itself, Restty's pane canvas, and Restty's IME textarea. Restty's local widgets inside the
+ * container, such as the search bar and the context menu, keep their events local.
  */
 
 import {
@@ -40,6 +44,20 @@ export const noMouseCapture: TerminalMouseCapturePolicy = Object.freeze({
   dragMotion: false,
   anyMotion: false
 });
+
+/**
+ * Restty's own input-target predicate accepts its IME textarea by these class names; the
+ * pane canvas receives pointer and wheel gestures; the container receives keyboard focus
+ * before a pane exists.
+ */
+const terminalInputSurfaceClasses = ["pane-ime-input", "restty-pane-ime-input", "pane-canvas"];
+
+export function isTerminalInputSurface(container: HTMLElement, target: EventTarget | null): boolean {
+  if (target === container) return true;
+  const classList = (target as { classList?: DOMTokenList } | null)?.classList;
+  if (!classList || typeof classList.contains !== "function") return false;
+  return terminalInputSurfaceClasses.some((name) => classList.contains(name));
+}
 
 export interface TerminalInputCaptureOptions {
   container: HTMLElement;
@@ -73,8 +91,10 @@ export function installTerminalInputCapture(options: TerminalInputCaptureOptions
   let heldButtons = 0;
 
   const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+  const onSurface = (event: Event): boolean => isTerminalInputSurface(container, event.target);
 
   const onKeyDown = (event: KeyboardEvent) => {
+    if (!onSurface(event)) return;
     if (isCompositionPlaceholderKey(event)) {
       // The IME or virtual keyboard owns this gesture; its text arrives through
       // beforeinput or compositionend.
@@ -90,16 +110,18 @@ export function installTerminalInputCapture(options: TerminalInputCaptureOptions
   };
 
   const onKeyUp = (event: KeyboardEvent) => {
-    if (isCompositionPlaceholderKey(event)) return;
+    if (!onSurface(event) || isCompositionPlaceholderKey(event)) return;
     sink(keyInputFromKeyboardEvent(event, "release"));
   };
 
-  const onCompositionStart = () => {
+  const onCompositionStart = (event: CompositionEvent) => {
+    if (!onSurface(event)) return;
     composing = true;
     lastPrintableKeydown = undefined;
   };
 
   const onCompositionEnd = (event: CompositionEvent) => {
+    if (!onSurface(event)) return;
     composing = false;
     const text = event.data ?? "";
     if (text) {
@@ -110,6 +132,7 @@ export function installTerminalInputCapture(options: TerminalInputCaptureOptions
   };
 
   const onBeforeInput = (event: Event) => {
+    if (!onSurface(event)) return;
     const input = event as InputEvent;
     if (input.inputType === "insertFromPaste") {
       const text = input.dataTransfer?.getData("text/plain") ?? input.data ?? "";
@@ -135,6 +158,7 @@ export function installTerminalInputCapture(options: TerminalInputCaptureOptions
   };
 
   const onPasteEvent = (event: ClipboardEvent) => {
+    if (!onSurface(event)) return;
     const text = event.clipboardData?.getData("text/plain") ?? "";
     if (!text) return;
     event.preventDefault();
@@ -155,6 +179,7 @@ export function installTerminalInputCapture(options: TerminalInputCaptureOptions
   };
 
   const onPointerDown = (event: PointerEvent) => {
+    if (!onSurface(event)) return;
     heldButtons = event.buttons;
     const policy = mousePolicy();
     // Shift holds the pointer for local selection, matching Restty's own routing.
@@ -163,6 +188,7 @@ export function installTerminalInputCapture(options: TerminalInputCaptureOptions
   };
 
   const onPointerUp = (event: PointerEvent) => {
+    if (!onSurface(event)) return;
     const wasHeld = heldButtons !== 0;
     heldButtons = event.buttons;
     const policy = mousePolicy();
@@ -171,6 +197,7 @@ export function installTerminalInputCapture(options: TerminalInputCaptureOptions
   };
 
   const onPointerMove = (event: PointerEvent) => {
+    if (!onSurface(event)) return;
     const policy = mousePolicy();
     if (!policy.tracking || event.shiftKey) return;
     const held = event.buttons !== 0;
@@ -179,6 +206,7 @@ export function installTerminalInputCapture(options: TerminalInputCaptureOptions
   };
 
   const onWheel = (event: WheelEvent) => {
+    if (!onSurface(event)) return;
     const policy = mousePolicy();
     if (!policy.tracking || event.shiftKey) {
       // Local scrollback: Restty scrolls its own viewport.
@@ -200,7 +228,8 @@ export function installTerminalInputCapture(options: TerminalInputCaptureOptions
     }
   };
 
-  const onFocusIn = () => {
+  const onFocusIn = (event: FocusEvent) => {
+    if (!onSurface(event)) return;
     sink({ kind: "focus", focused: true });
   };
 
