@@ -2063,7 +2063,25 @@ assert.match(hubTerminalDataPlane, /MAX_INFLIGHT_INPUT_OPERATIONS/);
 assert.match(hubTerminalDataPlane, /MAX_PENDING_TERMINAL_BYTES/);
 assert.match(hubTerminalDataPlane, /encodePasteOperation/);
 assert.match(hubTerminalDataPlane, /terminalEventQueue/);
-assert.doesNotMatch(hubTerminalDataPlane, /stale_mode|mode_generation|mode_revision|read_mode_flags|writeModeGatedInput|decodeDaemonByteEnvelope|payload_base64|encodeModeGatedInput/);
+// Retired mode-gated and JSON-envelope terminal transport tokens stay banned.
+assert.doesNotMatch(hubTerminalDataPlane, /stale_mode|mode_generation|mode_revision|read_mode_flags|writeModeGatedInput|decodeDaemonByteEnvelope|encodeModeGatedInput|daemon_terminal_event|payload_encoding/);
+// Terminal transport is binary: the route path decodes bodies with the Core codec only and never
+// through a base64 or JSON envelope. base64 appears in exactly two named places: the host-control
+// read_snapshot_page response (a control API whose pages are base64 by contract, not telemetry) and
+// the opt-in harness route-frame telemetry.
+assert.deepEqual(
+  [...hubTerminalDataPlane.matchAll(/^.*payload_base64.*$/gm)].map((line) => line[0].trim()),
+  ["const bytes = base64ToBytes(body.payload_base64);", "summary.payload_base64 = bytesToBase64(decoded.payload);"]
+);
+assert.match(hubTerminalDataPlane, /type: "read_snapshot_page",[\s\S]*?const bytes = base64ToBytes\(body\.payload_base64\);/);
+assert.equal((hubTerminalDataPlane.match(/base64ToBytes\(/g) ?? []).length, 2, "one definition and one call, in the paged capture path");
+assert.doesNotMatch(hubTerminalDataPlane, /base64ToBytes\(frame|atob\(frame|JSON\.parse\(/);
+// Harness telemetry is gated before any payload encoding and is inactive without the operator
+// harness global, which production code only reads.
+assert.match(hubTerminalDataPlane, /if \(liveHarnessTerminalRecorderInstalled\(\)\) \{\s*recordLiveHarnessTerminal\("output", \{ payload_bytes_base64: bytesToBase64\(data\)/);
+assert.match(hubTerminalDataPlane, /function recordLiveHarnessRouteFrame\([\s\S]*?const events = liveHarness\(\)\?\.events;\s*if \(!events\) return;[\s\S]*?bytesToBase64\(decoded\.payload\)/);
+assert.equal((hubTerminalDataPlane.match(/bytesToBase64\(/g) ?? []).length, 3, "one definition and the two gated telemetry calls");
+assert.doesNotMatch(hubTerminalDataPlane, /__BOTSTER_LIVE_PROTOCOL_HARNESS__\s*=[^=]/);
 assert.doesNotMatch(hubTerminalDataPlane, /type: "send_input"|type: "mode_gated_input"|type: "resize"/);
 assert.match(hubTerminalDataPlane, /type: "read_snapshot_page"/);
 assert.match(hubTerminalDataPlane, /bindIncrementalSnapshotReader/);
