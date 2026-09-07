@@ -3286,6 +3286,14 @@ await Promise.all([
 const requireRuntime = createRequire(join(compiledRoot, "runtime-test.cjs"));
 // The vendored Core-generated codec is the only terminal protocol source the tests use.
 const terminalProtocolModule = requireRuntime("./botster/generated/terminal-protocol.js");
+// Terminal chunk layout for the fake reserved channels, from the vendored Hub artifact.
+// Declared here because hoisted helpers below use them before the file's tail executes.
+const {
+  LOCAL_WEBRTC_TERMINAL_CHUNK_HEADER_BYTES: TEST_TERMINAL_CHUNK_HEADER_BYTES,
+  LOCAL_WEBRTC_TERMINAL_CHUNK_NONCE_BYTES: TEST_TERMINAL_CHUNK_NONCE_BYTES
+} = requireRuntime("./botster/generated/daemon-protocol.js");
+assert.equal(TEST_TERMINAL_CHUNK_HEADER_BYTES, 33);
+assert.equal(TEST_TERMINAL_CHUNK_NONCE_BYTES, 12);
 for (const name of ["decodeTerminalBody", "encodeTerminalBody", "encodeKey", "encodeMouse", "encodeFocus", "encodeResize", "encodeRawBytes", "encodePaste", "terminalKeyFromCode", "decodeModeFlags"]) {
   assert.equal(typeof terminalProtocolModule[name], "function", `generated terminal-protocol must export ${name}`);
 }
@@ -15731,9 +15739,6 @@ async function waitForEncryptedRequest(dataChannel, secret, predicate) {
 }
 
 /** 33-byte binary terminal chunk header from the Hub-generated daemon-protocol.ts. */
-const TEST_TERMINAL_CHUNK_HEADER_BYTES = 33;
-const TEST_TERMINAL_CHUNK_NONCE_BYTES = 12;
-
 async function testStreamKey(secret, usage) {
   return crypto.subtle.importKey("raw", hexToArrayBuffer(secret.slice("secret-".length)), "AES-GCM", false, [usage]);
 }
