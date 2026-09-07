@@ -454,6 +454,9 @@ export async function runTerminalPasteTests(helpers) {
       // Draining one in-flight result releases exactly one slot; the next paste is admitted
       // behind the remaining queued keys and is sent in order after them.
       await fixture.result(1, "written", { accepted: 13, written: 1 });
+      // The result is processed on the plane's event queue; wait until the freed slot has
+      // pumped the next queued key before admitting the late paste behind the queue.
+      await waitFrameCount(fixture, MAX_INFLIGHT_INPUT_OPERATIONS + 1, "p11: freed slot pumped the next key");
       const admitted = fixture.plane.writePaste("late\n");
       for (let id = 2; id <= total; id += 1) {
         await waitCondition(async () => (await fixture.framesSince()).length >= Math.min(total, id + MAX_INFLIGHT_INPUT_OPERATIONS - 1), `p11: drain ${id}`);
