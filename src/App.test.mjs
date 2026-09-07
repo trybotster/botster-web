@@ -2123,6 +2123,7 @@ assert.doesNotMatch(botsterTerminalPtyTransport, /writeModeGatedInput|pendingSem
 assert.match(resttyRenderer, /suppressQueryReplies|readOnly:\s*true/);
 assert.match(resttyRenderer, /mouseTrackingBitsFromCoreMode|from "\.\/mouseMode"/);
 assert.match(resttyRenderer, /__BOTSTER_RESTTY_DEBUG__/);
+assert.match(resttyRenderer, /getScreenText/);
 assert.match(hubTerminalDataPlane, /transport_recovered|handleTransportRecovered/);
 // The plane hears transport loss and recovery only through its own bridge, never the window.
 assert.match(hubTerminalDataPlane, /bridge\.subscribeLifecycle/);
@@ -2130,6 +2131,10 @@ assert.doesNotMatch(hubTerminalDataPlane, /webRtcDaemonLifecycleEventName|onWebr
 assert.match(liveProtocolHarnessScript, /__BOTSTER_RESTTY_DEBUG__/);
 assert.match(liveProtocolHarnessScript, /0x00ff0000|expectedColor/);
 assert.match(liveProtocolHarnessScript, /subscriptionAfter|fresh subscription/);
+assert.match(liveHubLaneScript, /__BOTSTER_RESTTY_DEBUG__\?\.active\?\.getScreenText/);
+assert.match(liveHubLaneScript, /screen-text probe is unavailable in the vendored renderer/);
+assert.match(liveHubLaneScript, /split\("\\n"\)\.some\(\(row\) => row\.startsWith\(expectedText\)\)/);
+assert.doesNotMatch(liveHubLaneScript, /pane-term-debug/);
 assert.doesNotMatch(connectionDiagnostics, /expectedDaemonSchemaVersion/);
 assert.match(connectionDiagnostics, /schemaVersionInformationFromFrame/);
 assert.match(connectionDiagnostics, /operatorErrorDiagnostic/);
@@ -2598,11 +2603,15 @@ assert.match(readme, /kind: web_app/);
 assert.match(readme, /launch_mode: background/);
 assert.match(readme, /readiness: local_url/);
 assert.match(readme, /rejects daemon operations other than/);
-assert.match(vendorReadme, /cd1911d0f88606270b1457c6995a3c04cb497edf/);
-assert.match(vendorReadme, /frozen-lockfile/);
+assert.match(vendorReadme, /71fbfeb9cbd356b112c922d101a94bab7413675d/);
+const vendoredResttyRevision = vendorReadme.match(
+  /Built from approved `trybotster\/restty` commit\s*`([0-9a-f]{40})`\./
+)?.[1];
+assert.equal(vendoredResttyRevision, PINNED_REVISIONS.modular_restty);
+assert.match(vendorReadme, /left `bun\.lock` and `package\.json` unchanged/);
 assert.match(vendorReadme, /suppressQueryReplies|readOnly/);
 assert.match(vendorReadme, /OSC 10\/11\/12/);
-const vendorResttyChunk = await readFile(new URL("./vendor/restty/chunk-xwdkhsew.js", import.meta.url), "utf8");
+const vendorResttyChunk = await readFile(new URL("./vendor/restty/chunk-8zhnfd9h.js", import.meta.url), "utf8");
 assert.equal([...vendorResttyChunk.matchAll(/hintTarget \?\? "auto"/g)].length, 2);
 assert.match(vendorResttyChunk, /suppressQueryReplies:\s*options\.readOnly\s*===\s*true|suppressQueryReplies/);
 assert.match(vendorResttyChunk, /if \(options\.readOnly\)/);

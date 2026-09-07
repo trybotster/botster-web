@@ -20,6 +20,7 @@ export type CreateRuntimeReportingOptions = {
 export declare function createRuntimeReporting(options: CreateRuntimeReportingOptions): {
     selectionForRow: (row: number, cols: number) => import("../../selection").SelectionRange;
     getSelectionText: () => string;
+    getScreenText: () => string;
     getRenderState: () => RenderState | null;
     resolveCursorPosition: (cursor: CursorInfo | null) => {
         col: number;

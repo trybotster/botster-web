@@ -205,6 +205,7 @@ try {
   // W-S1 uses the mounted Restty client for attach, keyboard input, and resize.
   peerA = await openPeer("peer-a");
   let attachedA = await readBoundedTerminalObserver(peerA);
+  let mountedColumns = 0;
   const contextA = () => ({
     page: peerA, subscriptionId: attachedA.subscription_id,
     generation: attachedA.generation, streamEpoch: attachedA.stream_epoch
@@ -220,6 +221,7 @@ try {
     if (modes.rows !== resized.rows || modes.cols !== resized.cols) {
       throw new Error(`worker size ${modes.rows}x${modes.cols} differs from mounted resize ${resized.rows}x${resized.cols}`);
     }
+    mountedColumns = resized.cols;
     if (modes.bracketed_paste !== false) throw new Error(`bracketed_paste=${String(modes.bracketed_paste)}, expected false`);
     const marker = `botster-web-production-size:${resized.rows}x${resized.cols}`;
     await typeThroughMountedTerminal(peerA, "botster-web-production-size\n");
@@ -295,11 +297,16 @@ try {
   }, PASTE_MS);
   console.log(`real-hub-smoke W-S3 policy observed ${JSON.stringify({ printable_bytes: PASTE_BYTES, multiline_rejected_bytes: PASTE_BYTES, post_rejection_input: "verified", multiline_support: "unresolved-product-requirement", consent_followup: "required" })}`);
 
-  // W-S4 proves restored history and new live output through the re-mounted Restty client.
-  const historyValue = `ws4-history-${Date.now().toString(36)}`;
+  // W-S4 proves restored visible screen state and new live output through the re-mounted Restty client.
+  const historyValue = `w4-${Date.now().toString(36)}`;
   const historyMarker = `botster-web-production-echo:${historyValue}`;
+  if (mountedColumns < 1 || historyMarker.length > mountedColumns) {
+    throw new Error(`W-S4 marker width ${historyMarker.length} exceeds mounted grid width ${mountedColumns}`);
+  }
   await step("ws4-history-before-detach", contextA(), async () => {
-    await typeThroughMountedTerminal(peerA, `${historyValue}\n`);
+    // The producer disables input echo and terminates each response row. The leading empty
+    // response makes the next short marker start at column zero for the row-prefix assertion.
+    await typeThroughMountedTerminal(peerA, `\n${historyValue}\n`);
     await waitForRenderedTerminalText(peerA, historyMarker);
   });
   const firstSubscription = attachedA.subscription_id;
@@ -316,7 +323,7 @@ try {
     await typeThroughMountedTerminal(peerA, `${value}\n`);
     await waitForRenderedTerminalText(peerA, `botster-web-production-echo:${value}`);
   });
-  console.log(`real-hub-smoke W-S4 passed ${JSON.stringify({ detached: firstSubscription, reattached: attachedA.subscription_id, abandoned_outstanding_count: attachedA.abandoned_outstanding_count })}`);
+  console.log(`real-hub-smoke W-S4 passed ${JSON.stringify({ detached: firstSubscription, reattached: attachedA.subscription_id, restored_visible_screen_state: true, abandoned_outstanding_count: attachedA.abandoned_outstanding_count })}`);
 
   await step("final-detach-peer-a", contextA(), () => openHomeView(peerA));
   await step("final-detach-peer-b", { page: peerB, subscriptionId: attachedB.subscription_id }, () => openHomeView(peerB));

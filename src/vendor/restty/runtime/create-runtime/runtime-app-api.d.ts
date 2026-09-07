@@ -34,6 +34,7 @@ type RuntimePublicApiOptions = {
     searchNext: ResttyApp["searchNext"];
     searchPrevious: ResttyApp["searchPrevious"];
     getSearchState: ResttyApp["getSearchState"];
+    getScreenText: ResttyApp["getScreenText"];
     dumpAtlasForCodepoint: ResttyApp["dumpAtlasForCodepoint"];
     resize: ResttyApp["resize"];
     focus: ResttyApp["focus"];

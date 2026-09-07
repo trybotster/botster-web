@@ -316,8 +316,13 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     const harnessWindow = window as typeof window & {
       __BOTSTER_RESTTY_DEBUG__?: {
         getPaletteColor?: (index: number) => number | null;
-        active?: { getPaletteColor?: (index: number) => number | null };
+        getScreenText?: () => string | null;
+        active?: {
+          getPaletteColor?: (index: number) => number | null;
+          getScreenText?: () => string | null;
+        };
       };
+      __BOTSTER_LIVE_PROTOCOL_HARNESS__?: unknown;
     };
     const getPaletteColor = (index: number): number | null => {
       const pane = this.terminal?.activePane?.() as { getPaletteColor?: (i: number) => number | null } | null;
@@ -326,10 +331,19 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       }
       return null;
     };
-    harnessWindow.__BOTSTER_RESTTY_DEBUG__ = {
+    const debugProbe: NonNullable<typeof harnessWindow.__BOTSTER_RESTTY_DEBUG__> = {
       getPaletteColor,
       active: { getPaletteColor }
     };
+    if (harnessWindow.__BOTSTER_LIVE_PROTOCOL_HARNESS__) {
+      const getScreenText = (): string | null => {
+        const pane = this.terminal?.activePane?.() as { getScreenText?: () => string } | null;
+        return typeof pane?.getScreenText === "function" ? pane.getScreenText() : null;
+      };
+      debugProbe.getScreenText = getScreenText;
+      debugProbe.active = { ...debugProbe.active, getScreenText };
+    }
+    harnessWindow.__BOTSTER_RESTTY_DEBUG__ = debugProbe;
     this.uninstallPaletteProbe = () => {
       if (harnessWindow.__BOTSTER_RESTTY_DEBUG__?.getPaletteColor === getPaletteColor) {
         delete harnessWindow.__BOTSTER_RESTTY_DEBUG__;

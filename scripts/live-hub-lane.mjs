@@ -775,11 +775,27 @@ export async function waitForTerminalSession(page, sessionId) {
 }
 
 export async function waitForRenderedTerminalText(page, text, timeout = 30_000) {
+  const probeState = await page.evaluate(() => {
+    const getScreenText = globalThis.__BOTSTER_RESTTY_DEBUG__?.active?.getScreenText;
+    if (typeof getScreenText !== "function") return "harness-probe-missing";
+    return getScreenText() === null ? "vendored-capability-missing" : "ready";
+  });
+  if (probeState === "harness-probe-missing") {
+    throw new Error("screen-text harness probe is unavailable");
+  }
+  if (probeState === "vendored-capability-missing") {
+    throw new Error("screen-text probe is unavailable in the vendored renderer");
+  }
   await page.waitForFunction(
     ({ containerClass, expectedText }) => {
       const root = globalThis.document.querySelector(`.${containerClass}`);
-      const cellReadout = root?.querySelector("pre.pane-term-debug")?.textContent ?? "";
-      return cellReadout.includes(expectedText);
+      const getScreenText = globalThis.__BOTSTER_RESTTY_DEBUG__?.active?.getScreenText;
+      const screenText = getScreenText?.();
+      return Boolean(
+        root &&
+        typeof screenText === "string" &&
+        screenText.split("\n").some((row) => row.startsWith(expectedText))
+      );
     },
     { containerClass: HOST_CHROME.terminalContainerClass, expectedText: text },
     { timeout }

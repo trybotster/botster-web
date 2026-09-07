@@ -424,6 +424,8 @@ export type ResttyApp = {
     searchPrevious: () => void;
     /** Get the current terminal search state. */
     getSearchState: () => ResttySearchState;
+    /** Get the visible screen as newline-separated text. */
+    getScreenText: () => string;
     /** Dump the glyph atlas entry for a given Unicode codepoint. */
     dumpAtlasForCodepoint: (cp: number) => void;
     /** Resize terminal grid to explicit columns/rows. */

@@ -8,7 +8,7 @@ import {
   isBuiltinThemeName,
   listBuiltinThemeNames,
   parseGhosttyTheme
-} from "./chunk-xwdkhsew.js";
+} from "./chunk-8zhnfd9h.js";
 export {
   RESTTY_PLUGIN_API_VERSION,
   Restty,

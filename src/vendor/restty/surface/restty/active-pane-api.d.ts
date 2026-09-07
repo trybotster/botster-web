@@ -27,6 +27,7 @@ export declare abstract class ResttyActivePaneApi {
     getMouseStatus(): ReturnType<InputHandler["getMouseStatus"]>;
     copySelectionToClipboard(): Promise<boolean>;
     pasteFromClipboard(): Promise<boolean>;
+    getScreenText(): string;
     openSearch(options?: ResttyPaneSearchUiOpenOptions): void;
     closeSearch(options?: ResttyPaneSearchUiCloseOptions): void;
     toggleSearch(options?: ResttyPaneSearchUiOpenOptions & ResttyPaneSearchUiCloseOptions): void;

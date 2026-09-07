@@ -44,6 +44,7 @@ export type ResttyPaneApi = {
     searchNext: () => void;
     searchPrevious: () => void;
     getSearchState: () => ResttySearchState;
+    getScreenText: () => string;
     openSearch: (options?: ResttyPaneSearchUiOpenOptions) => void;
     closeSearch: (options?: ResttyPaneSearchUiCloseOptions) => void;
     toggleSearch: (options?: ResttyPaneSearchUiOpenOptions & ResttyPaneSearchUiCloseOptions) => void;
@@ -98,6 +99,7 @@ export declare class ResttyPaneHandle implements ResttyPaneApi {
     searchNext(): void;
     searchPrevious(): void;
     getSearchState(): ResttySearchState;
+    getScreenText(): string;
     openSearch(options?: ResttyPaneSearchUiOpenOptions): void;
     closeSearch(options?: ResttyPaneSearchUiCloseOptions): void;
     toggleSearch(options?: ResttyPaneSearchUiOpenOptions & ResttyPaneSearchUiCloseOptions): void;

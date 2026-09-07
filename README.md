@@ -78,7 +78,8 @@ npm run smoke:real-hub
 ```
 
 The smoke verifies the manifest before Chromium starts. It uses mounted Restty clients for
-attach, keyboard input, resize, clipboard paste, two-peer rendering, and re-attach history.
+attach, keyboard input, resize, clipboard paste, two-peer rendering, and restored visible
+screen state after re-attach.
 
 The paste row records the current policy. The client writes a 65,536-byte printable paste.
 The client rejects a 65,536-byte multiline paste because it uses `allowUnsafe=false`.
