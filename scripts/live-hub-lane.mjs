@@ -1,8 +1,8 @@
 /**
  * Live Hub lane: the functions a real-Hub smoke needs, moved from the live packaged
  * protocol harness. Nothing here reads harness module state; every binary path, working
- * directory, data directory, and process handle is a parameter. Importing this module loads
- * vendored protocol assets, but it starts no Hub, browser, or subprocess.
+ * directory, data directory, and process handle is a parameter. Importing this module reads
+ * and transpiles vendored protocol metadata, but it starts no process or connection.
  */
 
 import { execFileSync, spawn } from "node:child_process";
