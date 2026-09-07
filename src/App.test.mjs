@@ -2600,13 +2600,14 @@ assert.equal(hubTestSupportProvenance.package_version, hubTestSupportMetadata.pa
 assert.equal(hubTestSupportProvenance.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(vendoredHubTestSupportPackageJson.version, hubTestSupportMetadata.package_version);
 assert.equal(vendoredHubTestSupportPackageJson.name, hubTestSupportMetadata.package_name);
-assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], "0.3.0");
+// Core terminal codecs come only from the vendored generated artifact; no npm terminal-protocol pin.
+assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], undefined);
+assert.equal(packageJson.devDependencies["@trybotster/terminal-protocol"], undefined);
 assert.equal(hubTestSupportMetadata.protocol_version, 9);
 assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 49);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${hubTestSupportMetadata.package_version}`,
-  `@trybotster/terminal-protocol@0.3.0`,
   `revision-${hubTestSupportMetadata.conformance_fixture_revision}`
 ];
 for (const document of [readme, architecture]) {
