@@ -1,12 +1,12 @@
 {
   "description": "Verbatim copy of the generated @trybotster/hub-test-support package from the Hub repository, vendored as a local file: dev dependency until Hub publishes this version to npm. Never edit these files by hand; metadata.json records the sha256 of every generated asset.",
   "owner": "botster-hub",
-  "revision": "8cdab7101e4688ec54444cd3fcef4bd83be904f5",
+  "revision": "3fd99050a859f8d9db2f6100f4e0acb57f22e412",
   "source_path": "packages/hub-test-support",
-  "package_version": "0.1.44",
+  "package_version": "0.1.45",
   "protocol_version": 9,
   "conformance_fixture_revision": 49,
-  "generated_from": "Hub 6fd279f by node packages/hub-test-support/scripts/sync-assets.mjs (cargo run -p botster-hub-test-support --example node_package_assets)",
+  "generated_from": "Hub 3fd9905 by node packages/hub-test-support/scripts/sync-assets.mjs (cargo run -p botster-hub-test-support --example node_package_assets)",
   "pins": {
     "botster-core": "a931125",
     "ghostty": "eb72ec6"

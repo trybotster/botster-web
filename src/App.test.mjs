@@ -14,6 +14,7 @@ import {
   materializePluginContractMatrixFixture,
   metadata as hubTestSupportMetadata,
   pluginContractMatrixFixturePath,
+  readLocalWebrtcDeliveryChunkConformanceFixture,
   readSessionLifecycleSubscriptionConformanceFixture,
   readSessionPluginBindingConformanceFixture,
   readUiContractConformanceFixtures,
@@ -124,6 +125,7 @@ const activeHubSessionId = "test-hub-session";
 let nextTestResponseMessageId = 0;
 let nextTestSubscriptionReservationGeneration = 0;
 const uiContractConformanceFixtures = await readUiContractConformanceFixtures();
+const localWebrtcDeliveryChunkConformanceFixture = readLocalWebrtcDeliveryChunkConformanceFixture();
 
 const sharedHubColdAssignment = parseWorkspacesSpawnAssignment(JSON.stringify({
   generation: "cold-1",
@@ -2022,7 +2024,7 @@ assert.match(webrtcDaemonClient, /frame: "hello"/);
 assert.match(webrtcDaemonClient, /frame\.frame === "hello_ack"/);
 assert.match(webrtcDaemonClient, /pendingKey\(generation, requestId\)/);
 assert.match(webrtcDaemonClient, /hostControlRequestLimits\.maxOutstandingRequests/);
-assert.match(webrtcDaemonClient, /maximumPlaintextBytes: 12 \* 1_024/);
+assert.match(webrtcDaemonClient, /maximumPlaintextBytes: LOCAL_WEBRTC_TERMINAL_CHUNK_MAX_PLAINTEXT_BYTES/);
 assert.match(webrtcDaemonClient, /initialDelayMs: 250,\s*maxDelayMs: 8_000/);
 assert.match(webrtcDaemonClient, /view\.getUint32\(29, true\)/);
 assert.match(webrtcDaemonClient, /header\.generation !== BigInt\(binding\.generation\)/);
@@ -2611,17 +2613,17 @@ assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 assert.equal(
   hubTestSupportMetadata.daemon_protocol.sha256,
-  "8bf9e2917063190c87f6c206476b6cdc269a5d9a8a8a68029d3120e8237dd769"
+  "67fb9b4e9ec367967a17ec0fa80890e47620c754e0f21536ed44b32c27a7132f"
 );
 assert.equal(hubTestSupportMetadata.ui_contract.package_version, "0.3.3");
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.44");
-// Hub 8cdab71 generated 0.1.44 but has not published it; Web consumes the verbatim package
+assert.equal(hubTestSupportMetadata.package_version, "0.1.45");
+// Hub 3fd9905 generated 0.1.45 but has not published it; Web consumes the verbatim package
 // from the tracked test-support directory through a file: dependency.
 assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "file:test-support/hub-test-support");
-assert.equal(hubTestSupportProvenance.revision, "8cdab7101e4688ec54444cd3fcef4bd83be904f5");
+assert.equal(hubTestSupportProvenance.revision, "3fd99050a859f8d9db2f6100f4e0acb57f22e412");
 assert.equal(hubTestSupportProvenance.package_version, hubTestSupportMetadata.package_version);
 assert.equal(hubTestSupportProvenance.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(vendoredHubTestSupportPackageJson.version, hubTestSupportMetadata.package_version);
@@ -2658,8 +2660,8 @@ assert.deepEqual(
     { kind: "surface", surface_id: "contract.settings" }
   ]
 );
-// The vendored daemon-protocol.ts is the Hub 384a5fc artifact recorded in PROVENANCE.json;
-// the vendored hub-test-support package (Hub 8cdab71) ships the same artifact.
+// The vendored daemon-protocol.ts is the Hub 3fd9905 artifact recorded in PROVENANCE.json;
+// the vendored hub-test-support package from that Hub revision ships the same artifact.
 assert.match(generatedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
 assert.match(generatedDaemonProtocol, /interface DaemonPluginResourceCounters/);
 assert.match(generatedDaemonProtocol, /\{ type: "refresh_local_packages" \}/);
@@ -3302,11 +3304,17 @@ const terminalProtocolModule = requireRuntime("./botster/generated/terminal-prot
 // Terminal chunk layout for the fake reserved channels, from the vendored Hub artifact.
 // Declared here because hoisted helpers below use them before the file's tail executes.
 const {
+  LOCAL_WEBRTC_TERMINAL_CHUNK_MAX_PLAINTEXT_BYTES: TEST_TERMINAL_CHUNK_MAX_PLAINTEXT_BYTES,
   LOCAL_WEBRTC_TERMINAL_CHUNK_HEADER_BYTES: TEST_TERMINAL_CHUNK_HEADER_BYTES,
   LOCAL_WEBRTC_TERMINAL_CHUNK_NONCE_BYTES: TEST_TERMINAL_CHUNK_NONCE_BYTES
 } = requireRuntime("./botster/generated/daemon-protocol.js");
 assert.equal(TEST_TERMINAL_CHUNK_HEADER_BYTES, 33);
 assert.equal(TEST_TERMINAL_CHUNK_NONCE_BYTES, 12);
+assert.equal(TEST_TERMINAL_CHUNK_MAX_PLAINTEXT_BYTES, 12_288);
+assert.equal(
+  TEST_TERMINAL_CHUNK_MAX_PLAINTEXT_BYTES,
+  localWebrtcDeliveryChunkConformanceFixture.terminal_chunk.maximum_plaintext_bytes
+);
 for (const name of ["decodeTerminalBody", "encodeTerminalBody", "encodeKey", "encodeMouse", "encodeFocus", "encodeResize", "encodeRawBytes", "encodePaste", "terminalKeyFromCode", "decodeModeFlags"]) {
   assert.equal(typeof terminalProtocolModule[name], "function", `generated terminal-protocol must export ${name}`);
 }
@@ -6808,7 +6816,9 @@ try {
     completedMessageBookkeepingBytes: 64
   });
   assert.deepEqual(localWebrtcInboundAdmissionLimits, { maximumQueuedFrames: 256, maximumQueuedBytes: 8 * 1_024 * 1_024 });
-  assert.deepEqual(localWebrtcTerminalChunkLimits, { maximumPlaintextBytes: 12 * 1_024 });
+  assert.deepEqual(localWebrtcTerminalChunkLimits, {
+    maximumPlaintextBytes: TEST_TERMINAL_CHUNK_MAX_PLAINTEXT_BYTES
+  });
 
   const largeResponseChannel = createFakeDataChannel();
   const largeResponseClient = createWebrtcTestClient([largeResponseChannel], localWebrtcBootstrapFixture);

@@ -2,6 +2,7 @@ import {
   LOCAL_WEBRTC_DELIVERY_CHUNK_VERSION,
   LOCAL_WEBRTC_MAX_DELIVERY_BYTES,
   LOCAL_WEBRTC_MAX_FRAME_BYTES,
+  LOCAL_WEBRTC_TERMINAL_CHUNK_MAX_PLAINTEXT_BYTES,
   LOCAL_WEBRTC_TERMINAL_CHUNK_HEADER_BYTES,
   LOCAL_WEBRTC_TERMINAL_CHUNK_NONCE_BYTES,
   LOCAL_WEBRTC_TERMINAL_CHUNK_TAG_BYTES
@@ -462,7 +463,7 @@ const terminalChunkNonceBytes = LOCAL_WEBRTC_TERMINAL_CHUNK_NONCE_BYTES;
 const terminalChunkTagBytes = LOCAL_WEBRTC_TERMINAL_CHUNK_TAG_BYTES;
 /** Match the Hub InboundTerminalChunkAssembly limit named LOCAL_WEBRTC_CHUNK_PAYLOAD_BYTES. */
 export const localWebrtcTerminalChunkLimits = Object.freeze({
-  maximumPlaintextBytes: 12 * 1_024
+  maximumPlaintextBytes: LOCAL_WEBRTC_TERMINAL_CHUNK_MAX_PLAINTEXT_BYTES
 });
 const terminalChunkPlaintextBytes = localWebrtcTerminalChunkLimits.maximumPlaintextBytes;
 
