@@ -5614,13 +5614,16 @@ try {
   const staleEventChunks = await chunkedTestResponse(
     localWebrtcBootstrapFixture.grant_secret,
     {
-      type: "package_event",
-      subscription_id: "event-generation-1-1",
-      owner: "package-notice-reaction",
-      name: "sample.notice",
-      payload: validPayload
+      frame: "event",
+      event: {
+        type: "package_event",
+        subscription_id: "event-generation-1-1",
+        owner: "package-notice-reaction",
+        name: "sample.notice",
+        payload: validPayload
+      }
     },
-    { deliveryKind: "daemon_event", messageId: "stale-package-event" }
+    { messageId: "stale-package-event" }
   );
   for (const chunk of staleEventChunks) replacementPackageEventDataChannel.emitMessage(JSON.stringify(chunk));
   await flushMicrotasks();
@@ -6678,7 +6681,11 @@ try {
   await waitForTestCondition(() => duplicateChannel.sent.length === 1);
   const duplicateChunks = await chunkedTestResponse(
     localWebrtcBootstrapFixture.grant_secret,
-    duplicateResponse,
+    {
+      frame: "response",
+      request_id: await takeUnansweredTestRequestId(duplicateChannel, localWebrtcBootstrapFixture.grant_secret, "list_sessions"),
+      response: duplicateResponse
+    },
     { chunkPayloadBytes: 40, messageId: "identical-duplicate-response" }
   );
   duplicateChannel.emitMessage(JSON.stringify(duplicateChunks[0]));
@@ -6760,7 +6767,11 @@ try {
   await waitForTestCondition(() => conflictingChannels[0].sent.length === 1);
   const conflictingChunks = await chunkedTestResponse(
     localWebrtcBootstrapFixture.grant_secret,
-    { kind: "events", events: [] },
+    {
+      frame: "response",
+      request_id: await takeUnansweredTestRequestId(conflictingChannels[0], localWebrtcBootstrapFixture.grant_secret, "status"),
+      response: { kind: "events", events: [] }
+    },
     { chunkPayloadBytes: 40, messageId: "conflicting-duplicate-response" }
   );
   conflictingChannels[0].emitMessage(JSON.stringify(conflictingChunks[0]));
