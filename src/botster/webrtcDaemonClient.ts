@@ -499,6 +499,9 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
     disconnect() {
       transport.disconnect();
     },
+    subscribeLifecycle(onEvent) {
+      return transport.subscribeLifecycle(onEvent);
+    },
     subscribeEvents(onEvent) {
       return transport.subscribeHostEvents(onEvent);
     },
@@ -522,8 +525,14 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
       };
 
       let binding: TerminalChannelBinding | undefined;
+      // Set once the Attach was written to the control channel. A consumer owes Hub a Detach
+      // only for an Attach that left; a queued Attach that failed before sending owes nothing.
+      let attachSent = false;
       const ready = transport
-        .request({ type: "attach", session_id: sessionId, subscription_id: subscriptionId })
+        .request(
+          { type: "attach", session_id: sessionId, subscription_id: subscriptionId },
+          { onSent: () => { attachSent = true; } }
+        )
         .then(async (response) => {
           if (closed) return;
           if (response.error) {
@@ -563,6 +572,7 @@ export function createWebrtcDaemonClient(options: WebrtcDaemonClientOptions): Da
         get generation() { return binding?.generation; },
         get peerGeneration() { return binding?.peerGeneration; },
         get label() { return binding?.label; },
+        get attachSent() { return attachSent; },
         abandon: () => {
           stopDelivery();
           if (binding) transport.closeTerminalChannel(binding);
@@ -601,6 +611,8 @@ class WebrtcDaemonTransport {
   private readonly entitySubscriptions = new Set<EntitySubscription>();
   private readonly packageEventHolders = new Set<PackageEventHolder>();
   private readonly hostEventListeners = new Set<(event: DaemonEvent) => void>();
+  /** Direct lifecycle listeners of this transport; each consumer sees only its own transport's events. */
+  private readonly lifecycleListeners = new Set<(event: WebrtcDaemonLifecycleEvent) => void>();
   private readonly terminalStreamListeners = new Set<TerminalStreamListener>();
   private readonly terminalChannels = new Set<TerminalChannelBinding>();
   private readonly subscriptionChannels = new Set<SubscriptionChannelBinding>();
@@ -633,7 +645,7 @@ class WebrtcDaemonTransport {
     }
   }
 
-  async request(request: DaemonRequest): Promise<DaemonResponse> {
+  async request(request: DaemonRequest, options: { onSent?: () => void } = {}): Promise<DaemonResponse> {
     try {
       await this.connect();
     } catch (error) {
@@ -660,6 +672,7 @@ class WebrtcDaemonTransport {
       requestId,
       request.type,
       "request",
+      options.onSent,
       (payload) => payload as DaemonResponse
     );
     return response;
@@ -716,6 +729,15 @@ class WebrtcDaemonTransport {
     return {
       unsubscribe: () => {
         this.hostEventListeners.delete(onEvent);
+      }
+    };
+  }
+
+  subscribeLifecycle(onEvent: (event: WebrtcDaemonLifecycleEvent) => void): { unsubscribe(): void } {
+    this.lifecycleListeners.add(onEvent);
+    return {
+      unsubscribe: () => {
+        this.lifecycleListeners.delete(onEvent);
       }
     };
   }
@@ -1389,6 +1411,7 @@ class WebrtcDaemonTransport {
     requestId: string,
     requestType: string,
     kind: PendingKind,
+    onSent: (() => void) | undefined,
     parse: (payload: unknown) => T
   ): Promise<T> {
     const channel = this.dataChannel;
@@ -1435,6 +1458,7 @@ class WebrtcDaemonTransport {
 
       try {
         channel.send(JSON.stringify(envelope));
+        onSent?.();
         if (!this.encryptedStreamReady && kind !== "hello") {
           this.encryptedStreamReady = true;
           this.emitLifecycle({ type: "encrypted-stream-ready", requestType });
@@ -1477,7 +1501,7 @@ class WebrtcDaemonTransport {
       }
     };
     recordLiveHarnessEvent("daemon_hello", hello.hello);
-    this.helloPromise = this.sendEncrypted<DaemonHelloAck>(hello, "", "hello", "hello", (payload) => {
+    this.helloPromise = this.sendEncrypted<DaemonHelloAck>(hello, "", "hello", "hello", undefined, (payload) => {
       const ack = payload as DaemonHelloAck;
       if (!ack || typeof ack.protocol !== "string" || !ack.compatibility) {
         throw webrtcFailure("data-plane", "local WebRTC hello ack is not a DaemonHelloAck");
@@ -2417,6 +2441,9 @@ class WebrtcDaemonTransport {
 
   private emitLifecycle(event: WebrtcDaemonLifecycleEvent): void {
     this.options.onLifecycle?.(event);
+    // Direct subscribers first: they are scoped to this transport. The window event that
+    // follows is the document-wide diagnostic feed and carries no transport identity.
+    for (const listener of [...this.lifecycleListeners]) listener(event);
     if (typeof window !== "undefined" && typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
       window.dispatchEvent(new CustomEvent(webRtcDaemonLifecycleEventName, { detail: event }));
     }

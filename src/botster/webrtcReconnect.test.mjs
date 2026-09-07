@@ -741,6 +741,72 @@ export async function runWebrtcReconnectTests(helpers) {
       assert.equal(liveTimersWithDelay(localWebrtcReconnectPolicy.attemptTimeoutMs, before - 1).length, 0);
       client.disconnect();
     });
+
+    // (i) Lifecycle delivery is transport-scoped: a plane on client A ignores the loss and
+    // recovery of client B, collapses an error-then-close pair on A into one loss, detaches
+    // only the Attach that was sent, and stops listening once detached.
+    await runScenario("i", async () => {
+      const a = makeClient();
+      const b = makeClient();
+      const statuses = [];
+      const plane = createHubTerminalDataPlane({ sessionId: "isolation-terminal-session", bridge: a.client });
+      bindGhostsnpInstaller(plane);
+      plane.subscribeStatus((status) => statuses.push(status));
+      plane.subscribeOutput(() => undefined);
+      await waitCondition(() => a.channels.length === 1 && a.channels[0].sent.length >= 1);
+      const firstAttach = (await decryptAll(a.channels[0])).find((request) => request.type === "attach");
+      assert.ok(firstAttach, "terminal attach was requested on client A");
+      const lostMessages = () => statuses.filter((status) => /data channel lost/.test(status.message)).length;
+
+      // Client B connects, loses its channel, and recovers on a new request: foreign events.
+      const bFirst = b.client.request({ type: "status" });
+      await waitCondition(() => b.channels.length === 1 && b.channels[0].sent.length >= 1);
+      await emitChunkedTestResponse(b.channels[0], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-b-first" });
+      await bFirst;
+      b.channels[0].close();
+      const bSecond = b.client.request({ type: "status" });
+      await waitCondition(() => b.channels.length === 2 && b.channels[1].sent.length >= 1);
+      await emitChunkedTestResponse(b.channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-b-second" });
+      await bSecond;
+      await flushMicrotasks();
+      await flushMicrotasks();
+      assert.equal(lostMessages(), 0, "client B's loss is not this plane's loss");
+      assert.equal(a.channels.length, 1, "client B's recovery started nothing on client A");
+      const requestsOnA = await decryptAll(a.channels[0]);
+      assert.deepEqual(requestsOnA.filter((request) => request.type === "attach" || request.type === "detach").length, 1, "no extra attach or detach on client A");
+
+      // An error report followed by the close event is one loss of one attachment.
+      a.channels[0].error();
+      a.channels[0].close();
+      await flushMicrotasks();
+      await flushMicrotasks();
+      assert.equal(lostMessages(), 1, "duplicate loss notifications collapse to one");
+      await waitAttempts(a.attempts, 2);
+      await waitCondition(() => a.channels[1]?.helloAckDelivered === true);
+      await waitCondition(() => a.channels[1].sent.length >= 1);
+      const recovered = await decryptAll(a.channels[1]);
+      assert.equal(recovered[0].type, "detach", "the recovered peer first detaches the superseded subscription");
+      assert.equal(recovered[0].subscription_id, firstAttach.subscription_id, "the Attach that was sent is the one detached");
+      await emitChunkedTestResponse(a.channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-detach" });
+      await waitCondition(() => a.channels[1].sent.length >= 2);
+      const reattach = (await decryptAll(a.channels[1])).find((request) => request.type === "attach");
+      assert.ok(reattach, "the plane re-attached on the recovered peer");
+      assert.notEqual(reattach.subscription_id, firstAttach.subscription_id, "recovery mints a fresh subscription id");
+
+      // A detached plane has released its lifecycle subscription: a later loss changes nothing.
+      const detaching = plane.detach();
+      await waitCondition(() => a.channels[1].sent.length >= 3);
+      await emitChunkedTestResponse(a.channels[1], secret, { kind: "events", events: [] }, { messageId: "reconnect-i-final-detach" });
+      await detaching;
+      const statusCount = statuses.length;
+      a.channels[1].error();
+      a.channels[1].close();
+      await flushMicrotasks();
+      await flushMicrotasks();
+      assert.equal(statuses.length, statusCount, "a detached plane receives no lifecycle events");
+      a.client.disconnect();
+      b.client.disconnect();
+    });
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     globalThis.window.clearTimeout = originalClearTimeout;

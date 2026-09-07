@@ -5,6 +5,7 @@ import type {
   PackageSurfaceOperation
 } from "@trybotster/ui-contract";
 import { hubStatusFamily } from "./connectionDiagnostics";
+import type { WebrtcDaemonLifecycleEvent } from "./webrtcDaemonClient";
 import type { EntityFrame } from "./entities";
 import type {
   EntitySubscriptionErrorPayload,
@@ -81,6 +82,11 @@ interface DaemonSpawnTarget {
 export interface DaemonBridgeClient {
   request(request: DaemonRequest): Promise<DaemonResponse>;
   disconnect?(): void;
+  /**
+   * Transport lifecycle events of this client only. A consumer that must react to loss and
+   * recovery of the transport it uses subscribes here; there is no unscoped fallback.
+   */
+  subscribeLifecycle?(onEvent: (event: WebrtcDaemonLifecycleEvent) => void): { unsubscribe(): void };
   subscribeEvents?(onEvent: (event: DaemonEvent) => void): { unsubscribe(): void };
   subscribePackageEvents?(
     spec: { owner: string; name: string; subjects: string[] },
@@ -110,6 +116,8 @@ export interface DaemonTerminalStreamSubscription {
   readonly generation?: number;
   readonly peerGeneration?: number;
   readonly label?: string;
+  /** True once the Attach request was written to the control channel; a queued Attach that never left is false. */
+  readonly attachSent?: boolean;
   unsubscribe(): void;
   /** Stop local frame delivery only — no detach request. Used when the data channel is already dead. */
   abandon(): void;

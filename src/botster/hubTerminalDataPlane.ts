@@ -20,7 +20,6 @@ import { hubTerminalSubscriptionId } from "./hubTransport";
 import type { DaemonReadScreen } from "./realHubDaemonDto";
 import {
   localWebrtcResponseChunkLimits,
-  webRtcDaemonLifecycleEventName,
   type WebrtcDaemonLifecycleEvent
 } from "./webrtcDaemonClient";
 import {
@@ -140,12 +139,16 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
    */
   private acceptedEpoch: number | undefined;
   private detachSentFor: { subscriptionId: string; generation: number } | undefined;
-  private lastAbandonedDetach: { subscriptionId: string; generation: number } | undefined;
+  /**
+   * The one attachment superseded by the current transport loss: its id, generation, and
+   * whether its Attach actually left the control channel. Only a sent Attach owes a Detach.
+   */
+  private lastAbandonedDetach: { subscriptionId: string; generation: number; attachSent: boolean } | undefined;
+  private lifecycleSubscription: { unsubscribe(): void } | undefined;
   private hydration: ScreenHydration | undefined;
   private incrementalSnapshotReaderFactory: (() => TerminalSnapshotReader) | undefined;
   private terminalEventQueue: Promise<void> = Promise.resolve();
   private snapshotRecoveries = 0;
-  private readonly onWebrtcLifecycle?: (event: Event) => void;
 
   /** Input operation ids start at 1 after each attach and increase within the generation. */
   private nextOperationId = 1;
@@ -169,24 +172,27 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     // Surviving-document DataChannel recovery mints a fresh terminal subscription and
     // re-runs the attach ordering without unmounting the renderer. Wait for
     // encrypted-stream-ready so attach RPCs are not issued against a half-open peer.
-    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
-      this.onWebrtcLifecycle = (event: Event) => {
-        const detail = (event as CustomEvent<WebrtcDaemonLifecycleEvent>).detail;
-        if (!detail?.type) return;
-        if (detail.type === "data-channel-closed" || detail.type === "data-channel-error") {
-          this.handleTransportLost();
-        } else if (
-          detail.type === "terminal-data-channel-closed" &&
-          detail.sessionId === this.sessionId &&
-          detail.subscriptionId === this.subscriptionId
-        ) {
-          this.handleTransportLost();
-          queueMicrotask(() => this.handleTransportRecovered());
-        } else if (detail.type === "encrypted-stream-ready") {
-          this.handleTransportRecovered();
-        }
-      };
-      window.addEventListener(webRtcDaemonLifecycleEventName, this.onWebrtcLifecycle);
+    // Only this plane's own transport may drive that: the subscription is taken directly
+    // from the bridge, and a bridge without one drives no loss or recovery at all.
+    this.lifecycleSubscription = options.bridge.subscribeLifecycle?.((event) => this.handleLifecycleEvent(event));
+  }
+
+  private handleLifecycleEvent(event: WebrtcDaemonLifecycleEvent): void {
+    if (this.detached) return;
+    if (event.type === "data-channel-closed" || event.type === "data-channel-error") {
+      this.handleTransportLost();
+    } else if (
+      event.type === "terminal-data-channel-closed" &&
+      event.sessionId === this.sessionId &&
+      event.subscriptionId === this.subscriptionId
+    ) {
+      // With the control transport already lost, this route close is part of the same
+      // loss; the transport's own recovery re-attaches.
+      if (this.transportLost) return;
+      this.handleTransportLost();
+      queueMicrotask(() => this.handleTransportRecovered());
+    } else if (event.type === "encrypted-stream-ready") {
+      this.handleTransportRecovered();
     }
   }
 
@@ -585,9 +591,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   }
 
   private uninstallLifecycleListener(): void {
-    if (this.onWebrtcLifecycle && typeof window !== "undefined") {
-      window.removeEventListener(webRtcDaemonLifecycleEventName, this.onWebrtcLifecycle);
-    }
+    this.lifecycleSubscription?.unsubscribe();
+    this.lifecycleSubscription = undefined;
   }
 
   /**
@@ -595,11 +600,17 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
    * mounted listeners so recovery can re-attach without unmounting the renderer.
    */
   private handleTransportLost(): void {
-    if (this.detached) return;
+    // One loss per attachment: a closed event that follows an error event for the same
+    // transport, or any repeat before recovery, changes nothing.
+    if (this.detached || this.transportLost) return;
     this.transportLost = true;
     const previousSubscriptionId = this.subscriptionId;
     const previousGeneration = this.hydration?.generation ?? this.attachmentGeneration;
-    this.lastAbandonedDetach = { subscriptionId: previousSubscriptionId, generation: previousGeneration };
+    this.lastAbandonedDetach = {
+      subscriptionId: previousSubscriptionId,
+      generation: previousGeneration,
+      attachSent: this.attachedReceived || this.streamSubscription?.attachSent === true
+    };
     this.closeStreamWithoutDetachRequest("Terminal stream was lost; delivery is unknown.");
     this.emitStatus({
       state: "attaching",
@@ -634,13 +645,17 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       message: "Reattaching terminal stream after WebRTC recovery."
     });
     void (async () => {
-      if (previousSubscriptionId && previousSubscriptionId !== this.subscriptionId) {
+      const abandoned = this.lastAbandonedDetach;
+      this.lastAbandonedDetach = undefined;
+      if (abandoned && previousSubscriptionId !== this.subscriptionId && !abandoned.attachSent) {
+        // The superseded Attach never left the control channel: Hub holds nothing for it.
+        recordLiveHarnessTerminal("detach_skipped_unsent", {
+          subscription_id: abandoned.subscriptionId,
+          generation: abandoned.generation
+        });
+      } else if (abandoned && previousSubscriptionId !== this.subscriptionId) {
         try {
-          const abandoned = this.lastAbandonedDetach;
-          await this.sendDetachRequestOnce(
-            previousSubscriptionId,
-            abandoned?.subscriptionId === previousSubscriptionId ? abandoned.generation : this.attachmentGeneration
-          );
+          await this.sendDetachRequestOnce(abandoned.subscriptionId, abandoned.generation);
         } catch (error: unknown) {
           recordLiveHarnessTerminal("stale_detach_ignored", {
             message: error instanceof Error ? error.message : String(error),

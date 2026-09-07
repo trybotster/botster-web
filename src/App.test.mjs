@@ -5950,7 +5950,9 @@ try {
   await waitForTestCondition(() => siblingEntityFrames.length === 2);
   await waitForTestCondition(() => siblingPackageEvents.length === 1);
 
-  failedTerminal.disableTransportRecovery?.();
+  // Teardown: the plane releases its lifecycle subscription and reconnect demand before the
+  // client disconnects, so no later event or timer from this scenario reaches another.
+  void failedTerminal.detach().catch(() => undefined);
   siblingTerminal.abandon();
   siblingEvents.unsubscribe();
   siblingEntity.unsubscribe();
@@ -15357,6 +15359,10 @@ function createFakeDataChannel() {
       if (this.readyState === "closed") return;
       this.readyState = "closed";
       for (const listener of listeners.get("close") ?? []) listener({});
+    },
+    /** A transport error report; browsers follow it with a close event. */
+    error() {
+      for (const listener of listeners.get("error") ?? []) listener({});
     },
     emitMessage(data) {
       for (const listener of listeners.get("message") ?? []) listener({ data });
