@@ -9481,7 +9481,8 @@ try {
       container.dispatch("pointerdown", pointer({}));
       container.dispatch("pointermove", pointer({ buttons: 1, clientX: 35 }));
       container.dispatch("pointermove", pointer({ buttons: 0, clientX: 45 }));
-      container.dispatch("pointerup", pointer({ buttons: 0 }));
+      // The release reports its own event position, here the fourth column.
+      container.dispatch("pointerup", pointer({ buttons: 0, clientX: 45 }));
       assert.deepEqual(sink.map((input) => [input.action, input.button ?? null, input.col, input.row, input.xPx, input.yPx]), [
         ["press", "left", 2, 2, 50, 90],
         ["motion", null, 3, 2, 70, 90],
