@@ -1,0 +1,172 @@
+{
+  "protocol": "botster-hub-daemon-v1",
+  "protocol_version": 9,
+  "conformance_fixture_revision": 49,
+  "required_features": [
+    "sessions",
+    "plugin_surface_render",
+    "plugin_surface_action",
+    "package_routes",
+    "package_navigation",
+    "spawn_targets",
+    "worktrees",
+    "terminal_readback",
+    "session_entity_subscriptions",
+    "session_type_entity_subscriptions",
+    "plugin_entity_subscriptions"
+  ],
+  "supported_features": [
+    "sessions",
+    "plugin_surface_render",
+    "plugin_surface_action",
+    "package_routes",
+    "package_navigation",
+    "spawn_targets",
+    "worktrees",
+    "terminal_readback",
+    "session_entity_subscriptions",
+    "session_type_entity_subscriptions",
+    "plugin_entity_subscriptions",
+    "hub_source_update",
+    "unix_terminal_adapter",
+    "terminal_subscription_closed",
+    "webrtc_terminal_adapter",
+    "attach_occupancy",
+    "package_event_subscriptions"
+  ],
+  "diagnostic_kinds": [
+    "connected",
+    "disconnected",
+    "compatibility_mismatch",
+    "unsupported_feature",
+    "terminal_stream_unavailable",
+    "worker_compatibility",
+    "action_failure",
+    "daemon_startup_failure",
+    "backpressure"
+  ],
+  "session_actions": [
+    "status",
+    "list_sessions",
+    "subscribe_entities",
+    "unsubscribe_entities",
+    "remove_session",
+    "spawn",
+    "attach",
+    "shutdown_session"
+  ],
+  "terminal_streaming": {
+    "supported": true,
+    "feature": "terminal_streaming",
+    "helper": "botster_hub_client::stream_attach",
+    "held_open_stream": true,
+    "conformance_ready_output": "conformance-ready",
+    "conformance_echo_output": "echo:from-conformance",
+    "missing_session_diagnostic_kind": "action_failure"
+  },
+  "session_entities": {
+    "supported": true,
+    "feature": "session_entity_subscriptions",
+    "helper": "botster_hub_client::subscribe_session_entities",
+    "frame_type": "botster_hub_client::DaemonEntityFrame",
+    "bounded_delivery": true,
+    "explicit_snapshot_resync": true,
+    "fixture_path": "botster_hub_test_support::session_lifecycle_subscription_conformance_scenario",
+    "json_helper": "botster_hub_test_support::session_lifecycle_subscription_conformance_fixture_json",
+    "runtime_runner": "botster_hub_test_support::run_session_lifecycle_subscription_conformance",
+    "runtime_regression": "session_entity_subscription_pushes_snapshot_ordered_deltas_and_fresh_reconnect",
+    "binding_family": "/session",
+    "lifecycle_class_field": "lifecycle_class",
+    "lifecycle_classes": [
+      "current",
+      "ended",
+      "indeterminate"
+    ],
+    "missing_row_state": "unavailable",
+    "plugin_surface_id": "contract.sessions",
+    "plugin_binding_fixture_path": "botster_hub_test_support::session_plugin_binding_conformance_scenario",
+    "reference_materializer": "botster_hub_test_support::materialize_session_plugin_bindings",
+    "row_reference_materializer": "botster_hub_test_support::materialize_session_plugin_rows"
+  },
+  "resize": {
+    "supported": true,
+    "feature": "resize",
+    "action": "resize",
+    "conformance_output_prefix": "winsize:"
+  },
+  "plugin_surfaces": {
+    "render_supported": true,
+    "render_feature": "plugin_surface_render",
+    "action_supported": true,
+    "action_feature": "plugin_surface_action",
+    "package_name": "botster.plugin-contract-matrix",
+    "surface_id": "contract.app",
+    "rendered_surface_kind": "panel",
+    "rendered_surface_node_id": "contract-app-panel",
+    "invalid_action_diagnostic_kind": "action_failure",
+    "runtime_runner": "botster_hub_test_support::run_plugin_contract_matrix_conformance",
+    "presentation_operation_kinds": [
+      "set",
+      "clear",
+      "toggle"
+    ],
+    "dialog_presence_key": "contract-dialog",
+    "dialog_form_node_id": "contract-app-form",
+    "dialog_input_node_id": "contract-app-message",
+    "actionable_sibling_form_forbidden": true,
+    "accepted_replacement_scope": "whole_surface",
+    "selected_workspace_equality_key": "selected-workspace",
+    "selected_workspace_equality_value": "workspace-alpha",
+    "authored_set_values": {
+      "contract-dialog": true,
+      "selected-workspace": "workspace-alpha"
+    }
+  },
+  "entity_actions": {
+    "supported_capabilities": [
+      "plugin_surface_json_actions",
+      "plugin_entity_frames"
+    ],
+    "unsupported_capabilities": []
+  },
+  "late_attach_history": {
+    "supported": true,
+    "fixture_path": "botster_hub_test_support::late_attach_history_conformance_scenario",
+    "json_helper": "botster_hub_test_support::late_attach_history_conformance_fixture_json",
+    "event_type": "botster_hub_test_support::TerminalStreamFixtureFrame",
+    "runtime_regression": "external_daemon_same_session_reattach_replays_opaque_history_before_live_output"
+  },
+  "terminal_mode_flags": {
+    "supported": true,
+    "feature": "terminal_readback",
+    "fixture_path": "botster_hub_test_support::mode_flags_conformance_scenario",
+    "json_helper": "botster_hub_test_support::mode_flags_conformance_fixture_json",
+    "request_type": "read_mode_flags",
+    "response_kind": "read_mode_flags"
+  },
+  "session_type_authoring": {
+    "supported": true,
+    "request_type": "show_session_type_definition",
+    "response_kind": "session_type_definition",
+    "response_field": "session_type_definition",
+    "definition_type": "botster_hub_client::DaemonSessionTypeEditableDefinition",
+    "editable_sources": [
+      "device",
+      "repo"
+    ],
+    "read_only_source": "package",
+    "read_only_error_kind": "read_only_session_type_source",
+    "authored_fields_absent_from_published_row": [
+      "context",
+      "environment",
+      "working_directory"
+    ],
+    "admission_group": "allow_runtime",
+    "runtime_regression": "session_type_definition_round_trips_authored_path_and_environment"
+  },
+  "known_limitations": [
+    "The matrix is a test/docs contract, not a daemon runtime endpoint.",
+    "Shipped Web/TUI binding resolution is owned by downstream client tickets; this Hub fixture is a producer/reference contract.",
+    "Clients own renderer-specific presentation policy for diagnostics."
+  ]
+}

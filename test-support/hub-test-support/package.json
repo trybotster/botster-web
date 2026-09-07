@@ -1,0 +1,47 @@
+{
+  "name": "@trybotster/hub-test-support",
+  "version": "0.1.44",
+  "description": "Node-consumable Botster hub client protocol and plugin contract test assets",
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./daemon-protocol": "./daemon-protocol.ts",
+    "./metadata": "./metadata.json",
+    "./first-party-client-support-matrix": "./first-party-client-support-matrix.json",
+    "./session-lifecycle-subscription-conformance-fixture": "./session-lifecycle-subscription-conformance-fixture.json",
+    "./session-plugin-binding-conformance-fixture": "./session-plugin-binding-conformance-fixture.json",
+    "./late-attach-history-conformance-fixture": "./late-attach-history-conformance-fixture.json",
+    "./local-webrtc-delivery-chunk-conformance-fixture": "./local-webrtc-delivery-chunk-conformance-fixture.json",
+    "./mode-flags-conformance-fixture": "./mode-flags-conformance-fixture.json",
+    "./fixtures/plugin-contract-matrix/*": "./fixtures/plugin-contract-matrix/*"
+  },
+  "files": [
+    "README.md",
+    "LICENSE",
+    "index.js",
+    "index.d.ts",
+    "metadata.json",
+    "daemon-protocol.ts",
+    "first-party-client-support-matrix.json",
+    "session-lifecycle-subscription-conformance-fixture.json",
+    "session-plugin-binding-conformance-fixture.json",
+    "late-attach-history-conformance-fixture.json",
+    "local-webrtc-delivery-chunk-conformance-fixture.json",
+    "mode-flags-conformance-fixture.json",
+    "fixtures/plugin-contract-matrix"
+  ],
+  "dependencies": {
+    "@trybotster/ui-contract": "0.3.3"
+  },
+  "scripts": {
+    "sync": "node scripts/sync-assets.mjs",
+    "check": "node scripts/sync-assets.mjs --check",
+    "test": "node test.mjs"
+  }
+}

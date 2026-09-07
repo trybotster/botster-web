@@ -993,6 +993,8 @@ const [
   uiContractDeclarations,
   uiContractSchemaRaw,
   contractMatrixManifestRaw,
+  hubTestSupportProvenanceRaw,
+  vendoredHubTestSupportPackageJsonRaw,
   css,
   variablesCss,
   vendorReadme
@@ -1038,6 +1040,8 @@ const [
   readFile(new URL("../node_modules/@trybotster/ui-contract/index.d.ts", import.meta.url), "utf8"),
   readFile(new URL("../node_modules/@trybotster/ui-contract/schema.json", import.meta.url), "utf8"),
   readFile(new URL("../node_modules/@trybotster/hub-test-support/fixtures/plugin-contract-matrix/botster-package.json", import.meta.url), "utf8"),
+  readFile(new URL("../test-support/hub-test-support/PROVENANCE.json", import.meta.url), "utf8"),
+  readFile(new URL("../test-support/hub-test-support/package.json", import.meta.url), "utf8"),
   readFile(new URL("./theme/app.css", import.meta.url), "utf8"),
   readFile(new URL("./theme/variables.css", import.meta.url), "utf8"),
   readFile(new URL("./vendor/restty/README.md", import.meta.url), "utf8")
@@ -2575,24 +2579,33 @@ const packageManifest = JSON.parse(packageManifestRaw);
 const packageJson = JSON.parse(packageJsonRaw);
 const uiContractSchema = JSON.parse(uiContractSchemaRaw);
 const contractMatrixManifest = JSON.parse(contractMatrixManifestRaw);
+const hubTestSupportProvenance = JSON.parse(hubTestSupportProvenanceRaw);
+const vendoredHubTestSupportPackageJson = JSON.parse(vendoredHubTestSupportPackageJsonRaw);
 assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 assert.equal(
   hubTestSupportMetadata.daemon_protocol.sha256,
-  "33c0c27941c0e9751342cfdbeb53d27bb4a1225e5ce7f4be280d9f0dc11ad7f3"
+  "8bf9e2917063190c87f6c206476b6cdc269a5d9a8a8a68029d3120e8237dd769"
 );
 assert.equal(hubTestSupportMetadata.ui_contract.package_version, "0.3.3");
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.43");
-assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "0.1.43");
+assert.equal(hubTestSupportMetadata.package_version, "0.1.44");
+// Hub 8cdab71 generated 0.1.44 but has not published it; Web consumes the verbatim package
+// from the tracked test-support directory through a file: dependency.
+assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "file:test-support/hub-test-support");
+assert.equal(hubTestSupportProvenance.revision, "8cdab7101e4688ec54444cd3fcef4bd83be904f5");
+assert.equal(hubTestSupportProvenance.package_version, hubTestSupportMetadata.package_version);
+assert.equal(hubTestSupportProvenance.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
+assert.equal(vendoredHubTestSupportPackageJson.version, hubTestSupportMetadata.package_version);
+assert.equal(vendoredHubTestSupportPackageJson.name, hubTestSupportMetadata.package_name);
 assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], "0.3.0");
-assert.equal(hubTestSupportMetadata.protocol_version, 8);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 48);
+assert.equal(hubTestSupportMetadata.protocol_version, 9);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 49);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
-  `${hubTestSupportMetadata.package_name}@${packageJson.devDependencies[hubTestSupportMetadata.package_name]}`,
+  `${hubTestSupportMetadata.package_name}@${hubTestSupportMetadata.package_version}`,
   `@trybotster/terminal-protocol@0.3.0`,
   `revision-${hubTestSupportMetadata.conformance_fixture_revision}`
 ];
@@ -2618,8 +2631,8 @@ assert.deepEqual(
     { kind: "surface", surface_id: "contract.settings" }
   ]
 );
-// The vendored daemon-protocol.ts is the Hub 4814089 artifact recorded in PROVENANCE.json;
-// the npm hub-test-support package still ships protocol 8 until Hub republishes it.
+// The vendored daemon-protocol.ts is the Hub 384a5fc artifact recorded in PROVENANCE.json;
+// the vendored hub-test-support package (Hub 8cdab71) ships the same artifact.
 assert.match(generatedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
 assert.match(generatedDaemonProtocol, /interface DaemonPluginResourceCounters/);
 assert.match(generatedDaemonProtocol, /\{ type: "refresh_local_packages" \}/);
