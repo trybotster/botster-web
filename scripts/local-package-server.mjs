@@ -4,8 +4,23 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import { extname, join, normalize, relative, sep } from "node:path";
 import { once } from "node:events";
 import { decodeHubConnection, HubConnectionError } from "./hubConnection.mjs";
+import { sendDaemonUnixRequest } from "./daemon-unix-client.mjs";
 
-const protocol = "botster-hub-daemon-v1";
+const daemonProtocol = "botster-hub-daemon-v1";
+const daemonCompatibilityRequirement = {
+  protocol: daemonProtocol,
+  protocol_version: 9,
+  required_features: ["webrtc_terminal_adapter"],
+  minimum_conformance_fixture_revision: 49,
+  client_name: "botster-web-package-server"
+};
+const daemonUnixFraming = {
+  lengthPrefixBytes: 4,
+  controlContainer: 1,
+  terminalContainer: 2,
+  maxTerminalRouteBytes: 1_024,
+  maxFrameBytes: 4_195_343
+};
 const signalingRequestTypes = new Set(["issue_local_webrtc_bootstrap", "local_webrtc_signal"]);
 const host = "127.0.0.1";
 const packageRoot = process.cwd();
@@ -198,11 +213,13 @@ process.once("SIGTERM", () => {
 });
 
 async function sendDaemonRequest(path, daemonRequest) {
-  const socket = await openDaemonSocket(path);
-  socket.write(`${JSON.stringify(daemonRequest)}\n`);
-  const reply = JSON.parse(await readSocketLine(socket));
-  socket.end();
-  return reply;
+  return sendDaemonUnixRequest({
+    socketPath: path,
+    request: daemonRequest,
+    protocol: daemonProtocol,
+    compatibilityRequirement: daemonCompatibilityRequirement,
+    framing: daemonUnixFraming
+  });
 }
 
 async function serveStaticUi(request, response) {
@@ -382,52 +399,6 @@ function contentTypeFor(filePath) {
     default:
       return "application/octet-stream";
   }
-}
-
-async function openDaemonSocket(path) {
-  const socket = connect(path);
-  await once(socket, "connect");
-  socket.setEncoding("utf8");
-
-  socket.write(`${JSON.stringify({ protocol })}\n`);
-  const hello = JSON.parse(await readSocketLine(socket));
-  if (hello.protocol !== protocol) {
-    socket.end();
-    throw new Error("daemon hello protocol mismatch");
-  }
-
-  return socket;
-}
-
-async function readSocketLine(socket) {
-  return new Promise((resolve, reject) => {
-    let buffer = "";
-    const cleanup = () => {
-      socket.off("data", onData);
-      socket.off("error", onError);
-      socket.off("end", onEnd);
-    };
-    const onData = (chunk) => {
-      buffer += chunk;
-      const newline = buffer.indexOf("\n");
-      if (newline >= 0) {
-        cleanup();
-        resolve(buffer.slice(0, newline));
-      }
-    };
-    const onError = (error) => {
-      cleanup();
-      reject(error);
-    };
-    const onEnd = () => {
-      cleanup();
-      reject(new Error("daemon socket closed before a JSON frame was read"));
-    };
-
-    socket.on("data", onData);
-    socket.on("error", onError);
-    socket.on("end", onEnd);
-  });
 }
 
 async function waitForSocket(path) {

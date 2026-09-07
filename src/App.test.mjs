@@ -983,6 +983,7 @@ const [
   pluginEntrypoint,
   checkDaemonProtocolDriftScript,
   localPackageServerScript,
+  daemonUnixClientScript,
   browserRuntimeSmokeScript,
   liveProtocolHarnessScript,
   liveHubLaneScript,
@@ -1031,6 +1032,7 @@ const [
   readFile(new URL("../plugin.lua", import.meta.url), "utf8"),
   readFile(new URL("../scripts/check-daemon-protocol-drift.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/local-package-server.mjs", import.meta.url), "utf8"),
+  readFile(new URL("../scripts/daemon-unix-client.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/browser-runtime-smoke.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-packaged-protocol-harness.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-hub-lane.mjs", import.meta.url), "utf8"),
@@ -2139,17 +2141,40 @@ assert.match(localHubFirstScreen, /Local Botster health/);
 assert.match(localHubFirstScreen, /packageLoadStatus/);
 assert.match(localHubFirstScreen, /sessionLoadStatus/);
 assert.doesNotMatch(localHubFirstScreen, /activeHubSessionId/);
-assert.match(localPackageServerScript, /protocol = "botster-hub-daemon-v1"/);
+assert.match(localPackageServerScript, /daemonProtocol = "botster-hub-daemon-v1"/);
 assert.match(localPackageServerScript, /decodeHubConnection/);
 assert.match(localPackageServerScript, /serveStaticUi/);
 assert.match(localPackageServerScript, /__BOTSTER_PACKAGE_RUNTIME__/);
 assert.match(localPackageServerScript, /case "\.mjs":/);
 assert.match(localPackageServerScript, /case "\.map":/);
 assert.match(localPackageServerScript, /kind: "daemon_response"/);
-assert.match(localPackageServerScript, /signalingRequestTypes/);
+assert.match(
+  localPackageServerScript,
+  /signalingRequestTypes = new Set\(\["issue_local_webrtc_bootstrap", "local_webrtc_signal"\]\)/
+);
 assert.match(localPackageServerScript, /issue_local_webrtc_bootstrap/);
 assert.match(localPackageServerScript, /local_webrtc_signal/);
 assert.doesNotMatch(localPackageServerScript, /text\/event-stream|EventSource|\/terminal|sendSseEvent|deterministicBotsterWebSurfaceResponse/);
+assert.match(localPackageServerScript, /sendDaemonUnixRequest/);
+assert.doesNotMatch(localPackageServerScript, /readSocketLine|openDaemonSocket|JSON\.stringify\(daemonRequest\)/);
+assert.match(daemonUnixClientScript, /frame: "hello"/);
+assert.match(daemonUnixClientScript, /frame: "request", request_id: "1"/);
+assert.match(daemonUnixClientScript, /It discards valid event, entity, and terminal deliveries/);
+assert.match(generatedDaemonProtocol, /export const PROTOCOL = "botster-hub-daemon-v1";/);
+assert.match(generatedDaemonProtocol, /export const CONFORMANCE_FIXTURE_REVISION = 49;/);
+assert.match(generatedDaemonProtocol, /export const UNIX_FRAME_LENGTH_PREFIX_BYTES = 4;/);
+assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_CONTROL = 1;/);
+assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_TERMINAL = 2;/);
+assert.match(generatedDaemonProtocol, /export const MAX_UNIX_TERMINAL_ROUTE_BYTES = 1024;/);
+assert.match(generatedDaemonProtocol, /export const MAX_UNIX_FRAME_BYTES = 4195343;/);
+assert.match(localPackageServerScript, /lengthPrefixBytes: 4/);
+assert.match(localPackageServerScript, /controlContainer: 1/);
+assert.match(localPackageServerScript, /terminalContainer: 2/);
+assert.match(localPackageServerScript, /maxTerminalRouteBytes: 1_024/);
+assert.match(localPackageServerScript, /maxFrameBytes: 4_195_343/);
+assert.match(localPackageServerScript, /protocol_version: 9/);
+assert.match(localPackageServerScript, /minimum_conformance_fixture_revision: 49/);
+assert.match(localPackageServerScript, /required_features: \["webrtc_terminal_adapter"\]/);
 assert.match(browserRuntimeSmokeScript, /proveMissingBootstrapDiagnostic/);
 assert.match(browserRuntimeSmokeScript, /Local WebRTC bootstrap failed/);
 assert.match(liveProtocolHarnessScript, /BOTSTER_HUB_BIN/);
@@ -15272,6 +15297,15 @@ assert.doesNotMatch(healthyFirstScreenMarkup, /botster-web-production-ready/);
 
 console.log("Renderer seam, runtime behavior, and registry fixture assertions passed.");
 
+function writePackageServerDaemonFrame(socket, value) {
+  const payload = Buffer.from(JSON.stringify(value), "utf8");
+  const frame = Buffer.allocUnsafe(5 + payload.length);
+  frame.writeUInt32LE(1 + payload.length, 0);
+  frame[4] = 1;
+  payload.copy(frame, 5);
+  socket.write(frame);
+}
+
 async function startPackageServerRuntime({
   launchResult = false,
   dynamicPort = false,
@@ -15294,58 +15328,73 @@ async function startPackageServerRuntime({
   ]);
 
   const daemon = createNetServer((socket) => {
-    socket.setEncoding("utf8");
-    let buffer = "";
+    let buffer = Buffer.alloc(0);
     let handshakeComplete = false;
     socket.on("data", (chunk) => {
-      buffer += chunk;
-      let newline = buffer.indexOf("\n");
-      while (newline >= 0) {
-        const line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        if (line.trim()) {
-          const frame = JSON.parse(line);
-          if (!handshakeComplete) {
-            assert.deepEqual(frame, { protocol: "botster-hub-daemon-v1" });
-            handshakeComplete = true;
-            socket.write(`${JSON.stringify({ protocol: "botster-hub-daemon-v1" })}\n`);
-          } else {
-            daemonRequests.push(frame);
-            if (frame.type === "issue_local_webrtc_bootstrap") {
-              bootstrapSequence += 1;
-              const localWebrtcBootstrap = bootstrapSequence === invalidBootstrapAt
-                ? null
-                : {
-                    grant_id: `package-server-grant-${bootstrapSequence}`,
-                    grant_secret: String(bootstrapSequence).padStart(64, "0"),
-                    package_name: frame.package_name,
-                    entrypoint_id: frame.entrypoint_id,
-                    expected_origin: frame.origin,
-                    expires_at: 0,
-                    signaling_transport: "daemon_request",
-                    data_plane: "webrtc_data_channel",
-                    ordered: true
-                  };
-              socket.write(
-                `${JSON.stringify({
-                  kind: "local_webrtc_bootstrap",
-                  local_webrtc_bootstrap: localWebrtcBootstrap
-                })}\n`
-              );
-            } else if (frame.type === "status") {
-              socket.write(
-                `${JSON.stringify({
-                  kind: "status",
-                  status: { lifecycle_state: "running", schema_version: 1 },
-                  events: []
-                })}\n`
-              );
-            } else {
-              socket.write(`${JSON.stringify({ kind: "events", events: [] })}\n`);
+      buffer = Buffer.concat([buffer, chunk]);
+      while (buffer.length >= 4) {
+        const frameLength = buffer.readUInt32LE(0);
+        if (buffer.length < 4 + frameLength) break;
+        const container = buffer[4];
+        const frame = JSON.parse(buffer.subarray(5, 4 + frameLength).toString("utf8"));
+        buffer = buffer.subarray(4 + frameLength);
+        assert.equal(container, 1);
+        if (!handshakeComplete) {
+          assert.equal(frame.frame, "hello");
+          assert.equal(frame.hello.protocol, "botster-hub-daemon-v1");
+          assert.deepEqual(frame.hello.compatibility.required_features, ["webrtc_terminal_adapter"]);
+          handshakeComplete = true;
+          writePackageServerDaemonFrame(socket, {
+            frame: "hello_ack",
+            ack: {
+              protocol: "botster-hub-daemon-v1",
+              compatibility: {
+                protocol: "botster-hub-daemon-v1",
+                protocol_version: 9,
+                features: ["webrtc_terminal_adapter"],
+                conformance_fixture_revision: 49
+              }
             }
-          }
+          });
+          continue;
         }
-        newline = buffer.indexOf("\n");
+
+        assert.equal(frame.frame, "request");
+        daemonRequests.push(frame.request);
+        let response;
+        if (frame.request.type === "issue_local_webrtc_bootstrap") {
+          bootstrapSequence += 1;
+          const localWebrtcBootstrap = bootstrapSequence === invalidBootstrapAt
+            ? null
+            : {
+                grant_id: `package-server-grant-${bootstrapSequence}`,
+                grant_secret: String(bootstrapSequence).padStart(64, "0"),
+                package_name: frame.request.package_name,
+                entrypoint_id: frame.request.entrypoint_id,
+                expected_origin: frame.request.origin,
+                expires_at: 0,
+                signaling_transport: "daemon_request",
+                data_plane: "webrtc_data_channel",
+                ordered: true
+              };
+          response = {
+            kind: "local_webrtc_bootstrap",
+            local_webrtc_bootstrap: localWebrtcBootstrap
+          };
+        } else if (frame.request.type === "status") {
+          response = {
+            kind: "status",
+            status: { lifecycle_state: "running", schema_version: 1 },
+            events: []
+          };
+        } else {
+          response = { kind: "events", events: [] };
+        }
+        writePackageServerDaemonFrame(socket, {
+          frame: "response",
+          request_id: frame.request_id,
+          response
+        });
       }
     });
   });

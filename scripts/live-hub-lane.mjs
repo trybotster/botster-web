@@ -22,6 +22,7 @@ import {
   HOST_CHROME,
   packageEnsureDecision
 } from "./live-packaged-protocol-helpers.mjs";
+import { sendDaemonUnixRequest } from "./daemon-unix-client.mjs";
 
 const daemonProtocolModule = await (async () => {
   const source = readFileSync(new URL("../src/botster/generated/daemon-protocol.ts", import.meta.url), "utf8");
@@ -40,7 +41,6 @@ const {
 } = daemonProtocolModule;
 
 export const daemonProtocol = PROTOCOL;
-const DAEMON_REQUEST_MS = 30_000;
 
 /**
  * Verifies the candidate binaries against Hub's install-manifest.json (artifacts by name
@@ -108,97 +108,18 @@ export function formatLaneFailure(fields) {
 }
 
 export async function sendDaemonRequest(socketPath, request) {
-  const socket = connect(socketPath);
-  const deadlineAt = Date.now() + DAEMON_REQUEST_MS;
-  let completed = false;
-  try {
-    await waitForSocketConnect(socket, deadlineAt);
-    const compatibilityRequirement = loadDaemonCompatibilityRequirement();
-    socket.write(encodeUnixControlFrame({
-      frame: "hello",
-      hello: {
-        protocol: daemonProtocol,
-        compatibility: compatibilityRequirement
-      }
-    }));
-    const hello = await readUnixControlFrame(socket, deadlineAt);
-    assertServerFrame(hello);
-    if (hello.frame === "close") {
-      if (!isRecord(hello.reason)) throw new Error("daemon sent a malformed close frame during hello");
-      throw new Error(`daemon closed during hello: ${JSON.stringify(hello.reason)}`);
+  return sendDaemonUnixRequest({
+    socketPath,
+    request,
+    protocol: daemonProtocol,
+    compatibilityRequirement: loadDaemonCompatibilityRequirement(),
+    framing: {
+      lengthPrefixBytes: UNIX_FRAME_LENGTH_PREFIX_BYTES,
+      controlContainer: UNIX_CONTAINER_CONTROL,
+      terminalContainer: UNIX_CONTAINER_TERMINAL,
+      maxTerminalRouteBytes: MAX_UNIX_TERMINAL_ROUTE_BYTES,
+      maxFrameBytes: MAX_UNIX_FRAME_BYTES
     }
-    if (hello.frame !== "hello_ack" || !isRecord(hello.ack) || hello.ack.protocol !== daemonProtocol) {
-      throw new Error("daemon hello protocol mismatch");
-    }
-    assertDaemonCompatibility(hello.ack.compatibility, compatibilityRequirement);
-
-    socket.write(encodeUnixControlFrame({ frame: "request", request_id: "1", request }));
-    // This connection never subscribes. It can discard unrelated mux notifications while
-    // it waits for its one correlated response; it does not provide a general event queue.
-    while (true) {
-      const reply = await readUnixControlFrame(socket, deadlineAt);
-      assertServerFrame(reply);
-      if (reply.frame === "close") {
-        if (!isRecord(reply.reason)) throw new Error("daemon sent a malformed close frame before reply");
-        throw new Error(`daemon closed before reply: ${JSON.stringify(reply.reason)}`);
-      }
-      if (reply.frame === "event") {
-        if (!isRecord(reply.event)) throw new Error("daemon sent a malformed event frame");
-        continue;
-      }
-      if (reply.frame === "entity") {
-        if (!isRecord(reply.entity)) throw new Error("daemon sent a malformed entity frame");
-        continue;
-      }
-      if (reply.frame !== "response") {
-        throw new Error(`unexpected daemon reply: ${JSON.stringify(reply)}`);
-      }
-      if (reply.request_id !== "1") {
-        throw new Error(`daemon returned unknown request_id ${JSON.stringify(reply.request_id)}`);
-      }
-      if (!isRecord(reply.response)) {
-        throw new Error("daemon sent a malformed response frame");
-      }
-      completed = true;
-      return reply.response;
-    }
-  } finally {
-    if (completed) {
-      socket.end();
-    } else {
-      socket.destroy();
-    }
-  }
-}
-
-function waitForSocketConnect(socket, deadlineAt) {
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      clearTimeout(timer);
-      socket.off("connect", onConnect);
-      socket.off("error", onError);
-      socket.off("close", onClose);
-    };
-    const onConnect = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (error) => {
-      cleanup();
-      reject(error);
-    };
-    const onClose = () => {
-      cleanup();
-      reject(new Error("daemon socket closed before connect"));
-    };
-    const onTimeout = () => {
-      cleanup();
-      reject(new Error(`daemon request deadline ${DAEMON_REQUEST_MS} ms exceeded`));
-    };
-    const timer = setTimeout(onTimeout, remainingDeadlineMs(deadlineAt));
-    socket.once("connect", onConnect);
-    socket.once("error", onError);
-    socket.once("close", onClose);
   });
 }
 
@@ -221,148 +142,6 @@ function loadDaemonCompatibilityRequirement() {
     minimum_conformance_fixture_revision: hubTestSupportMetadata.conformance_fixture_revision,
     client_name: "botster-web-live-harness"
   };
-}
-
-function encodeUnixControlFrame(value) {
-  const payload = Buffer.from(JSON.stringify(value), "utf8");
-  const frameLength = 1 + payload.length;
-  if (frameLength > MAX_UNIX_FRAME_BYTES) {
-    throw new Error(`daemon control frame exceeds ${MAX_UNIX_FRAME_BYTES} bytes`);
-  }
-  const frame = Buffer.allocUnsafe(UNIX_FRAME_LENGTH_PREFIX_BYTES + frameLength);
-  frame.writeUInt32LE(frameLength, 0);
-  frame[UNIX_FRAME_LENGTH_PREFIX_BYTES] = UNIX_CONTAINER_CONTROL;
-  payload.copy(frame, UNIX_FRAME_LENGTH_PREFIX_BYTES + 1);
-  return frame;
-}
-
-async function readUnixControlFrame(socket, deadlineAt) {
-  while (true) {
-    assertWithinDeadline(deadlineAt);
-    const prefix = await readSocketBytes(socket, UNIX_FRAME_LENGTH_PREFIX_BYTES, deadlineAt);
-    const frameLength = prefix.readUInt32LE(0);
-    if (frameLength < 2 || frameLength > MAX_UNIX_FRAME_BYTES) {
-      throw new Error(`invalid daemon frame length ${frameLength}`);
-    }
-    const frame = await readSocketBytes(socket, frameLength, deadlineAt);
-    if (frame[0] === UNIX_CONTAINER_TERMINAL) {
-      assertUnixTerminalContainer(frame);
-      continue;
-    }
-    if (frame[0] !== UNIX_CONTAINER_CONTROL) {
-      throw new Error(`unexpected daemon container ${frame[0]}`);
-    }
-    return JSON.parse(frame.subarray(1).toString("utf8"));
-  }
-}
-
-async function readSocketBytes(socket, length, deadlineAt) {
-  const chunks = [];
-  let received = 0;
-  while (received < length) {
-    assertWithinDeadline(deadlineAt);
-    const chunk = socket.read(length - received);
-    if (chunk !== null) {
-      chunks.push(chunk);
-      received += chunk.length;
-      continue;
-    }
-    if (socket.readableEnded || socket.destroyed) {
-      throw new Error("daemon socket closed before reply");
-    }
-    await waitForSocketReadable(socket, deadlineAt);
-  }
-  return chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, length);
-}
-
-function waitForSocketReadable(socket, deadlineAt) {
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      clearTimeout(timer);
-      socket.off("readable", onReadable);
-      socket.off("error", onError);
-      socket.off("end", onEnd);
-      socket.off("close", onClose);
-    };
-    const onReadable = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (error) => {
-      cleanup();
-      reject(error);
-    };
-    const onEnd = () => {
-      cleanup();
-      reject(new Error("daemon socket closed before reply"));
-    };
-    const onClose = () => {
-      cleanup();
-      reject(new Error("daemon socket closed before reply"));
-    };
-    const onTimeout = () => {
-      cleanup();
-      reject(new Error(`daemon request deadline ${DAEMON_REQUEST_MS} ms exceeded`));
-    };
-
-    const timer = setTimeout(onTimeout, remainingDeadlineMs(deadlineAt));
-    socket.once("readable", onReadable);
-    socket.once("error", onError);
-    socket.once("end", onEnd);
-    socket.once("close", onClose);
-  });
-}
-
-function remainingDeadlineMs(deadlineAt) {
-  return Math.max(0, deadlineAt - Date.now());
-}
-
-function assertWithinDeadline(deadlineAt) {
-  if (Date.now() >= deadlineAt) {
-    throw new Error(`daemon request deadline ${DAEMON_REQUEST_MS} ms exceeded`);
-  }
-}
-
-function assertServerFrame(frame) {
-  if (!isRecord(frame) || typeof frame.frame !== "string") {
-    throw new Error("daemon sent a malformed control frame");
-  }
-}
-
-function assertUnixTerminalContainer(frame) {
-  const fixedBytes = 1 + 2 + 8 + 4;
-  if (frame.length < fixedBytes + 1) {
-    throw new Error("daemon sent a truncated terminal container");
-  }
-  const routeLength = frame.readUInt16LE(1);
-  if (
-    routeLength < 1 ||
-    routeLength > MAX_UNIX_TERMINAL_ROUTE_BYTES ||
-    frame.length < fixedBytes + routeLength
-  ) {
-    throw new Error("daemon sent an invalid terminal container route");
-  }
-  new TextDecoder("utf-8", { fatal: true }).decode(frame.subarray(3, 3 + routeLength));
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function assertDaemonCompatibility(compatibility, required) {
-  const features = Array.isArray(compatibility?.features) ? compatibility.features : [];
-  const missing = required.required_features.filter((feature) => !features.includes(feature));
-  if (
-    compatibility?.protocol !== required.protocol ||
-    compatibility?.protocol_version !== required.protocol_version ||
-    !Number.isInteger(compatibility?.conformance_fixture_revision) ||
-    compatibility?.conformance_fixture_revision < required.minimum_conformance_fixture_revision ||
-    missing.length > 0
-  ) {
-    throw new Error(
-      `daemon compatibility mismatch: required=${JSON.stringify(required)} actual=${JSON.stringify(compatibility)} missing=${JSON.stringify(missing)}`
-    );
-  }
 }
 
 export async function waitForSocket(socketPath, exitMessage) {
