@@ -7584,10 +7584,12 @@ try {
   globalThis.window = originalWindow;
 }
 const mountedWebrtcInputs = [];
+// The bridge forwards the renderer's semantic input records to the data plane's sendInput.
 const mountedWebrtcDataPlane = {
   sessionId: activeHubSessionId,
-  writeInput(data) {
-    mountedWebrtcInputs.push(data);
+  sendInput(input) {
+    assert.equal(input.kind, "raw", "the mounted bridge forwards the renderer's raw-bytes record unchanged");
+    mountedWebrtcInputs.push(new TextDecoder().decode(input.bytes));
   },
   subscribeOutput() {
     return { unsubscribe() {} };
@@ -7614,7 +7616,7 @@ await mountedWebrtcBridge.attach(
   { sessionId: activeHubSessionId, renderer: "restty" },
   mountedWebrtcDataPlane
 );
-mountedInputListener("webrtc-mounted-input\n");
+mountedInputListener({ kind: "raw", bytes: new TextEncoder().encode("webrtc-mounted-input\n") });
 assert.deepEqual(mountedWebrtcInputs, ["webrtc-mounted-input\n"]);
 
 const realTransport = createHubTransport({ bridge });
@@ -10393,7 +10395,7 @@ try {
         unmount: async () => undefined,
         attach: async () => undefined,
         focus: async () => undefined,
-        writeInput: async () => undefined,
+        writeRawInput: async () => undefined,
         resize: async () => undefined
       },
       dataPlane: {
