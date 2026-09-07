@@ -3186,7 +3186,8 @@ const { runTerminalViewBridgeSmokeFixture } = await import(
 );
 const smoke = await runTerminalViewBridgeSmokeFixture();
 
-assert.deepEqual(smoke.dataPlane.inputs, ["ls\n"]);
+const smokeInputText = (inputs) => inputs.map((input) => (input.kind === "raw" ? new TextDecoder().decode(input.bytes) : `<${input.kind}>`));
+assert.deepEqual(smokeInputText(smoke.dataPlane.inputs), ["ls\n"]);
 assert.deepEqual(smoke.firstRenderer.writes.map((data) => Buffer.from(data).toString("utf8")), ["ready\r\n", "ok\r\n"]);
 assert.deepEqual(smoke.firstRenderer.resizes, [{ rows: 24, columns: 80 }]);
 assert.equal(smoke.dataPlane.outputSubscriptionCount, 1);
@@ -3197,8 +3198,8 @@ assert.ok(smoke.lifecycle.indexOf("destroy") < smoke.lifecycle.lastIndexOf("crea
 assert.equal(smoke.lifecycle.filter((event) => event === "focus").length, 2);
 assert.equal(smoke.lifecycle.filter((event) => event === "input:unsubscribe").length, 1);
 assert.doesNotMatch(smoke.firstRenderer.writes.map((data) => Buffer.from(data).toString("utf8")).join(""), /stale/);
-assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /stale/);
-assert.doesNotMatch(smoke.dataPlane.inputs.join(""), /premount/);
+assert.doesNotMatch(smokeInputText(smoke.dataPlane.inputs).join(""), /stale/);
+assert.doesNotMatch(smokeInputText(smoke.dataPlane.inputs).join(""), /premount/);
 
 const compiledRoot = join(tmpdir(), "botster-web-runtime-test");
 await rm(compiledRoot, { recursive: true, force: true });

@@ -245,7 +245,10 @@ body {
 }
 
 .terminal-session-view .panel-heading,
-.terminal-session-view .terminal-status[data-terminal-attach-state="attached"],
+.terminal-session-view .terminal-status[data-terminal-attach-state="attached"] {
+  display: none;
+}
+
 .terminal-session-view .terminal-status {
   position: absolute;
   z-index: 1;
