@@ -3430,6 +3430,8 @@ function terminalGridProbe() {
       hubResizes.push({ rows: geometry.rows, columns: geometry.cols });
     }
   };
+  // The rendered grid is the scheme 2 RESIZE geometry: rows, columns, widthPx, heightPx.
+  // These probes measure without pixel dimensions, so the pixel fields are 0.
   const apply = (grid, event = "browser_resize") => {
     rendered.grid = { ...grid };
     rendered.events.push({ event, grid: { ...grid } });
@@ -3488,7 +3490,7 @@ function runTerminalTransportOrder(order, rows, columns) {
   }
 
   const expected = { rows, columns };
-  assert.deepEqual(probe.rendered.grid, expected);
+  assert.deepEqual(probe.rendered.grid, { ...expected, widthPx: 0, heightPx: 0 });
   assert.deepEqual(probe.hubResizes.at(-1), expected);
   // Restty-encoded mouse and focus reports are render-only; anything else is reported.
   assert.equal(transport.sendInput("\u001b[<64;1;1M"), true);
@@ -3551,7 +3553,7 @@ async function runGhostsnpGridCase(resizePosition) {
   const reappliedAt = probe.rendered.events.findIndex(({ event }) => event === "ghostsnp_grid_reapply");
   assert.equal(importedAt >= 0, true);
   assert.equal(reappliedAt > importedAt, true);
-  assert.deepEqual(probe.rendered.grid, expected);
+  assert.deepEqual(probe.rendered.grid, { ...expected, widthPx: 0, heightPx: 0 });
   assert.deepEqual(probe.hubResizes.at(-1), expected);
 }
 
@@ -3657,7 +3659,7 @@ await runGhostsnpGridCase("after");
   const importedAt = probe.rendered.events.findIndex(({ event }) => event === "ghostsnp_import");
   const reappliedAt = probe.rendered.events.findIndex(({ event }) => event === "ghostsnp_grid_reapply");
   assert.equal(reappliedAt > importedAt, true);
-  assert.deepEqual(probe.rendered.grid, expected);
+  assert.deepEqual(probe.rendered.grid, { ...expected, widthPx: 0, heightPx: 0 });
   const finalResizeFrame = terminalFrames.at(-1);
   assert.equal(finalResizeFrame[1], TerminalInputKind.resize);
   const finalResizeView = new DataView(finalResizeFrame.buffer, finalResizeFrame.byteOffset, finalResizeFrame.byteLength);
