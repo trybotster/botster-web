@@ -187,10 +187,15 @@ export async function runTerminalPasteTests(helpers) {
       const result = (operationId, outcome, options) =>
         emitTestTerminalBody(terminal, secret, { generation, streamEpoch: 0 }, inputResultBody(operationId, outcome, { modeBits, ...options }));
       const framesSince = async () => {
-        const frames = await sentTestInputFrames({ sent: terminal.sent.slice(sentBefore) }, secret);
+        // Polled while sends are in progress: only complete messages count as frames.
+        const frames = await sentTestInputFrames({ sent: terminal.sent.slice(sentBefore) }, secret, { allowTrailingPartial: true });
         return frames.map(decodeFrame);
       };
-      return { terminal, subscriptionId, result, framesSince };
+      // Strict reassembly at a scenario's completion point: every message complete.
+      const assertComplete = async () => {
+        await sentTestInputFrames({ sent: terminal.sent.slice(sentBefore) }, secret);
+      };
+      return { terminal, subscriptionId, result, framesSince, assertComplete };
     };
     const first = await admit(0);
     return { client, control, plane, statuses, outputs, outcomes, sessionId, answerControl, admit, ...first };
@@ -234,6 +239,7 @@ export async function runTerminalPasteTests(helpers) {
         { kind: "paste", outcome: "written", requestedBytes: 70_000, acceptedPayloadBytes: 70_000, writtenPtyBytes: 70_012, operationId: 1 }
       );
       assert.equal(fixture.outcomes.length, 1, "the outcome is also published to outcome subscribers");
+      await fixture.assertComplete();
     });
 
     // (p2) Unicode paste: UTF-8 byte length above UTF-16 length, exact content.
@@ -253,6 +259,7 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(outcome.outcome, "written");
       assert.equal(outcome.requestedBytes, bytes, "requested bytes are the exact UTF-8 size");
       assert.equal(outcome.writtenPtyBytes, bytes);
+      await fixture.assertComplete();
     });
 
     // (p3) Bracketed paste on and off: byte-identical frames; the worker adds the markers.
@@ -273,6 +280,7 @@ export async function runTerminalPasteTests(helpers) {
         const outcome = await pending;
         assert.equal(outcome.outcome, "written");
         assert.equal(outcome.writtenPtyBytes, bracketed ? text.length + 12 : text.length, "PTY bytes include the worker's markers");
+        await fixture.assertComplete();
       }
       assert.equal(collected[0], collected[1], "frames are identical under bracketed paste off and on");
     });
@@ -308,6 +316,7 @@ export async function runTerminalPasteTests(helpers) {
         await flushMicrotasks();
         assert.equal((await fixture.framesSince()).length, expectedFrames, `${outcomeName}: no retry frames`);
       }
+      await fixture.assertComplete();
     });
 
     // (p5) Bounds: size before encoding, one assembling paste per route, retained bytes across
@@ -356,6 +365,7 @@ export async function runTerminalPasteTests(helpers) {
       await waitFrameCount(fixture, 6 + 2 * bigFrames + 3, "p5: post-release commit");
       await fixture.result(5, "written", { accepted: 1, written: 1 });
       assert.equal((await afterPending).outcome, "written");
+      await fixture.assertComplete();
     });
 
     // (p6) Ordering: keys keep their place around a paste; a resize goes ahead of queued
@@ -381,6 +391,7 @@ export async function runTerminalPasteTests(helpers) {
       assert.deepEqual(later.slice(6).map((frame) => frame.name), ["paste_begin", "paste_chunk", "paste_commit", "resize"]);
       await fixture.result(5, "written", { accepted: 6, written: 6 });
       assert.equal((await laterPaste).outcome, "written");
+      await fixture.assertComplete();
     });
 
     // (p7) A chunk send that fails mid-paste cancels the operation and aborts it best effort.
@@ -401,6 +412,7 @@ export async function runTerminalPasteTests(helpers) {
       const frames = await fixture.framesSince();
       assert.deepEqual(frames.map((frame) => frame.name), ["paste_begin", "paste_abort"], "BEGIN then a best-effort ABORT, no COMMIT");
       assert.equal(frames[1].operationId, 1);
+      await fixture.assertComplete();
     });
 
     // (p8) Unknown delivery: committed, then the stream is lost before its result.
@@ -413,6 +425,7 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(outcome.outcome, "outcome_unknown");
       assert.match(outcome.detail, /lost/);
       assert.equal(outcome.operationId, 1);
+      await fixture.assertComplete();
     });
 
     // (p9) A later attachment restarts operation ids at 1 and never replays the lost paste.
@@ -430,6 +443,8 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(frames[0].operationId, 1, "operation ids restart on the new attachment");
       await second.result(1, "written", { accepted: 6, written: 6 });
       assert.equal((await later).outcome, "written");
+      await fixture.assertComplete();
+      await second.assertComplete();
     });
 
     // (p11) Queue capacity is reserved at admission: a paste behind a full in-flight window
@@ -468,6 +483,7 @@ export async function runTerminalPasteTests(helpers) {
       ]);
       await fixture.result(total + 1, "written", { accepted: 5, written: 5 });
       assert.equal((await admitted).outcome, "written");
+      await fixture.assertComplete();
     });
 
     // (p12) A paste queued behind a full window is fenced by its attachment: loss cancels it
@@ -493,6 +509,8 @@ export async function runTerminalPasteTests(helpers) {
       const second = await fixture.admit(1);
       await flushMicrotasks();
       assert.equal((await second.framesSince()).length, 0, "nothing from the lost attachment is replayed");
+      await fixture.assertComplete();
+      await second.assertComplete();
     });
 
     // (p13) Raw terminal messages queued ahead of decode are bounded: the bound acts on the
@@ -508,6 +526,7 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(fixture.terminal.readyState, "closed", "the frame past the bound retires the route synchronously");
       const outcome = await pending;
       assert.equal(outcome.outcome, "outcome_unknown");
+      await fixture.assertComplete();
     });
 
     // (p10) Transport without a data plane: explicit local rejection, no key path.

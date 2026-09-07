@@ -16006,7 +16006,7 @@ async function openTestTerminalChunk(secret, message) {
 }
 
 /** Reassembles every Web-to-Hub binary message on a terminal channel into complete input frames. */
-async function sentTestInputFrames(channel, secret) {
+async function sentTestInputFrames(channel, secret, { allowTrailingPartial = false } = {}) {
   const frames = [];
   const partial = new Map();
   for (const sent of channel.sent) {
@@ -16025,7 +16025,10 @@ async function sentTestInputFrames(channel, secret) {
       partial.delete(key);
     }
   }
-  assert.equal(partial.size, 0, "no partial terminal message remains");
+  // A poll taken while a multi-chunk message is still being written sees its trailing
+  // partial message; a final read must see none.
+  if (!allowTrailingPartial) assert.equal(partial.size, 0, "no partial terminal message remains");
+  else assert.ok(partial.size <= 1, "at most the message in flight is partial");
   return frames;
 }
 
