@@ -7,7 +7,8 @@ import type {
   TerminalOutput,
   TerminalResizeGeometry,
   TerminalSnapshotReader,
-  TerminalSubscription
+  TerminalSubscription,
+  UnsafePasteConsent
 } from "./terminal";
 import type { TerminalSemanticInput } from "./terminalInputEvents";
 import type {
@@ -58,6 +59,7 @@ export const MAX_INFLIGHT_INPUT_OPERATIONS: number = MAX_INPUT_OPERATIONS_PER_SE
 export const MAX_QUEUED_INPUT_BYTES: number = MAX_RETAINED_INPUT_BYTES_PER_SESSION;
 /** Web-local bound on unsent input operations, matching the pending output item bound. */
 export const MAX_QUEUED_INPUT_OPERATIONS: number = MAX_PENDING_TERMINAL_ITEMS;
+export const UNSAFE_PASTE_CONSENT_TIMEOUT_MS = 30_000;
 
 /**
  * Optional hooks that pause ownership-creating async boundaries so isolation
@@ -72,6 +74,8 @@ export interface HubTerminalDataPlaneTestHooks {
   detachRequestBoundMs?: number;
   /** Test-only shorter bound for admitted terminal hydration progress. */
   hydrationProgressBoundMs?: number;
+  /** Test-only shorter bound for unsafe-paste consent. */
+  unsafePasteConsentTimeoutMs?: number;
 }
 
 export interface HubTerminalDataPlaneOptions {
@@ -100,6 +104,9 @@ interface QueuedInputOperation {
   operation: EncodedInputOperation;
   kind: TerminalInputOutcome["kind"];
   requestedBytes: number;
+  /** Original paste bytes retained only until the authoritative outcome is known. */
+  pasteData?: Uint8Array;
+  pasteAttempt?: number;
   resolve?: (outcome: TerminalInputOutcome) => void;
 }
 
@@ -108,6 +115,12 @@ interface InflightInputOperation extends QueuedInputOperation {
   operationId: number;
   /** Client payload bytes still counted against the retained-input bound until the result lands. */
   retainedBytes: number;
+}
+
+interface PendingUnsafePaste {
+  consent: UnsafePasteConsent;
+  data: Uint8Array;
+  timeout: ReturnType<typeof setTimeout>;
 }
 
 export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
@@ -159,6 +172,9 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private readonly inflightInputs = new Map<number, InflightInputOperation>();
   private inputSendChain: Promise<void> = Promise.resolve();
   private pendingResize: TerminalResizeGeometry | undefined;
+  private pasteAttempt = 0;
+  private pendingUnsafePaste: PendingUnsafePaste | undefined;
+  private consentRetainedBytes = 0;
 
   constructor(private readonly options: HubTerminalDataPlaneOptions) {
     if (!options.sessionId) throw new Error("Hub terminal data plane requires a session id.");
@@ -252,12 +268,14 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
    */
   async writePaste(text: string): Promise<TerminalInputOutcome> {
     const outcome = await this.writePasteOperation(text);
-    recordLiveHarnessTerminal("paste_outcome", { ...outcome, sessionId: this.sessionId });
-    this.publishOutcome(outcome);
+    this.publishPasteOutcome(outcome);
     return outcome;
   }
 
   private async writePasteOperation(text: string): Promise<TerminalInputOutcome> {
+    this.releaseUnsafePasteConsent();
+    this.pasteAttempt += 1;
+    const pasteAttempt = this.pasteAttempt;
     const rejected = (reason: string, detail: string, requestedBytes?: number): TerminalInputOutcome => ({
       kind: "paste",
       outcome: "rejected_locally",
@@ -278,9 +296,9 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     if (bytes > MAX_PASTE_BYTES) {
       return rejected("too_large", `Paste of ${bytes} bytes exceeds the ${MAX_PASTE_BYTES}-byte paste limit.`, bytes);
     }
-    const operation = encodePasteOperation(data);
+    const operation = encodePasteOperation(data, false);
     return new Promise<TerminalInputOutcome>((resolve) => {
-      if (!this.enqueueInput({ operation, kind: "paste", requestedBytes: bytes, resolve })) {
+      if (!this.enqueueInput({ operation, kind: "paste", requestedBytes: bytes, pasteData: data, pasteAttempt, resolve })) {
         resolve(rejected("queue_bounds", this.queueBoundsDetail("Paste"), bytes));
         return;
       }
@@ -294,7 +312,49 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
 
   /** Queued plus in-flight client payload bytes, mirroring Core's per-session retained bound. */
   private retainedInputBytes(): number {
-    return this.queuedInputBytes + this.inflightInputBytes;
+    return this.queuedInputBytes + this.inflightInputBytes + this.consentRetainedBytes;
+  }
+
+  confirmUnsafePaste(consent: UnsafePasteConsent): boolean {
+    const pending = this.pendingUnsafePaste;
+    if (!pending || !sameUnsafePasteConsent(pending.consent, consent)) return false;
+    if (!this.isCurrentAttachment(consent.attachmentGeneration) || Date.now() >= consent.expiresAt) {
+      this.releaseUnsafePasteConsent();
+      return false;
+    }
+
+    const data = pending.data;
+    const requestedBytes = data.byteLength;
+    this.releaseUnsafePasteConsent();
+    const admitted = this.enqueueInput({
+      operation: encodePasteOperation(data, true),
+      kind: "paste",
+      requestedBytes,
+      resolve: (outcome) => this.publishPasteOutcome(outcome)
+    });
+    if (!admitted) {
+      this.publishPasteOutcome({
+        kind: "paste",
+        outcome: "rejected_locally",
+        requestedBytes,
+        reason: "queue_bounds",
+        detail: this.queueBoundsDetail("Paste")
+      });
+    }
+    return admitted;
+  }
+
+  cancelUnsafePaste(consent: UnsafePasteConsent): boolean {
+    if (!this.pendingUnsafePaste || !sameUnsafePasteConsent(this.pendingUnsafePaste.consent, consent)) {
+      return false;
+    }
+    this.releaseUnsafePasteConsent();
+    return true;
+  }
+
+  private publishPasteOutcome(outcome: TerminalInputOutcome): void {
+    recordLiveHarnessTerminal("paste_outcome", { ...outcome, sessionId: this.sessionId });
+    this.publishOutcome(outcome);
   }
 
   /** Reserves queue capacity for one operation, or refuses it without retaining anything. */
@@ -391,12 +451,41 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     if (this.inflightInputs.get(inflight.operationId) !== inflight) return;
     this.inflightInputs.delete(inflight.operationId);
     this.inflightInputBytes -= inflight.retainedBytes;
+    let unsafePasteConsent: UnsafePasteConsent | undefined;
+    if (
+      outcome === "rejected_unsafe_paste" &&
+      counts.acceptedPayloadBytes === 0 &&
+      counts.writtenPtyBytes === 0 &&
+      inflight.kind === "paste" &&
+      inflight.pasteData !== undefined &&
+      inflight.pasteAttempt === this.pasteAttempt &&
+      this.isCurrentAttachment(inflight.generation)
+    ) {
+      this.releaseUnsafePasteConsent();
+      unsafePasteConsent = Object.freeze({
+        attachmentGeneration: inflight.generation,
+        rejectedOperationId: inflight.operationId,
+        expiresAt: Date.now() + (this.testHooks?.unsafePasteConsentTimeoutMs ?? UNSAFE_PASTE_CONSENT_TIMEOUT_MS)
+      });
+      const pending: PendingUnsafePaste = {
+        consent: unsafePasteConsent,
+        data: inflight.pasteData,
+        timeout: setTimeout(() => {
+          if (this.pendingUnsafePaste === pending) this.releaseUnsafePasteConsent();
+        }, this.testHooks?.unsafePasteConsentTimeoutMs ?? UNSAFE_PASTE_CONSENT_TIMEOUT_MS)
+      };
+      this.pendingUnsafePaste = pending;
+      // A paste operation's bodyBytes is the raw payload length, which equals data.byteLength.
+      this.consentRetainedBytes = inflight.retainedBytes;
+      this.assertUnsafePasteConsentAccounting();
+    }
     const result: TerminalInputOutcome = {
       kind: inflight.kind,
       outcome,
       operationId: inflight.operationId,
       requestedBytes: inflight.requestedBytes,
       ...counts,
+      ...(unsafePasteConsent ? { unsafePasteConsent } : {}),
       detail
     };
     if (inflight.resolve) {
@@ -424,6 +513,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     }
     this.queuedInputBytes = 0;
     this.inflightInputBytes = 0;
+    this.releaseUnsafePasteConsent();
     this.pendingResize = undefined;
     this.nextOperationId = 1;
   }
@@ -1079,10 +1169,28 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       subscription_id: this.subscriptionId
     });
     this.acceptedEpoch = toEpoch;
+    this.releaseUnsafePasteConsent();
     this.cancelHydration();
     this.ensureHydration(attachmentGeneration);
     this.emitStatus({ state: "attaching", message: "Terminal route resynchronizing after egress overflow." });
     this.armHydrationProgressBound(this.hydration!);
+  }
+
+  private releaseUnsafePasteConsent(): void {
+    const pending = this.pendingUnsafePaste;
+    this.pendingUnsafePaste = undefined;
+    this.consentRetainedBytes = 0;
+    if (pending) clearTimeout(pending.timeout);
+    this.assertUnsafePasteConsentAccounting();
+  }
+
+  private assertUnsafePasteConsentAccounting(): void {
+    const expected = this.pendingUnsafePaste?.data.byteLength ?? 0;
+    if (this.consentRetainedBytes !== expected) {
+      throw new Error(
+        `Unsafe paste consent accounting mismatch: retained=${this.consentRetainedBytes} expected=${expected}.`
+      );
+    }
   }
 
   private ensureHydration(attachmentGeneration: number): ScreenHydration {
@@ -1387,6 +1495,14 @@ function base64ToBytes(payloadBase64: string): Uint8Array {
 
 export function createHubTerminalDataPlane(options: HubTerminalDataPlaneOptions): TerminalDataPlaneAttachment {
   return new HubTerminalDataPlane(options);
+}
+
+function sameUnsafePasteConsent(left: UnsafePasteConsent, right: UnsafePasteConsent): boolean {
+  return (
+    left.attachmentGeneration === right.attachmentGeneration &&
+    left.rejectedOperationId === right.rejectedOperationId &&
+    left.expiresAt === right.expiresAt
+  );
 }
 
 function createTerminalSubscriptionId(): string {

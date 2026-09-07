@@ -51,9 +51,11 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
   };
   const inputMessage = (element) =>
     findAll(element, (node) => node.nodeType === 1 && classOf(node) === "terminal-input-message")[0] ?? null;
+  const pasteAction = (element, action) =>
+    findAll(element, (node) => node.nodeType === 1 && node.getAttribute?.("data-terminal-paste-action") === action)[0] ?? null;
 
   const makeDataPlane = (sessionId) => {
-    const state = { statusSubscriptions: 0, statusUnsubscribes: 0, detachCount: 0 };
+    const state = { statusSubscriptions: 0, statusUnsubscribes: 0, detachCount: 0, confirmed: [], cancelled: [] };
     return {
       state,
       dataPlane: {
@@ -62,6 +64,8 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
         async writePaste(text) {
           return { kind: "paste", outcome: "rejected_locally", requestedBytes: text.length, reason: "fake", detail: "fake data plane" };
         },
+        confirmUnsafePaste(consent) { state.confirmed.push(consent); return true; },
+        cancelUnsafePaste(consent) { state.cancelled.push(consent); return true; },
         subscribeOutput: () => ({ unsubscribe() {} }),
         subscribeStatus(listener) {
           state.statusSubscriptions += 1;
@@ -73,7 +77,7 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     };
   };
   const makeBridge = ({ attach } = {}) => {
-    const calls = { mount: 0, unmount: 0, attach: 0, detach: 0, subscribeInputOutcomes: 0, outcomeUnsubscribes: 0 };
+    const calls = { mount: 0, unmount: 0, attach: 0, detach: 0, focus: 0, subscribeInputOutcomes: 0, outcomeUnsubscribes: 0 };
     let outcomeListener;
     let mountId = 0;
     return {
@@ -84,7 +88,7 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
         async unmount() { calls.unmount += 1; },
         async attach() { calls.attach += 1; await attach?.(); },
         async detach() { calls.detach += 1; },
-        async focus() {},
+        async focus() { calls.focus += 1; },
         async writeRawInput() {},
         async resize() {},
         subscribeInputOutcomes(_descriptor, listener) {
@@ -201,5 +205,55 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     await settle();
     assert.equal(inputMessage(host.element), null, "replacement session shows no old-session input message");
     assert.equal(calls.outcomeUnsubscribes >= 1, true, "the old outcome subscription was released");
+  });
+
+  // (v4) Eligible unsafe paste uses the existing live outcome region. The prompt exposes
+  // no clipboard content and never moves focus when it appears.
+  await runScenario("v4-unsafe-consent-prompt", async () => {
+    const { bridge, calls, emitOutcome } = makeBridge();
+    const { dataPlane } = makeDataPlane("consent");
+    const host = await mountHost({
+      bridge,
+      dataPlane,
+      descriptor: { sessionId: "consent", renderer: "restty" }
+    });
+    for (let round = 0; round < 40 && calls.subscribeInputOutcomes === 0; round += 1) await settle();
+    const consent = { attachmentGeneration: 4, rejectedOperationId: 9, expiresAt: Date.now() + 30_000 };
+    const secretClipboardText = "never-render-this-control-text\n";
+    await act(async () => {
+      emitOutcome({
+        kind: "paste",
+        outcome: "rejected_unsafe_paste",
+        operationId: 9,
+        requestedBytes: secretClipboardText.length,
+        acceptedPayloadBytes: 0,
+        writtenPtyBytes: 0,
+        unsafePasteConsent: consent,
+        detail: "paste contains a newline"
+      });
+    });
+    const message = inputMessage(host.element);
+    assert.ok(message);
+    assert.equal(message.getAttribute("role"), "status");
+    assert.match(textOf(message), /Multiline or control input can execute commands/);
+    assert.match(textOf(message), /Cancel paste/);
+    assert.match(textOf(message), /Paste anyway/);
+    assert.doesNotMatch(textOf(message), /never-render-this-control-text/);
+    assert.equal(pasteAction(host.element, "cancel")?.getAttribute("type"), "button");
+    assert.equal(pasteAction(host.element, "confirm")?.getAttribute("type"), "button");
+    assert.equal(calls.focus, 0, "showing consent does not move focus");
+    assert.equal(findAll(message, (node) => node.getAttribute?.("autofocus") !== null).length, 0);
+
+    await act(async () => {
+      emitOutcome({
+        kind: "paste",
+        outcome: "rejected_unsafe_paste",
+        operationId: 10,
+        requestedBytes: 5,
+        detail: "missing progress counts"
+      });
+    });
+    assert.equal(pasteAction(host.element, "confirm"), null, "ineligible rejection has no confirm control");
+    assert.match(textOf(inputMessage(host.element)), /Dismiss/);
   });
 }

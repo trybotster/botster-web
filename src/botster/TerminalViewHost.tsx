@@ -6,6 +6,7 @@ import {
   type TerminalAttachmentStatus,
   type TerminalDataPlaneAttachment,
   type TerminalInputOutcome,
+  type UnsafePasteConsent,
   type TerminalViewBridge,
   type TerminalViewDescriptor,
   type TerminalViewMount
@@ -48,7 +49,7 @@ export function TerminalViewHost({
   // Persistent input message: an input outcome other than `written` stays visible until the
   // user dismisses it or a later operation is written. Attachment lifecycle is not involved.
   const [inputMessage, setInputMessage] = useState<TerminalInputOutcome | undefined>();
-  const terminalDataPlane = useMemo(
+  const terminalDataPlane = useMemo<TerminalDataPlaneAttachment>(
     () =>
       dataPlane ??
       new MockTerminalDataPlane(descriptor.sessionId, [
@@ -57,6 +58,27 @@ export function TerminalViewHost({
       ]),
     [dataPlane, descriptor.sessionId]
   );
+  const unsafePasteConsent = inputMessage?.unsafePasteConsent;
+
+  useEffect(() => {
+    if (!unsafePasteConsent) return;
+    const remaining = Math.max(0, unsafePasteConsent.expiresAt - Date.now());
+    const timeout = setTimeout(() => {
+      terminalDataPlane.cancelUnsafePaste?.(unsafePasteConsent);
+      setInputMessage((current) => {
+        if (!current?.unsafePasteConsent || !sameUnsafePasteConsent(current.unsafePasteConsent, unsafePasteConsent)) {
+          return current;
+        }
+        return {
+          ...current,
+          unsafePasteConsent: undefined,
+          reason: "consent_expired",
+          detail: "Paste confirmation expired; clipboard text was released."
+        };
+      });
+    }, remaining);
+    return () => clearTimeout(timeout);
+  }, [terminalDataPlane, unsafePasteConsent]);
 
   useEffect(() => {
     onAttachmentStatusRef.current = onAttachmentStatus;
@@ -151,6 +173,30 @@ export function TerminalViewHost({
     };
   }, [bridge, descriptor, terminalDataPlane]);
 
+  const restoreTerminalFocus = () => {
+    void bridge.focus(descriptor).catch((error: unknown) => onDiagnosticRef.current?.(error));
+  };
+
+  const confirmUnsafePaste = (consent: UnsafePasteConsent) => {
+    terminalDataPlane.confirmUnsafePaste?.(consent);
+    setInputMessage((current) =>
+      current?.unsafePasteConsent && sameUnsafePasteConsent(current.unsafePasteConsent, consent)
+        ? undefined
+        : current
+    );
+    restoreTerminalFocus();
+  };
+
+  const cancelUnsafePaste = (consent: UnsafePasteConsent) => {
+    terminalDataPlane.cancelUnsafePaste?.(consent);
+    setInputMessage((current) =>
+      current?.unsafePasteConsent && sameUnsafePasteConsent(current.unsafePasteConsent, consent)
+        ? undefined
+        : current
+    );
+    restoreTerminalFocus();
+  };
+
   return (
     <aside className="terminal-panel" aria-labelledby="terminal-heading">
       <div className="panel-heading">
@@ -177,13 +223,32 @@ export function TerminalViewHost({
           data-terminal-input-outcome={inputMessage.outcome}
         >
           <span>{terminalInputMessage(inputMessage)}</span>
-          <button
-            type="button"
-            aria-label="Dismiss terminal input message"
-            onClick={() => setInputMessage(undefined)}
-          >
-            Dismiss
-          </button>
+          {unsafePasteConsent && terminalDataPlane.confirmUnsafePaste && terminalDataPlane.cancelUnsafePaste ? (
+            <div className="terminal-input-actions">
+              <button
+                type="button"
+                data-terminal-paste-action="cancel"
+                onClick={() => cancelUnsafePaste(unsafePasteConsent)}
+              >
+                Cancel paste
+              </button>
+              <button
+                type="button"
+                data-terminal-paste-action="confirm"
+                onClick={() => confirmUnsafePaste(unsafePasteConsent)}
+              >
+                Paste anyway
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              aria-label="Dismiss terminal input message"
+              onClick={() => setInputMessage(undefined)}
+            >
+              Dismiss
+            </button>
+          )}
         </div>
       ) : null}
       {mountDiagnostic ? (
@@ -193,6 +258,14 @@ export function TerminalViewHost({
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function sameUnsafePasteConsent(left: UnsafePasteConsent, right: UnsafePasteConsent): boolean {
+  return (
+    left.attachmentGeneration === right.attachmentGeneration &&
+    left.rejectedOperationId === right.rejectedOperationId &&
+    left.expiresAt === right.expiresAt
   );
 }
 

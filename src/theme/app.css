@@ -293,6 +293,16 @@ body {
   cursor: pointer;
 }
 
+.terminal-input-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.terminal-input-actions button {
+  margin-left: 0;
+}
+
 .terminal-session-view .terminal-input-message {
   position: absolute;
   z-index: 1;

@@ -79,9 +79,10 @@ attach, keyboard input, resize, clipboard paste, two-peer rendering, and restore
 screen state after re-attach.
 
 The paste row records the current policy. The client writes a 65,536-byte printable paste.
-The client rejects a 65,536-byte multiline paste because it uses `allowUnsafe=false`.
-Multiline paste support remains an unresolved product requirement pending a consent follow-up.
-This smoke does not fully accept Web paste.
+For a 65,536-byte multiline paste, the client first sends `allowUnsafe=false`.
+After Core returns an exact zero-write unsafe rejection, the client asks for consent.
+Explicit confirmation sends the same bytes as a new operation with `allowUnsafe=true`.
+Cancellation sends nothing and restores normal terminal input.
 
 ```bash
 BOTSTER_HUB_BIN=/path/to/botster-hub \

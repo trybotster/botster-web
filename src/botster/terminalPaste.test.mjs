@@ -99,7 +99,7 @@ export async function runTerminalPasteTests(helpers) {
    * One attached plane over a real transport. `modeBits` shapes the MODES frame. Control
    * attach and detach requests are answered by the responder; nothing else is requested.
    */
-  const attachPlane = async (name, { modeBits = ModeBits.CURSOR_VISIBLE, autoAckTerminal = true } = {}) => {
+  const attachPlane = async (name, { modeBits = ModeBits.CURSOR_VISIBLE, autoAckTerminal = true, testHooks } = {}) => {
     const channels = [];
     const client = createWebrtcDaemonClient({
       bootstrap: localWebrtcBootstrapFixture,
@@ -121,7 +121,7 @@ export async function runTerminalPasteTests(helpers) {
     const statuses = [];
     const outputs = [];
     const outcomes = [];
-    const plane = createHubTerminalDataPlane({ sessionId, bridge: client });
+    const plane = createHubTerminalDataPlane({ sessionId, bridge: client, testHooks });
     const fixtureRecord = { client, plane };
     scenarioFixtures.push(fixtureRecord);
     bindGhostsnpInstaller(plane);
@@ -310,6 +310,7 @@ export async function runTerminalPasteTests(helpers) {
         assert.equal(outcome.outcome, outcomeName, outcomeName);
         assert.equal(outcome.operationId, operationId, outcomeName);
         assert.equal(outcome.requestedBytes, 10, outcomeName);
+        assert.equal(outcome.unsafePasteConsent, undefined, `${outcomeName}: no exact zero-write consent`);
         if (expected.writtenPtyBytes !== undefined) assert.equal(outcome.writtenPtyBytes, expected.writtenPtyBytes, outcomeName);
         else assert.equal(outcome.writtenPtyBytes, undefined, `${outcomeName}: unknown counts are absent, never zero`);
         assert.match(outcome.detail, expected.detail, outcomeName);
@@ -526,6 +527,174 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(fixture.terminal.readyState, "closed", "the frame past the bound retires the route synchronously");
       const outcome = await pending;
       assert.equal(outcome.outcome, "outcome_unknown");
+      await fixture.assertComplete();
+    });
+
+    // (p14) Consent transfers one near-limit payload through the existing byte budget.
+    // Confirmation creates a fresh operation and changes only the existing allow_unsafe field.
+    await runScenario("p14-unsafe-consent-confirm", async () => {
+      const fixture = await attachPlane("p14");
+      const text = `${"u".repeat(MAX_PASTE_BYTES - 1)}\n`;
+      const frameCount = Math.ceil(MAX_PASTE_BYTES / MAX_PASTE_CHUNK_DATA_BYTES) + 2;
+      const pending = fixture.plane.writePaste(text);
+      await waitFrameCount(fixture, frameCount, "p14: unconfirmed commit");
+      assert.equal(fixture.plane.retainedInputBytes(), MAX_PASTE_BYTES, "unconfirmed in-flight bytes are charged once");
+      assert.equal(fixture.plane.inflightInputBytes, MAX_PASTE_BYTES);
+      assert.equal(fixture.plane.consentRetainedBytes, 0);
+
+      await fixture.result(1, "rejected_unsafe_paste", { accepted: 0, written: 0 });
+      const rejected = await pending;
+      assert.ok(rejected.unsafePasteConsent, "an exact zero-write unsafe rejection offers consent");
+      assert.equal(rejected.unsafePasteConsent.rejectedOperationId, 1);
+      assert.equal(fixture.plane.retainedInputBytes(), MAX_PASTE_BYTES, "the in-flight charge transfers to consent");
+      assert.equal(fixture.plane.inflightInputBytes, 0);
+      assert.equal(fixture.plane.consentRetainedBytes, MAX_PASTE_BYTES);
+
+      assert.equal(fixture.plane.confirmUnsafePaste(rejected.unsafePasteConsent), true);
+      assert.equal(fixture.plane.confirmUnsafePaste(rejected.unsafePasteConsent), false, "consent is single-use");
+      assert.equal(fixture.plane.consentRetainedBytes, 0, "confirmation releases the consent charge before queue admission");
+      assert.equal(fixture.plane.retainedInputBytes(), MAX_PASTE_BYTES, "the confirmed queue or in-flight entry holds one charge");
+      const frames = await waitFrameCount(fixture, 2 * frameCount, "p14: confirmed commit");
+      const confirmed = frames.slice(frameCount);
+      assert.deepEqual(new Set(confirmed.map((frame) => frame.operationId)), new Set([2]), "confirmation uses one new operation id");
+      assert.equal(beginHeader(confirmed[0].body).allowUnsafe, true);
+      assert.equal(new TextDecoder().decode(Buffer.concat(confirmed.slice(1, -1).map((frame) => chunkBody(frame.body).data))), text);
+      await fixture.result(2, "written", { accepted: MAX_PASTE_BYTES, written: MAX_PASTE_BYTES });
+      await waitCondition(() => fixture.outcomes.some((outcome) => outcome.operationId === 2 && outcome.outcome === "written"), "p14: confirmed result");
+      assert.equal(fixture.plane.retainedInputBytes(), 0, "the written result releases the confirmed charge");
+      await fixture.assertComplete();
+    });
+
+    // (p15) Only the newest paste attempt can create consent. Exact attachment identity
+    // prevents an old prompt from approving new content after operation ids restart.
+    await runScenario("p15-unsafe-consent-stale", async () => {
+      const fixture = await attachPlane("p15");
+      const first = fixture.plane.writePaste("first\n");
+      const second = fixture.plane.writePaste("second\n");
+      await waitFrameCount(fixture, 6, "p15: two paste commits");
+      await fixture.result(1, "rejected_unsafe_paste", { accepted: 0, written: 0 });
+      const firstOutcome = await first;
+      assert.equal(firstOutcome.unsafePasteConsent, undefined, "an older out-of-order result cannot create consent");
+      assert.equal(fixture.plane.consentRetainedBytes, 0);
+      assert.equal(fixture.plane.retainedInputBytes(), 7, "only the newer in-flight payload remains charged");
+
+      await fixture.result(2, "rejected_unsafe_paste", { accepted: 0, written: 0 });
+      const secondOutcome = await second;
+      const oldConsent = secondOutcome.unsafePasteConsent;
+      assert.ok(oldConsent);
+      assert.equal(fixture.plane.consentRetainedBytes, 7);
+
+      const empty = await fixture.plane.writePaste("");
+      assert.equal(empty.reason, "empty");
+      assert.equal(fixture.plane.retainedInputBytes(), 0, "a new local rejection invalidates existing consent");
+      assert.equal(fixture.plane.confirmUnsafePaste(oldConsent), false);
+
+      const beforeLoss = fixture.plane.writePaste("before-loss\n");
+      await waitFrameCount(fixture, 9, "p15: pre-loss paste commit");
+      await fixture.result(3, "rejected_unsafe_paste", { accepted: 0, written: 0 });
+      const beforeLossConsent = (await beforeLoss).unsafePasteConsent;
+      assert.ok(beforeLossConsent);
+      fixture.terminal.close();
+      const replacement = await fixture.admit(1);
+      assert.equal(fixture.plane.retainedInputBytes(), 0, "generation replacement releases consent");
+
+      const replacementPaste = fixture.plane.writePaste("replacement\n");
+      const replacementFrames = await waitFrameCount(replacement, 3, "p15: replacement paste commit");
+      assert.equal(replacementFrames[0].operationId, 1, "the replacement generation reuses operation id 1");
+      await replacement.result(1, "rejected_unsafe_paste", { accepted: 0, written: 0 });
+      const replacementConsent = (await replacementPaste).unsafePasteConsent;
+      assert.ok(replacementConsent);
+      assert.notEqual(replacementConsent.attachmentGeneration, beforeLossConsent.attachmentGeneration);
+      assert.equal(fixture.plane.confirmUnsafePaste(beforeLossConsent), false, "an old generation token sends nothing");
+      assert.equal((await replacement.framesSince()).length, 3);
+      assert.equal(fixture.plane.confirmUnsafePaste(replacementConsent), true);
+      const confirmed = await waitFrameCount(replacement, 6, "p15: replacement confirmation");
+      assert.equal(confirmed[3].operationId, 2);
+      assert.equal(beginHeader(confirmed[3].body).allowUnsafe, true);
+      await replacement.result(2, "written", { accepted: 12, written: 12 });
+      await waitCondition(() => fixture.outcomes.some((outcome) => outcome.operationId === 2 && outcome.outcome === "written"), "p15: replacement result");
+      await fixture.assertComplete();
+      await replacement.assertComplete();
+    });
+
+    // (p16) Cancel, expiry, and route resync release only the pending consent. Missing
+    // progress counts never create consent. Ordinary input remains usable after cancellation.
+    await runScenario("p16-unsafe-consent-release", async () => {
+      const fixture = await attachPlane("p16");
+      const missing = fixture.plane.writePaste("missing\n");
+      await waitFrameCount(fixture, 3, "p16: missing-count paste");
+      await fixture.result(1, "rejected_unsafe_paste");
+      assert.equal((await missing).unsafePasteConsent, undefined, "missing counts are not zero");
+      assert.equal(fixture.plane.retainedInputBytes(), 0);
+
+      const cancelled = fixture.plane.writePaste("cancel\n");
+      await waitFrameCount(fixture, 6, "p16: cancelled paste");
+      await fixture.result(2, "rejected_unsafe_paste", { accepted: 0, written: 0 });
+      const cancelConsent = (await cancelled).unsafePasteConsent;
+      assert.ok(cancelConsent);
+      assert.equal(fixture.plane.cancelUnsafePaste(cancelConsent), true);
+      assert.equal(fixture.plane.cancelUnsafePaste(cancelConsent), false);
+      assert.equal(fixture.plane.retainedInputBytes(), 0);
+      assert.equal((await fixture.framesSince()).length, 6, "cancel sends no paste frames");
+
+      const noMods = { shift: false, ctrl: false, alt: false, super: false, capsLock: false, numLock: false };
+      fixture.plane.sendInput({ kind: "key", action: "press", code: "KeyK", key: "k", mods: noMods, text: "k", composing: false, unshiftedCodepoint: 107 });
+      await waitFrameCount(fixture, 7, "p16: ordinary key after cancel");
+      await fixture.result(3, "written", { accepted: 13, written: 1 });
+
+      const resynced = fixture.plane.writePaste("resync\n");
+      await waitFrameCount(fixture, 10, "p16: resync paste");
+      await fixture.result(4, "rejected_unsafe_paste", { accepted: 0, written: 0 });
+      const resyncConsent = (await resynced).unsafePasteConsent;
+      assert.ok(resyncConsent);
+      await emitTestTerminalBody(
+        fixture.terminal,
+        secret,
+        { generation: 9200, streamEpoch: 1 },
+        terminalProtocolModule.encodeTerminalBody({ kind: "route_resync", from_epoch: 0, to_epoch: 1 })
+      );
+      await waitCondition(() => fixture.plane.consentRetainedBytes === 0, "p16: route resync release");
+      assert.equal(fixture.plane.confirmUnsafePaste(resyncConsent), false);
+      assert.equal(fixture.plane.inflightInputBytes, 0, "resync does not alter settled input accounting");
+      await fixture.assertComplete();
+
+      const expiryFixture = await attachPlane("p16-expiry", { testHooks: { unsafePasteConsentTimeoutMs: 25 } });
+      const expired = expiryFixture.plane.writePaste("expire\n");
+      await waitFrameCount(expiryFixture, 3, "p16: expiring paste");
+      await expiryFixture.result(1, "rejected_unsafe_paste", { accepted: 0, written: 0 });
+      const expiredConsent = (await expired).unsafePasteConsent;
+      assert.ok(expiredConsent);
+      await waitCondition(() => expiryFixture.plane.consentRetainedBytes === 0, "p16: consent expiry");
+      assert.equal(expiryFixture.plane.retainedInputBytes(), 0);
+      assert.equal(expiryFixture.plane.confirmUnsafePaste(expiredConsent), false);
+      await expiryFixture.assertComplete();
+    });
+
+    // (p17) Nonzero progress is never eligible. Public detach releases an eligible payload
+    // immediately and leaves its old token inert.
+    await runScenario("p17-unsafe-consent-detach", async () => {
+      const fixture = await attachPlane("p17");
+      const nonzero = fixture.plane.writePaste("nonzero\n");
+      await waitFrameCount(fixture, 3, "p17: nonzero unsafe result");
+      await fixture.result(1, "rejected_unsafe_paste", { accepted: 0, written: 1 });
+      assert.equal((await nonzero).unsafePasteConsent, undefined);
+      assert.equal(fixture.plane.retainedInputBytes(), 0);
+
+      const pending = fixture.plane.writePaste("detach\n");
+      await waitFrameCount(fixture, 6, "p17: detachable consent");
+      await fixture.result(2, "rejected_unsafe_paste", { accepted: 0, written: 0 });
+      const consent = (await pending).unsafePasteConsent;
+      assert.ok(consent);
+      assert.equal(fixture.plane.consentRetainedBytes, 7);
+      let detached = false;
+      const detaching = fixture.plane.detach().then(() => { detached = true; });
+      await waitCondition(async () => {
+        await fixture.answerControl();
+        return detached;
+      }, "p17: detach response");
+      await detaching;
+      assert.equal(fixture.plane.retainedInputBytes(), 0, "detach releases consent accounting");
+      assert.equal(fixture.plane.confirmUnsafePaste(consent), false);
       await fixture.assertComplete();
     });
 

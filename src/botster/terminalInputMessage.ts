@@ -35,6 +35,9 @@ export function terminalInputMessage(outcome: TerminalInputOutcome): string {
     case "rejected_too_large":
       return `${label} rejected: ${terminalInputSize(outcome)} exceeds the limit. ${outcome.detail}`.trim();
     case "rejected_unsafe_paste":
+      if (outcome.unsafePasteConsent) {
+        return `Paste was not sent. Multiline or control input can execute commands. Confirm ${terminalInputSize(outcome)} only if you trust the clipboard source.`;
+      }
       return `Paste rejected: the clipboard text contains control sequences the terminal considers unsafe. ${outcome.detail}`.trim();
     case "rejected_lane_full":
       return `${label} rejected: too many input operations are in flight. ${outcome.detail}`.trim();

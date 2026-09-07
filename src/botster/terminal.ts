@@ -73,7 +73,15 @@ export interface TerminalInputOutcome {
   acceptedPayloadBytes?: number;
   writtenPtyBytes?: number;
   reason?: string;
+  /** Exact rejected operation that can authorize one confirmed unsafe paste. */
+  unsafePasteConsent?: UnsafePasteConsent;
   detail: string;
+}
+
+export interface UnsafePasteConsent {
+  readonly attachmentGeneration: number;
+  readonly rejectedOperationId: number;
+  readonly expiresAt: number;
 }
 
 export interface TerminalResizeGeometry {
@@ -96,6 +104,10 @@ export interface TerminalDataPlaneAttachment {
    * Resolves with the authoritative outcome. Web never adds bracketed-paste markers.
    */
   writePaste(text: string): Promise<TerminalInputOutcome>;
+  /** Queue one confirmed unsafe paste only when the exact consent is still current. */
+  confirmUnsafePaste?(consent: UnsafePasteConsent): boolean;
+  /** Release one pending unsafe paste only when the exact consent is still current. */
+  cancelUnsafePaste?(consent: UnsafePasteConsent): boolean;
   /** Bind the Restty incremental snapshot decoder for one subscription. */
   bindIncrementalSnapshotReader?(createReader: () => TerminalSnapshotReader): void;
   subscribeOutput(listener: (data: TerminalOutput) => void): TerminalSubscription;

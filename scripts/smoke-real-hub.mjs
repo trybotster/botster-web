@@ -240,7 +240,7 @@ try {
   });
   console.log(`real-hub-smoke W-S2 passed ${JSON.stringify({ peer_a: attachedA.subscription_id, peer_b: attachedB.subscription_id })}`);
 
-  // W-S3 uses the mounted clipboard path. The client always requests allowUnsafe=false.
+  // W-S3 uses the mounted clipboard path. Every new paste first requests allowUnsafe=false.
   await step("ws3-printable-safe", contextA(), async () => {
     await takePasteOutcomes(peerA);
     await takeTerminalResults(peerA);
@@ -273,29 +273,115 @@ try {
     await waitForTerminalMarker(peerA, "ws3-receipt", PASTE_MS);
   }, PASTE_MS);
 
-  await step("ws3-multiline-rejected", contextA(), async () => {
+  await step("ws3-multiline-confirmed", contextA(), async () => {
     await takePasteOutcomes(peerA);
     await takeTerminalResults(peerA);
-    const dispatched = await dispatchMountedPaste(peerA, multilinePasteText(PASTE_BYTES));
+    const text = multilinePasteText(PASTE_BYTES);
+    const digest = createHash("sha256").update(text, "utf8").digest("hex");
+    await registerTerminalMarker(peerA, "ws3-multiline-ready", `botster-web-production-receive-ready:${PASTE_BYTES}\n`);
+    await typeThroughMountedTerminal(peerA, `botster-web-production-receive:${PASTE_BYTES}\n`);
+    await waitForTerminalMarker(peerA, "ws3-multiline-ready", PASTE_MS);
+    const receipt = `botster-web-production-received:${PASTE_BYTES}:${PASTE_BYTES}:${digest}`;
+    await registerTerminalMarker(peerA, "ws3-multiline-receipt", receipt);
+    const dispatched = await dispatchMountedPaste(peerA, text);
     if (!dispatched.defaultPrevented) throw new Error("mounted multiline paste was not consumed");
     await waitForObserver(peerA, (observed) => observed.paste_outcome_count === 1 && observed.result_count === 1, PASTE_MS);
-    const outcome = oneRow(await takePasteOutcomes(peerA), "multiline paste", "paste outcome");
-    const result = oneRow(await takeTerminalResults(peerA), "multiline paste", "INPUT_RESULT");
-    if (!Number.isSafeInteger(outcome.operationId) || outcome.operationId !== result.operation_id) {
-      throw new Error(`multiline paste operation IDs differ: outcome=${JSON.stringify(outcome)} result=${JSON.stringify(result)}`);
+    const rejectedOutcome = oneRow(await takePasteOutcomes(peerA), "unconfirmed multiline paste", "paste outcome");
+    const rejectedResult = oneRow(await takeTerminalResults(peerA), "unconfirmed multiline paste", "INPUT_RESULT");
+    if (!Number.isSafeInteger(rejectedOutcome.operationId) || rejectedOutcome.operationId !== rejectedResult.operation_id) {
+      throw new Error(`unconfirmed multiline operation IDs differ: outcome=${JSON.stringify(rejectedOutcome)} result=${JSON.stringify(rejectedResult)}`);
     }
-    if (outcome.outcome !== "rejected_unsafe_paste" || result.outcome !== "rejected_unsafe_paste") {
-      throw new Error(`multiline paste outcome=${String(outcome.outcome)} result=${String(result.outcome)}`);
+    if (rejectedOutcome.outcome !== "rejected_unsafe_paste" || rejectedResult.outcome !== "rejected_unsafe_paste") {
+      throw new Error(`unconfirmed multiline outcome=${String(rejectedOutcome.outcome)} result=${String(rejectedResult.outcome)}`);
     }
-    if (outcome.requestedBytes !== PASTE_BYTES) {
-      throw new Error(`multiline paste counts are invalid: outcome=${JSON.stringify(outcome)} result=${JSON.stringify(result)}`);
+    if (
+      rejectedOutcome.requestedBytes !== PASTE_BYTES ||
+      rejectedOutcome.acceptedPayloadBytes !== 0 ||
+      rejectedOutcome.writtenPtyBytes !== 0 ||
+      rejectedResult.accepted_payload_bytes !== 0 ||
+      rejectedResult.written_pty_bytes !== 0 ||
+      !rejectedOutcome.unsafePasteConsent
+    ) {
+      throw new Error(`unconfirmed multiline zero-write proof is invalid: outcome=${JSON.stringify(rejectedOutcome)} result=${JSON.stringify(rejectedResult)}`);
     }
-    // A partial PTY write would prefix the next line and make this exact echo fail.
-    const value = `ws3-after-rejection-${Date.now().toString(36)}`;
-    await typeThroughMountedTerminal(peerA, `${value}\n`);
-    await waitForRenderedTerminalText(peerA, `botster-web-production-echo:${value}`);
+    const confirm = peerA.locator('[data-terminal-paste-action="confirm"]');
+    await confirm.waitFor({ state: "visible", timeout: PASTE_MS });
+    await confirm.click();
+    await waitForObserver(peerA, (observed) => observed.paste_outcome_count === 1 && observed.result_count === 1, PASTE_MS);
+    const confirmedOutcome = oneRow(await takePasteOutcomes(peerA), "confirmed multiline paste", "paste outcome");
+    const confirmedResult = oneRow(await takeTerminalResults(peerA), "confirmed multiline paste", "INPUT_RESULT");
+    if (
+      confirmedOutcome.outcome !== "written" ||
+      confirmedResult.outcome !== "written" ||
+      confirmedOutcome.operationId !== confirmedResult.operation_id ||
+      confirmedOutcome.operationId === rejectedOutcome.operationId
+    ) {
+      throw new Error(`confirmed multiline operation proof is invalid: rejected=${JSON.stringify(rejectedOutcome)} outcome=${JSON.stringify(confirmedOutcome)} result=${JSON.stringify(confirmedResult)}`);
+    }
+    const modes = await readDirectTerminalModeFlags(peerA, sessionId);
+    const expectedWrittenBytes = modes.bracketed_paste ? PASTE_BYTES + 12 : PASTE_BYTES;
+    if (
+      confirmedOutcome.requestedBytes !== PASTE_BYTES ||
+      confirmedOutcome.acceptedPayloadBytes !== PASTE_BYTES ||
+      confirmedOutcome.writtenPtyBytes !== expectedWrittenBytes ||
+      confirmedResult.written_pty_bytes !== expectedWrittenBytes
+    ) {
+      throw new Error(`confirmed multiline counts are invalid for bracketed_paste=${String(modes.bracketed_paste)}: outcome=${JSON.stringify(confirmedOutcome)} result=${JSON.stringify(confirmedResult)}`);
+    }
+    await waitForTerminalMarker(peerA, "ws3-multiline-receipt", PASTE_MS);
+    const focused = await peerA.evaluate(() => globalThis.document.activeElement?.getAttribute?.("class") ?? "");
+    if (!focused.includes("ime-input")) throw new Error(`terminal focus was not restored after paste confirmation: ${focused}`);
   }, PASTE_MS);
-  console.log(`real-hub-smoke W-S3 policy observed ${JSON.stringify({ printable_bytes: PASTE_BYTES, multiline_rejected_bytes: PASTE_BYTES, post_rejection_input: "verified", multiline_support: "unresolved-product-requirement", consent_followup: "required" })}`);
+
+  await step("ws3-multiline-cancelled", contextA(), async () => {
+    await takePasteOutcomes(peerA);
+    await takeTerminalResults(peerA);
+    await registerTerminalMarker(
+      peerA,
+      "ws3-cancelled-transcript",
+      "botster-web-production-echo:cancel-this-line\n"
+    );
+    const dispatched = await dispatchMountedPaste(peerA, "cancel-this-line\n");
+    if (!dispatched.defaultPrevented) throw new Error("mounted cancelled paste was not consumed");
+    await waitForObserver(peerA, (observed) => observed.paste_outcome_count === 1 && observed.result_count === 1, PASTE_MS);
+    const rejectedOutcome = oneRow(await takePasteOutcomes(peerA), "cancelled multiline paste", "paste outcome");
+    const rejectedResult = oneRow(await takeTerminalResults(peerA), "cancelled multiline paste", "INPUT_RESULT");
+    if (
+      rejectedOutcome.outcome !== "rejected_unsafe_paste" ||
+      rejectedOutcome.acceptedPayloadBytes !== 0 ||
+      rejectedOutcome.writtenPtyBytes !== 0 ||
+      rejectedResult.accepted_payload_bytes !== 0 ||
+      rejectedResult.written_pty_bytes !== 0
+    ) {
+      throw new Error(`cancelled multiline zero-write proof is invalid: outcome=${JSON.stringify(rejectedOutcome)} result=${JSON.stringify(rejectedResult)}`);
+    }
+    const cancel = peerA.locator('[data-terminal-paste-action="cancel"]');
+    await cancel.waitFor({ state: "visible", timeout: PASTE_MS });
+    const beforeCancel = await readBoundedTerminalObserver(peerA);
+    await cancel.click();
+    const afterCancel = await readBoundedTerminalObserver(peerA);
+    if ((afterCancel.counts.input_sent ?? 0) !== (beforeCancel.counts.input_sent ?? 0)) {
+      throw new Error("paste cancellation admitted another input operation");
+    }
+    if ((await takePasteOutcomes(peerA)).length !== 0 || (await takeTerminalResults(peerA)).length !== 0) {
+      throw new Error("cancelled paste sent a second operation");
+    }
+    const focused = await peerA.evaluate(() => globalThis.document.activeElement?.getAttribute?.("class") ?? "");
+    if (!focused.includes("ime-input")) throw new Error(`terminal focus was not restored after paste cancellation: ${focused}`);
+    const value = `ws3-after-cancel-${Date.now().toString(36)}`;
+    await registerTerminalMarker(peerA, "ws3-after-cancel", `botster-web-production-echo:${value}\n`);
+    await typeThroughMountedTerminal(peerA, `${value}\n`);
+    await waitForTerminalMarker(peerA, "ws3-after-cancel", PASTE_MS);
+    await waitForRenderedTerminalText(peerA, `botster-web-production-echo:${value}`);
+    const cancelledReachedProducer = await peerA.evaluate(() => {
+      const observer = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.boundedTerminalObserver;
+      const matched = observer?.markerMatched?.("ws3-cancelled-transcript") === true;
+      observer?.removeMarker?.("ws3-cancelled-transcript");
+      return matched;
+    });
+    if (cancelledReachedProducer) throw new Error("producer transcript contains the cancelled paste before the ordered follow-up marker");
+  }, PASTE_MS);
+  console.log(`real-hub-smoke W-S3 passed ${JSON.stringify({ printable_bytes: PASTE_BYTES, confirmed_multiline_bytes: PASTE_BYTES, zero_write_rejection: "verified", new_operation_id: "verified", cancel_no_send: "verified", post_cancel_input: "verified" })}`);
 
   // W-S4 proves restored visible screen state and new live output through the re-mounted Restty client.
   const historyValue = `w4-${Date.now().toString(36)}`;
@@ -327,7 +413,7 @@ try {
 
   await step("final-detach-peer-a", contextA(), () => openHomeView(peerA));
   await step("final-detach-peer-b", { page: peerB, subscriptionId: attachedB.subscription_id }, () => openHomeView(peerB));
-  console.log(`real-hub-smoke passed ${JSON.stringify({ session_id: sessionId, post_rejection_input: "verified", paste_policy: "multiline-rejected-consent-followup", multiline_support: "unresolved-product-requirement", source_revisions: manifest.source_revisions })}`);
+  console.log(`real-hub-smoke passed ${JSON.stringify({ session_id: sessionId, post_cancel_input: "verified", paste_policy: "per-operation-explicit-consent", multiline_support: "confirmed", source_revisions: manifest.source_revisions })}`);
 } catch (error) {
   const fields = error instanceof LaneFailure ? error.fields : { layer: "web", step: "unclassified", session_id: sessionId, cause: error };
   console.error(formatLaneFailure(fields));
