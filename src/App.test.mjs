@@ -6160,6 +6160,8 @@ try {
   try {
     const stale = generationClient.request({ type: "list_sessions" });
     const staleRejection = assert.rejects(stale, (error) => error instanceof WebrtcDaemonClientError && /connection changed while list_sessions was encrypting/.test(error.message));
+    // If an earlier assertion fails, teardown settles these without an unhandled rejection.
+    staleRejection.catch(() => undefined);
     await waitForTestCondition(() => heldRequests.length === 1);
     // Loss: the stale request holds a slot on generation 1 and is still encrypting.
     const lifecycleBefore = lifecycleEvents.length;
@@ -6167,6 +6169,7 @@ try {
     await waitForTestCondition(() => lifecycleEvents.slice(lifecycleBefore).some((event) => event.detail.type === "data-channel-closed"));
     // Reconnect on a new request; its id restarts at 1, the same id the stale request took.
     const fresh = generationClient.request({ type: "list_apps" });
+    fresh.catch(() => undefined);
     await waitForTestCondition(() => heldRequests.length === 2);
     assert.equal(generationChannels[1].readyState, "open", "the replacement peer is connected");
     // The stale encryption completes after the reconnect.
