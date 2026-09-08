@@ -62,7 +62,6 @@ setupIonicReact({
 const loadingSnapshot: UiTreeSnapshot = {
   kind: "ui_tree_snapshot",
   surface: "botster-web.production.loading",
-  version: "local-loading-v1",
   root: {
     id: "production-loading-root",
     type: "section",

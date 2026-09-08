@@ -783,33 +783,6 @@ assert.deepEqual(reconnectGenerationEvidence([
   authoritativeSnapshot: true
 });
 const acceptedWorkspacesTree = { type: "panel", id: "accepted-workspaces-tree" };
-const rejectedWorkspacesTree = { type: "panel", id: "rejected-workspaces-tree" };
-assert.equal(latestAcceptedWorkspacesUiTree([
-  {
-    kind: "daemon_response",
-    payload: {
-      plugin_surface: {
-        package_name: "botster-workspaces",
-        surface_id: "workspaces",
-        body: { type: "panel", id: "unvalidated-raw-body" }
-      }
-    }
-  },
-  {
-    kind: "hub_frame",
-    payload: {
-      kind: "action_result",
-      payload: {
-        accepted: false,
-        result: {
-          package_name: "botster-workspaces",
-          surface_id: "workspaces",
-          plugin_action_result: { state: "rejected", replacement: rejectedWorkspacesTree }
-        }
-      }
-    }
-  }
-]), null);
 assert.equal(latestAcceptedWorkspacesUiTree([
   {
     kind: "daemon_response",
@@ -1365,7 +1338,6 @@ assert.match(appFeatureSources.join("\n"), /hubUpdateOutcomeFromResult\(result\)
             plugin_surface: {
               package_name: packageName,
               surface_id: surfaceId,
-              body: "ok",
               ui_tree_snapshot: {
                 package_name: packageName,
                 surface_id: surfaceId,
@@ -1734,7 +1706,6 @@ assert.match(app, /operatorErrorDiagnostic/);
 assert.match(app, /hubConnectionDiagnosticFromFrame/);
 assert.match(app, /production\.diagnostic_action_status/);
 assert.match(app, /production\.plugin_surface_status/);
-assert.match(app, /plugin-surface-hub-validated-v1/);
 assert.doesNotMatch(app, /plugin-surface-body-v1|normalizePluginSurfaceNode|pluginSurfaceBodySnapshot/);
 assert.match(app, /terminalUnavailableDiagnostic/);
 assert.match(app, /surfaceSnapshot \?\? loadingSnapshot/);
@@ -1897,10 +1868,18 @@ assert.doesNotMatch(liveProtocolHarnessScript, /accepted\|accepted/i);
 assert.doesNotMatch(liveProtocolHarnessScript, /operator\/i/);
 assert.doesNotMatch(liveProtocolHarnessScript, /Rejected contract\\.action\|error/i);
 assert.match(generatedDaemonProtocol, /plugin_surface\?: DaemonPluginSurface \| null;/);
-assert.match(generatedDaemonProtocol, /export interface DaemonPluginSurface/);
-assert.match(generatedDaemonProtocol, /body: UiNode;/);
-assert.match(generatedDaemonProtocol, /ui_tree_snapshot\?: DaemonUiTreeSnapshot \| null;/);
-assert.match(generatedDaemonProtocol, /export interface DaemonUiTreeSnapshot/);
+assert.match(
+  generatedDaemonProtocol,
+  /export interface DaemonPluginSurface \{\s+package_name: string;\s+surface_id: string;\s+ui_tree_snapshot: DaemonUiTreeSnapshot;\s+\}/
+);
+assert.doesNotMatch(
+  generatedDaemonProtocol,
+  /export interface DaemonPluginSurface \{[^}]*\bbody:/
+);
+assert.match(
+  generatedDaemonProtocol,
+  /export interface DaemonUiTreeSnapshot \{\s+package_name: string;\s+surface_id: string;\s+body: UiNode;\s+\}/
+);
 assert.match(generatedDaemonProtocol, /export interface DaemonPackage/);
 assert.match(generatedDaemonProtocol, /apps\?: DaemonApp\[\];/);
 assert.match(generatedDaemonProtocol, /package_navigation\?: DaemonPackageNavigationEntry\[\];/);
@@ -1943,6 +1922,7 @@ assert.match(hubTransport, /recordLiveHarnessEvent\("hub_frame"/);
 assert.match(hubTransport, /recordLiveHarnessEvent\("daemon_response", response\)/);
 assert.match(hubTransport, /daemonResponseFrames/);
 assert.doesNotMatch(hubTransport, /ui_tree_snapshot/);
+assert.doesNotMatch(app, /readRecord\(result\)\.ui_tree_snapshot|pluginSurface\.body|hasPluginSurfaceBody/);
 // Session types are a canonical bare family delivered by a held subscription. No
 // botster-web.* pull family, no list request, and no name-derived title may survive in
 // the production transport. This assertion names the tokens it proves absent, which is
@@ -2451,6 +2431,11 @@ assert.match(
   uiNodes,
   /render\(snapshot: UiTreeSnapshot, entities: EntityFrameStore, options\?: UiNodeRenderOptions\)/
 );
+assert.match(
+  uiNodes,
+  /export interface UiTreeSnapshot \{\s+kind: "ui_tree_snapshot";\s+surface: string;\s+root: UiNode;\s+\}/
+);
+assert.doesNotMatch(uiNodes, /interface UiTreeSnapshot \{[^}]*\bversion:/);
 assert.match(actions, /class CorrelatedActionDispatcher/);
 assert.match(actions, /botster\.session\.select/);
 assert.doesNotMatch(actions, /click|submit|change/);
@@ -4112,7 +4097,6 @@ transport.inject({
   payload: {
     kind: "ui_tree_snapshot",
     surface: "runtime-test",
-    version: "test-v1",
     root: { id: "runtime-root", type: "text", props: { text: "Runtime snapshot" } }
   }
 });
@@ -4819,7 +4803,6 @@ const bridge = {
           plugin_surface: {
             package_name: "botster-web",
             surface_id: request.surface_id,
-            body: bodyText,
             ui_tree_snapshot: {
               package_name: "botster-web",
               surface_id: request.surface_id,
@@ -4847,7 +4830,6 @@ const bridge = {
         plugin_surface: {
           package_name: request.package_name,
           surface_id: request.surface_id,
-          body: { rendered: true },
           ui_tree_snapshot: {
             package_name: request.package_name,
             surface_id: request.surface_id,
@@ -12224,7 +12206,6 @@ try {
   const validatedProductionSnapshot = {
     kind: "ui_tree_snapshot",
     surface: "botster-web/production-app",
-    version: "plugin-surface-hub-validated-v1",
     root: {
       id: "production-app-root",
       type: "panel",
@@ -12249,7 +12230,7 @@ try {
   const successfulValidatedSnapshotSurfaceMarkup = renderPluginSurfaceRoutePage({
     title: "botster-web",
     phase: "rendered",
-    status: "botster-web: Workspaces rendered (botster-web/production-app)",
+    status: "botster-web: botster-web App (botster-web/production-app)",
     snapshot: validatedProductionSnapshot
   });
   assert.match(successfulValidatedSnapshotSurfaceMarkup, /class="plugin-surface-page"/);
@@ -12273,7 +12254,6 @@ try {
         plugin_surface: {
           package_name: workspacesNamedSlotSurface.packageName,
           surface_id: workspacesNamedSlotSurface.surfaceId,
-          body: "Workspaces",
           ui_tree_snapshot: {
             package_name: workspacesNamedSlotSurface.packageName,
             surface_id: workspacesNamedSlotSurface.surfaceId,
@@ -12557,7 +12537,6 @@ try {
           plugin_surface: {
             package_name: "botster-web",
             surface_id: "production-app",
-            body: "Workspaces rendered",
             ui_tree_snapshot: {
               package_name: "botster-web",
               surface_id: "production-app",
@@ -12590,7 +12569,7 @@ try {
       routeKey: "botster-web/production-app",
       title: "botster-web",
       phase: "rendered",
-      status: "botster-web: Workspaces rendered (botster-web/production-app)",
+      status: "botster-web: botster-web App (botster-web/production-app)",
       snapshot: validatedProductionSnapshot,
       packageName: "botster-web",
       surfaceId: "production-app"
@@ -12697,7 +12676,6 @@ try {
         plugin_surface: {
           package_name: applicationPrimitiveSurface.packageName,
           surface_id: applicationPrimitiveSurface.surfaceId,
-          body: "UiNode payload delivered through plugin_surface_render.",
           ui_tree_snapshot: {
             package_name: applicationPrimitiveSurface.packageName,
             surface_id: applicationPrimitiveSurface.surfaceId,
@@ -12760,8 +12738,7 @@ try {
           kind: "plugin_surface",
           plugin_surface: {
             package_name: "botster-web",
-            surface_id: "production-app",
-            body: { text: "Workspaces rendered from JSON body" }
+            surface_id: "production-app"
           }
         }
       },
@@ -12773,7 +12750,7 @@ try {
       routeKey: "botster-web/production-app",
       title: "botster-web",
       phase: "error",
-      status: "botster-web requires a hub validated UiTree snapshot for botster-web/production-app; this hub returned only an unvalidated plugin surface body."
+      status: "botster-web render response does not include the required snapshot for botster-web/production-app."
     }
   );
   assert.deepEqual(
@@ -12785,7 +12762,11 @@ try {
           plugin_surface: {
             package_name: "botster-web",
             surface_id: "production-app",
-            body: {}
+            ui_tree_snapshot: {
+              package_name: "other-package",
+              surface_id: "production-app",
+              body: { id: "mismatched-root", type: "panel" }
+            }
           }
         }
       },
@@ -12797,21 +12778,7 @@ try {
       routeKey: "botster-web/production-app",
       title: "botster-web",
       phase: "error",
-      status: "botster-web requires a hub validated UiTree snapshot for botster-web/production-app; this hub returned only an unvalidated plugin surface body."
-    }
-  );
-  assert.deepEqual(
-    renderedPluginSurfaceState(
-      { accepted: true, result: { kind: "plugin_surface" } },
-      "botster-web",
-      expectedProductionSurface,
-      "botster-web/production-app"
-    ),
-    {
-      routeKey: "botster-web/production-app",
-      title: "botster-web",
-      phase: "error",
-      status: "Render response did not include botster-web/production-app validated snapshot."
+      status: "botster-web render response has a snapshot identity mismatch for botster-web/production-app."
     }
   );
   assert.deepEqual(
@@ -12821,9 +12788,13 @@ try {
         result: {
           kind: "plugin_surface",
           plugin_surface: {
-            package_name: "other-package",
-            surface_id: "other-surface",
-            body: "Other rendered"
+            package_name: "botster-web",
+            surface_id: "production-app",
+            ui_tree_snapshot: {
+              package_name: "botster-web",
+              surface_id: "production-app",
+              body: {}
+            }
           }
         }
       },
@@ -12835,7 +12806,7 @@ try {
       routeKey: "botster-web/production-app",
       title: "botster-web",
       phase: "error",
-      status: "Render response did not include botster-web/production-app validated snapshot."
+      status: "botster-web render response has an invalid snapshot body for botster-web/production-app."
     }
   );
   const structuredErrorSurfaceMarkup = renderPluginSurfaceRoutePage({
@@ -13493,7 +13464,6 @@ try {
         {
           kind: "ui_tree_snapshot",
           surface: "bound-row-identity-negative",
-          version: "test",
           root: uiContractConformanceFixtures.fixtures.bound_row_identity
         },
         createInMemoryEntityFrameStore([
@@ -13530,7 +13500,7 @@ try {
     const actions = [];
     const markup = renderToStaticMarkup(
       ionicUiNodeRendererRegistry.render(
-        { kind: "ui_tree_snapshot", surface: "identity-validation.test", version: "test", root },
+        { kind: "ui_tree_snapshot", surface: "identity-validation.test", root },
         createInMemoryEntityFrameStore([
           { operation: "entity_snapshot", family: "identity.row", records }
         ]),
@@ -13813,7 +13783,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "fallback.capability",
-        version: "test",
         root: {
           id: "capability-gated-node",
           type: "text",
@@ -13846,7 +13815,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "fallback.primitive",
-        version: "test",
         root: {
           id: "unsupported-timeline",
           type: "timeline"
@@ -13897,7 +13865,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: rejectedContractResult.surface_id,
-        version: "test",
         root: uiContractConformanceFixtures.fixtures.form
       },
       createInMemoryEntityFrameStore(),
@@ -14025,7 +13992,6 @@ try {
   const bindListSnapshot = {
     kind: "ui_tree_snapshot",
     surface: "bind-list.test",
-    version: "test",
     root: {
       id: "bind-list-root",
       type: "stack",
@@ -14106,7 +14072,6 @@ try {
   const sessionBindingSnapshot = {
     kind: "ui_tree_snapshot",
     surface: "contract.sessions",
-    version: `hub-test-support-revision-${sessionPluginBindingFixture.conformance_fixture_revision}`,
     root: sessionPluginBindingFixture.surface
   };
   const renderSessionBindings = () => renderToStaticMarkup(
@@ -14266,7 +14231,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "toolbar-order.test",
-        version: "test",
         root: {
           id: "toolbar-order",
           type: "toolbar",
@@ -14294,7 +14258,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "form-field.select-options",
-        version: "test",
         root: {
           id: "spawn-form",
           type: "form",
@@ -14338,7 +14301,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "iframe.test",
-        version: "test",
         root: {
           id: "preview-frame",
           type: "iframe",
@@ -14366,7 +14328,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "iframe.invalid",
-        version: "test",
         root: {
           id: "bad-frame",
           type: "iframe",
@@ -14385,7 +14346,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "iframe.protocol-relative",
-        version: "test",
         root: {
           id: "protocol-relative-frame",
           type: "iframe",
@@ -14404,7 +14364,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "workspaces.test",
-        version: "test",
         root: {
           id: "workspaces-root",
           type: "section",
@@ -14462,7 +14421,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "action.primitive",
-        version: "test",
         root: {
           id: "action-node-id",
           type: "button",
@@ -14486,7 +14444,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "workspaces.spawn-opener",
-        version: "test",
         root: {
           id: "opaque-producer-owned-spawn-opener",
           type: "button",
@@ -14539,7 +14496,6 @@ try {
     {
       kind: "ui_tree_snapshot",
       surface: "interaction-props.test",
-      version: "test",
       root: {
         id: "interaction-root",
         type: "section",
@@ -14694,7 +14650,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "inline.layout",
-        version: "test",
         root: {
           id: "inline-root",
           type: "inline",
@@ -14721,7 +14676,6 @@ try {
       {
         kind: "ui_tree_snapshot",
         surface: "empty-state.actions",
-        version: "test",
         root: {
           id: "empty-root",
           type: "empty_state",
@@ -16411,7 +16365,6 @@ function removeCssAtRules(source) {
           {
             kind: "ui_tree_snapshot",
             surface: "entity-options-test",
-            version: "test",
             root: formRoot
           },
           store,
@@ -16440,7 +16393,6 @@ function removeCssAtRules(source) {
           {
             kind: "ui_tree_snapshot",
             surface: "entity-options-test",
-            version: "test",
             root: formRoot
           },
           store,
@@ -16487,7 +16439,6 @@ function removeCssAtRules(source) {
             {
               kind: "ui_tree_snapshot",
               surface: "entity-options-test",
-              version: "test",
               root: formRoot
             },
             store,
@@ -16564,7 +16515,6 @@ function removeCssAtRules(source) {
             plugin_surface: {
               package_name: packageName,
               surface_id: surfaceId,
-              body: "ok",
               ui_tree_snapshot: {
                 package_name: packageName,
                 surface_id: surfaceId,

@@ -33,7 +33,6 @@ export interface UiTreeSnapshot {
   kind: "ui_tree_snapshot";
   surface: string;
   root: UiNode;
-  version: string;
 }
 
 type RealizeNodeIdentity<T extends UiNode = UiNode> = T extends UiNode

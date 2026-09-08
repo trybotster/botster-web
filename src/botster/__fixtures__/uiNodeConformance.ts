@@ -50,7 +50,6 @@ const boundRowIdentity = fixtures.bound_row_identity as UiNode;
 export const uiNodeConformanceSnapshot: UiTreeSnapshot = {
   kind: "ui_tree_snapshot",
   surface: "botster-web.fixture.registry",
-  version: `ui-contract-${uiContractConformance.contract_version}`,
   root: {
     id: "root",
     type: "stack",

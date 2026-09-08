@@ -53,7 +53,6 @@ const children = [
 export const sessionBindingVariantSnapshot: UiTreeSnapshot = {
   kind: "ui_tree_snapshot",
   surface: "session-binding-child-variants",
-  version: "hub-test-support-revision-24",
   root: {
     id: "session-binding-child-variants-root",
     type: "stack",
