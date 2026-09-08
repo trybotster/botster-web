@@ -76,7 +76,10 @@ npm run smoke:real-hub
 
 The smoke verifies the manifest before Chromium starts. It uses mounted Restty clients for
 attach, keyboard input, resize, clipboard paste, two-peer rendering, and restored visible
-screen state after re-attach.
+screen state after re-attach. It then closes the active control DataChannel without navigation.
+The surviving client must use a new terminal subscription on the new WebRTC connection. It must
+install a fresh snapshot before it receives new live output. It must then complete a new input
+round trip.
 
 The paste row records the current policy. The client writes a 65,536-byte printable paste.
 For a 65,536-byte multiline paste, the client first sends `allowUnsafe=false`.

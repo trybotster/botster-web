@@ -26,6 +26,8 @@ const workerBin = process.env.BOTSTER_SESSION_WORKER_BIN;
 const manifestPath = process.env.BOTSTER_CANDIDATE_MANIFEST;
 const sessionId = "web-smoke";
 const STEP_MS = 30_000;
+const RECONNECT_MS = 15_000;
+const RECONNECT_OBSERVER_MS = 10_000;
 const PASTE_MS = 45_000;
 const PASTE_BYTES = 65_536;
 
@@ -411,9 +413,57 @@ try {
   });
   console.log(`real-hub-smoke W-S4 passed ${JSON.stringify({ detached: firstSubscription, reattached: attachedA.subscription_id, restored_visible_screen_state: true, abandoned_outstanding_count: attachedA.abandoned_outstanding_count })}`);
 
+  // W-S5 closes the live control DataChannel without navigating. The surviving mounted
+  // client must reconnect, reserve a fresh terminal route, install its snapshot, receive
+  // new output, and send new input on that route.
+  const beforeReconnect = await readBoundedTerminalObserver(peerA);
+  const reconnectStartedAt = Date.now();
+  await step("ws5-close-data-channel", contextA(), async () => {
+    await peerA.waitForFunction(
+      () => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function",
+      undefined,
+      { timeout: STEP_MS }
+    );
+    const closed = await peerA.evaluate(() =>
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.closeDataChannel()
+    );
+    if (!closed) throw new Error("in-page reconnect control did not close the active DataChannel");
+  });
+  await step("ws5-reattach", contextA(), async () => {
+    const previousInstallCount = beforeReconnect.counts.ghostsnp_install ?? 0;
+    const next = await waitForObserver(
+      peerA,
+      (observed) =>
+        observed.subscription_id &&
+        observed.subscription_id !== beforeReconnect.subscription_id &&
+        observed.attach_state === "attached" &&
+        observed.snapshot.finish_seen &&
+        (observed.counts.ghostsnp_install ?? 0) > previousInstallCount
+          ? observed : null,
+      RECONNECT_OBSERVER_MS
+    );
+    await waitForTerminalAttachState(peerA, "attached");
+    attachedA = next;
+  }, RECONNECT_MS);
+  await step("ws5-live-output", contextA(), async () => {
+    const value = `ws5-output-${Date.now().toString(36)}`;
+    const marker = `botster-web-production-echo:${value}`;
+    await registerTerminalMarker(peerA, "ws5-live-output", `${marker}\n`);
+    await typeThroughMountedTerminal(peerB, `${value}\n`);
+    await waitForTerminalMarker(peerA, "ws5-live-output");
+    await waitForRenderedTerminalText(peerA, marker);
+  });
+  await step("ws5-input-round-trip", contextA(), async () => {
+    const value = `ws5-input-${Date.now().toString(36)}`;
+    const marker = `botster-web-production-echo:${value}`;
+    await typeThroughMountedTerminal(peerA, `${value}\n`);
+    await waitForRenderedTerminalText(peerA, marker);
+  });
+  console.log(`real-hub-smoke W-S5 passed ${JSON.stringify({ previous_subscription_id: beforeReconnect.subscription_id, subscription_id: attachedA.subscription_id, previous_generation: beforeReconnect.generation, generation: attachedA.generation, reconnect_elapsed_ms: Date.now() - reconnectStartedAt, snapshot_reinstalled: true, live_output: "verified", input_round_trip: "verified" })}`);
+
   await step("final-detach-peer-a", contextA(), () => openHomeView(peerA));
   await step("final-detach-peer-b", { page: peerB, subscriptionId: attachedB.subscription_id }, () => openHomeView(peerB));
-  console.log(`real-hub-smoke passed ${JSON.stringify({ session_id: sessionId, post_cancel_input: "verified", paste_policy: "per-operation-explicit-consent", multiline_support: "confirmed", source_revisions: manifest.source_revisions })}`);
+  console.log(`real-hub-smoke passed ${JSON.stringify({ session_id: sessionId, post_cancel_input: "verified", paste_policy: "per-operation-explicit-consent", multiline_support: "confirmed", in_page_reconnect: "verified", source_revisions: manifest.source_revisions })}`);
 } catch (error) {
   const fields = error instanceof LaneFailure ? error.fields : { layer: "web", step: "unclassified", session_id: sessionId, cause: error };
   console.error(formatLaneFailure(fields));

@@ -961,6 +961,7 @@ const [
   browserRuntimeSmokeScript,
   liveProtocolHarnessScript,
   liveHubLaneScript,
+  smokeRealHubScript,
   workspacesSharedHubBrowserSmokeScript,
   liveSharedSessionDriverScript,
   liveSharedSessionCoordinatorScript,
@@ -1010,6 +1011,7 @@ const [
   readFile(new URL("../scripts/browser-runtime-smoke.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-packaged-protocol-harness.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-hub-lane.mjs", import.meta.url), "utf8"),
+  readFile(new URL("../scripts/smoke-real-hub.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/workspaces-shared-hub-browser-smoke.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-shared-session-browser-driver.mjs", import.meta.url), "utf8"),
   readFile(new URL("../scripts/live-shared-session-coordinator.mjs", import.meta.url), "utf8"),
@@ -2388,6 +2390,10 @@ assert.match(liveProtocolHarnessScript, /typeThroughMountedTerminal\(page, `\$\{
 assert.match(liveProtocolHarnessScript, /callTerminalControl\(page, "focus"\)/);
 assert.match(liveProtocolHarnessScript, /page\.waitForTimeout\(100\)|setTimeout\(r, 100\)/);
 assert.match(liveHubLaneScript, /page\.keyboard\.(insertText|type)\(data/);
+assert.match(smokeRealHubScript, /transportControl\?\.closeDataChannel/);
+assert.match(smokeRealHubScript, /RECONNECT_OBSERVER_MS/);
+assert.match(smokeRealHubScript, /counts\.ghostsnp_install/);
+assert.match(smokeRealHubScript, /real-hub-smoke W-S5 passed/);
 assert.doesNotMatch(liveProtocolHarnessScript, /callTerminalControl\(page, "writeInput", `\$\{echoProbe\}\\n`\)/);
 assert.match(liveProtocolHarnessScript, /key === "grant_secret" && nextValue !== "\[redacted\]"/);
 assert.match(liveProtocolHarnessScript, /waitForTerminalAttachState\(page, \["attached"\]\)/);
