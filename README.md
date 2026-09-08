@@ -78,8 +78,9 @@ The smoke verifies the manifest before Chromium starts. It uses mounted Restty c
 attach, keyboard input, resize, clipboard paste, two-peer rendering, and restored visible
 screen state after re-attach. It then closes the active control DataChannel without navigation.
 The surviving client must use a new terminal subscription on the new WebRTC connection. It must
-install a fresh snapshot before it receives new live output. It must then complete a new input
-round trip.
+use a new route generation while the same Hub and Core worker remain active. The smoke does not
+compare generation values across a restart. The client must install a fresh snapshot before it
+receives new live output. It must then complete a new input round trip.
 
 The paste row records the current policy. The client writes a 65,536-byte printable paste.
 For a 65,536-byte multiline paste, the client first sends `allowUnsafe=false`.

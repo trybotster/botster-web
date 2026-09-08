@@ -2393,6 +2393,7 @@ assert.match(liveHubLaneScript, /page\.keyboard\.(insertText|type)\(data/);
 assert.match(smokeRealHubScript, /transportControl\?\.closeDataChannel/);
 assert.match(smokeRealHubScript, /RECONNECT_OBSERVER_MS/);
 assert.match(smokeRealHubScript, /counts\.ghostsnp_install/);
+assert.match(smokeRealHubScript, /reconnect reused reservation generation/);
 assert.match(smokeRealHubScript, /real-hub-smoke W-S5 passed/);
 assert.doesNotMatch(liveProtocolHarnessScript, /callTerminalControl\(page, "writeInput", `\$\{echoProbe\}\\n`\)/);
 assert.match(liveProtocolHarnessScript, /key === "grant_secret" && nextValue !== "\[redacted\]"/);

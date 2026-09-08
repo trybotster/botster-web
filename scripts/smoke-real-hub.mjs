@@ -442,6 +442,15 @@ try {
           ? observed : null,
       RECONNECT_OBSERVER_MS
     );
+    // The new subscription establishes a fresh route identity. The same Hub and Core worker
+    // stays active in W-S5, so the shared allocator must return a different generation.
+    // Only inequality is significant. The allocator does not define numeric order.
+    // Do not use this assertion in a lane that restarts the Hub or Core worker.
+    if (next.generation === beforeReconnect.generation) {
+      throw new Error(
+        `reconnect reused reservation generation ${String(next.generation)} for subscriptions ${beforeReconnect.subscription_id} and ${next.subscription_id}`
+      );
+    }
     await waitForTerminalAttachState(peerA, "attached");
     attachedA = next;
   }, RECONNECT_MS);
