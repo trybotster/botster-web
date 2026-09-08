@@ -24,6 +24,7 @@ const packageRoot = process.cwd();
 const hubBin = process.env.BOTSTER_HUB_BIN;
 const workerBin = process.env.BOTSTER_SESSION_WORKER_BIN;
 const manifestPath = process.env.BOTSTER_CANDIDATE_MANIFEST;
+const ablateReconnectClose = process.env.BOTSTER_REAL_HUB_ABLATE_RECONNECT_CLOSE === "1";
 const sessionId = "web-smoke";
 const STEP_MS = 30_000;
 const RECONNECT_MS = 15_000;
@@ -419,6 +420,10 @@ try {
   const beforeReconnect = await readBoundedTerminalObserver(peerA);
   const reconnectStartedAt = Date.now();
   await step("ws5-close-data-channel", contextA(), async () => {
+    if (ablateReconnectClose) {
+      console.log("real-hub-smoke W-S5 close ablated");
+      return;
+    }
     await peerA.waitForFunction(
       () => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function",
       undefined,

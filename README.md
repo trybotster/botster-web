@@ -82,6 +82,9 @@ use a new route generation while the same Hub and Core worker remain active. The
 compare generation values across a restart. The client must install a fresh snapshot before it
 receives new live output. It must then complete a new input round trip.
 
+The W-S5 negative control sets `BOTSTER_REAL_HUB_ABLATE_RECONNECT_CLOSE=1`. The smoke skips
+only the DataChannel close. The unchanged reattach oracle must fail at its 10-second bound.
+
 The paste row records the current policy. The client writes a 65,536-byte printable paste.
 For a 65,536-byte multiline paste, the client first sends `allowUnsafe=false`.
 After Core returns an exact zero-write unsafe rejection, the client asks for consent.
