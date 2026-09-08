@@ -419,22 +419,8 @@ try {
   // new output, and send new input on that route.
   const beforeReconnect = await readBoundedTerminalObserver(peerA);
   const reconnectStartedAt = Date.now();
-  await step("ws5-close-data-channel", contextA(), async () => {
-    if (ablateReconnectClose) {
-      console.log("real-hub-smoke W-S5 close ablated");
-      return;
-    }
-    await peerA.waitForFunction(
-      () => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function",
-      undefined,
-      { timeout: STEP_MS }
-    );
-    const closed = await peerA.evaluate(() =>
-      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.closeDataChannel()
-    );
-    if (!closed) throw new Error("in-page reconnect control did not close the active DataChannel");
-  });
-  await step("ws5-reattach", contextA(), async () => {
+  console.log(`real-hub-smoke W-S5 configuration ${JSON.stringify({ reconnect_close_ablated: ablateReconnectClose })}`);
+  const waitForFreshAttachment = async () => {
     const previousInstallCount = beforeReconnect.counts.ghostsnp_install ?? 0;
     const next = await waitForObserver(
       peerA,
@@ -457,27 +443,58 @@ try {
       );
     }
     await waitForTerminalAttachState(peerA, "attached");
-    attachedA = next;
-  }, RECONNECT_MS);
-  await step("ws5-live-output", contextA(), async () => {
-    const value = `ws5-output-${Date.now().toString(36)}`;
-    const marker = `botster-web-production-echo:${value}`;
-    await registerTerminalMarker(peerA, "ws5-live-output", `${marker}\n`);
-    await typeThroughMountedTerminal(peerB, `${value}\n`);
-    await waitForTerminalMarker(peerA, "ws5-live-output");
-    await waitForRenderedTerminalText(peerA, marker);
-  });
-  await step("ws5-input-round-trip", contextA(), async () => {
-    const value = `ws5-input-${Date.now().toString(36)}`;
-    const marker = `botster-web-production-echo:${value}`;
-    await typeThroughMountedTerminal(peerA, `${value}\n`);
-    await waitForRenderedTerminalText(peerA, marker);
-  });
-  console.log(`real-hub-smoke W-S5 passed ${JSON.stringify({ previous_subscription_id: beforeReconnect.subscription_id, subscription_id: attachedA.subscription_id, previous_generation: beforeReconnect.generation, generation: attachedA.generation, reconnect_elapsed_ms: Date.now() - reconnectStartedAt, snapshot_reinstalled: true, live_output: "verified", input_round_trip: "verified" })}`);
+    return next;
+  };
+
+  if (ablateReconnectClose) {
+    const expectedCause = `bounded terminal observer condition exceeded ${RECONNECT_OBSERVER_MS} ms`;
+    let expectedFailureObserved = false;
+    try {
+      await step("ws5-reattach-negative-control", contextA(), waitForFreshAttachment, RECONNECT_MS);
+    } catch (error) {
+      const cause = error instanceof LaneFailure && error.fields.cause instanceof Error
+        ? error.fields.cause.message
+        : "";
+      if (cause !== expectedCause) throw error;
+      expectedFailureObserved = true;
+      console.log(`real-hub-smoke W-S5 negative control passed ${JSON.stringify({ reconnect_close_ablated: true, expected_failure_step: "ws5-reattach-negative-control", expected_deadline_ms: RECONNECT_OBSERVER_MS, elapsed_ms: Date.now() - reconnectStartedAt })}`);
+    }
+    if (!expectedFailureObserved) {
+      throw new Error("W-S5 negative control unexpectedly observed a fresh attachment without closing the DataChannel");
+    }
+  } else {
+    await step("ws5-close-data-channel", contextA(), async () => {
+      await peerA.waitForFunction(
+        () => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function",
+        undefined,
+        { timeout: STEP_MS }
+      );
+      const closed = await peerA.evaluate(() =>
+        globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.closeDataChannel()
+      );
+      if (!closed) throw new Error("in-page reconnect control did not close the active DataChannel");
+    });
+    attachedA = await step("ws5-reattach", contextA(), waitForFreshAttachment, RECONNECT_MS);
+    await step("ws5-live-output", contextA(), async () => {
+      const value = `ws5-output-${Date.now().toString(36)}`;
+      const marker = `botster-web-production-echo:${value}`;
+      await registerTerminalMarker(peerA, "ws5-live-output", `${marker}\n`);
+      await typeThroughMountedTerminal(peerB, `${value}\n`);
+      await waitForTerminalMarker(peerA, "ws5-live-output");
+      await waitForRenderedTerminalText(peerA, marker);
+    });
+    await step("ws5-input-round-trip", contextA(), async () => {
+      const value = `ws5-input-${Date.now().toString(36)}`;
+      const marker = `botster-web-production-echo:${value}`;
+      await typeThroughMountedTerminal(peerA, `${value}\n`);
+      await waitForRenderedTerminalText(peerA, marker);
+    });
+    console.log(`real-hub-smoke W-S5 passed ${JSON.stringify({ previous_subscription_id: beforeReconnect.subscription_id, subscription_id: attachedA.subscription_id, previous_generation: beforeReconnect.generation, generation: attachedA.generation, reconnect_elapsed_ms: Date.now() - reconnectStartedAt, snapshot_reinstalled: true, live_output: "verified", input_round_trip: "verified" })}`);
+  }
 
   await step("final-detach-peer-a", contextA(), () => openHomeView(peerA));
   await step("final-detach-peer-b", { page: peerB, subscriptionId: attachedB.subscription_id }, () => openHomeView(peerB));
-  console.log(`real-hub-smoke passed ${JSON.stringify({ session_id: sessionId, post_cancel_input: "verified", paste_policy: "per-operation-explicit-consent", multiline_support: "confirmed", in_page_reconnect: "verified", source_revisions: manifest.source_revisions })}`);
+  console.log(`real-hub-smoke passed ${JSON.stringify({ session_id: sessionId, post_cancel_input: "verified", paste_policy: "per-operation-explicit-consent", multiline_support: "confirmed", reconnect_close_ablated: ablateReconnectClose, in_page_reconnect: ablateReconnectClose ? "negative-control-passed" : "verified", source_revisions: manifest.source_revisions })}`);
 } catch (error) {
   const fields = error instanceof LaneFailure ? error.fields : { layer: "web", step: "unclassified", session_id: sessionId, cause: error };
   console.error(formatLaneFailure(fields));

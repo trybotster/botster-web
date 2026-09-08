@@ -83,7 +83,8 @@ compare generation values across a restart. The client must install a fresh snap
 receives new live output. It must then complete a new input round trip.
 
 The W-S5 negative control sets `BOTSTER_REAL_HUB_ABLATE_RECONNECT_CLOSE=1`. The smoke skips
-only the DataChannel close. The unchanged reattach oracle must fail at its 10-second bound.
+only the DataChannel close. The control passes only when the reattach oracle reaches its
+10-second bound. An unexpected new attachment makes the control fail.
 
 The paste row records the current policy. The client writes a 65,536-byte printable paste.
 For a 65,536-byte multiline paste, the client first sends `allowUnsafe=false`.

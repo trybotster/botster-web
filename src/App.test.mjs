@@ -2392,6 +2392,8 @@ assert.match(liveProtocolHarnessScript, /page\.waitForTimeout\(100\)|setTimeout\
 assert.match(liveHubLaneScript, /page\.keyboard\.(insertText|type)\(data/);
 assert.match(smokeRealHubScript, /transportControl\?\.closeDataChannel/);
 assert.match(smokeRealHubScript, /BOTSTER_REAL_HUB_ABLATE_RECONNECT_CLOSE/);
+assert.match(smokeRealHubScript, /W-S5 negative control passed/);
+assert.match(smokeRealHubScript, /in_page_reconnect: ablateReconnectClose \? "negative-control-passed" : "verified"/);
 assert.match(smokeRealHubScript, /RECONNECT_OBSERVER_MS/);
 assert.match(smokeRealHubScript, /counts\.ghostsnp_install/);
 assert.match(smokeRealHubScript, /reconnect reused reservation generation/);
