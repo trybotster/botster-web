@@ -382,6 +382,10 @@ export function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserve
       const lastKinds = [];
       const errors = [];
       const counts = new Map();
+      let outputTail = new Uint8Array(0);
+      const diagnosticTransitions = [];
+      let diagnosticSequence = 0;
+      let diagnosticRouteIdentity = null;
       let attachmentGeneration = null;
       let routeGeneration = null;
       let subscriptionId = null;
@@ -394,6 +398,11 @@ export function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserve
       let readySeen = false;
       let finishSeen = false;
       let abandonedOutstandingCount = 0;
+      let pasteInputSentCount = 0;
+      let focusInputSentCount = 0;
+      let helloAckSeen = false;
+      let sessionSubscriptionRequested = false;
+      let sessionSnapshotSeen = false;
 
       const remember = (list, value, limit) => {
         list.push(value);
@@ -436,10 +445,40 @@ export function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserve
           marker.carry = joined.slice(joined.length - carryLength);
         }
       };
+      const rememberOutputTail = (encoded) => {
+        if (typeof encoded !== "string") return;
+        const bytes = decodeBase64(encoded);
+        const joined = new Uint8Array(outputTail.length + bytes.length);
+        joined.set(outputTail);
+        joined.set(bytes, outputTail.length);
+        outputTail = joined.slice(Math.max(0, joined.length - 4_096));
+      };
+      const recordDiagnosticTransition = (kind, payload = null) => {
+        const rawPayload = payload && typeof payload === "object" ? { ...payload } : payload;
+        const entry = {
+          sequence: ++diagnosticSequence,
+          monotonic_ms: globalThis.performance.now(),
+          kind,
+          payload: rawPayload
+        };
+        if (kind === "attach" && rawPayload && typeof rawPayload === "object") {
+          entry.generation_domain = "browser_local_attachment_attempt";
+          entry.attach_field_presence = {
+            subscription_id: Object.prototype.hasOwnProperty.call(rawPayload, "subscription_id"),
+            generation: Object.prototype.hasOwnProperty.call(rawPayload, "generation"),
+            stream_epoch: Object.prototype.hasOwnProperty.call(rawPayload, "stream_epoch")
+          };
+          entry.attach_payload_keys = Object.keys(rawPayload).sort();
+        }
+        remember(diagnosticTransitions, entry, 128);
+      };
       const terminalPush = (...entries) => {
         for (const entry of entries) {
           const kind = String(entry?.kind ?? "unknown");
           const payload = entry?.payload ?? {};
+          if (["terminal_subscription_closed", "status", "reader_cancel", "attach", "resize"].includes(kind)) {
+            recordDiagnosticTransition(kind, payload);
+          }
           recordKind(kind);
           if (kind === "attach") {
             abandonedOutstandingCount = Math.min(
@@ -474,6 +513,8 @@ export function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserve
             processExit = payload.code ?? null;
             processExitSeen = true;
           } else if (kind === "input_sent") {
+            if (payload.kind === "paste") pasteInputSentCount += 1;
+            if (payload.kind === "focus") focusInputSentCount += 1;
             const operationId = Number(payload.operation_id);
             if (!Number.isSafeInteger(operationId) || operationId < 1) {
               fail(`invalid sent operation id ${String(payload.operation_id)}`);
@@ -500,6 +541,7 @@ export function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserve
           } else if (kind === "paste_outcome") {
             remember(pasteOutcomes, { ...payload }, 32);
           } else if (kind === "output") {
+            rememberOutputTail(payload.payload_bytes_base64);
             feedMarkers("output", payload.payload_bytes_base64);
           } else if (kind === "renderer_write") {
             feedMarkers("renderer", payload.payload_bytes_base64);
@@ -509,6 +551,37 @@ export function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserve
       };
       const eventPush = (...entries) => {
         for (const entry of entries) {
+          if (entry?.kind === "daemon_event" && entry.payload?.type === "terminal_subscription_closed") {
+            recordDiagnosticTransition("daemon_event:terminal_subscription_closed", entry.payload);
+          }
+          if (entry?.kind === "terminal_route_frame") {
+            const payload = entry.payload ?? {};
+            const identity = `${String(payload.subscription_id)}:${String(payload.generation)}:${String(payload.stream_epoch)}`;
+            if (identity !== diagnosticRouteIdentity) {
+              diagnosticRouteIdentity = identity;
+              recordDiagnosticTransition("hub_route_identity", {
+                subscription_id: payload.subscription_id,
+                generation: payload.generation,
+                stream_epoch: payload.stream_epoch,
+                first_frame_kind: payload.frame?.kind
+              });
+            }
+          }
+          if (entry?.kind === "daemon_hello_ack") helloAckSeen = true;
+          if (
+            entry?.kind === "daemon_request" &&
+            entry.payload?.type === "subscribe_entities" &&
+            entry.payload?.entity_type === "session"
+          ) {
+            sessionSubscriptionRequested = true;
+          }
+          if (
+            entry?.kind === "hub_frame" &&
+            entry.payload?.kind === "entity_snapshot" &&
+            entry.payload?.payload?.family === "session"
+          ) {
+            sessionSnapshotSeen = true;
+          }
           if (entry?.kind !== "terminal_route_frame") continue;
           const payload = entry.payload ?? {};
           routeGeneration = payload.generation ?? routeGeneration;
@@ -538,6 +611,15 @@ export function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserve
         takeResults() {
           return results.splice(0);
         },
+        decodedOutputTail() {
+          return new TextDecoder().decode(outputTail);
+        },
+        diagnosticTransitionTail() {
+          return diagnosticTransitions.map((entry) => ({ ...entry }));
+        },
+        recordDiagnosticAction(label) {
+          recordDiagnosticTransition("harness_action", { label: String(label) });
+        },
         snapshot() {
           return {
             subscription_id: subscriptionId,
@@ -550,6 +632,13 @@ export function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserve
             latest_resize: latestResize,
             outstanding_ids: [...outstanding.keys()],
             abandoned_outstanding_count: abandonedOutstandingCount,
+            paste_input_sent_count: pasteInputSentCount,
+            focus_input_sent_count: focusInputSentCount,
+            peer_readiness: {
+              hello_ack_seen: helloAckSeen,
+              session_subscription_requested: sessionSubscriptionRequested,
+              session_snapshot_seen: sessionSnapshotSeen
+            },
             last_kinds: [...lastKinds],
             errors: [...errors],
             counts: Object.fromEntries(counts),
@@ -815,6 +904,24 @@ export async function readBoundedTerminalObserver(page) {
   return state;
 }
 
+export async function readBoundedTerminalOutputTail(page) {
+  return page.evaluate(() =>
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.boundedTerminalObserver?.decodedOutputTail?.() ?? null
+  );
+}
+
+export async function readBoundedTerminalTransitionTail(page) {
+  return page.evaluate(() =>
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.boundedTerminalObserver?.diagnosticTransitionTail?.() ?? null
+  );
+}
+
+export async function recordBoundedTerminalDiagnosticAction(page, label) {
+  await page.evaluate(({ actionLabel }) => {
+    globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.boundedTerminalObserver?.recordDiagnosticAction?.(actionLabel);
+  }, { actionLabel: label });
+}
+
 export async function registerTerminalMarker(page, id, text, source = "output") {
   await page.evaluate(
     ({ markerId, markerText, markerSource }) => {
@@ -827,16 +934,24 @@ export async function registerTerminalMarker(page, id, text, source = "output") 
 }
 
 export async function waitForTerminalMarker(page, id, timeout = 30_000) {
-  await page.waitForFunction(
-    ({ markerId }) =>
-      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.boundedTerminalObserver?.markerMatched?.(markerId) === true,
-    { markerId: id },
-    { timeout }
-  ).finally(async () => {
+  try {
+    await page.waitForFunction(
+      ({ markerId }) =>
+        globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.boundedTerminalObserver?.markerMatched?.(markerId) === true,
+      { markerId: id },
+      { timeout }
+    );
+  } catch (error) {
+    const outputTail = await readBoundedTerminalOutputTail(page).catch(() => null);
+    throw new Error(
+      `terminal marker ${id} was not observed: decoded_output_tail=${JSON.stringify(outputTail)}; ${error.message}`,
+      { cause: error }
+    );
+  } finally {
     await page.evaluate(({ markerId }) => {
       globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.boundedTerminalObserver?.removeMarker?.(markerId);
     }, { markerId: id }).catch(() => undefined);
-  });
+  }
 }
 
 export async function takePasteOutcomes(page) {

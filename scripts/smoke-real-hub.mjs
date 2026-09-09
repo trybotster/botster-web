@@ -9,10 +9,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { chromium } from "playwright";
-import { productionSessionScriptSource } from "./live-packaged-protocol-helpers.mjs";
+import { HOST_CHROME, productionSessionScriptSource } from "./live-packaged-protocol-helpers.mjs";
 import {
   dispatchMountedPaste, ensurePackageEnabled, formatLaneFailure, installLiveHarnessPageHooks,
-  openHomeView, openSessionTerminal, readBoundedTerminalObserver, readDirectTerminalModeFlags,
+  openHomeView, openSessionTerminal, readBoundedTerminalObserver, readBoundedTerminalOutputTail,
+  readBoundedTerminalTransitionTail, readDirectTerminalModeFlags, recordBoundedTerminalDiagnosticAction,
   registerTerminalMarker, requestDaemonShutdown, sendDaemonRequest, spawnHubProcess,
   takePasteOutcomes, takeTerminalResults, typeThroughMountedTerminal, verifyCandidateManifest,
   waitForHtmlShell, waitForHttpOk, waitForPackageAppUrl, waitForRenderedTerminalText,
@@ -53,13 +54,25 @@ async function step(name, context, body, deadlineMs = STEP_MS) {
     const observed = context.page
       ? await readBoundedTerminalObserver(context.page).catch(() => null)
       : null;
+    const outputTail = context.page
+      ? await readBoundedTerminalOutputTail(context.page).catch(() => null)
+      : null;
+    const transitionTail = context.page
+      ? await readBoundedTerminalTransitionTail(context.page).catch(() => null)
+      : null;
+    const diagnosticCause = outputTail || transitionTail
+      ? new Error(
+        `${cause instanceof Error ? cause.message : String(cause)}; decoded_output_tail=${JSON.stringify(outputTail)}; diagnostic_transition_tail=${JSON.stringify(transitionTail)}`,
+        { cause }
+      )
+      : cause;
     throw new LaneFailure({
       layer: "web", step: name, session_id: sessionId,
       subscription_id: observed?.subscription_id ?? context.subscriptionId ?? null,
       generation: observed?.generation ?? context.generation ?? null,
       stream_epoch: observed?.stream_epoch ?? context.streamEpoch ?? null,
       deadline_ms: deadlineMs, elapsed_ms: Date.now() - startedAt,
-      last_kinds: observed?.last_kinds ?? [], cause
+      last_kinds: observed?.last_kinds ?? [], cause: diagnosticCause
     });
   } finally {
     clearTimeout(timer);
@@ -115,6 +128,30 @@ async function mountedAttachment(page) {
   );
 }
 
+async function waitForPeerReadiness(page, name) {
+  await page.waitForFunction(
+    () => {
+      const readiness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.boundedTerminalObserver?.snapshot?.().peer_readiness;
+      return readiness?.hello_ack_seen && readiness.session_subscription_requested && readiness.session_snapshot_seen;
+    },
+    undefined,
+    { timeout: STEP_MS - 1_000 }
+  ).catch(async (error) => {
+    const observed = await readBoundedTerminalObserver(page).catch(() => null);
+    throw new Error(`${name} connection or session hydration incomplete: peer_readiness=${JSON.stringify(observed?.peer_readiness ?? null)}; ${error.message}`);
+  });
+}
+
+async function waitForDashboardSessionRow(page, name) {
+  const sessionRows = page.getByTestId(HOST_CHROME.dashboardTestId).locator("ion-item");
+  const matchingRow = sessionRows.filter({ has: page.getByText(sessionId, { exact: true }) });
+  await matchingRow.waitFor({ state: "visible", timeout: STEP_MS - 1_000 }).catch(async (error) => {
+    const rows = await sessionRows.evaluateAll((items) => items.slice(0, 16).map((item) => item.textContent?.trim() ?? ""));
+    const observed = await readBoundedTerminalObserver(page).catch(() => null);
+    throw new Error(`${name} dashboard session row is missing: row_count=${rows.length}; rows=${JSON.stringify(rows)}; peer_readiness=${JSON.stringify(observed?.peer_readiness ?? null)}; ${error.message}`);
+  });
+}
+
 function printablePasteText(length) {
   let text = "";
   for (let index = 0; index < length; index += 1) {
@@ -123,9 +160,14 @@ function printablePasteText(length) {
   return text;
 }
 
-function multilinePasteText(length) {
+function multilinePasteFixture(length) {
   const beforeNewline = Math.floor((length - 1) / 2);
-  return `${"u".repeat(beforeNewline)}\n${"u".repeat(length - beforeNewline - 1)}`;
+  const before = "u".repeat(beforeNewline);
+  const after = "u".repeat(length - beforeNewline - 1);
+  return {
+    clipboardText: `${before}\n${after}`,
+    expectedPtyText: `${before}\r${after}`
+  };
 }
 
 function oneRow(rows, label, kind) {
@@ -198,6 +240,8 @@ try {
       () => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl),
       undefined, { timeout: STEP_MS }
     ));
+    await step(`${name}-connection`, { page }, () => waitForPeerReadiness(page, name));
+    await step(`${name}-dashboard-session`, { page }, () => waitForDashboardSessionRow(page, name));
     await step(`${name}-open-session`, { page }, async () => {
       await openSessionTerminal(page, sessionId);
       return mountedAttachment(page);
@@ -249,8 +293,11 @@ try {
     await takeTerminalResults(peerA);
     const text = printablePasteText(PASTE_BYTES);
     const digest = createHash("sha256").update(text, "utf8").digest("hex");
+    // Raw receiver output uses LF. Normal producer output uses CRLF.
     await registerTerminalMarker(peerA, "ws3-ready", `botster-web-production-receive-ready:${PASTE_BYTES}\n`);
+    await recordBoundedTerminalDiagnosticAction(peerA, "ws3-printable-receiver-command-before");
     await typeThroughMountedTerminal(peerA, `botster-web-production-receive:${PASTE_BYTES}\n`);
+    await recordBoundedTerminalDiagnosticAction(peerA, "ws3-printable-receiver-command-after");
     await waitForTerminalMarker(peerA, "ws3-ready", PASTE_MS);
     const receipt = `botster-web-production-received:${PASTE_BYTES}:${PASTE_BYTES}:${digest}`;
     await registerTerminalMarker(peerA, "ws3-receipt", receipt);
@@ -279,8 +326,8 @@ try {
   await step("ws3-multiline-confirmed", contextA(), async () => {
     await takePasteOutcomes(peerA);
     await takeTerminalResults(peerA);
-    const text = multilinePasteText(PASTE_BYTES);
-    const digest = createHash("sha256").update(text, "utf8").digest("hex");
+    const { clipboardText: text, expectedPtyText } = multilinePasteFixture(PASTE_BYTES);
+    const digest = createHash("sha256").update(expectedPtyText, "utf8").digest("hex");
     await registerTerminalMarker(peerA, "ws3-multiline-ready", `botster-web-production-receive-ready:${PASTE_BYTES}\n`);
     await typeThroughMountedTerminal(peerA, `botster-web-production-receive:${PASTE_BYTES}\n`);
     await waitForTerminalMarker(peerA, "ws3-multiline-ready", PASTE_MS);
@@ -322,7 +369,10 @@ try {
       throw new Error(`confirmed multiline operation proof is invalid: rejected=${JSON.stringify(rejectedOutcome)} outcome=${JSON.stringify(confirmedOutcome)} result=${JSON.stringify(confirmedResult)}`);
     }
     const modes = await readDirectTerminalModeFlags(peerA, sessionId);
-    const expectedWrittenBytes = modes.bracketed_paste ? PASTE_BYTES + 12 : PASTE_BYTES;
+    if (modes.bracketed_paste !== false) {
+      throw new Error(`multiline fixture requires bracketed_paste=false, observed ${String(modes.bracketed_paste)}`);
+    }
+    const expectedWrittenBytes = PASTE_BYTES;
     if (
       confirmedOutcome.requestedBytes !== PASTE_BYTES ||
       confirmedOutcome.acceptedPayloadBytes !== PASTE_BYTES ||
@@ -336,13 +386,13 @@ try {
     if (!focused.includes("ime-input")) throw new Error(`terminal focus was not restored after paste confirmation: ${focused}`);
   }, PASTE_MS);
 
-  await step("ws3-multiline-cancelled", contextA(), async () => {
+  const cancelInputSentDelta = await step("ws3-multiline-cancelled", contextA(), async () => {
     await takePasteOutcomes(peerA);
     await takeTerminalResults(peerA);
     await registerTerminalMarker(
       peerA,
       "ws3-cancelled-transcript",
-      "botster-web-production-echo:cancel-this-line\n"
+      "botster-web-production-echo:cancel-this-line\r\n"
     );
     const dispatched = await dispatchMountedPaste(peerA, "cancel-this-line\n");
     if (!dispatched.defaultPrevented) throw new Error("mounted cancelled paste was not consumed");
@@ -363,8 +413,14 @@ try {
     const beforeCancel = await readBoundedTerminalObserver(peerA);
     await cancel.click();
     const afterCancel = await readBoundedTerminalObserver(peerA);
-    if ((afterCancel.counts.input_sent ?? 0) !== (beforeCancel.counts.input_sent ?? 0)) {
-      throw new Error("paste cancellation admitted another input operation");
+    if (afterCancel.paste_input_sent_count !== beforeCancel.paste_input_sent_count) {
+      throw new Error("paste cancellation admitted another paste operation");
+    }
+    const inputSentDelta = (afterCancel.counts.input_sent ?? 0) - (beforeCancel.counts.input_sent ?? 0);
+    const focusInputSentDelta = afterCancel.focus_input_sent_count - beforeCancel.focus_input_sent_count;
+    // This run observes one blur to Cancel and one restore. Only focus input is permitted here.
+    if (inputSentDelta !== focusInputSentDelta) {
+      throw new Error(`paste cancellation admitted ${inputSentDelta - focusInputSentDelta} non-focus input operations`);
     }
     if ((await takePasteOutcomes(peerA)).length !== 0 || (await takeTerminalResults(peerA)).length !== 0) {
       throw new Error("cancelled paste sent a second operation");
@@ -372,7 +428,7 @@ try {
     const focused = await peerA.evaluate(() => globalThis.document.activeElement?.getAttribute?.("class") ?? "");
     if (!focused.includes("ime-input")) throw new Error(`terminal focus was not restored after paste cancellation: ${focused}`);
     const value = `ws3-after-cancel-${Date.now().toString(36)}`;
-    await registerTerminalMarker(peerA, "ws3-after-cancel", `botster-web-production-echo:${value}\n`);
+    await registerTerminalMarker(peerA, "ws3-after-cancel", `botster-web-production-echo:${value}\r\n`);
     await typeThroughMountedTerminal(peerA, `${value}\n`);
     await waitForTerminalMarker(peerA, "ws3-after-cancel", PASTE_MS);
     await waitForRenderedTerminalText(peerA, `botster-web-production-echo:${value}`);
@@ -383,8 +439,9 @@ try {
       return matched;
     });
     if (cancelledReachedProducer) throw new Error("producer transcript contains the cancelled paste before the ordered follow-up marker");
+    return { inputSentDelta, focusInputSentDelta };
   }, PASTE_MS);
-  console.log(`real-hub-smoke W-S3 passed ${JSON.stringify({ printable_bytes: PASTE_BYTES, confirmed_multiline_bytes: PASTE_BYTES, zero_write_rejection: "verified", new_operation_id: "verified", cancel_no_send: "verified", post_cancel_input: "verified" })}`);
+  console.log(`real-hub-smoke W-S3 passed ${JSON.stringify({ printable_bytes: PASTE_BYTES, confirmed_multiline_bytes: PASTE_BYTES, zero_write_rejection: "verified", new_operation_id: "verified", cancel_no_send: "verified", cancel_input_sent_delta: cancelInputSentDelta.inputSentDelta, cancel_focus_input_sent_delta: cancelInputSentDelta.focusInputSentDelta, cancel_non_focus_input_sent_delta: cancelInputSentDelta.inputSentDelta - cancelInputSentDelta.focusInputSentDelta, post_cancel_input: "verified" })}`);
 
   // W-S4 proves restored visible screen state and new live output through the re-mounted Restty client.
   const historyValue = `w4-${Date.now().toString(36)}`;
@@ -452,10 +509,11 @@ try {
     try {
       await step("ws5-reattach-negative-control", contextA(), waitForFreshAttachment, RECONNECT_MS);
     } catch (error) {
-      const cause = error instanceof LaneFailure && error.fields.cause instanceof Error
-        ? error.fields.cause.message
-        : "";
-      if (cause !== expectedCause) throw error;
+      const diagnosticCause = error instanceof LaneFailure ? error.fields.cause : null;
+      const originalCause = diagnosticCause instanceof Error && diagnosticCause.cause instanceof Error
+        ? diagnosticCause.cause
+        : diagnosticCause;
+      if (!(originalCause instanceof Error) || originalCause.message !== expectedCause) throw error;
       expectedFailureObserved = true;
       console.log(`real-hub-smoke W-S5 negative control passed ${JSON.stringify({ reconnect_close_ablated: true, expected_failure_step: "ws5-reattach-negative-control", expected_deadline_ms: RECONNECT_OBSERVER_MS, elapsed_ms: Date.now() - reconnectStartedAt })}`);
     }
@@ -478,7 +536,7 @@ try {
     await step("ws5-live-output", contextA(), async () => {
       const value = `ws5-output-${Date.now().toString(36)}`;
       const marker = `botster-web-production-echo:${value}`;
-      await registerTerminalMarker(peerA, "ws5-live-output", `${marker}\n`);
+      await registerTerminalMarker(peerA, "ws5-live-output", `${marker}\r\n`);
       await typeThroughMountedTerminal(peerB, `${value}\n`);
       await waitForTerminalMarker(peerA, "ws5-live-output");
       await waitForRenderedTerminalText(peerA, marker);

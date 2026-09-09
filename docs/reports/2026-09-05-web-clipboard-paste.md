@@ -163,6 +163,14 @@ The bracketed case confirms the marker accounting exactly: the wire is the paylo
 
 This validates the live clipboard paste lane end to end against the corrected Core. Five admitted cases delivered byte-exact, with the receiver digest, Web accounting, and Core `bytes_written` all agreeing: ASCII, Unicode, CRLF, bracketed on, and bracketed off. The sixth case, the oversize paste, was refused before encoding, evidenced by a rejected outcome, no paste transaction telemetry, and no key-path input; that no protocol frame was sent is an inference from the plane source, not a delivered byte count. It remains candidate validation against the rc.1 Hub, not the final full matrix.
 
+### Current Ghostty contract note (2026-09-08)
+
+The run 5 table records the observed result at Core `bf6e7d9`. Do not use its byte-identical `crlf` row as a current contract expectation. The current candidate pins Ghostty `eb72ec61304ea256be1d86ed8fa961c84e43ecbd`. At that pin, unbracketed paste converts every LF byte to CR. Thus, bare LF becomes CR and CRLF becomes CRCR. The public rule is in `include/ghostty/vt/paste.h:60-68`. The implementation is in `src/input/paste.zig:101-106`. The bare-LF and CRLF tests are in `src/input/paste.zig:174-191`.
+
+The W-S3 cancel proof also needed a correction at this candidate. Its old transcript marker expected LF after normal producer output, but the PTY emits CRLF in that mode. The old marker could not match. Thus, earlier intermediate descriptions did not prove that cancelled paste text was absent from the producer transcript. The corrected marker expects CRLF and the positive candidate lane now proves transcript exclusion.
+
+The sibling lane in `scripts/live-packaged-protocol-harness.mjs` still computes unbracketed wire bytes as unchanged payload bytes. Its CRLF case therefore conflicts with the current Ghostty contract. This known issue is outside the current W-S1 through W-S5 scope. Correct it when that lane is next changed.
+
 ## Final Web gates
 
 The final Web gates ran at commit `db405e7`: `npm run typecheck`, `npm run lint` (zero errors, five pre-existing warnings), `npm test`, and `npm run build`, each exit 0, one command at a time. Their logs and `SHA256SUMS` are preserved under `node_modules/.botster-foundation-evidence/web-paste/final-gates/` and keep their `db405e7` identity; they are not reattributed. Commits after `db405e7` on this branch are report-only and leave `src/` and `dist/` unchanged, so the gate results at `db405e7` still hold for the current checkpoint.
