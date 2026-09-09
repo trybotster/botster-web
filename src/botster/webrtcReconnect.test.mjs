@@ -411,8 +411,9 @@ export async function runWebrtcReconnectTests(helpers) {
       assert.equal(eventsSince(before, "reconnect-scheduled").length, 1);
       assert.equal(liveTimersWithDelay(250, before).length, 1);
       // Two concurrent requests during the wait start one attempt now and cancel the timer.
-      const first = client.request({ type: "list_apps" });
+      // Start status first so fake responses cannot depend on list_apps winning wire order.
       const second = client.request({ type: "status" });
+      const first = client.request({ type: "list_apps" });
       await flushMicrotasks();
       await waitAttempts(attempts, 3, "requests started exactly one attempt");
       assert.equal(liveTimersWithDelay(250, before).length, 0, "retry timer cancelled by the caller-started attempt");
@@ -423,8 +424,8 @@ export async function runWebrtcReconnectTests(helpers) {
       assert.equal(requests.filter((request) => request.type === "status").length, 1);
       assert.equal(requests.filter((request) => request.type === "subscribe_entities").length, 1);
       await emitChunkedTestResponse(channels[1], secret, { kind: "entity_subscribed", events: [], diagnostics: [] }, { messageId: "reconnect-c-subscribe-2" });
-      await emitChunkedTestResponse(channels[1], secret, { kind: "apps", apps: [], events: [], diagnostics: [] }, { messageId: "reconnect-c-apps" });
-      await emitChunkedTestResponse(channels[1], secret, { kind: "status", status: null, sessions: [], packages: [], events: [], diagnostics: [] }, { messageId: "reconnect-c-status" });
+      await emitChunkedTestResponse(channels[1], secret, { kind: "apps", apps: [], events: [], diagnostics: [] }, { messageId: "reconnect-c-apps", requestType: "list_apps" });
+      await emitChunkedTestResponse(channels[1], secret, { kind: "status", status: null, sessions: [], packages: [], events: [], diagnostics: [] }, { messageId: "reconnect-c-status", requestType: "status" });
       stage("c: await first request");
       assert.equal((await first).kind, "apps");
       assert.equal((await second).kind, "status");
