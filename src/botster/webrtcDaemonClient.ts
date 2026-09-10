@@ -378,13 +378,21 @@ function dropFilterAllowsFrame(
 
 export type WebrtcDaemonFailureStage = "bootstrap" | "signaling" | "transport" | "encryption" | "data-plane";
 
+export interface WebrtcDaemonRequestFailure {
+  code: "local_request_timeout" | "local_request_interrupted";
+  request_id: string;
+  operation: string;
+}
+
 export class WebrtcDaemonClientError extends Error {
   readonly botsterWebrtcStage: WebrtcDaemonFailureStage;
+  readonly requestFailure?: WebrtcDaemonRequestFailure;
 
-  constructor(stage: WebrtcDaemonFailureStage, message: string) {
+  constructor(stage: WebrtcDaemonFailureStage, message: string, requestFailure?: WebrtcDaemonRequestFailure) {
     super(message);
     this.name = "WebrtcDaemonClientError";
     this.botsterWebrtcStage = stage;
+    this.requestFailure = requestFailure;
   }
 }
 
@@ -1523,7 +1531,15 @@ class WebrtcDaemonTransport {
     }
     return new Promise<T>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
-        const error = webrtcFailure("data-plane", `local WebRTC request timed out: ${requestType}`);
+        const error = new WebrtcDaemonClientError(
+          "data-plane",
+          `local WebRTC request timed out: ${requestType}`,
+          kind === "hello" ? undefined : {
+            code: "local_request_timeout",
+            request_id: requestId,
+            operation: requestType
+          }
+        );
         if (kind === "hello") {
           this.failPeerGeneration(generation, error);
           return;
@@ -1561,7 +1577,15 @@ class WebrtcDaemonTransport {
       } catch (error) {
         this.settlePending(key2, pending, (entry) =>
           entry.reject(
-            webrtcFailure("data-plane", `local WebRTC data-plane send failed for ${requestType}: ${errorMessage(error)}`)
+            new WebrtcDaemonClientError(
+              "data-plane",
+              `local WebRTC data-plane send failed for ${requestType}: ${errorMessage(error)}`,
+              kind === "hello" ? undefined : {
+                code: "local_request_interrupted",
+                request_id: requestId,
+                operation: requestType
+              }
+            )
           )
         );
       }
@@ -2450,7 +2474,14 @@ class WebrtcDaemonTransport {
       }
     }
     for (const pending of failing) {
-      pending.reject(error);
+      const requestError = error instanceof WebrtcDaemonClientError && pending.kind !== "hello"
+        ? new WebrtcDaemonClientError(error.botsterWebrtcStage, error.message, {
+            code: "local_request_interrupted",
+            request_id: pending.requestId,
+            operation: pending.requestType
+          })
+        : error;
+      pending.reject(requestError);
       pending.slot?.release();
     }
     this.cancelRequestSlotWaiters(error, generation);

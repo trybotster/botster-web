@@ -5978,6 +5978,64 @@ try {
   siblingEntity.unsubscribe();
   eventSiblingClient.disconnect();
 
+// Local request failures retain the exact encrypted request identity.
+for (const failureKind of ["timeout", "closed", "send_throw"]) {
+  const channel = createFakeDataChannel();
+  const sendAttempts = [];
+  if (failureKind === "send_throw") {
+    channel.send = (data) => {
+      sendAttempts.push(data);
+      channel.readyState = "closing";
+      throw new Error("Data channel is closing");
+    };
+  }
+  const client = createWebrtcTestClient([channel], localWebrtcBootstrapFixture);
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalClearTimeout = globalThis.window.clearTimeout;
+  const timers = new Map();
+  let nextTimer = 0;
+  globalThis.window.setTimeout = (callback) => {
+    const timer = ++nextTimer;
+    timers.set(timer, callback);
+    return timer;
+  };
+  globalThis.window.clearTimeout = (timer) => timers.delete(timer);
+  try {
+    const request = client.request({
+      type: "plugin_surface_render",
+      package_name: "botster-workspaces",
+      surface_id: "workspaces",
+      payload: {}
+    });
+    const failure = request.catch((error) => error);
+    const attemptedFrames = failureKind === "send_throw" ? sendAttempts : channel.sent;
+    await waitForTestCondition(() => attemptedFrames.length === 1);
+    const frame = await decodeTestClientFrame(localWebrtcBootstrapFixture.grant_secret, attemptedFrames[0]);
+    if (failureKind === "timeout") {
+      assert.equal(timers.size, 1);
+      [...timers.values()][0]();
+    } else if (failureKind === "closed") {
+      channel.close();
+    }
+    const error = await failure;
+    assert.equal(error instanceof WebrtcDaemonClientError, true);
+    assert.deepEqual(error.requestFailure, {
+      code: failureKind === "timeout" ? "local_request_timeout" : "local_request_interrupted",
+      request_id: frame.request_id,
+      operation: "plugin_surface_render"
+    });
+    assert.equal(attemptedFrames.length, 1);
+    if (failureKind === "send_throw") {
+      assert.equal(channel.sent.length, 0);
+      assert.equal(error.message, "local WebRTC data-plane send failed for plugin_surface_render: Data channel is closing");
+    }
+  } finally {
+    client.disconnect();
+    globalThis.window.setTimeout = originalSetTimeout;
+    globalThis.window.clearTimeout = originalClearTimeout;
+  }
+}
+
 // An attach stream abandoned before its reservation observes its own attach outcome: no
 // unhandled rejection, no late binding, the pending request slot released on timeout, and a
 // late reservation for the abandoned request discarded. A stream that is still awaited
@@ -8357,6 +8415,151 @@ assert.equal(
   "Release metadata could not be read"
 );
 
+// Render failures must not become successful responses with missing snapshots.
+const rejectedPluginRenderResults = [];
+for (const renderResponse of [
+  {
+    kind: "operator_error",
+    error: {
+      code: "runtime_request_timeout",
+      request_id: "42",
+      operation: "plugin_surface_render",
+      message: "runtime request timed out"
+    }
+  },
+  { kind: "operator_error", error: null },
+  { kind: "status", error: null },
+  {
+    kind: "plugin_surface",
+    error: {
+      code: "render_failed",
+      request_id: "42",
+      operation: "plugin_surface_render",
+      message: "Plugin render failed"
+    }
+  }
+]) {
+  const renderRequests = [];
+  const renderFrames = [];
+  const renderRuntime = createBotsterWebClient({
+    transport: createHubTransport({
+      bridge: {
+        async request(request) {
+          renderRequests.push(request);
+          return renderResponse;
+        }
+      }
+    }),
+    actionIdGenerator: deterministicIds("plugin-render-error"),
+    actionTimeoutMs: 50
+  });
+  renderRuntime.hub.onFrame((frame) => renderFrames.push(frame));
+  await renderRuntime.hub.connect({ client: "botster-web", capabilities: [] });
+  renderRequests.length = 0;
+  renderFrames.length = 0;
+  const renderResult = await renderRuntime.actions.dispatch({
+    origin: "ui_node",
+    action: {
+      id: "botster.package.surface.render",
+      target: "botster-workspaces",
+      params: { surface_id: "workspaces" }
+    }
+  });
+  await flushMicrotasks();
+  assert.deepEqual(renderRequests, [{
+    type: "plugin_surface_render",
+    package_name: "botster-workspaces",
+    surface_id: "workspaces",
+    payload: {}
+  }]);
+  assert.equal(renderResult.accepted, false);
+  const expectedReason = renderResponse.error?.message
+    ?? `Plugin surface render protocol error: expected plugin_surface, received ${renderResponse.kind}.`;
+  assert.equal(renderResult.reason, expectedReason);
+  assert.equal(renderResult.result.error_kind, renderResponse.error?.code);
+  assert.deepEqual(renderResult.result.error, renderResponse.error);
+  const actionFrames = renderFrames.filter((frame) => frame.kind === "action_result");
+  assert.equal(actionFrames.length, 1);
+  assert.equal(renderResult.request_id, "plugin-render-error-1");
+  assert.equal(actionFrames[0].payload.request_id, renderResult.request_id);
+  if (renderResponse.error) {
+    assert.deepEqual(
+      renderFrames.find((frame) => frame.kind === "operator_error").payload,
+      renderResponse.error
+    );
+  }
+  rejectedPluginRenderResults.push(renderResult);
+}
+
+// A local client timeout rejects the bridge promise without a Hub response.
+for (const requestFailure of ["plain_error", undefined, {
+  code: "local_request_timeout",
+  request_id: "43",
+  operation: "plugin_surface_render"
+}]) {
+  const renderRequests = [];
+  const renderFrames = [];
+  const timeoutError = requestFailure === "plain_error"
+    ? new Error("Plain render bridge failure")
+    : new WebrtcDaemonClientError(
+    "data-plane",
+    "local WebRTC request timed out: plugin_surface_render",
+    requestFailure
+  );
+  const renderRuntime = createBotsterWebClient({
+    transport: createHubTransport({
+      bridge: {
+        async request(request) {
+          if (request.type === "status") return { kind: "status" };
+          renderRequests.push(request);
+          throw timeoutError;
+        }
+      }
+    }),
+    actionIdGenerator: deterministicIds("plugin-render-local-timeout"),
+    actionTimeoutMs: 50
+  });
+  renderRuntime.hub.onFrame((frame) => renderFrames.push(frame));
+  await renderRuntime.hub.connect({ client: "botster-web", capabilities: [] });
+  const result = await renderRuntime.actions.dispatch({
+    origin: "ui_node",
+    action: {
+      id: "botster.package.surface.render",
+      target: "botster-workspaces",
+      params: { surface_id: "workspaces" }
+    }
+  });
+  await flushMicrotasks();
+  assert.deepEqual(renderRequests, [{
+    type: "plugin_surface_render",
+    package_name: "botster-workspaces",
+    surface_id: "workspaces",
+    payload: {}
+  }]);
+  assert.equal(result.accepted, false);
+  assert.equal(result.request_id, "plugin-render-local-timeout-1");
+  assert.equal(result.reason, timeoutError.message);
+  if (requestFailure === "plain_error") {
+    assert.equal(result.result, undefined);
+    assert.equal(renderFrames.some((frame) => frame.kind === "operator_error"), false);
+    assert.equal(renderFrames.some((frame) => frame.kind === "action_result"), false);
+    rejectedPluginRenderResults.push(result);
+    continue;
+  }
+  assert.equal(result.result.error_kind, requestFailure?.code);
+  assert.equal(result.result.error, undefined);
+  assert.deepEqual(result.result.transport_error, {
+    stage: "data-plane",
+    message: timeoutError.message,
+    ...requestFailure
+  });
+  assert.equal(renderFrames.some((frame) => frame.kind === "operator_error"), false);
+  const actionFrames = renderFrames.filter((frame) => frame.kind === "action_result");
+  assert.equal(actionFrames.length, 1);
+  assert.equal(actionFrames[0].payload.request_id, result.request_id);
+  rejectedPluginRenderResults.push(result);
+}
+
 // Offline path: no reachable Hub. The transport rejection surfaces as a rejected action
 // result carrying the transport reason and no hub_update payload at all.
 const hubUpdateOfflineRuntime = createBotsterWebClient({
@@ -9712,6 +9915,17 @@ try {
   const {
     renderedPluginSurfaceState
   } = pluginSurfaceStateModule;
+  for (const renderResult of rejectedPluginRenderResults) {
+    const surfaceState = renderedPluginSurfaceState(
+      renderResult,
+      "Workspaces",
+      { packageName: "botster-workspaces", surfaceId: "workspaces" }
+    );
+    assert.equal(surfaceState.phase, "error");
+    assert.equal(surfaceState.status, renderResult.reason);
+    assert.equal(surfaceState.snapshot, undefined);
+    assert.doesNotMatch(surfaceState.status, /required snapshot/);
+  }
   const {
     appRouteFromPathname,
     appRoutePath

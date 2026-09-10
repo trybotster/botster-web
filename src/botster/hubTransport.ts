@@ -5,7 +5,7 @@ import type {
   PackageSurfaceOperation
 } from "@trybotster/ui-contract";
 import { hubStatusFamily } from "./connectionDiagnostics";
-import type { WebrtcDaemonLifecycleEvent } from "./webrtcDaemonClient";
+import { WebrtcDaemonClientError, type WebrtcDaemonLifecycleEvent } from "./webrtcDaemonClient";
 import type { EntityFrame } from "./entities";
 import type {
   EntitySubscriptionErrorPayload,
@@ -1381,17 +1381,39 @@ async function dispatchDaemonAction(
       return;
     }
 
-    const response = await bridge.request({
-      type: "plugin_surface_render",
-      package_name: packageName,
-      surface_id: surfaceId,
-      payload: jsonObject(action.params?.payload)
-    });
+    let response: DaemonResponse;
+    try {
+      response = await bridge.request({
+        type: "plugin_surface_render",
+        package_name: packageName,
+        surface_id: surfaceId,
+        payload: jsonObject(action.params?.payload)
+      });
+    } catch (error) {
+      if (!(error instanceof WebrtcDaemonClientError)) throw error;
+      emit(actionResultFrame(request, false, error.message, {
+        package_name: packageName,
+        surface_id: surfaceId,
+        error_kind: error.requestFailure?.code,
+        transport_error: {
+          stage: error.botsterWebrtcStage,
+          message: error.message,
+          ...error.requestFailure
+        }
+      }));
+      return;
+    }
     emitResponse(response);
-    emit(actionResultFrame(request, !response.error, response.error?.message, {
+    const renderResponseMatches = response.kind === "plugin_surface";
+    const renderError = response.error?.message ?? (!renderResponseMatches
+      ? `Plugin surface render protocol error: expected plugin_surface, received ${response.kind}.`
+      : undefined);
+    emit(actionResultFrame(request, renderResponseMatches && !response.error, renderError, {
       package_name: packageName,
       surface_id: surfaceId,
       kind: response.kind,
+      error_kind: response.error?.code,
+      error: response.error,
       plugin_surface: response.plugin_surface
     }));
     return;
