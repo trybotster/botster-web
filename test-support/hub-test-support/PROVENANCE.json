@@ -1,15 +1,36 @@
 {
   "description": "Verbatim copy of the generated @trybotster/hub-test-support package from the Hub repository, vendored as a local file: dev dependency until Hub publishes this version to npm. Never edit these files by hand; metadata.json records the sha256 of every generated asset.",
   "owner": "botster-hub",
-  "revision": "3fd99050a859f8d9db2f6100f4e0acb57f22e412",
+  "revision": "b60ca68dcae7c8025d69784c9f77efdb9ea5a827",
   "source_path": "packages/hub-test-support",
   "package_version": "0.1.45",
   "protocol_version": 9,
   "conformance_fixture_revision": 49,
-  "generated_from": "Hub 3fd9905 by node packages/hub-test-support/scripts/sync-assets.mjs (cargo run -p botster-hub-test-support --example node_package_assets)",
+  "export_method": "git show of committed files",
   "pins": {
-    "botster-core": "a931125",
-    "ghostty": "eb72ec6"
+    "botster-core": "b9e989be3232c72e966ce3fdb63878c82b70d94d",
+    "ghostty": "eb72ec61304ea256be1d86ed8fa961c84e43ecbd"
   },
-  "omitted": ["scripts/", "test.mjs"]
+  "files": {
+    "LICENSE": "7d416423b9031a167a2c7c0f26a4ecc090db68734a47cc8d61247a9688edadb3",
+    "README.md": "9a7d13b31f058cbd18058619be37d3594be0f699b821df6201dcf3c55e6d2648",
+    "daemon-protocol.ts": "9f0e3d86b8b9169b5775a6d4db70570bbb659decb550b605093f1cd2d15c4ce5",
+    "first-party-client-support-matrix.json": "35bb652c7dcd101a62a1ea62bda9cba44711c0a2f492b5cbe669c9cc610cbb6a",
+    "fixtures/plugin-contract-matrix/README.md": "970adbd645d5691d4aac3871f560ce4930966aec46997c7842f0f5d3208928f9",
+    "fixtures/plugin-contract-matrix/botster-package.json": "f208ee46043a33f60562c4a7a93a3c3f9b0a359639466df8f9c2b4ee8f56b5ae",
+    "fixtures/plugin-contract-matrix/plugin.lua": "c02b78ce6756be6ab2abadc68505f7c9427c97637c80c24cdfb0ec5a214252e3",
+    "index.d.ts": "6559cc27cebe4e7b981b80bad322b05191622032f6c5d405ffcbccabeeab9692",
+    "index.js": "9bff41089306218e87a6ca11e9963ba73aa0b7b8db8d56193d9e94e30ec9e3ad",
+    "late-attach-history-conformance-fixture.json": "82702d704fa4b958bc5baeeb60ce81a1dec6b0a0d71599fbcdc1db5f488ba59d",
+    "local-webrtc-delivery-chunk-conformance-fixture.json": "d1c00ae85537c98488e7e3ca2e3d9459aaddae1e143ab7fccf739294bba7d476",
+    "metadata.json": "446bec59155e5a9513e0c8c998463000f8e30cd3c33553fa687645531cea3ffb",
+    "mode-flags-conformance-fixture.json": "9edd6c14f2f13da2250997224439158503810eca0e2bba24f63d6950f32d919a",
+    "package.json": "3b22479111509829e60dc3ac4e0f63b4ff31f614196b6da576cc8986e6360a4c",
+    "session-lifecycle-subscription-conformance-fixture.json": "894d1c9aeca083baa074f420c9e20c95ec50100af6a9f16f1425c28195906ac6",
+    "session-plugin-binding-conformance-fixture.json": "94c436b2038303e9bcc1e4a8b5a10c0bc554c8678f0e8d1f836fc60b01629c45"
+  },
+  "omitted": [
+    "scripts/",
+    "test.mjs"
+  ]
 }

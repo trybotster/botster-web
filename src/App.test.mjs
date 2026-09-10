@@ -2608,17 +2608,17 @@ assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 assert.equal(
   hubTestSupportMetadata.daemon_protocol.sha256,
-  "67fb9b4e9ec367967a17ec0fa80890e47620c754e0f21536ed44b32c27a7132f"
+  "9f0e3d86b8b9169b5775a6d4db70570bbb659decb550b605093f1cd2d15c4ce5"
 );
 assert.equal(hubTestSupportMetadata.ui_contract.package_version, "0.3.3");
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.package_version, "0.1.45");
-// Hub 3fd9905 generated 0.1.45 but has not published it; Web consumes the verbatim package
+// Web consumes the verbatim 0.1.45 package from committed Hub b60ca68
 // from the tracked test-support directory through a file: dependency.
 assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "file:test-support/hub-test-support");
-assert.equal(hubTestSupportProvenance.revision, "3fd99050a859f8d9db2f6100f4e0acb57f22e412");
+assert.equal(hubTestSupportProvenance.revision, "b60ca68dcae7c8025d69784c9f77efdb9ea5a827");
 assert.equal(hubTestSupportProvenance.package_version, hubTestSupportMetadata.package_version);
 assert.equal(hubTestSupportProvenance.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(vendoredHubTestSupportPackageJson.version, hubTestSupportMetadata.package_version);
@@ -2655,7 +2655,7 @@ assert.deepEqual(
     { kind: "surface", surface_id: "contract.settings" }
   ]
 );
-// The vendored daemon-protocol.ts is the Hub 3fd9905 artifact recorded in PROVENANCE.json;
+// The vendored daemon-protocol.ts is the Hub b60ca68 artifact recorded in PROVENANCE.json;
 // the vendored hub-test-support package from that Hub revision ships the same artifact.
 assert.match(generatedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
 assert.match(generatedDaemonProtocol, /interface DaemonPluginResourceCounters/);

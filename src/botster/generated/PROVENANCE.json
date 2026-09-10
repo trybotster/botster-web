@@ -3,15 +3,15 @@
   "artifacts": {
     "terminal-protocol.ts": {
       "owner": "botster-core",
-      "revision": "b19cfb380e469bbcb47a5425d624b699c5fac565",
+      "revision": "b9e989be3232c72e966ce3fdb63878c82b70d94d",
       "source_path": "crates/botster-terminal-protocol-client/generated/terminal-protocol.ts",
       "sha256": "e6847ae88e49845a166b4b48f7b96cbaa9384fb2eb9bc651f0f512c0adb54fef"
     },
     "daemon-protocol.ts": {
       "owner": "botster-hub",
-      "revision": "3fd99050a859f8d9db2f6100f4e0acb57f22e412",
+      "revision": "b60ca68dcae7c8025d69784c9f77efdb9ea5a827",
       "source_path": "crates/botster-hub-client/generated/daemon-protocol.ts",
-      "sha256": "67fb9b4e9ec367967a17ec0fa80890e47620c754e0f21536ed44b32c27a7132f"
+      "sha256": "9f0e3d86b8b9169b5775a6d4db70570bbb659decb550b605093f1cd2d15c4ce5"
     }
   }
 }
