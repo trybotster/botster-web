@@ -1,7 +1,7 @@
 {
   "description": "Verbatim copy of the generated @trybotster/hub-test-support package from the Hub repository, vendored as a local file: dev dependency until Hub publishes this version to npm. Never edit these files by hand; metadata.json records the sha256 of every generated asset.",
   "owner": "botster-hub",
-  "revision": "0b9a11d93654361b6eb2aa894f0875d89b756d33",
+  "revision": "46fa2e65a2b81ff3218239b7c8051a40ef53f262",
   "source_path": "packages/hub-test-support",
   "package_version": "0.1.45",
   "protocol_version": 9,

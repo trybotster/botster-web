@@ -2615,10 +2615,10 @@ assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-co
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.package_version, "0.1.45");
-// Web consumes the verbatim 0.1.45 package from committed Hub 0b9a11d9
+// Web consumes the verbatim 0.1.45 package from committed Hub 46fa2e65
 // from the tracked test-support directory through a file: dependency.
 assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "file:test-support/hub-test-support");
-assert.equal(hubTestSupportProvenance.revision, "0b9a11d93654361b6eb2aa894f0875d89b756d33");
+assert.equal(hubTestSupportProvenance.revision, "46fa2e65a2b81ff3218239b7c8051a40ef53f262");
 assert.equal(hubTestSupportProvenance.package_version, hubTestSupportMetadata.package_version);
 assert.equal(hubTestSupportProvenance.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(vendoredHubTestSupportPackageJson.version, hubTestSupportMetadata.package_version);
@@ -2655,7 +2655,7 @@ assert.deepEqual(
     { kind: "surface", surface_id: "contract.settings" }
   ]
 );
-// The vendored daemon-protocol.ts is the Hub 0b9a11d9 artifact recorded in PROVENANCE.json;
+// The vendored daemon-protocol.ts is the Hub 46fa2e65 artifact recorded in PROVENANCE.json;
 // the vendored hub-test-support package from that Hub revision ships the same artifact.
 assert.match(generatedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
 assert.match(generatedDaemonProtocol, /interface DaemonPluginResourceCounters/);
