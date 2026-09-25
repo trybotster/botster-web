@@ -741,6 +741,11 @@ function hubLaneContext() {
 }
 
 async function requestDaemonShutdown() {
+  // Session workers outlive the Hub by design, so a harness-owned production session is
+  // shut down before the Hub. A caller-owned shared session is left to its caller.
+  if (productionSessionStarted && !productionSessionShutDown && !sharedSessionMode) {
+    await shutdownProductionSession();
+  }
   await requestHubShutdown({ ...hubLaneContext(), dataDir: webrtcDataDir, hubProcess });
 }
 
@@ -2647,11 +2652,19 @@ async function assertSelectedAppSurfaceRendered(page, target) {
         workspacesCompatibilityState = retainedState;
         await assertWorkspacesCompatibilityRow(page, retainedState, stage);
       } else {
+        // Workspaces renders only the empty-state create action on an empty index, never a
+        // duplicate top "new" action (botster-workspaces plugin_runtime_test).
         await assertWorkspacesNodeIds(page, [
-          "botster-workspaces-new",
           "botster-workspaces-empty",
           "botster-workspaces-empty-create"
         ], "initial cold start");
+        const duplicateCreate = await page
+          .getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
+          .locator("[data-ui-node-id='botster-workspaces-new']")
+          .count();
+        if (duplicateCreate !== 0) {
+          throw new Error("Workspaces initial cold start rendered a duplicate top botster-workspaces-new action");
+        }
         workspacesCompatibilityState = await createWorkspacesCompatibilityWorkspace(page);
       }
     } else {
@@ -3042,12 +3055,15 @@ async function renderedActionDiagnostics(surface) {
 async function selectSharedHubWorkspace(page, workspace) {
   const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const row = surface.locator(`[data-ui-node-id='${workspace.rendered_row_node_id}']`);
-  const action = row.locator("ion-button[data-action-id]");
-  await action.waitFor({ timeout: 15_000 });
-  const actionId = await action.getAttribute("data-action-id");
+  // A Workspaces row is a list_item whose activation is the row itself.
+  await row.waitFor({ timeout: 15_000 });
+  const actionId = await row.getAttribute("data-activation-action-id");
+  if (!actionId) {
+    throw new Error(`shared-Hub workspace row ${workspace.rendered_row_node_id} rendered no activation action`);
+  }
   const nodeId = await row.getAttribute("data-ui-node-id");
   const sinceIndex = await harnessEventCount(page);
-  await action.click();
+  await row.click();
   await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId, nodeId, kind: "submit", sinceIndex,
     label: "shared-Hub rendered workspace selection"
@@ -3671,11 +3687,13 @@ async function selectWorkspacesLifecycleWorkspace(page, state) {
   const row = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
     .locator(`[data-ui-node-id='botster-workspaces-row-${state.workspaceId}']`);
   await row.waitFor({ timeout: 15_000 });
-  const openButton = row.locator("ion-button[data-action-id]");
-  await openButton.waitFor({ timeout: 15_000 });
-  const actionId = await openButton.getAttribute("data-action-id");
+  // A Workspaces row is a list_item whose activation is the row itself.
+  const actionId = await row.getAttribute("data-activation-action-id");
+  if (actionId !== "botster_workspaces.open") {
+    throw new Error(`Workspaces row rendered unexpected activation action id ${JSON.stringify(actionId)}`);
+  }
   const sinceIndex = await harnessEventCount(page);
-  await openButton.click();
+  await row.click();
   await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId,
     nodeId: `botster-workspaces-row-${state.workspaceId}`,
@@ -3692,15 +3710,16 @@ async function selectWorkspacesLifecycleWorkspace(page, state) {
     label: "Workspaces accepted workspace selection"
   });
   await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
-    .getByRole("button", { name: "Add existing session", exact: true })
+    .locator(`[data-ui-node-id='botster-workspaces-add-${state.workspaceId}']`)
     .waitFor({ timeout: 15_000 });
 }
 
 async function openWorkspacesAddSessionDialog(page, state, labelSuffix) {
   const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
-  const openButton = surface
-    .locator("ion-button[data-action-id='botster_workspaces.open']")
-    .filter({ hasText: "Add existing session" });
+  // The workspace toolbar's "Add session" action opens the "Add existing session" dialog.
+  const openButton = surface.locator(
+    `ion-button[data-action-id='botster_workspaces.open'][data-ui-node-id='botster-workspaces-add-${state.workspaceId}']`
+  );
   const openActionId = await openButton.getAttribute("data-action-id");
   const openNodeId = await openButton.getAttribute("data-ui-node-id");
   const openEventCount = await harnessEventCount(page);
