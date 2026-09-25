@@ -5,6 +5,7 @@ import {
   hostCompatibilityRequirement,
   hostHelloConformanceRevision,
   hostHelloProtocol,
+  hostHelloProtocolVersion,
   requiredHostFeatures,
   terminalCompatibilityRequirement
 } from "./protocolPlanes";
@@ -15,7 +16,7 @@ export const hubStatusFamily = "botster-web.hub_status";
 export const hubCompatibilityDiagnosticId = "hub-compatibility";
 export const terminalCompatibilityDiagnosticId = "terminal-compatibility";
 export const expectedDaemonProtocol = hostHelloProtocol;
-export const minimumDaemonProtocolVersion = 1;
+export const requiredDaemonProtocolVersion = hostHelloProtocolVersion;
 export const minimumConformanceFixtureRevision = hostHelloConformanceRevision;
 export const requiredDaemonFeatures = requiredHostFeatures;
 export {
@@ -485,13 +486,13 @@ export function compatibilityDiagnosticsFromFrame(frame: HubControlFrame): Conne
 
   if (
     typeof compatibility.protocol_version !== "number" ||
-    compatibility.protocol_version < minimumDaemonProtocolVersion
+    compatibility.protocol_version !== requiredDaemonProtocolVersion
   ) {
     return [
       {
         id: hubCompatibilityDiagnosticId,
         title: "Hub protocol version mismatch",
-        detail: `Running hub protocol version ${String(compatibility.protocol_version)} is below required version ${minimumDaemonProtocolVersion}.`,
+        detail: `Running hub protocol version ${String(compatibility.protocol_version)} does not match required version ${requiredDaemonProtocolVersion}.`,
         severity: "danger",
         source: "compatibility"
       }

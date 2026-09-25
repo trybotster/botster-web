@@ -3718,7 +3718,7 @@ const {
   hubStatusFamily,
   initialConnectionDiagnostics,
   minimumConformanceFixtureRevision,
-  minimumDaemonProtocolVersion,
+  requiredDaemonProtocolVersion,
   operatorErrorDiagnostic,
   requiredDaemonFeatures,
   schemaVersionInformationFromFrame,
@@ -8908,7 +8908,7 @@ const protocolMismatchDiagnostic = compatibilityDiagnosticsFromFrame({
         schema_version: 1,
         compatibility: {
           protocol: "other-protocol",
-          protocol_version: 1,
+          protocol_version: requiredDaemonProtocolVersion,
           features: [
             "sessions",
             "terminal_streaming",
@@ -8936,7 +8936,7 @@ const outdatedProtocolVersionDiagnostic = compatibilityDiagnosticsFromFrame({
         schema_version: 2,
         compatibility: {
           protocol: "botster-hub-daemon-v1",
-          protocol_version: minimumDaemonProtocolVersion - 1,
+          protocol_version: requiredDaemonProtocolVersion - 1,
           features: requiredDaemonFeatures,
           conformance_fixture_revision: minimumConformanceFixtureRevision
         }
@@ -8958,7 +8958,7 @@ const missingCapabilityDiagnostic = compatibilityDiagnosticsFromFrame({
         schema_version: 1,
         compatibility: {
           protocol: "botster-hub-daemon-v1",
-          protocol_version: 1,
+          protocol_version: requiredDaemonProtocolVersion,
           features: ["sessions"],
           conformance_fixture_revision: minimumConformanceFixtureRevision
         }
@@ -8983,7 +8983,7 @@ for (const missingFeature of requiredDaemonFeatures) {
           schema_version: 2,
           compatibility: {
             protocol: "botster-hub-daemon-v1",
-            protocol_version: minimumDaemonProtocolVersion,
+            protocol_version: requiredDaemonProtocolVersion,
             features: requiredDaemonFeatures.filter((feature) => feature !== missingFeature),
             conformance_fixture_revision: minimumConformanceFixtureRevision
           }
@@ -9007,7 +9007,7 @@ const outdatedConformanceDiagnostic = compatibilityDiagnosticsFromFrame({
         schema_version: 1,
         compatibility: {
           protocol: "botster-hub-daemon-v1",
-          protocol_version: 1,
+          protocol_version: requiredDaemonProtocolVersion,
           features: requiredDaemonFeatures,
           conformance_fixture_revision: 13
         }
@@ -9029,7 +9029,7 @@ const compatibleDescriptorDiagnostics = compatibilityDiagnosticsFromFrame({
         schema_version: 1,
         compatibility: {
           protocol: "botster-hub-daemon-v1",
-          protocol_version: 1,
+          protocol_version: requiredDaemonProtocolVersion,
           features: [...requiredDaemonFeatures],
           conformance_fixture_revision: minimumConformanceFixtureRevision
         }
@@ -9049,42 +9049,39 @@ assert.deepEqual(requiredDaemonFeatures, [
 ]);
 // Web requires exactly the conformance revision of the vendored Hub fixture package.
 assert.equal(minimumConformanceFixtureRevision, hubTestSupportMetadata.conformance_fixture_revision);
-assert.equal(minimumDaemonProtocolVersion, 1);
+// Web requires exactly the protocol version of the vendored Hub fixture package.
+assert.equal(requiredDaemonProtocolVersion, hubTestSupportMetadata.protocol_version);
 assert.equal(compatibleDescriptorDiagnostics.length, 1);
 assert.equal(compatibleDescriptorDiagnostic.title, "Hub compatibility descriptor compatible");
 assert.equal(compatibleDescriptorDiagnostic.id, "hub-compatibility");
 
-// Protocol 6 remains compatible when the Hub also meets the current conformance revision.
-const protocolSixHubStatusRecord = {
-  id: "local-hub",
-  schema_version: 3,
-  software: { product_id: "botster-hub", product_name: "Botster Hub", version: "0.1.0" },
-  installation: { mode: "development", provenance: "development_build" },
-  compatibility: {
-    protocol: "botster-hub-daemon-v1",
-    protocol_version: 6,
-    features: [...requiredDaemonFeatures],
-    // Current revision, so only the protocol version is behind in this fixture.
-    conformance_fixture_revision: hubTestSupportMetadata.conformance_fixture_revision
-  }
-};
-const protocolSixDiagnostics = compatibilityDiagnosticsFromFrame({
-  kind: "entity_snapshot",
-  payload: {
-    operation: "entity_snapshot",
-    family: hubStatusFamily,
-    records: [protocolSixHubStatusRecord]
-  }
-});
-assert.equal(protocolSixDiagnostics.length, 1);
-assert.equal(protocolSixDiagnostics[0].title, "Hub compatibility descriptor compatible");
-assert.equal(protocolSixDiagnostics[0].severity, "success");
-assert.match(protocolSixDiagnostics[0].detail, /Protocol botster-hub-daemon-v1 v6 advertises required features\./);
-assert.equal(protocolSixDiagnostics.some((diagnostic) => /mismatch/i.test(diagnostic.title)), false);
-assert.equal(protocolSixDiagnostics.some((diagnostic) => /unsupported_feature/.test(JSON.stringify(diagnostic))), false);
-assert.equal(minimumDaemonProtocolVersion, 1);
-// Web requires exactly the conformance revision of the vendored Hub fixture package.
-assert.equal(minimumConformanceFixtureRevision, hubTestSupportMetadata.conformance_fixture_revision);
+// Cold cut: an earlier or later host protocol version is a mismatch, even at the current
+// conformance revision with every required feature.
+for (const protocolVersion of [6, requiredDaemonProtocolVersion - 1, requiredDaemonProtocolVersion + 1]) {
+  const [diagnostic] = compatibilityDiagnosticsFromFrame({
+    kind: "entity_snapshot",
+    payload: {
+      operation: "entity_snapshot",
+      family: hubStatusFamily,
+      records: [{
+        id: "local-hub",
+        schema_version: 3,
+        compatibility: {
+          protocol: "botster-hub-daemon-v1",
+          protocol_version: protocolVersion,
+          features: [...requiredDaemonFeatures],
+          conformance_fixture_revision: hubTestSupportMetadata.conformance_fixture_revision
+        }
+      }]
+    }
+  });
+  assert.equal(diagnostic.title, "Hub protocol version mismatch");
+  assert.equal(diagnostic.severity, "danger");
+  assert.equal(
+    diagnostic.detail,
+    `Running hub protocol version ${protocolVersion} does not match required version ${requiredDaemonProtocolVersion}.`
+  );
+}
 
 // Pre-envelope conformance revisions fail closed under the current revision floor.
 const preGhostsnpDiagnostics = compatibilityDiagnosticsFromFrame({
@@ -9097,7 +9094,7 @@ const preGhostsnpDiagnostics = compatibilityDiagnosticsFromFrame({
       schema_version: 3,
       compatibility: {
         protocol: "botster-hub-daemon-v1",
-        protocol_version: 6,
+        protocol_version: requiredDaemonProtocolVersion,
         features: [...requiredDaemonFeatures],
         conformance_fixture_revision: 34
       }
@@ -9116,7 +9113,7 @@ const previousGhostsnpFloorDiagnostics = compatibilityDiagnosticsFromFrame({
       schema_version: 3,
       compatibility: {
         protocol: "botster-hub-daemon-v1",
-        protocol_version: 6,
+        protocol_version: requiredDaemonProtocolVersion,
         features: [...requiredDaemonFeatures],
         conformance_fixture_revision: 35
       }
@@ -9136,7 +9133,7 @@ const advertisedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame(
         schema_version: 1,
         compatibility: {
           protocol: "botster-hub-daemon-v1",
-          protocol_version: 1,
+          protocol_version: requiredDaemonProtocolVersion,
           features: requiredDaemonFeatures,
           conformance_fixture_revision: minimumConformanceFixtureRevision
         }
@@ -9168,7 +9165,7 @@ const hubReportedTerminalReadbackDiagnostics = compatibilityDiagnosticsFromFrame
         schema_version: 1,
         compatibility: {
           protocol: "botster-hub-daemon-v1",
-          protocol_version: 1,
+          protocol_version: requiredDaemonProtocolVersion,
           features: [...requiredDaemonFeatures],
           conformance_fixture_revision: minimumConformanceFixtureRevision
         },
