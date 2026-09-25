@@ -114,8 +114,8 @@ export function useProductionHubConnection(options: {
         if (subscriptionError) {
           setSessionTypeSubscriptionError(subscriptionError);
         } else if (isEntitySnapshotFrameForFamily(frame, "session_type")) {
-          // A fresh authoritative baseline ends the failed generation. The error is terminal
-          // for its own generation only -- it must not outlive a successful resubscribe.
+          // entity_error does not end the subscription. Hub's next snapshot on the same
+          // subscription is the replacement baseline, so it clears the error state.
           setSessionTypeSubscriptionError(undefined);
         }
       }

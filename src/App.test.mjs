@@ -6844,6 +6844,40 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
   assert.equal(subscriptionErrorFrames[1].message, "session_type snapshot exceeded the frame budget");
   // Still exactly one outbound frame: the original subscribe. No unsubscribe, no resubscribe.
   assert.equal(subscriptionErrorChannel.sent.length, 1);
+  // entity_error is not terminal: Hub recovers the same subscription with a replacement
+  // snapshot, and deltas continue from that snapshot's sequence.
+  await emitChunkedTestResponse(
+    subscriptionErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_snapshot",
+      subscription_id: "session-type-subscription-1",
+      entity_type: "session_type",
+      snapshot_seq: 1,
+      items: [{ session_type_id: "device/recovered", id: "recovered" }]
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "session-type-recovery-snapshot" }
+  );
+  await emitChunkedTestResponse(
+    subscriptionErrorChannel,
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      type: "entity_upsert",
+      subscription_id: "session-type-subscription-1",
+      entity_type: "session_type",
+      snapshot_seq: 2,
+      id: "device/after-recovery",
+      entity: { session_type_id: "device/after-recovery", id: "after-recovery" }
+    },
+    { deliveryKind: "daemon_entity_frame", messageId: "session-type-recovery-upsert" }
+  );
+  await waitForTestCondition(() => subscriptionErrorFrames.length === 4);
+  assert.deepEqual(
+    subscriptionErrorFrames.map((frame) => frame.type),
+    ["entity_snapshot", "entity_error", "entity_snapshot", "entity_upsert"]
+  );
+  assert.deepEqual(subscriptionErrorFrames[2].items, [{ session_type_id: "device/recovered", id: "recovered" }]);
+  assert.equal(subscriptionErrorChannel.sent.length, 1);
   sessionTypeSubscription.unsubscribe();
   await waitForTestCondition(() => subscriptionErrorChannel.sent.length === 2);
   await emitChunkedTestResponse(
@@ -8099,7 +8133,31 @@ assert.deepEqual(emittedSurfaceError.payload, {
   code: "entity_provider_frame_too_large",
   message: "session_type snapshot exceeded the frame budget"
 });
-// Terminal for the generation: nothing refetches and no management list request is provoked.
+// Nothing refetches and no management list request is provoked.
+assert.equal(bridgeRequests.some((request) => request.type === "list_session_types"), false);
+// The error does not end the subscription: the next snapshot on the same held subscription
+// is a full replacement of the session_type set, with no new subscribe.
+const sessionTypeSubscriptionCountBeforeRecovery = bridgeEntitySubscriptions.filter(
+  (subscription) => subscription.entityType === "session_type"
+).length;
+const framesBeforeRecovery = realFrames.length;
+sessionTypeSubscription.onFrame({
+  type: "entity_snapshot",
+  subscription_id: "bridge-session_type-generation-1",
+  entity_type: "session_type",
+  snapshot_seq: 7,
+  items: [authoritativeSessionTypeItems[0]]
+});
+await flushMicrotasks();
+const recoverySnapshot = realFrames
+  .slice(framesBeforeRecovery)
+  .find((frame) => frame.kind === "entity_snapshot" && frame.payload.family === "session_type");
+assert.deepEqual(recoverySnapshot.payload.records.map((record) => record.id), ["device/codex"]);
+assert.equal(recoverySnapshot.payload.sequence, 7);
+assert.equal(
+  bridgeEntitySubscriptions.filter((subscription) => subscription.entityType === "session_type").length,
+  sessionTypeSubscriptionCountBeforeRecovery
+);
 assert.equal(bridgeRequests.some((request) => request.type === "list_session_types"), false);
 assert.deepEqual(
   bridgeRequests.find((request) => request.type === "create_session_type"),

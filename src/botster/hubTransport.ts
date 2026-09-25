@@ -641,7 +641,8 @@ export function daemonEntityFrame(frame: DaemonEntityFrame): HubControlFrame | u
     };
   }
 
-  // Hub reports a terminal subscription failure. Surface it verbatim; never refetch or resubscribe.
+  // Hub reports a subscription error without ending the subscription. Surface it verbatim;
+  // never refetch or resubscribe. The next snapshot on the same subscription replaces the set.
   if (frame.type === "entity_error") {
     return {
       kind: "entity_error",
