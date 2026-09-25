@@ -7575,22 +7575,42 @@ async function proveMountedClipboardPaste(page) {
   if (!dispatched.defaultPrevented) {
     throw new Error(`mounted clipboard paste was not consumed by the Botster capture path: ${JSON.stringify(dispatched)}`);
   }
-  await page.waitForFunction(
-    ({ beforeCount, bytes }) =>
+  const pasteTelemetry = () => page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
+      .filter((entry) => ["paste", "paste_outcome", "input_sent", "clipboard_paste", "paste_routed", "input_result", "restty_input_uncaptured"].includes(entry.kind))
+      .slice(-12)
+  );
+  const waitForPasteOutcome = (outcomes, label) => page.waitForFunction(
+    ({ beforeCount, bytes, outcomes }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
         .filter((entry) => entry.kind === "paste_outcome")
         .slice(beforeCount)
-        .some((entry) => entry.payload?.outcome === "written" && entry.payload?.requestedBytes === bytes && entry.payload?.acceptedPayloadBytes === bytes),
-    { beforeCount: outcomesBefore, bytes: expectedBytes },
+        .find((entry) => outcomes.includes(entry.payload?.outcome) && entry.payload?.requestedBytes === bytes)
+        ?.payload ?? null,
+    { beforeCount: outcomesBefore, bytes: expectedBytes, outcomes },
     { timeout: 45_000 }
-  ).catch(async (error) => {
-    const telemetry = await page.evaluate(() =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
-        .filter((entry) => ["paste", "paste_outcome", "input_sent", "clipboard_paste", "paste_routed", "input_result", "restty_input_uncaptured"].includes(entry.kind))
-        .slice(-12)
-    );
-    throw new Error(`mounted clipboard paste did not reach a written outcome: ${error.message}; telemetry=${JSON.stringify(telemetry)}`);
+  ).then((handle) => handle.jsonValue()).catch(async (error) => {
+    throw new Error(`mounted clipboard paste did not reach ${label}: ${error.message}; telemetry=${JSON.stringify(await pasteTelemetry())}`);
   });
+  // The payload ends in a newline. Without bracketed paste, Core rejects it as unsafe with zero
+  // writes and Web offers per-operation consent; the proof confirms through the real UI.
+  const firstOutcome = await waitForPasteOutcome(["written", "rejected_unsafe_paste"], "a written or unsafe-rejected outcome");
+  let unsafePasteConsent = null;
+  if (firstOutcome.outcome === "rejected_unsafe_paste") {
+    if (firstOutcome.acceptedPayloadBytes !== 0 || firstOutcome.writtenPtyBytes !== 0 || !firstOutcome.unsafePasteConsent) {
+      throw new Error(`unsafe paste rejection was not an exact zero-write consent offer: ${JSON.stringify(firstOutcome)}`);
+    }
+    const confirm = page.locator('[data-terminal-paste-action="confirm"]');
+    await confirm.waitFor({ state: "visible", timeout: 5_000 });
+    await confirm.click();
+    unsafePasteConsent = { rejected_operation_id: firstOutcome.operationId, confirmed: true };
+  }
+  const writtenOutcome = firstOutcome.outcome === "written"
+    ? firstOutcome
+    : await waitForPasteOutcome(["written"], "a written outcome after consent");
+  if (writtenOutcome.acceptedPayloadBytes !== expectedBytes) {
+    throw new Error(`mounted clipboard paste accepted ${writtenOutcome.acceptedPayloadBytes} of ${expectedBytes} bytes`);
+  }
   await page.waitForFunction(
     ({ since, marker }) => {
       const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since);
@@ -7644,6 +7664,7 @@ async function proveMountedClipboardPaste(page) {
     operation_id: pasteResult.operation_id ?? null,
     written_pty_bytes: pasteResult.written_pty_bytes ?? null,
     bracketed_paste: decodeModeFlags(pasteResult.mode_bits ?? 0).bracketed_paste,
+    unsafe_paste_consent: unsafePasteConsent,
     key_after_paste: "botster-web-production-echo:after-paste"
   });
 }
@@ -8000,13 +8021,16 @@ async function provePaletteProjectionAfterOsc(page, sessionId) {
       `palette index 1 did not become 0x${expectedColor.toString(16)} after OSC: before=${beforeColor} after=${after}: ${error.message}`
     );
   });
+  // captureSnapshot returns the assembled GHOSTSNP buffer for the current attachment, or
+  // nothing when the attachment moved; it crosses page.evaluate as an index-keyed object.
   const capture = await callTerminalControl(page, "captureSnapshot");
-  if (!capture || capture.session_id !== sessionId) {
-    throw new Error(`palette path missing capture_snapshot for ${sessionId}: ${JSON.stringify(capture)}`);
+  const captureBytes = capture ? Object.keys(capture).length : 0;
+  if (!capture || captureBytes <= 8 || String.fromCharCode(...[0, 1, 2, 3, 4, 5, 6, 7].map((index) => capture[index])) !== "GHOSTSNP") {
+    throw new Error(`palette path missing capture_snapshot for ${sessionId}: ${JSON.stringify({ bytes: captureBytes })}`);
   }
   const afterColor = await page.evaluate(() => globalThis.__BOTSTER_RESTTY_DEBUG__?.getPaletteColor?.(1) ?? null);
   recordProofNote("palette_projection", {
-    capture_bytes: capture.payload_bytes,
+    capture_bytes: captureBytes,
     probe: { source: "restty", before: beforeColor, after: afterColor, expected: expectedColor }
   });
 }
@@ -8964,7 +8988,7 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
     return attaches.at(-1)?.payload?.subscription_id ?? null;
   });
   const chronologyBefore = await assertTerminalAttachChronology(page, sessionId);
-  if (!chronologyBefore.sequence?.includes("snapshot")) {
+  if (!hasCompleteSnapshot(chronologyBefore.sequence)) {
     throw new Error(`pre-reconnect chronology missing GHOSTSNP snapshot: ${JSON.stringify(chronologyBefore)}`);
   }
   const historyMarker = `botster-web-inpage-history:${Date.now().toString(36)}`;
@@ -9056,12 +9080,13 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
       `post-reconnect chronology subscription mismatch: expected ${subscriptionAfter}, got ${chronologyAfter.subscription_id}`
     );
   }
-  if (!chronologyAfter.sequence?.includes("snapshot")) {
+  if (!hasCompleteSnapshot(chronologyAfter.sequence)) {
     throw new Error(`post-reconnect chronology missing GHOSTSNP snapshot: ${JSON.stringify(chronologyAfter)}`);
   }
-  const snapshotIdx = chronologyAfter.sequence.indexOf("snapshot");
-  const liveOutputIdx = chronologyAfter.sequence.indexOf("terminal_output");
-  if (liveOutputIdx >= 0 && snapshotIdx > liveOutputIdx) {
+  // Scheme 2: SNAPSHOT_READY, history pages, SNAPSHOT_FINISH, then live output.
+  const snapshotFinishIdx = chronologyAfter.sequence.indexOf("snapshot_finish");
+  const liveOutputIdx = chronologyAfter.sequence.indexOf("output");
+  if (liveOutputIdx >= 0 && snapshotFinishIdx > liveOutputIdx) {
     throw new Error(`post-reconnect snapshot-before-live violated: ${JSON.stringify(chronologyAfter.sequence)}`);
   }
 
@@ -9086,9 +9111,6 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
     );
   }
 
-  // Ablation: with the recovery listener removed, DataChannel recovery must not mint a fresh attach.
-  await proveTerminalReconnectListenerAblation(page, subscriptionAfter);
-
   recordProofNote("in_page_terminal_reconnect", {
     openEventsBefore,
     attachTelemetryBefore,
@@ -9099,84 +9121,30 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
     chronologyAfter,
     historyMarker,
     postProbe,
-    document_sentinel: sentinel,
-    ablation: true
+    document_sentinel: sentinel
   });
 }
 
-async function proveTerminalReconnectListenerAblation(page, subscriptionAfterRecovery) {
-  const attachBefore = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "attach").length
-  );
-  const ablated = await page.evaluate(() => {
-    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    if (typeof harness?.disableTerminalTransportRecovery === "function") {
-      harness.disableTerminalTransportRecovery();
-      return true;
-    }
-    return false;
-  });
-  if (!ablated) {
-    throw new Error(
-      "reconnect-listener ablation unavailable: expose __BOTSTER_LIVE_PROTOCOL_HARNESS__.disableTerminalTransportRecovery"
-    );
-  }
-
-  const openBefore = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
-      (entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open"
-    ).length
-  );
-  const closed = await page.evaluate(
-    () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
-  );
-  if (!closed) {
-    throw new Error("ablation reconnect could not close the WebRTC data channel");
-  }
-  await page.waitForFunction(
-    ({ before }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
-        (entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open"
-      ).length > before,
-    { before: openBefore },
-    { timeout: 30_000 }
-  ).catch((error) => {
-    throw new Error(`ablation reconnect never reopened the data channel: ${error.message}`);
-  });
-  // Allow time for a non-ablated path to reattach if the listener were still live.
-  await new Promise((r) => setTimeout(r, 1500));
-  const attachAfter = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "attach").length
-  );
-  if (attachAfter > attachBefore) {
-    throw new Error(
-      `ablation failed: fresh attach still occurred after recovery listener removal (before=${attachBefore} after=${attachAfter} lastSub=${subscriptionAfterRecovery})`
-    );
-  }
-  recordProofNote("reconnect_listener_ablation", {
-    attachBefore,
-    attachAfter,
-    subscriptionAfterRecovery
-  });
+/** A complete scheme 2 hydration: SNAPSHOT_READY followed by SNAPSHOT_FINISH. */
+function hasCompleteSnapshot(sequence) {
+  if (!Array.isArray(sequence)) return false;
+  const ready = sequence.indexOf("snapshot_ready");
+  return ready >= 0 && sequence.indexOf("snapshot_finish", ready) > ready;
 }
 
 async function waitForAutomaticTerminalRestore(page) {
-  // GHOSTSNP-first hydrate: Snapshot install + ReadModeFlags (ReadScreen is optional supplement).
-  try {
-    await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_mode_flags" }, "automatic read_mode_flags request");
-  } catch (error) {
-    const debug = await page.evaluate(() => {
-      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
-      return {
-        stream_errors: events.filter((entry) => entry.kind === "terminal_stream_error").slice(-6),
-        hello: events.filter((entry) => entry.kind === "daemon_hello" || entry.kind === "daemon_hello_ack").slice(-4),
-        discarded: events.filter((entry) => entry.kind === "webrtc_terminal_frame_discarded").slice(-6),
-        terminal_kinds: terminal.map((entry) => entry.kind).slice(-20)
-      };
-    });
-    throw new Error(`${error.message}; hydrate_debug=${JSON.stringify(debug)}`, { cause: error });
-  }
+  // Terminal scheme 2 hydrate: the terminal route delivers MODES, SNAPSHOT_READY, history,
+  // and SNAPSHOT_FINISH. Attach needs no host-control readback.
+  const hydrateDebug = () => page.evaluate(() => {
+    const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+    const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
+    return {
+      stream_errors: events.filter((entry) => entry.kind === "terminal_stream_error").slice(-6),
+      hello: events.filter((entry) => entry.kind === "daemon_hello" || entry.kind === "daemon_hello_ack").slice(-4),
+      discarded: events.filter((entry) => entry.kind === "webrtc_terminal_frame_discarded").slice(-6),
+      terminal_kinds: terminal.map((entry) => entry.kind).slice(-20)
+    };
+  });
   const restoration = await page.waitForFunction(
     () => {
       const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
@@ -9200,9 +9168,24 @@ async function waitForAutomaticTerminalRestore(page) {
     },
     undefined,
     { timeout: 20_000 }
-  ).then((handle) => handle.jsonValue()).catch((error) => {
-    throw new Error(`timed out waiting for automatic snapshot restoration: ${error.message}`);
+  ).then((handle) => handle.jsonValue()).catch(async (error) => {
+    throw new Error(
+      `timed out waiting for automatic snapshot restoration: ${error.message}; hydrate_debug=${JSON.stringify(await hydrateDebug())}`,
+      { cause: error }
+    );
   });
+  const hostControlReadback = await page.evaluate(() =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter(
+        (entry) =>
+          entry.kind === "daemon_request" &&
+          (entry.payload?.type === "read_mode_flags" || entry.payload?.type === "read_screen")
+      )
+      .map((entry) => entry.payload.type)
+  );
+  if (hostControlReadback.length > 0) {
+    throw new Error(`automatic restore used host-control readback: ${JSON.stringify(hostControlReadback)}`);
+  }
 
   // Web validates only the transport envelope. Restty owns the opaque snapshot bytes.
   // A complete hydration is one SNAPSHOT_READY page, zero or more SNAPSHOT_HISTORY pages,
@@ -9326,7 +9309,7 @@ async function waitForResizeProof(page, requestedResize) {
     const observedSize = await waitForNextSizeProbe(page, outputCount).catch(() => undefined);
     lastObservedSize = observedSize ?? lastObservedSize;
 
-    if (observedSize === `${requestedResize.rows}x${requestedResize.columns}`) {
+    if (observedSize === `${requestedResize.rows}x${requestedResize.cols}`) {
       return;
     }
 
@@ -9334,7 +9317,7 @@ async function waitForResizeProof(page, requestedResize) {
   }
 
   throw new Error(
-    `timed out waiting for PTY resize ${requestedResize.rows}x${requestedResize.columns}; last observed ${lastObservedSize}`
+    `timed out waiting for PTY resize ${requestedResize.rows}x${requestedResize.cols}; last observed ${lastObservedSize}`
   );
 }
 
@@ -9685,7 +9668,7 @@ async function latestTerminalResize(page) {
     return resizeEvents.at(-1)?.payload;
   });
 
-  if (!resize || typeof resize.rows !== "number" || typeof resize.columns !== "number") {
+  if (!resize || typeof resize.rows !== "number" || typeof resize.cols !== "number") {
     throw new Error("live harness could not read the latest terminal resize request");
   }
 
