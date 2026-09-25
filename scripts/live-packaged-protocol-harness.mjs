@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -223,6 +223,7 @@ let hubStderr = "";
 let productionSessionStarted = false;
 let productionSessionShutDown = false;
 const ownsWebrtcDataDir = suppliedDataDir === undefined;
+let harnessFailed = false;
 const webrtcDataDir =
   suppliedDataDir ??
   await mkdtemp(join(process.platform === "win32" ? tmpdir() : "/tmp", "botster-web-webrtc-"));
@@ -702,6 +703,7 @@ try {
   if (typeof error.stack === "string") {
     error.stack = `${diagnosticMessage}\n${error.stack}`;
   }
+  harnessFailed = true;
   throw error;
 } finally {
   await browser?.close();
@@ -712,6 +714,19 @@ try {
       once(hubProcess, "exit"),
       new Promise((resolve) => setTimeout(resolve, 2_000))
     ]);
+  }
+  // On failure, keep the Hub's own logs and state for diagnosis before the owned data
+  // directory is removed. Sockets are not copied.
+  const failureArtifactDir = process.env.BOTSTER_LIVE_FAILURE_ARTIFACT_DIR;
+  if (harnessFailed && failureArtifactDir && webrtcDataDir) {
+    const destination = join(failureArtifactDir, `hub-data-${Date.now()}`);
+    await cp(webrtcDataDir, destination, {
+      recursive: true,
+      filter: (source) => !source.endsWith(".sock")
+    }).then(
+      () => console.error(`hub data directory copied for diagnosis: ${destination}`),
+      (copyError) => console.error(`hub data directory copy failed: ${copyError.message}`)
+    );
   }
   if (ownsWebrtcDataDir && webrtcDataDir) {
     await rm(webrtcDataDir, { recursive: true, force: true });
@@ -7284,11 +7299,14 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
     const floodSessionId = `web-flood-${Date.now().toString(36)}`;
     const floodSubscriptionId = `${floodSessionId}-sub`;
     const events = [];
-    await control.request({
+    const spawn = await control.request({
       type: "spawn",
       session_id: floodSessionId,
       command: "yes write-budget-stall"
     });
+    if (spawn?.error) {
+      return { ok: false, reason: "slow-client flood session spawn failed", spawn };
+    }
     let releaseHeldTerminalOutput;
     let reportHeldTerminalOutput;
     const heldTerminalOutput = new Promise((resolve) => {
@@ -7352,7 +7370,18 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     stream.abandon();
-    return { ok: false, reason: "timed out waiting for core_adapter_closed", events: events.slice(-8) };
+    // The flood session's worker outlives the Hub by design; shut it down on failure too.
+    const failedCleanup = await control.request({ type: "shutdown_session", session_id: floodSessionId }).catch(
+      (error) => ({ error: error instanceof Error ? error.message : String(error) })
+    );
+    return {
+      ok: false,
+      reason: "timed out waiting for core_adapter_closed",
+      spawn_kind: spawn?.kind ?? null,
+      cleanup_kind: failedCleanup?.kind ?? null,
+      cleanup_error: failedCleanup?.error ?? null,
+      events: events.slice(-8)
+    };
   }, { siblingSessionId });
   if (!proof.ok) {
     throw new Error(`slow-client sibling proof failed: ${JSON.stringify(proof)}`);
