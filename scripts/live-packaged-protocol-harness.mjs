@@ -7705,7 +7705,7 @@ async function proveLivePasteCases(page) {
         new RegExp(expected).test(
           (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from)
             .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
-            .map((entry) => globalThis.atob(entry.payload.payload_base64 ?? ""))
+            .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
             .join("")
         ),
       { from: since, expected: source },
@@ -7804,9 +7804,11 @@ async function proveLivePasteCases(page) {
   // compare Web's outcome, Core's input_result, and the receiver's receipt.
   const receivePaste = async ({ label, text, bracketed }) => {
     const payload = Buffer.from(text, "utf8");
+    // Ghostty eb72ec61 (include/ghostty/vt/paste.h): an unbracketed paste converts every LF
+    // byte to CR, so bare LF becomes CR and CRLF becomes CRCR. Bracketed paste is unchanged.
     const wire = bracketed
       ? Buffer.concat([Buffer.from(`${ESC}[200~`, "latin1"), payload, Buffer.from(`${ESC}[201~`, "latin1")])
-      : payload;
+      : Buffer.from(payload.map((byte) => (byte === 0x0a ? 0x0d : byte)));
     const leakMarker = `botster-web-live-paste-${label}:`;
     if (!text.startsWith(leakMarker)) throw new Error(`${label}: fixture must start with its leak marker`);
 
@@ -7833,7 +7835,26 @@ async function proveLivePasteCases(page) {
       throw new Error(`${label}: paste gesture was not consumed by the Botster capture path: ${JSON.stringify(dispatched)}`);
     }
 
-    const outcome = await nextPasteOutcome(outcomesBefore, label);
+    let outcome = await nextPasteOutcome(outcomesBefore, label);
+    // Without bracketed paste, Core rejects text with a line break as unsafe with zero writes,
+    // and Web offers per-operation consent. The case confirms through the real UI; the
+    // confirmed paste is a fresh operation that must write.
+    let unsafePasteConsent = null;
+    if (outcome?.outcome === "rejected_unsafe_paste") {
+      if (bracketed || !/[\r\n]/.test(text)) {
+        throw new Error(`${label}: unexpected unsafe-paste rejection: ${JSON.stringify(outcome)}`);
+      }
+      if (outcome.acceptedPayloadBytes !== 0 || outcome.writtenPtyBytes !== 0 || !outcome.unsafePasteConsent) {
+        throw new Error(`${label}: unsafe paste rejection was not an exact zero-write consent offer: ${JSON.stringify(outcome)}`);
+      }
+      const confirm = page.locator('[data-terminal-paste-action="confirm"]');
+      await confirm.waitFor({ state: "visible", timeout: 5_000 });
+      await confirm.click();
+      unsafePasteConsent = { rejected_operation_id: outcome.operationId };
+      outcome = await nextPasteOutcome(outcomesBefore + 1, `${label} after consent`);
+    } else if (!bracketed && /[\r\n]/.test(text)) {
+      throw new Error(`${label}: a line break without bracketed paste was not rejected as unsafe: ${JSON.stringify(outcome)}`);
+    }
     if (outcome?.outcome !== "written") {
       throw new Error(`${label}: expected a written outcome, observed ${JSON.stringify(outcome)}`);
     }
@@ -7882,7 +7903,8 @@ async function proveLivePasteCases(page) {
       },
       { id: outcome.operationId, before: outcomesBefore }
     );
-    if (uniqueness.outcomes_for_operation !== 1 || uniqueness.results_for_operation !== 1 || uniqueness.new_outcomes !== 1) {
+    const expectedNewOutcomes = unsafePasteConsent ? 2 : 1;
+    if (uniqueness.outcomes_for_operation !== 1 || uniqueness.results_for_operation !== 1 || uniqueness.new_outcomes !== expectedNewOutcomes) {
       throw new Error(`${label}: expected exactly one outcome and one result for operation ${outcome.operationId}: ${JSON.stringify(uniqueness)}`);
     }
     const wireDigest = sha256Hex(wire);
@@ -7913,6 +7935,7 @@ async function proveLivePasteCases(page) {
       written_pty_bytes: result.written_pty_bytes,
       written_pty_bytes_accounting: bytesWrittenAccounting,
       operation_id: outcome.operationId,
+      unsafe_paste_consent: unsafePasteConsent,
       pre_paste_bracketed_paste: preFlags.bracketed_paste,
       pre_paste_mouse_mode: preFlags.mouse_mode
     });
