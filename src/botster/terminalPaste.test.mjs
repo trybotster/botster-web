@@ -52,10 +52,17 @@ export async function runTerminalPasteTests(helpers) {
   const scenarioFixtures = recorder();
   const cleanupFixture = async (fixture) => {
     try {
-      await Promise.race([
-        Promise.resolve(fixture.plane?.detach?.()).catch(() => undefined),
-        new Promise((resolve) => realSetTimeout(resolve, 1_000))
-      ]);
+      let settled = false;
+      const detaching = Promise.resolve(fixture.plane?.detach?.()).then(
+        () => { settled = true; notifyTestProgress(); },
+        () => { settled = true; notifyTestProgress(); }
+      );
+      // The fake Hub answers the Detach request when it is sent; each sent frame wakes this wait.
+      await waitForTestCondition(async () => {
+        await fixture.answerControl?.();
+        return settled;
+      }, { label: `paste fixture detach at stage: ${currentStage}`, deadlineMs: 1_000 });
+      await detaching;
     } finally {
       fixture.client?.disconnect?.();
     }
@@ -65,6 +72,7 @@ export async function runTerminalPasteTests(helpers) {
     scenarioFixtures.length = 0;
     let bound;
     const timeout = new Promise((_, reject) => {
+      // timer: deadline — one scenario; expiry fails it with its name and stage.
       bound = realSetTimeout(() => {
         reject(new Error(`paste scenario ${name} timed out after ${SCENARIO_BOUND_MS} ms at stage: ${currentStage}`));
       }, SCENARIO_BOUND_MS);
@@ -136,12 +144,26 @@ export async function runTerminalPasteTests(helpers) {
       responderPass ??= runResponderPass().finally(() => { responderPass = undefined; });
       return responderPass;
     };
+    fixtureRecord.answerControl = answerControl;
+    // The fake Hub answers Attach on the first control channel and Detach on every control
+    // channel: after a loss the client reconnects and sends its Detach on the new one.
     const runResponderPass = async () => {
+      for (const [channelIndex, channel] of channels.entries()) {
+        for (const [index, sent] of channel.sent.entries()) {
+          const key = `${channelIndex}:${index}`;
+          if (answered.has(key) || typeof sent !== "string") continue;
+          const request = await decryptTestEnvelope(secret, sent);
+          if (request?.type === "detach") {
+            answered.add(key);
+            await emitChunkedTestResponse(channel, secret, { kind: "events", events: recorder() }, { messageId: `${name}-detach-${key}`, requestType: "detach" });
+          }
+        }
+      }
       for (const [index, sent] of control.sent.entries()) {
-        if (answered.has(index) || typeof sent !== "string") continue;
+        if (answered.has(`0:${index}`) || typeof sent !== "string") continue;
         const request = await decryptTestEnvelope(secret, sent);
         if (request?.type === "attach") {
-          answered.add(index);
+          answered.add(`0:${index}`);
           // Protocol 10: the fake Hub names the Core generation in the reserved channel's HelloAck.
           fakeHubTerminalGenerations.set(`r-${name}-${request.subscription_id}`, generation);
           await emitChunkedTestResponse(control, secret, {
@@ -155,9 +177,6 @@ export async function runTerminalPasteTests(helpers) {
             },
             events: recorder()
           }, { messageId: `${name}-reservation-${index}`, requestType: "attach" });
-        } else if (request?.type === "detach") {
-          answered.add(index);
-          await emitChunkedTestResponse(control, secret, { kind: "events", events: recorder() }, { messageId: `${name}-detach-${index}`, requestType: "detach" });
         }
       }
     };
@@ -671,8 +690,9 @@ export async function runTerminalPasteTests(helpers) {
       globalThis.setTimeout = (callback, delay, ...args) => {
         if (delay === consentWindowMs) {
           consentTimers.push(callback);
-          return globalSetTimeout(() => undefined, 0);
+          return -1;
         }
+        // timer: deadline — forwards the code under test's own timers unchanged; only the captured delay is controlled.
         return globalSetTimeout(callback, delay, ...args);
       };
       let expiryFixture;

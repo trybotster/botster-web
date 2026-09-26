@@ -5301,6 +5301,42 @@ try {
     kind: "sessions", sessions: [], events: [], diagnostics: []
   });
   assert.equal((await secondResponsePromise).kind, "sessions");
+  // Request telemetry correlates each request with its response by id: daemon_request_id names
+  // the subscription, and webrtc_response_assembly carries the response kind and error code.
+  {
+    const harness = { events: recorder() };
+    const previousHarness = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = harness;
+    try {
+      const released = webrtcClient.request({ type: "unsubscribe_events", subscription_id: "sub-released" });
+      await waitForTestCondition(() => dataChannel.sent.length > 2);
+      await emitChunkedTestResponse(dataChannel, refreshedBootstraps[0].grant_secret, { kind: "events", events: [], error: null });
+      await released;
+      const refused = webrtcClient.request({ type: "unsubscribe_events", subscription_id: "sub-unknown" }).then((value) => value, (error) => error);
+      await waitForTestCondition(() => dataChannel.sent.length > 3);
+      await emitChunkedTestResponse(dataChannel, refreshedBootstraps[0].grant_secret, {
+        kind: "events",
+        events: [],
+        error: { code: "subscription_not_found", request_id: "fake", operation: "unsubscribe_events", message: "unknown subscription" }
+      });
+      await refused;
+      const ids = harness.events.filter((entry) => entry.kind === "daemon_request_id").map((entry) => entry.payload);
+      const responses = harness.events.filter((entry) => entry.kind === "webrtc_response_assembly").map((entry) => entry.payload);
+      assert.deepEqual(ids.map((entry) => [entry.request_type, entry.subscription_id]), [
+        ["unsubscribe_events", "sub-released"],
+        ["unsubscribe_events", "sub-unknown"]
+      ]);
+      const outcomeOf = (subscriptionId) => {
+        const request = ids.find((entry) => entry.subscription_id === subscriptionId);
+        const response = responses.find((entry) => entry.request_id === request.request_id && entry.generation === request.generation);
+        return [response.response_kind, response.error_code];
+      };
+      assert.deepEqual(outcomeOf("sub-released"), ["events", null], "a successful release has no error code");
+      assert.deepEqual(outcomeOf("sub-unknown"), ["events", "subscription_not_found"], "a refused release carries its error code");
+    } finally {
+      globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = previousHarness;
+    }
+  }
   assert.equal(
     lifecycleEvents.filter((event) => event.detail.type === "encrypted-stream-ready").length,
     1
@@ -7087,6 +7123,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
         armTimers.push(callback);
         return -1;
       }
+      // timer: deadline — forwards the code under test's own timers unchanged; only the captured delay is controlled.
       return windowSetTimeout(callback, delay, ...args);
     };
     let timeoutArm;
@@ -8009,6 +8046,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
         iceDeadlines.push(callback);
         return -1;
       }
+      // timer: deadline — forwards the code under test's own timers unchanged; only the captured delay is controlled.
       return windowSetTimeout(callback, delay, ...args);
     };
     const iceListeners = recorder();
@@ -10269,8 +10307,9 @@ for (const scenario of [
   globalThis.setTimeout = (callback, delay, ...args) => {
     if (delay === hydrationBoundMs) {
       hydrationTimers.push(callback);
-      return globalSetTimeout(() => undefined, 0);
+      return -1;
     }
+    // timer: deadline — forwards the code under test's own timers unchanged; only the captured delay is controlled.
     return globalSetTimeout(callback, delay, ...args);
   };
   let plane;

@@ -23,8 +23,10 @@ export const KNOWN_EXCEPTIONS = { "app-lifecycle-entity": 5 };
 
 /** A timer call: the global timer functions and the conventional sleep helper. */
 const TIMER_CALL = /(?<![\w$.])(?:(?:globalThis|window)\.)?(setTimeout|setInterval|sleep)\s*\(/;
+/** A captured timer function: `const realSetTimeout = setTimeout;` makes realSetTimeout a timer. */
+const TIMER_ALIAS = /(?:const|let|var)\s+([\w$]+)\s*=\s*(?:(?:globalThis|window)\.)*(?:setTimeout|setInterval)\s*;/g;
 /** Library waits that poll; the shared helpers in scripts/harness-waits.mjs replace them. */
-const POLLING_WAIT = /\.(waitForTimeout|waitForFunction|waitForURL)\s*\(|\.waitFor\s*\(|["']networkidle["']/;
+const POLLING_WAIT = /\.(waitForTimeout|waitForFunction|waitForURL)\s*\(|\.waitFor\s*\(|["']networkidle["']|\bexpect\.poll\s*\(|\.toPass\s*\(/;
 const MARKER = new RegExp(`//\\s*timer:\\s*(${TIMER_CATEGORIES.join("|")})\\s+—\\s+\\S`);
 const EXCEPTION = /\/\/\s*timer-exception:\s*([\w-]+)\s+—\s+\S/;
 
@@ -36,13 +38,17 @@ export function scanTimerSource(source, knownExceptions = KNOWN_EXCEPTIONS) {
   const lines = source.split("\n");
   const violations = [];
   const exceptions = [];
+  const aliases = [...source.matchAll(TIMER_ALIAS)].map((match) => match[1]);
+  const aliasCall = aliases.length > 0
+    ? new RegExp(`(?<![\\w$.])(?:${aliases.map((alias) => alias.replace(/\$/g, "\\$")).join("|")})\\s*\\(`)
+    : undefined;
   lines.forEach((text, index) => {
     const code = text.replace(/\/\/.*$/, "");
     if (POLLING_WAIT.test(code)) {
       violations.push({ line: index + 1, kind: "polling-wait", text: text.trim() });
       return;
     }
-    if (!TIMER_CALL.test(code)) return;
+    if (!TIMER_CALL.test(code) && !aliasCall?.test(code)) return;
     const nearby = [text, index > 0 ? lines[index - 1] : ""];
     if (nearby.some((candidate) => MARKER.test(candidate))) return;
     const exception = nearby.map((candidate) => candidate.match(EXCEPTION)).find(Boolean);

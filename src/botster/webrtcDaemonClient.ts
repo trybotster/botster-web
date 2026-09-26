@@ -720,6 +720,13 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("transport", `local WebRTC connection changed while ${request.type} waited for a request slot`);
     }
     const requestId = String(this.nextRequestId++);
+    // Correlates this request with its response record (webrtc_response_assembly) by id.
+    recordLiveHarnessEvent("daemon_request_id", {
+      request_type: request.type,
+      request_id: requestId,
+      generation: target.generation,
+      subscription_id: "subscription_id" in request ? request.subscription_id : null
+    });
     const envelope: ClientFrame = { frame: "request", request_id: requestId, request };
     const response = await this.sendEncrypted<DaemonResponse>(
       target,
@@ -2408,10 +2415,13 @@ class WebrtcDaemonTransport {
       });
       return;
     }
+    const responseError = (frame.response as { error?: { code?: string } | null } | undefined)?.error;
     recordLiveHarnessEvent("webrtc_response_assembly", {
       request_type: pending.requestType,
       request_id: frame.request_id,
       generation,
+      response_kind: (frame.response as { kind?: string } | undefined)?.kind ?? null,
+      error_code: responseError?.code ?? null,
       total_bytes: assembly.totalBytes,
       chunk_count: assembly.chunkCount,
       started_at: assembly.startedAt,

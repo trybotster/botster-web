@@ -1818,33 +1818,64 @@ async function exercisePackageEvents(page, { forceGap }) {
   ) {
     throw new Error("leaving the session view subscribed with an empty subject set");
   }
-  // Release boundary: leaving the session view releases its package-event subscription; the
-  // Hub's answer to unsubscribe_events is the acknowledgement. After it, the Hub has no
-  // subscriber for the subject, so the dashboard emission has nowhere to go.
-  await waitForHarnessEvent(
+  // Release boundary: leaving the session view releases its package-event subscription. The
+  // boundary is the Hub's successful answer (no error code) to unsubscribe_events for exactly
+  // that subscription, correlated by request id. After it, the Hub has no subscriber for the
+  // subject, so the dashboard emission has nowhere to go.
+  const releasedSubscriptionId = await page.evaluate((before) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(0, before)
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "subscribe_events")
+      .at(-1)?.payload?.subscription_id ?? null,
+  leaveSince);
+  if (!releasedSubscriptionId) throw new Error("the session view had no package-event subscription to release");
+  const release = await waitForHarnessEvent(
     page,
-    (since) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).some((entry) =>
-      entry.kind === "webrtc_response_assembly" && entry.payload?.request_type === "unsubscribe_events"
-    ),
-    leaveSince,
-    { label: "package-event subscription released after leaving the session view", deadlineMs: 15_000 }
+    ({ since, subscriptionId }) => {
+      const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since);
+      const request = events.find((entry) =>
+        entry.kind === "daemon_request_id" &&
+        entry.payload?.request_type === "unsubscribe_events" &&
+        entry.payload?.subscription_id === subscriptionId
+      );
+      if (!request) return false;
+      return events.find((entry) =>
+        entry.kind === "webrtc_response_assembly" &&
+        entry.payload?.request_id === request.payload.request_id &&
+        entry.payload?.generation === request.payload.generation
+      )?.payload ?? false;
+    },
+    { since: leaveSince, subscriptionId: releasedSubscriptionId },
+    { label: `package-event subscription ${releasedSubscriptionId} released`, deadlineMs: 15_000 }
   );
+  if (release.error_code !== null) {
+    throw new Error(`the Hub refused to release package-event subscription ${releasedSubscriptionId}: ${JSON.stringify(release)}`);
+  }
   const dashboardNotice = `Matching session notice dashboard-${sentinelNonce}`;
   const dashboardSentinel = `Matching session notice dashboard-sentinel-${sentinelNonce}`;
   const dashboardSince = await harnessEventCount(page);
   await emitPackageEventFixtureAction(page, packageEventsMatchAction, { notice: dashboardNotice });
-  // Admission boundary: the session view subscribes again; its package-event channel is ready
-  // before the sentinel is emitted, and the sentinel carries its own notice text.
+  // Admission boundary: the session view subscribes again with a new subscription, and that
+  // subscription's package-event channel is ready before the sentinel is emitted.
   const remountSince = await harnessEventCount(page);
   await openSessionTerminal(page, productionSessionId);
   await waitForTerminalSession(page, productionSessionId);
   await waitForHarnessEvent(
     page,
-    (since) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).some((entry) =>
-      entry.kind === "subscription_data_channel" && entry.payload?.class === "package_event" && entry.payload?.state === "ready"
-    ),
-    remountSince,
-    { label: "package-event subscription admitted after the remount", deadlineMs: 15_000 }
+    ({ since, released }) => {
+      const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since);
+      const subscribe = events.find((entry) =>
+        entry.kind === "daemon_request" && entry.payload?.type === "subscribe_events" && entry.payload?.subscription_id !== released
+      );
+      if (!subscribe) return false;
+      return events.some((entry) =>
+        entry.kind === "subscription_data_channel" &&
+        entry.payload?.class === "package_event" &&
+        entry.payload?.state === "ready" &&
+        entry.payload?.subscription_id === subscribe.payload.subscription_id
+      );
+    },
+    { since: remountSince, released: releasedSubscriptionId },
+    { label: "the remount's new package-event subscription is ready", deadlineMs: 15_000 }
   );
   await emitPackageEventFixtureAction(page, packageEventsMatchAction, { notice: dashboardSentinel });
   await waitForPackageEventNotice(page, dashboardSentinel, dashboardSince, "package-events sentinel after the dashboard emission");

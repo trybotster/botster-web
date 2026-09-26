@@ -46,6 +46,7 @@ export async function runWebrtcReconnectTests(helpers) {
     currentStage = "start";
     let bound;
     const timeout = new Promise((_, reject) => {
+      // timer: deadline — one scenario; expiry fails it with its name and stage.
       bound = realSetTimeout(() => {
         reject(new Error(`reconnect scenario ${name} timed out after ${SCENARIO_BOUND_MS} ms at stage: ${currentStage}`));
       }, SCENARIO_BOUND_MS);
