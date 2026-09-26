@@ -7282,12 +7282,15 @@ async function proveByteFaithfulLiveTerminal(page) {
 }
 
 async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
-  const proof = await page.evaluate(async ({ siblingSessionId: liveSessionId }) => {
+  // Node owns the flood session's cleanup: it is registered before the page can spawn it, so
+  // any exit (an exception in the page, a rejected attach, a failed status) still shuts it down.
+  const floodSessionId = `web-flood-${Date.now().toString(36)}`;
+  harnessSpawnedSessionIds.add(floodSessionId);
+  const proof = await page.evaluate(async ({ siblingSessionId: liveSessionId, floodSessionId }) => {
     const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
     if (!control?.request || !control.streamTerminal) {
       return { ok: false, reason: "transportControl missing request/streamTerminal" };
     }
-    const floodSessionId = `web-flood-${Date.now().toString(36)}`;
     const floodSubscriptionId = `${floodSessionId}-sub`;
     const events = [];
     const spawn = await control.request({
@@ -7373,10 +7376,12 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
       cleanup_error: failedCleanup?.error ?? null,
       events: events.slice(-8)
     };
-  }, { siblingSessionId });
+  }, { siblingSessionId, floodSessionId });
   if (!proof.ok) {
     throw new Error(`slow-client sibling proof failed: ${JSON.stringify(proof)}`);
   }
+  // The proof shut the flood session down itself on success.
+  harnessSpawnedSessionIds.delete(floodSessionId);
   await proveLiveTerminalAfterAttach(page, `sibling-still-live-${Date.now().toString(36)}`);
   recordProofNote("slow_client_sibling", proof);
 }

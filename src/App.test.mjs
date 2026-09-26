@@ -9634,6 +9634,8 @@ assert.match(botsterTerminalPtyTransport, /looksLikeResttyMouseReport/);
 assert.match(hubTerminalDataPlane, /DaemonTerminalStreamSubscription|abandon\(\)/);
 assert.match(hubTransport, /abandon\(\):\s*void|interface DaemonTerminalStreamSubscription/);
 assert.match(liveProtocolHarnessScript, /requiredSubscriptionId/);
+// Node registers the flood session for cleanup before the page can spawn it, so every exit path shuts it down.
+assert.match(liveProtocolHarnessScript, /harnessSpawnedSessionIds\.add\(floodSessionId\);\n {2}const proof = await page\.evaluate/);
 assert.doesNotMatch(liveProtocolHarnessScript, /disableTerminalTransportRecovery/);
 assert.match(liveProtocolHarnessScript, /entry\.kind !== "renderer_write"/);
 assert.doesNotMatch(hubTerminalDataPlane, /holdLiveSnapshotInstallIfArmed|armSnapshotInstallHold|ablateCancelDetach/);
