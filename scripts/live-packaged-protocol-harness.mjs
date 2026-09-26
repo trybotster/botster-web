@@ -7316,7 +7316,13 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
     const stream = control.streamTerminal(floodSessionId, floodSubscriptionId, (event) => {
       if ("body" in event) {
         const decoded = decode(event.body);
-        events.push({ type: decoded.kind, route: event.route, generation: event.generation, stream_epoch: event.streamEpoch });
+        events.push({
+          type: decoded.kind,
+          state: decoded.kind === "attach_state" ? decoded.state : undefined,
+          route: event.route,
+          generation: event.generation,
+          stream_epoch: event.streamEpoch
+        });
         if (decoded.kind === "output") {
           reportHeldTerminalOutput();
           return heldTerminalOutput;
@@ -7344,6 +7350,20 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
         event.subscription_id === floodSubscriptionId
       );
       if (closed) {
+        // Intended slow-client outcome: the route bound first and delivered frames, and only
+        // then did Core close it for backpressure. A close with no prior output is an attach failure.
+        const closeIndex = events.indexOf(closed);
+        const framesBeforeClose = events.slice(0, closeIndex).filter((entry) => entry.type !== "terminal_subscription_closed");
+        const frameKindsBeforeClose = framesBeforeClose.reduce((counts, entry) => {
+          counts[entry.type] = (counts[entry.type] ?? 0) + 1;
+          return counts;
+        }, {});
+        const attachedBeforeClose = framesBeforeClose.some((entry) => entry.type === "attach_state" && entry.state === "attached");
+        if (!attachedBeforeClose || !frameKindsBeforeClose.output) {
+          stream.abandon();
+          await control.request({ type: "shutdown_session", session_id: floodSessionId }).catch(() => undefined);
+          return { ok: false, reason: "slow-client route closed before it was attached and delivered output", closed, frameKindsBeforeClose };
+        }
         const status = await control.request({ type: "status" });
         const cleanup = await control.request({
           type: "shutdown_session",
@@ -7356,6 +7376,8 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
         return {
           ok: true,
           closed,
+          attachedBeforeClose,
+          frameKindsBeforeClose,
           statusKind: status.kind,
           cleanupKind: cleanup.kind,
           siblingSessionId: liveSessionId

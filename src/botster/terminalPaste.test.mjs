@@ -16,6 +16,7 @@ export async function runTerminalPasteTests(helpers) {
     createFakeDataChannel,
     createFakePeerConnection,
     installAutoHelloAck,
+    fakeHubTerminalGenerations,
     decryptTestEnvelope,
     emitChunkedTestResponse,
     flushMicrotasks,
@@ -142,12 +143,13 @@ export async function runTerminalPasteTests(helpers) {
         const request = await decryptTestEnvelope(secret, sent);
         if (request?.type === "attach") {
           answered.add(index);
+          // Protocol 10: the fake Hub names the Core generation in the reserved channel's HelloAck.
+          fakeHubTerminalGenerations.set(`r-${name}-${request.subscription_id}`, generation);
           await emitChunkedTestResponse(control, secret, {
             kind: "terminal_reservation",
             terminal_reservation: {
               session_id: sessionId,
               subscription_id: request.subscription_id,
-              generation,
               peer_generation: 1,
               label: `r-${name}-${request.subscription_id}`,
               expires_in_seconds: 30

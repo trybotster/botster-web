@@ -15,6 +15,7 @@ export async function runWebrtcReconnectTests(helpers) {
     createFakeDataChannel,
     createFakePeerConnection,
     installAutoHelloAck,
+    fakeHubTerminalGenerations,
     decryptTestEnvelope,
     emitChunkedTestResponse,
     waitForTestCondition,
@@ -357,12 +358,12 @@ export async function runWebrtcReconnectTests(helpers) {
 
       // Complete the actual admission on the recovered peer: reservation, reserved-channel
       // Hello, snapshot READY and FINISH, Attached, then live output into the real data plane.
+      fakeHubTerminalGenerations.set("r-reconnect-terminal", 9101);
       await emitChunkedTestResponse(channels[1], secret, {
         kind: "terminal_reservation",
         terminal_reservation: {
           session_id: "reconnect-terminal-session",
           subscription_id: reattach.subscription_id,
-          generation: 9101,
           peer_generation: 4,
           label: "r-reconnect-terminal",
           expires_in_seconds: 30
@@ -488,7 +489,7 @@ export async function runWebrtcReconnectTests(helpers) {
         frame: "hello_ack",
         ack: {
           protocol: "botster-hub-daemon-v1",
-          compatibility: { protocol: "botster-hub-daemon-v1", protocol_version: 9, features: [], conformance_fixture_revision: 49 },
+          compatibility: { protocol: "botster-hub-daemon-v1", protocol_version: 10, features: [], conformance_fixture_revision: 50 },
           terminal_compatibility: null,
           diagnostics: []
         }

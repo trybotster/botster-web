@@ -120,6 +120,12 @@ import {
   sessionIdFromTerminalSubscription
 } from "../scripts/terminal-baseline-observer.mjs";
 
+/**
+ * Core generation the fake Hub names in a terminal channel's HelloAck (protocol 10), keyed by
+ * the reserved label. Entity and event channels are not registered and get no terminal_generation.
+ */
+const fakeHubTerminalGenerations = new Map();
+
 const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
 let nextTestResponseMessageId = 0;
@@ -1839,7 +1845,7 @@ assert.doesNotMatch(realHubDaemonDto, /export type DaemonEvent\s*=/);
 assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client Rust serde DTOs/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "read_mode_flags"; session_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "read_snapshot_page"; session_id: string; capture_id: string; page: number \}/);
-assert.match(generatedDaemonProtocol, /export const PROTOCOL_VERSION = 9;/);
+assert.match(generatedDaemonProtocol, /export const PROTOCOL_VERSION = 10;/);
 assert.match(generatedDaemonProtocol, /export type ClientFrame =/);
 assert.match(generatedDaemonProtocol, /export type ServerFrame =/);
 assert.match(generatedDaemonProtocol, /\{ frame: "entity"; entity: DaemonEntityFrame \}/);
@@ -2068,7 +2074,12 @@ assert.match(webrtcDaemonClient, /hostControlRequestLimits\.maxOutstandingReques
 assert.match(webrtcDaemonClient, /maximumPlaintextBytes: LOCAL_WEBRTC_TERMINAL_CHUNK_MAX_PLAINTEXT_BYTES/);
 assert.match(webrtcDaemonClient, /initialDelayMs: 250,\s*maxDelayMs: 8_000/);
 assert.match(webrtcDaemonClient, /view\.getUint32\(29, true\)/);
-assert.match(webrtcDaemonClient, /header\.generation !== BigInt\(binding\.generation\)/);
+assert.match(webrtcDaemonClient, /header\.generation !== BigInt\(admittedTerminalGeneration\(binding\)\)/);
+// Protocol 10: the terminal HelloAck names the Core generation; the reservation has none.
+assert.match(webrtcDaemonClient, /const terminalGeneration = ack\.terminal_generation;/);
+assert.doesNotMatch(webrtcDaemonClient, /coreGeneration = reservation\.generation|generation: reservation\.generation,\n\s+label: reservation\.label,\n\s+closed: false,\n\s+admitted: false,\n\s+outboundMessageId/);
+// No client reservation timer: a reserved channel fails only on a Hub reject or WebRTC event.
+assert.doesNotMatch(webrtcDaemonClient, /expiryTimeout|expires_in_seconds\) \* 1_000/);
 assert.match(webrtcDaemonClient, /terminal_subscription_closed/);
 assert.doesNotMatch(webrtcDaemonClient, /for_webrtc_terminal_subscription_closed/);
 assert.match(webrtcDaemonClient, /control DataChannel received an entity delivery/);
@@ -2182,7 +2193,7 @@ assert.match(daemonUnixClientScript, /frame: "hello"/);
 assert.match(daemonUnixClientScript, /frame: "request", request_id: "1"/);
 assert.match(daemonUnixClientScript, /It discards valid event, entity, and terminal deliveries/);
 assert.match(generatedDaemonProtocol, /export const PROTOCOL = "botster-hub-daemon-v1";/);
-assert.match(generatedDaemonProtocol, /export const CONFORMANCE_FIXTURE_REVISION = 49;/);
+assert.match(generatedDaemonProtocol, /export const CONFORMANCE_FIXTURE_REVISION = 50;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_FRAME_LENGTH_PREFIX_BYTES = 4;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_CONTROL = 1;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_TERMINAL = 2;/);
@@ -2193,8 +2204,8 @@ assert.match(localPackageServerScript, /controlContainer: 1/);
 assert.match(localPackageServerScript, /terminalContainer: 2/);
 assert.match(localPackageServerScript, /maxTerminalRouteBytes: 1_024/);
 assert.match(localPackageServerScript, /maxFrameBytes: 4_195_343/);
-assert.match(localPackageServerScript, /protocol_version: 9/);
-assert.match(localPackageServerScript, /minimum_conformance_fixture_revision: 49/);
+assert.match(localPackageServerScript, /protocol_version: 10/);
+assert.match(localPackageServerScript, /minimum_conformance_fixture_revision: 50/);
 assert.match(localPackageServerScript, /required_features: \["webrtc_terminal_adapter"\]/);
 assert.match(browserRuntimeSmokeScript, /proveMissingBootstrapDiagnostic/);
 assert.match(browserRuntimeSmokeScript, /Local WebRTC bootstrap failed/);
@@ -2625,7 +2636,8 @@ assert.match(liveProtocolHarnessScript, /webrtc_response_assembly/);
 assert.match(liveProtocolHarnessScript, /response_assembly_telemetry|ghostsnp_install/);
 assert.match(liveProtocolHarnessScript, /automatic snapshot restoration|ghostsnp_install/);
 assert.match(architecture, /No JSON or base64 touches terminal bytes/);
-assert.match(architecture, /A chunk whose generation differs from the reservation is stale data from a retired subscription and is discarded/);
+assert.match(architecture, /A chunk whose generation differs from `terminal_generation` is stale data from a retired subscription and is discarded/);
+assert.match(architecture, /Web runs no reservation timer for terminal, entity, or package-event channels/);
 assert.match(readme, /two fresh WebRTC subscription generations/);
 assert.match(readme, /scripts\/local-package-server\.mjs/);
 assert.match(readme, /kind: web_app/);
@@ -2667,17 +2679,17 @@ assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 assert.equal(
   hubTestSupportMetadata.daemon_protocol.sha256,
-  "c477b5067f2b64b2ab200e30dd70093563e8e758c7fa374309d28916a5e66001"
+  "094727a1d913e1d4882a6b0619aa67601a8d3872003a6ef0c521c77fe6230a10"
 );
 assert.equal(hubTestSupportMetadata.ui_contract.package_version, "0.3.3");
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.45");
-// Web consumes the verbatim 0.1.45 package from committed Hub 46fa2e65
+assert.equal(hubTestSupportMetadata.package_version, "0.1.46");
+// Web consumes the verbatim 0.1.46 package from committed Hub e3dacd99
 // from the tracked test-support directory through a file: dependency.
 assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "file:test-support/hub-test-support");
-assert.equal(hubTestSupportProvenance.revision, "46fa2e65a2b81ff3218239b7c8051a40ef53f262");
+assert.equal(hubTestSupportProvenance.revision, "e3dacd99924a960856dec16e7b320bb57179b609");
 assert.equal(hubTestSupportProvenance.package_version, hubTestSupportMetadata.package_version);
 assert.equal(hubTestSupportProvenance.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(vendoredHubTestSupportPackageJson.version, hubTestSupportMetadata.package_version);
@@ -2685,8 +2697,8 @@ assert.equal(vendoredHubTestSupportPackageJson.name, hubTestSupportMetadata.pack
 // Core terminal codecs come only from the vendored generated artifact; no npm terminal-protocol pin.
 assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], undefined);
 assert.equal(packageJson.devDependencies["@trybotster/terminal-protocol"], undefined);
-assert.equal(hubTestSupportMetadata.protocol_version, 9);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 49);
+assert.equal(hubTestSupportMetadata.protocol_version, 10);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 50);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${hubTestSupportMetadata.package_version}`,
@@ -2714,7 +2726,7 @@ assert.deepEqual(
     { kind: "surface", surface_id: "contract.settings" }
   ]
 );
-// The vendored daemon-protocol.ts is the Hub 46fa2e65 artifact recorded in PROVENANCE.json;
+// The vendored daemon-protocol.ts is the Hub e3dacd99 artifact recorded in PROVENANCE.json;
 // the vendored hub-test-support package from that Hub revision ships the same artifact.
 assert.match(generatedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
 assert.match(generatedDaemonProtocol, /interface DaemonPluginResourceCounters/);
@@ -5236,7 +5248,7 @@ try {
     2
   );
 
-  // Host-control v9 ServerFrame shapes that belong on reserved channels, delivered on the
+  // Host-control v10 ServerFrame shapes that belong on reserved channels, delivered on the
   // control channel: an entity frame and a package-event host event.
   for (const [deliveryKind, payload, expectedError] of [
     [
@@ -5751,6 +5763,8 @@ try {
   assert.equal(missingReservationChannels[0].createdDataChannels.length, 1);
   missingReservationClient.disconnect();
 
+  // Protocol 10: Web runs no reservation timer. A reserved channel that is never admitted
+  // fails on Hub's typed control-channel reject, which names the exact label.
   const openTimeoutChannels = [createFakeDataChannel()];
   const openTimeoutClient = createWebrtcTestClient(
     openTimeoutChannels,
@@ -5758,9 +5772,10 @@ try {
     { entitySubscriptionIdGenerator: () => "open-timeout-id", autoAckTerminal: false }
   );
   const openTimeoutSubscription = openTimeoutClient.subscribeEntityFrames("session", () => {});
-  const openTimeoutFailure = assert.rejects(
-    openTimeoutSubscription.ready,
-    /subscription reservation expired before admission/
+  let openTimeoutError;
+  const openTimeoutFailure = openTimeoutSubscription.ready.then(
+    () => assert.fail("an expired reservation must not admit"),
+    (error) => { openTimeoutError = error; }
   );
   await waitForTestCondition(() => openTimeoutChannels[0].sent.length === 1);
   await emitChunkedTestResponse(
@@ -5776,16 +5791,185 @@ try {
         generation: 9001,
         peer_generation: 1,
         label: "r-open-timeout-exact-label",
-        expires_in_seconds: 0.001
+        expires_in_seconds: 30
       }
     },
     { messageId: "open-timeout-reservation", expectUnackedSubscriptionChannel: true }
   );
+  await waitForTestCondition(() => openTimeoutChannels[0].createdDataChannels.length === 2);
+  // A reject for another label leaves this channel alone.
+  await emitChunkedTestResponse(
+    openTimeoutChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { frame: "event", event: { type: "runtime_observation", kind: "subscription_channel_rejected:reservation_expired:r-some-other-label" } },
+    { messageId: "unrelated-channel-reject" }
+  );
+  await flushMicrotasks();
+  assert.equal(openTimeoutError, undefined);
+  assert.notEqual(openTimeoutChannels[0].createdDataChannels[1].readyState, "closed");
+  await emitChunkedTestResponse(
+    openTimeoutChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { frame: "event", event: { type: "runtime_observation", kind: "subscription_channel_rejected:reservation_expired:r-open-timeout-exact-label" } },
+    { messageId: "open-timeout-channel-reject" }
+  );
   await openTimeoutFailure;
+  assert.match(openTimeoutError.message, /reserved channel r-open-timeout-exact-label rejected by Hub: reservation_expired/);
+  assert.deepEqual(openTimeoutError.channelRejection, {
+    reason: "reservation_expired",
+    label: "r-open-timeout-exact-label",
+    retryable: true
+  });
   assert.equal(openTimeoutChannels[0].createdDataChannels[1].label, "r-open-timeout-exact-label");
   assert.equal(openTimeoutChannels[0].createdDataChannels[1].readyState, "closed");
   assert.equal(openTimeoutChannels[0].createdDataChannels.length, 2);
   openTimeoutClient.disconnect();
+
+  // A terminal attach whose Hub bind fails gets a typed, non-retryable reject and no HelloAck.
+  const bindFailedChannels = [createFakeDataChannel()];
+  const bindFailedClient = createWebrtcTestClient(bindFailedChannels, localWebrtcBootstrapFixture, { autoAckTerminal: false });
+  const bindFailedStream = bindFailedClient.streamTerminal("bind-failed-session", "bind-failed-subscription", () => {});
+  let bindFailedError;
+  const bindFailedOutcome = bindFailedStream.ready.then(
+    () => assert.fail("a failed bind must not admit"),
+    (error) => { bindFailedError = error; }
+  );
+  await waitForTestCondition(() => bindFailedChannels[0].sent.length === 1);
+  await emitChunkedTestResponse(
+    bindFailedChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    {
+      kind: "terminal_reservation",
+      terminal_reservation: {
+        session_id: "bind-failed-session",
+        subscription_id: "bind-failed-subscription",
+        peer_generation: 1,
+        label: "r-bind-failed-terminal",
+        expires_in_seconds: 30
+      },
+      events: []
+    },
+    { messageId: "bind-failed-reservation" }
+  );
+  await waitForTestCondition(() => bindFailedChannels[0].createdDataChannels.length === 2);
+  await emitChunkedTestResponse(
+    bindFailedChannels[0],
+    localWebrtcBootstrapFixture.grant_secret,
+    { frame: "event", event: { type: "runtime_observation", kind: "subscription_channel_rejected:bind_failed:r-bind-failed-terminal" } },
+    { messageId: "bind-failed-channel-reject" }
+  );
+  await bindFailedOutcome;
+  assert.deepEqual(bindFailedError.channelRejection, {
+    reason: "bind_failed",
+    label: "r-bind-failed-terminal",
+    retryable: false
+  });
+  assert.equal(bindFailedChannels[0].createdDataChannels[1].readyState, "closed");
+  bindFailedClient.disconnect();
+
+  // A typed reject that arrives while the reserved channel is still "connecting" reaches the
+  // caller as its channelRejection, for every channel class, and no client timer is involved.
+  const connectingRejectCases = [
+    {
+      name: "terminal",
+      start: (client) => client.streamTerminal("connecting-session", "connecting-terminal-sub", () => {}),
+      reservation: {
+        kind: "terminal_reservation",
+        terminal_reservation: {
+          session_id: "connecting-session",
+          subscription_id: "connecting-terminal-sub",
+          peer_generation: 1,
+          label: "r-connecting-terminal",
+          expires_in_seconds: 30
+        },
+        events: []
+      },
+      label: "r-connecting-terminal",
+      responseOptions: {}
+    },
+    {
+      name: "entity",
+      clientOptions: { entitySubscriptionIdGenerator: () => "connecting-entity-sub" },
+      start: (client) => client.subscribeEntityFrames("session", () => {}),
+      reservation: {
+        kind: "entity_subscribed",
+        events: [],
+        diagnostics: [],
+        subscription_reservation: {
+          kind: "entity",
+          subscription_id: "connecting-entity-sub",
+          generation: 9101,
+          peer_generation: 1,
+          label: "r-connecting-entity",
+          expires_in_seconds: 30
+        }
+      },
+      label: "r-connecting-entity",
+      responseOptions: { expectUnackedSubscriptionChannel: true }
+    },
+    {
+      name: "package_event",
+      clientOptions: { eventSubscriptionIdGenerator: () => "connecting-event-sub" },
+      start: (client) => client.subscribePackageEvents(
+        { owner: "package-notice-reaction", name: "sample.notice", subjects: ["web-prod"] },
+        () => undefined
+      ),
+      reservation: {
+        kind: "event_subscribed",
+        events: [],
+        diagnostics: [],
+        subscription_reservation: {
+          kind: "package_event",
+          subscription_id: "connecting-event-sub",
+          generation: 9102,
+          peer_generation: 1,
+          label: "r-connecting-event",
+          expires_in_seconds: 30
+        }
+      },
+      label: "r-connecting-event",
+      responseOptions: { expectUnackedSubscriptionChannel: true }
+    }
+  ];
+  for (const testCase of connectingRejectCases) {
+    const channels = [createFakeDataChannel()];
+    const client = createWebrtcTestClient(channels, localWebrtcBootstrapFixture, {
+      ...testCase.clientOptions,
+      autoAckTerminal: false,
+      autoOpenReserved: false
+    });
+    const owner = testCase.start(client);
+    let failure;
+    const outcome = owner.ready.then(
+      () => assert.fail(`${testCase.name}: a rejected reservation must not admit`),
+      (error) => { failure = error; }
+    );
+    await waitForTestCondition(() => channels[0].sent.length === 1);
+    await emitChunkedTestResponse(
+      channels[0],
+      localWebrtcBootstrapFixture.grant_secret,
+      testCase.reservation,
+      { messageId: `connecting-${testCase.name}-reservation`, ...testCase.responseOptions }
+    );
+    await waitForTestCondition(() => channels[0].createdDataChannels.length === 2);
+    const reserved = channels[0].createdDataChannels[1];
+    assert.equal(reserved.label, testCase.label);
+    assert.equal(reserved.readyState, "connecting", `${testCase.name}: the reserved channel is still connecting`);
+    await emitChunkedTestResponse(
+      channels[0],
+      localWebrtcBootstrapFixture.grant_secret,
+      { frame: "event", event: { type: "runtime_observation", kind: `subscription_channel_rejected:reservation_expired:${testCase.label}` } },
+      { messageId: `connecting-${testCase.name}-reject` }
+    );
+    await outcome;
+    assert.deepEqual(
+      failure.channelRejection,
+      { reason: "reservation_expired", label: testCase.label, retryable: true },
+      `${testCase.name}: the caller receives the typed rejection, not the close it causes`
+    );
+    assert.equal(reserved.readyState, "closed");
+    client.disconnect();
+  }
 
   // An Attach operator error rejects only that terminal owner. The shared control
   // peer must still bind its next response and remain usable.
@@ -5884,6 +6068,7 @@ try {
     (event) => siblingTerminalEvents.push(event)
   );
   await waitForTestCondition(() => eventSiblingChannels[0].sent.length === 3);
+  fakeHubTerminalGenerations.set("r-sibling-terminal", 9002);
   await emitChunkedTestResponse(
     eventSiblingChannels[0],
     localWebrtcBootstrapFixture.grant_secret,
@@ -5892,7 +6077,6 @@ try {
       terminal_reservation: {
         session_id: "sibling-terminal-session",
         subscription_id: "sibling-terminal-subscription",
-        generation: 9002,
         peer_generation: 1,
         label: "r-sibling-terminal",
         expires_in_seconds: 30
@@ -5957,6 +6141,7 @@ try {
 
   const statusAfterAttachTimeout = eventSiblingClient.request({ type: "status" });
   await waitForTestCondition(() => eventSiblingChannels[0].sent.length === 5);
+  fakeHubTerminalGenerations.set("r-late-timed-out-terminal", 9003);
   await emitChunkedTestResponse(
     eventSiblingChannels[0],
     localWebrtcBootstrapFixture.grant_secret,
@@ -5965,7 +6150,6 @@ try {
       terminal_reservation: {
         session_id: timedOutAttachRequest.session_id,
         subscription_id: timedOutAttachRequest.subscription_id,
-        generation: 9003,
         peer_generation: 1,
         label: "r-late-timed-out-terminal",
         expires_in_seconds: 30
@@ -6134,6 +6318,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     await waitForTestCondition(() => abandonChannel.sent.length === sentBefore + hostControlRequestLimits.maxOutstandingRequests);
 
     // A late reservation for the abandoned request is a stale completion: no channel opens.
+    fakeHubTerminalGenerations.set("r-late-abandoned-terminal", 9010);
     await emitChunkedTestResponse(
       abandonChannel,
       localWebrtcBootstrapFixture.grant_secret,
@@ -6142,7 +6327,6 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
         terminal_reservation: {
           session_id: "abandoned-session",
           subscription_id: "abandoned-subscription",
-          generation: 9010,
           peer_generation: 1,
           label: "r-late-abandoned-terminal",
           expires_in_seconds: 30
@@ -7373,6 +7557,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
       subscription_id: "dedicated-subscription-a"
     }
   );
+  fakeHubTerminalGenerations.set("opaque-terminal-label-a", 41);
   await emitChunkedTestResponse(
     dedicatedControlChannel,
     localWebrtcBootstrapFixture.grant_secret,
@@ -7381,7 +7566,6 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
       terminal_reservation: {
         session_id: "dedicated-session-a",
         subscription_id: "dedicated-subscription-a",
-        generation: 41,
         peer_generation: 73,
         label: "opaque-terminal-label-a",
         expires_in_seconds: 30
@@ -7491,6 +7675,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     (event) => secondTerminalEvents.push(event)
   );
   await waitForTestCondition(() => dedicatedControlChannel.sent.length === 2);
+  fakeHubTerminalGenerations.set("opaque-terminal-label-b", 42);
   await emitChunkedTestResponse(
     dedicatedControlChannel,
     localWebrtcBootstrapFixture.grant_secret,
@@ -7499,7 +7684,6 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
       terminal_reservation: {
         session_id: "dedicated-session-b",
         subscription_id: "dedicated-subscription-b",
-        generation: 42,
         peer_generation: 73,
         label: "opaque-terminal-label-b",
         expires_in_seconds: 30
@@ -7537,6 +7721,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
   );
   const cancelledReady = assert.rejects(cancelledStream.ready, /closed|stale/);
   await waitForTestCondition(() => cancelledControlChannel.sent.length === 1);
+  fakeHubTerminalGenerations.set("opaque-terminal-label-cancelled", 51);
   await emitChunkedTestResponse(
     cancelledControlChannel,
     localWebrtcBootstrapFixture.grant_secret,
@@ -7545,7 +7730,6 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
       terminal_reservation: {
         session_id: "cancelled-session",
         subscription_id: "cancelled-subscription",
-        generation: 51,
         peer_generation: 73,
         label: "opaque-terminal-label-cancelled",
         expires_in_seconds: 30
@@ -7703,6 +7887,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     createFakeDataChannel,
     createFakePeerConnection,
     installAutoHelloAck,
+    fakeHubTerminalGenerations,
     decryptTestEnvelope,
     emitChunkedTestResponse,
     waitForTestCondition,
@@ -7729,6 +7914,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     createFakeDataChannel,
     createFakePeerConnection,
     installAutoHelloAck,
+    fakeHubTerminalGenerations,
     decryptTestEnvelope,
     decryptTestEnvelopeBytes,
     emitChunkedTestResponse,
@@ -9558,6 +9744,49 @@ function fakeRouteBridge(sessionId, options = {}) {
   assert.equal(installs.length, installsBefore + 2, "the route re-primes the renderer from a fresh READY");
   assert.deepEqual(outputs, ["epoch-0", "epoch-1-live"]);
   assert.equal(statuses.at(-1).state, "attached");
+  await plane.detach();
+}
+
+// Under a sustained flood Core may resync repeatedly, including mid-snapshot. Each accepted
+// ROUTE_RESYNC abandons the partial hydration; only the snapshot of the latest epoch replaces
+// the screen, and the route never closes or re-attaches.
+{
+  const sessionId = "repeated-resync-session";
+  const subscriptionId = "repeated-resync-subscription";
+  const generation = 4;
+  const wire = fakeRouteBridge(sessionId, { generation });
+  const outputs = [];
+  const statuses = [];
+  const plane = createHubTerminalDataPlane({ sessionId, subscriptionId, bridge: wire.bridge });
+  const installs = bindGhostsnpInstaller(plane);
+  plane.subscribeStatus((status) => statuses.push(status));
+  plane.subscribeOutput((data) => outputs.push(Buffer.from(data).toString("utf8")));
+  await waitForTestCondition(() => wire.streams.length === 1);
+  const route = wire.streams[0];
+  const send = (event, streamEpoch) => route.onEvent(routeFrame(subscriptionId, event, { generation, streamEpoch }));
+  for (const frame of standardAttachFrames(subscriptionId, { generation })) await route.onEvent(frame);
+  await send({ kind: "output", payload: new TextEncoder().encode("epoch-0") }, 0);
+  // Epoch 1 starts a snapshot, then Core resyncs again before SNAPSHOT_FINISH.
+  await send({ kind: "route_resync", from_epoch: 0, to_epoch: 1 }, 1);
+  await send({ kind: "modes", mode_bits: 2, rows: 24, cols: 80 }, 1);
+  await send({ kind: "snapshot_ready", payload: ghostsnpFixture() }, 1);
+  await send({ kind: "route_resync", from_epoch: 1, to_epoch: 2 }, 2);
+  // The abandoned epoch's remaining frames are dropped.
+  await send({ kind: "snapshot_finish" }, 1);
+  await send({ kind: "output", payload: new TextEncoder().encode("epoch-1-live") }, 1);
+  await send({ kind: "output", payload: new TextEncoder().encode("epoch-2-early") }, 2);
+  assert.deepEqual(outputs, ["epoch-0"], "no output before the latest epoch's snapshot completes");
+  const installsBeforeLatest = installs.length;
+  await send({ kind: "modes", mode_bits: 2, rows: 24, cols: 80 }, 2);
+  await send({ kind: "snapshot_ready", payload: ghostsnpFixture() }, 2);
+  await send({ kind: "snapshot_history", payload: opaqueFinishPage }, 2);
+  await send({ kind: "snapshot_finish" }, 2);
+  assert.ok(installs.length > installsBeforeLatest, "the latest epoch's snapshot replaces the screen");
+  assert.deepEqual(outputs, ["epoch-0", "epoch-2-early"]);
+  await send({ kind: "output", payload: new TextEncoder().encode("epoch-2-live") }, 2);
+  assert.deepEqual(outputs, ["epoch-0", "epoch-2-early", "epoch-2-live"]);
+  assert.equal(statuses.at(-1).state, "attached");
+  assert.equal(wire.streams.length, 1, "a resync never re-attaches or opens another route");
   await plane.detach();
 }
 
@@ -15643,9 +15872,9 @@ async function startPackageServerRuntime({
               protocol: "botster-hub-daemon-v1",
               compatibility: {
                 protocol: "botster-hub-daemon-v1",
-                protocol_version: 9,
+                protocol_version: 10,
                 features: ["webrtc_terminal_adapter"],
-                conformance_fixture_revision: 49
+                conformance_fixture_revision: 50
               }
             }
           });
@@ -15910,7 +16139,7 @@ function createFakeDataChannel() {
   };
 }
 
-function createFakePeerConnection(dataChannel, secret, { autoAckTerminal = true } = {}) {
+function createFakePeerConnection(dataChannel, secret, { autoAckTerminal = true, autoOpenReserved = true } = {}) {
   const createdDataChannels = [];
   let remoteDescriptionSet = false;
   dataChannel.label = "botster-daemon";
@@ -15930,7 +16159,7 @@ function createFakePeerConnection(dataChannel, secret, { autoAckTerminal = true 
       channel.options = options;
       if (autoAckTerminal) installAutoHelloAck(channel, secret);
       createdDataChannels.push(channel);
-      if (remoteDescriptionSet) queueMicrotask(() => channel.open());
+      if (remoteDescriptionSet && autoOpenReserved) queueMicrotask(() => channel.open());
       return channel;
     },
     async createOffer() {
@@ -15941,7 +16170,10 @@ function createFakePeerConnection(dataChannel, secret, { autoAckTerminal = true 
     },
     async setRemoteDescription() {
       remoteDescriptionSet = true;
-      for (const channel of createdDataChannels) channel.open();
+      // Reserved channels stay "connecting" when a test needs a pre-open reject.
+      for (const channel of createdDataChannels) {
+        if (autoOpenReserved || channel === dataChannel) channel.open();
+      }
     },
     close() {},
     addEventListener() {},
@@ -15950,7 +16182,7 @@ function createFakePeerConnection(dataChannel, secret, { autoAckTerminal = true 
 }
 
 function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
-  const { autoAckTerminal = true, ...clientOptions } = options;
+  const { autoAckTerminal = true, autoOpenReserved = true, ...clientOptions } = options;
   let nextDataChannel = 0;
   for (const channel of dataChannels) {
     installAutoHelloAck(channel, bootstrap.grant_secret);
@@ -15968,7 +16200,7 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
       return createFakePeerConnection(
         dataChannels[nextDataChannel++],
         bootstrap.grant_secret,
-        { autoAckTerminal }
+        { autoAckTerminal, autoOpenReserved }
       );
     },
     fetchImpl: async () => ({
@@ -15985,13 +16217,13 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
   });
 }
 
-/** Host-control v9 Hello ack fixture: protocol 9, conformance 49, terminal scheme 2. */
+/** Host-control v10 Hello ack fixture: protocol 10, conformance 50, terminal scheme 2. */
 function testHelloAckFixture() {
   return {
     protocol: "botster-hub-daemon-v1",
     compatibility: {
       protocol: "botster-hub-daemon-v1",
-      protocol_version: 9,
+      protocol_version: 10,
       features: [
         "sessions",
         "terminal_readback",
@@ -16040,7 +16272,12 @@ function installAutoHelloAck(dataChannel, secret) {
       void emitChunkedTestResponse(
         dataChannel,
         secret,
-        { frame: "hello_ack", ack: testHelloAckFixture() },
+        {
+          frame: "hello_ack",
+          ack: fakeHubTerminalGenerations.has(dataChannel.label)
+            ? { ...testHelloAckFixture(), terminal_generation: fakeHubTerminalGenerations.get(dataChannel.label) }
+            : testHelloAckFixture()
+        },
         { messageId: `hello-ack-${dataChannel.helloSent.length}` }
       ).then(async () => {
         await flushMicrotasks();

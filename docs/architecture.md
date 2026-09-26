@@ -17,11 +17,17 @@
 
 ## Production transport
 
-Installed package runtime uses one ordered WebRTC control DataChannel and one ordered DataChannel for each terminal, entity, and package-event subscription. Every channel opens with an encrypted host-control v9 `ClientFrame` Hello and waits for the `ServerFrame` Hello ack. Control deliveries are JSON text chunks of one encrypted `ServerFrame`: a correlated response, a host event, an entity frame, or a typed close reason.
+Installed package runtime uses one ordered WebRTC control DataChannel and one ordered DataChannel for each terminal, entity, and package-event subscription. Every channel opens with an encrypted host-control v10 `ClientFrame` Hello and waits for the `ServerFrame` Hello ack. Control deliveries are JSON text chunks of one encrypted `ServerFrame`: a correlated response, a host event, an entity frame, or a typed close reason.
 
 Host requests are `ClientFrame` requests with a client-chosen `request_id`: a decimal u64, strictly increasing per connection generation, starting at 1. Web keys pending work by connection generation and `request_id`; Hub may complete requests out of order. Web holds the 33rd outstanding request locally until a slot frees. A frame Web cannot correlate is a protocol error and closes the connection, which takes the ordinary reconnect path.
 
-Web sends `Attach` on the control channel. Hub returns a terminal reservation with an opaque label, a subscription generation, and a peer generation. Web creates one ordered DataChannel with that exact label, sends its Hello, and waits for the ack. After admission the channel carries binary chunks only: a 33-byte header (`version`, `message_id`, `chunk_index`, `chunk_count`, `total_bytes`, the fixed attachment `generation`, and the Core `stream_epoch`) followed by one AES-GCM sealed slice of the plaintext body. Hub to Web the body is one Core scheme 2 terminal body; Web to Hub it is one Core input frame with `stream_epoch` 0. No JSON or base64 touches terminal bytes. A chunk whose generation differs from the reservation is stale data from a retired subscription and is discarded.
+Web sends `Attach` on the control channel. Hub does no Core work there: it returns a terminal reservation with an opaque label, a peer generation, and an expiry, but no generation. Web creates one ordered DataChannel with that exact label and sends its Hello. Hub validates the Hello and then attaches and binds the Core route in one step. The terminal channel's Hello ack carries `terminal_generation`, the Core generation of this route. Web sends no input and matches no `terminal_subscription_closed` before that ack. After admission the channel carries binary chunks only: a 33-byte header (`version`, `message_id`, `chunk_index`, `chunk_count`, `total_bytes`, the fixed attachment `generation`, and the Core `stream_epoch`) followed by one AES-GCM sealed slice of the plaintext body. Hub to Web the body is one Core scheme 2 terminal body; Web to Hub it is one Core input frame with `stream_epoch` 0. No JSON or base64 touches terminal bytes. A chunk whose generation differs from `terminal_generation` is stale data from a retired subscription and is discarded.
+
+Web runs no reservation timer for terminal, entity, or package-event channels. A reserved channel fails only on one of these events:
+
+1. Hub's control-channel runtime observation `subscription_channel_rejected:<reason>:<label>`. The reason is one of `unreserved`, `stale`, `duplicate`, `over_limit`, `invalid_hello`, `bind_failed`, or `reservation_expired`. Web fails the channel with that label with a typed rejection. Only `reservation_expired` is retryable, so the owner may attach or subscribe again.
+2. The reserved RTCDataChannel's own `close` or `error` event before admission.
+3. Loss of the control peer, which ends every reserved channel on it.
 
 Session state uses a held entity subscription and canonical family `session`:
 
@@ -77,7 +83,7 @@ reads the generic entity store, including nested row context, while
 Bind-list identity has one materialization order. The direct item-template root
 retains its item-relative `$bind`; after that root becomes a nonblank literal,
 `bind_list_descendant_id` children call the runtime helper exported by
-`@trybotster/ui-contract@0.3.3`. Test assets come from `@trybotster/hub-test-support@0.1.45` (host protocol 9, conformance revision-49), vendored verbatim from Hub 46fa2e65 into `test-support/hub-test-support` as a `file:` dev dependency until Hub publishes it. Host DTOs come from the Hub-generated `daemon-protocol.ts` and Core terminal
+`@trybotster/ui-contract@0.3.3`. Test assets come from `@trybotster/hub-test-support@0.1.46` (host protocol 10, conformance revision-50), vendored verbatim from Hub e3dacd99 into `test-support/hub-test-support` as a `file:` dev dependency until Hub publishes it. Host DTOs come from the Hub-generated `daemon-protocol.ts` and Core terminal
 codecs, key tables, and feature tokens from the Core-generated `terminal-protocol.ts`, both
 copied verbatim into `src/botster/generated/`. Web never hand-maintains a protocol definition.
 Nested bind lists establish a new nearest-row context. Web never encodes,

@@ -90,12 +90,12 @@ export const localWebrtcReconnectPolicy = Object.freeze({
 });
 
 /**
- * Host-control v9 request bounds. Hub answers a valid 33rd outstanding request with a
+ * Host-control v10 request bounds. Hub answers a valid 33rd outstanding request with a
  * correlated `too_many_requests` error, so the client holds the 33rd locally until a slot
  * frees. Request ids are decimal u64 strings, strictly increasing per connection generation.
  */
 export const hostControlRequestLimits = Object.freeze({
-  /** Host-control v9: at most 32 requests outstanding per connection generation. */
+  /** Host-control v10: at most 32 requests outstanding per connection generation. */
   maxOutstandingRequests: 32,
   /** Web policy: callers held for a slot beyond this count are refused, never queued without bound. */
   maxWaitingRequests: 256
@@ -153,7 +153,8 @@ type TerminalStreamListener = {
   sessionId: string;
   subscriptionId: string;
   peerGeneration: number;
-  coreGeneration: number;
+  /** Core generation from the terminal HelloAck; undefined until admission, so no close matches. */
+  coreGeneration: number | undefined;
   closed: boolean;
   onEvent(event: TerminalStreamEvent): void | Promise<void>;
 };
@@ -177,17 +178,19 @@ type TerminalChannelBinding = {
   channel: RTCDataChannel;
   peerGeneration: number;
   transportGeneration: number;
-  generation: number;
+  /** Core generation from the terminal HelloAck (terminal_generation); set before admitted. */
+  generation: number | undefined;
   label: string;
   closed: boolean;
   admitted: boolean;
+  /** Hub's typed reject for this reservation, preferred over the close it causes. */
+  rejection?: WebrtcDaemonClientError;
   /** Per-channel, per-direction message counters; strictly increasing. */
   outboundMessageId: bigint;
   lastInboundMessageId: bigint;
   assembly?: TerminalChannelAssembly;
   resolveReady(): void;
   rejectReady(error: unknown): void;
-  expiryTimeout: number;
 };
 
 type SubscriptionChannelAssembly = {
@@ -209,11 +212,12 @@ type SubscriptionChannelBindingBase = {
   label: string;
   closed: boolean;
   admitted: boolean;
+  /** Hub's typed reject for this reservation, preferred over the close it causes. */
+  rejection?: WebrtcDaemonClientError;
   completedMessageIds: Set<string>;
   assembly?: SubscriptionChannelAssembly;
   resolveReady(): void;
   rejectReady(error: unknown): void;
-  expiryTimeout: number;
 };
 
 type EntityChannelBinding = SubscriptionChannelBindingBase & {
@@ -387,6 +391,8 @@ export interface WebrtcDaemonRequestFailure {
 export class WebrtcDaemonClientError extends Error {
   readonly botsterWebrtcStage: WebrtcDaemonFailureStage;
   readonly requestFailure?: WebrtcDaemonRequestFailure;
+  /** Hub's typed reserved-channel reject, when the Hub refused this channel. */
+  channelRejection?: SubscriptionChannelRejection;
 
   constructor(stage: WebrtcDaemonFailureStage, message: string, requestFailure?: WebrtcDaemonRequestFailure) {
     super(message);
@@ -457,7 +463,7 @@ function inboundAdmissionFailure(channel: string, admission: InboundAdmission): 
 }
 
 /**
- * Binary terminal chunk layout (Hub host-control v9), 33-byte header:
+ * Binary terminal chunk layout (Hub host-control v10), 33-byte header:
  * offset 0 `u8 version=2`; 1 `u64 LE message_id` (per channel, per direction, from 1);
  * 9 `u32 LE chunk_index`; 13 `u32 LE chunk_count`; 17 `u32 LE total_bytes` (plaintext length);
  * 21 `u64 LE generation` (fixed attachment generation from the reservation);
@@ -648,7 +654,6 @@ class WebrtcDaemonTransport {
   private readonly terminalStreamListeners = new Set<TerminalStreamListener>();
   private readonly terminalChannels = new Set<TerminalChannelBinding>();
   private readonly subscriptionChannels = new Set<SubscriptionChannelBinding>();
-  private readonly subscriptionGenerations = new Map<string, number>();
   private helloPromise: Promise<DaemonHelloAck> | undefined;
   private peerConnection: RTCPeerConnection | undefined;
   private dataChannel: RTCDataChannel | undefined;
@@ -831,13 +836,11 @@ class WebrtcDaemonTransport {
     subscriptionId: string,
     onEvent: (event: TerminalStreamEvent) => void | Promise<void>
   ): TerminalStreamListener {
-    const coreGeneration = (this.subscriptionGenerations.get(subscriptionId) ?? 0) + 1;
-    this.subscriptionGenerations.set(subscriptionId, coreGeneration);
     const listener: TerminalStreamListener = {
       sessionId,
       subscriptionId,
       peerGeneration: this.peerGeneration,
-      coreGeneration,
+      coreGeneration: undefined,
       closed: false,
       onEvent
     };
@@ -873,7 +876,7 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("transport", `terminal DataChannel creation failed: ${errorMessage(error)}`);
     }
     listener.peerGeneration = reservation.peer_generation;
-    listener.coreGeneration = reservation.generation;
+    listener.coreGeneration = undefined;
     let binding!: TerminalChannelBinding;
     const ready = new Promise<void>((resolve, reject) => {
       binding = {
@@ -881,19 +884,14 @@ class WebrtcDaemonTransport {
         channel,
         peerGeneration: reservation.peer_generation,
         transportGeneration,
-        generation: reservation.generation,
+        generation: undefined,
         label: reservation.label,
         closed: false,
         admitted: false,
         outboundMessageId: 0n,
         lastInboundMessageId: 0n,
         resolveReady: resolve,
-        rejectReady: reject,
-        expiryTimeout: window.setTimeout(() => {
-          const error = webrtcFailure("data-plane", "terminal reservation expired before admission");
-          binding.rejectReady(error);
-          this.closeTerminalChannel(binding);
-        }, Math.max(1, reservation.expires_in_seconds) * 1_000)
+        rejectReady: reject
       };
     });
     this.terminalChannels.add(binding);
@@ -929,7 +927,8 @@ class WebrtcDaemonTransport {
     channel.addEventListener("close", () => this.closeTerminalChannel(binding, true));
     channel.addEventListener("error", () => this.closeTerminalChannel(binding, true));
     try {
-      await waitForDataChannelOpen(channel);
+      // A typed Hub reject can arrive while the channel is still connecting; it settles `ready`.
+      await Promise.race([waitForDataChannelOpen(channel), ready]);
       if (listener.closed || binding.closed || transportGeneration !== this.peerGeneration) {
         throw webrtcFailure("transport", "terminal DataChannel opened for a stale reservation");
       }
@@ -948,9 +947,10 @@ class WebrtcDaemonTransport {
       }
       return binding;
     } catch (error) {
-      binding.rejectReady(error);
+      const failure = binding.rejection ?? error;
+      binding.rejectReady(failure);
       this.closeTerminalChannel(binding);
-      throw error;
+      throw failure;
     }
   }
 
@@ -986,7 +986,7 @@ class WebrtcDaemonTransport {
       // Input carries the fixed attachment identity only; stream_epoch is reserved as 0.
       const message = await sealTerminalChunk(
         key,
-        { messageId, chunkIndex, chunkCount, totalBytes, generation: BigInt(binding.generation), streamEpoch: 0 },
+        { messageId, chunkIndex, chunkCount, totalBytes, generation: BigInt(admittedTerminalGeneration(binding)), streamEpoch: 0 },
         slice
       );
       if (message.byteLength >= LOCAL_WEBRTC_MAX_FRAME_BYTES) {
@@ -1007,7 +1007,6 @@ class WebrtcDaemonTransport {
       remote
     });
     binding.rejectReady(webrtcFailure("transport", "terminal subscription channel closed"));
-    window.clearTimeout(binding.expiryTimeout);
     if (binding.assembly) window.clearTimeout(binding.assembly.timeout);
     this.terminalChannels.delete(binding);
     if (!remote || !binding.admitted) {
@@ -1019,7 +1018,7 @@ class WebrtcDaemonTransport {
         type: "terminal-data-channel-closed",
         sessionId: binding.listener.sessionId,
         subscriptionId: binding.listener.subscriptionId,
-        generation: binding.generation
+        generation: admittedTerminalGeneration(binding)
       });
     }
   }
@@ -1051,8 +1050,14 @@ class WebrtcDaemonTransport {
       if (ack.protocol !== hostHelloProtocol || !isTerminalCompatibilityAccepted(ack.terminal_compatibility)) {
         throw webrtcFailure("data-plane", "terminal DataChannel Hello was rejected");
       }
+      // Hub attaches and binds the Core route on this Hello; the ack names its generation.
+      const terminalGeneration = ack.terminal_generation;
+      if (typeof terminalGeneration !== "number" || !Number.isSafeInteger(terminalGeneration) || terminalGeneration < 0) {
+        throw webrtcFailure("data-plane", "terminal DataChannel HelloAck omitted a valid terminal_generation");
+      }
+      binding.generation = terminalGeneration;
+      binding.listener.coreGeneration = terminalGeneration;
       binding.admitted = true;
-      window.clearTimeout(binding.expiryTimeout);
       binding.resolveReady();
       recordLiveHarnessEvent("terminal_data_channel", {
         state: "ready",
@@ -1074,8 +1079,8 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("data-plane", "terminal DataChannel chunk header was invalid");
     }
     const { header, sealed } = parsed;
-    if (header.generation !== BigInt(binding.generation)) {
-      // The reservation fixes the route generation for this attachment; any other value is
+    if (header.generation !== BigInt(admittedTerminalGeneration(binding))) {
+      // The HelloAck fixes the route generation for this attachment; any other value is
       // data from a retired subscription and is discarded, never continued.
       recordLiveHarnessEvent("terminal_data_channel_discarded", {
         label: binding.label,
@@ -1182,13 +1187,7 @@ class WebrtcDaemonTransport {
         admitted: false,
         completedMessageIds: new Set(),
         resolveReady: resolve,
-        rejectReady: reject,
-        expiryTimeout: window.setTimeout(() => {
-          const error = webrtcFailure("data-plane", "subscription reservation expired before admission");
-          this.emitSubscriptionChannelFailure(binding, "expired", error);
-          binding.rejectReady(error);
-          this.closeSubscriptionChannel(binding);
-        }, Math.max(1, reservation.expires_in_seconds) * 1_000)
+        rejectReady: reject
       };
       binding = channelClass === "entity"
         ? { ...base, channelClass, owner: owner as EntitySubscription }
@@ -1241,7 +1240,8 @@ class WebrtcDaemonTransport {
     channel.addEventListener("error", () => this.closeSubscriptionChannel(binding, true));
 
     try {
-      await waitForDataChannelOpen(channel);
+      // A typed Hub reject can arrive while the channel is still connecting; it settles `ready`.
+      await Promise.race([waitForDataChannelOpen(channel), ready]);
       if (!this.isCurrentSubscriptionBinding(binding)) {
         throw webrtcFailure("transport", "subscription DataChannel opened for a stale reservation");
       }
@@ -1269,9 +1269,10 @@ class WebrtcDaemonTransport {
       }
       return binding;
     } catch (error) {
-      binding.rejectReady(error);
+      const failure = binding.rejection ?? error;
+      binding.rejectReady(failure);
       this.closeSubscriptionChannel(binding);
-      throw error;
+      throw failure;
     }
   }
 
@@ -1290,7 +1291,6 @@ class WebrtcDaemonTransport {
       remote
     });
     binding.rejectReady(webrtcFailure("transport", "subscription DataChannel closed"));
-    window.clearTimeout(binding.expiryTimeout);
     if (binding.assembly) window.clearTimeout(binding.assembly.timeout);
     this.subscriptionChannels.delete(binding);
     if (binding.owner.channel === binding) binding.owner.channel = undefined;
@@ -1397,7 +1397,6 @@ class WebrtcDaemonTransport {
         throw webrtcFailure("data-plane", "subscription DataChannel Hello was rejected");
       }
       binding.admitted = true;
-      window.clearTimeout(binding.expiryTimeout);
       binding.resolveReady();
       recordLiveHarnessEvent("subscription_data_channel", {
         class: binding.channelClass,
@@ -1468,6 +1467,36 @@ class WebrtcDaemonTransport {
       reason,
       detail: errorMessage(error)
     });
+  }
+
+  /**
+   * Hub refused a reserved channel (reported on the control channel, then the channel is
+   * closed). The owning attach or subscribe fails with the typed reason; this, the channel's
+   * own close and error events, and control-peer loss are the only ways a reservation fails.
+   */
+  private rejectReservedChannel(rejection: SubscriptionChannelRejection): void {
+    const error = webrtcFailure(
+      "data-plane",
+      `reserved channel ${rejection.label} rejected by Hub: ${rejection.reason}`
+    );
+    error.channelRejection = rejection;
+    for (const binding of this.terminalChannels) {
+      if (binding.label !== rejection.label || binding.admitted) continue;
+      binding.rejection = error;
+      binding.rejectReady(error);
+      this.closeTerminalChannel(binding);
+    }
+    for (const binding of this.subscriptionChannels) {
+      if (binding.label !== rejection.label || binding.admitted) continue;
+      binding.rejection = error;
+      this.emitSubscriptionChannelFailure(
+        binding,
+        rejection.reason === "reservation_expired" ? "expired" : "rejected",
+        error
+      );
+      binding.rejectReady(error);
+      this.closeSubscriptionChannel(binding);
+    }
   }
 
   private createReservedDataChannel(
@@ -2193,7 +2222,7 @@ class WebrtcDaemonTransport {
     }
     try {
       await peerConnection.setRemoteDescription(answer as unknown as RTCSessionDescriptionInit);
-      await waitForDataChannelOpen(dataChannel);
+      await waitForDataChannelOpen(dataChannel, requestTimeoutMs);
     } catch (error) {
       if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
       throw webrtcFailure("transport", `local WebRTC transport failed: ${errorMessage(error)}`);
@@ -2756,6 +2785,10 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("data-plane", "control DataChannel received a package-event delivery");
     }
     recordLiveHarnessEvent("daemon_event", event);
+    if (event.type === "runtime_observation") {
+      const rejection = parseSubscriptionChannelRejection(event.kind);
+      if (rejection) this.rejectReservedChannel(rejection);
+    }
     if (event.type === "terminal_subscription_closed") {
       const listeners = [...this.terminalStreamListeners].filter(
         (listener) =>
@@ -2949,6 +2982,33 @@ class WebrtcDaemonTransport {
   }
 }
 
+/** The Core generation of an admitted terminal channel; admission always sets it first. */
+function admittedTerminalGeneration(binding: TerminalChannelBinding): number {
+  if (!binding.admitted || binding.generation === undefined) {
+    throw webrtcFailure("data-plane", "terminal channel used before its HelloAck named a generation");
+  }
+  return binding.generation;
+}
+
+export type SubscriptionChannelRejection = {
+  reason: string;
+  label: string;
+  /** Only an expired reservation is worth retrying with a fresh attach or subscribe. */
+  retryable: boolean;
+};
+
+const subscriptionChannelRejectedPrefix = "subscription_channel_rejected:";
+
+/** Parses Hub's `subscription_channel_rejected:<reason>:<label>` runtime observation. */
+export function parseSubscriptionChannelRejection(kind: string): SubscriptionChannelRejection | undefined {
+  if (!kind.startsWith(subscriptionChannelRejectedPrefix)) return undefined;
+  const rest = kind.slice(subscriptionChannelRejectedPrefix.length);
+  const separator = rest.indexOf(":");
+  if (separator <= 0 || separator === rest.length - 1) return undefined;
+  const reason = rest.slice(0, separator);
+  return { reason, label: rest.slice(separator + 1), retryable: reason === "reservation_expired" };
+}
+
 function webrtcFailure(stage: WebrtcDaemonFailureStage, message: string): WebrtcDaemonClientError {
   return new WebrtcDaemonClientError(stage, message);
 }
@@ -3113,7 +3173,7 @@ function describeCloseReason(reason: DaemonCloseReason): string {
 }
 
 /**
- * Decodes one host-control v9 `ServerFrame`. A payload without a known `frame` tag, or a
+ * Decodes one host-control v10 `ServerFrame`. A payload without a known `frame` tag, or a
  * response without a decimal `request_id`, is a protocol error: the caller closes the
  * connection, because a frame the client cannot correlate cannot be answered or ignored safely.
  */
@@ -3350,18 +3410,25 @@ function waitForIceGatheringComplete(peerConnection: RTCPeerConnection): Promise
   });
 }
 
-function waitForDataChannelOpen(dataChannel: RTCDataChannel): Promise<void> {
+/**
+ * Resolves on the channel's own "open" and rejects on its "error" or "close". Only the control
+ * channel passes a deadline; reserved channels fail on WebRTC events or Hub's typed reject.
+ */
+function waitForDataChannelOpen(dataChannel: RTCDataChannel, deadlineMs?: number): Promise<void> {
   if (dataChannel.readyState === "open") {
     return Promise.resolve();
   }
 
   return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
-      cleanup();
-      reject(new Error("timed out waiting for local WebRTC data channel"));
-    }, requestTimeoutMs);
+    const timeout = deadlineMs === undefined
+      ? undefined
+      // timer: deadline — the control DataChannel handshake; expiry fails this connect attempt.
+      : window.setTimeout(() => {
+          cleanup();
+          reject(new Error("timed out waiting for local WebRTC data channel"));
+        }, deadlineMs);
     const cleanup = () => {
-      window.clearTimeout(timeout);
+      if (timeout !== undefined) window.clearTimeout(timeout);
       dataChannel.removeEventListener("open", onOpen);
       dataChannel.removeEventListener("error", onError);
       dataChannel.removeEventListener("close", onClose);
