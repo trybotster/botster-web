@@ -2266,7 +2266,7 @@ assert.match(pluginSurfaceRouteDescriptorSource, /daemonPackages\.find\(\(record
 assert.match(pluginSurfaceRouteDescriptorSource, /projectedPackages\.find\(\(record\) => record\.id === packageName\)/);
 assert.match(pluginSurfaceRouteDescriptorSource, /const surfaces = projectedPackage\?\.app_surfaces \?\? \[\]/);
 assert.doesNotMatch(pluginSurfaceRouteDescriptorSource, /package_name \?\? record\.name \?\? record\.id/);
-assert.match(liveProtocolHarnessScript, /events\.slice\(sinceIndex\)\.some/);
+assert.match(liveProtocolHarnessScript, /\.slice\(fromIndex\)\s*\.some\(\(entry\) => globalThis\.__botsterHarnessEventMatches/);
 assert.match(liveProtocolHarnessScript, /openContractAppFromNavigation/);
 assert.match(liveProtocolHarnessScript, /getByLabel\("Admitted plugin navigation"\)/);
 assert.match(liveProtocolHarnessScript, /proveRapidAlternateScreenReattach/);
@@ -2475,7 +2475,9 @@ assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
 assert.doesNotMatch(liveProtocolHarnessScript, /type: "send_input"/);
 assert.match(liveProtocolHarnessScript, /typeThroughMountedTerminal\(page, `\$\{echoProbe\}\\n`\)/);
 assert.match(liveProtocolHarnessScript, /callTerminalControl\(page, "focus"\)/);
-assert.match(liveProtocolHarnessScript, /page\.waitForTimeout\(100\)|setTimeout\(r, 100\)/);
+// Harness event waits are page-condition waits with the matcher installed in the page.
+assert.match(liveHubLaneScript, /__botsterHarnessEventMatches = \$\{harnessEventMatches\.toString\(\)\}/);
+assert.match(liveProtocolHarnessScript, /globalThis\.__botsterHarnessEventMatches\(entry, matchCriteria\)/);
 assert.match(liveHubLaneScript, /page\.keyboard\.(insertText|type)\(data/);
 assert.match(smokeRealHubScript, /transportControl\?\.closeDataChannel/);
 assert.match(smokeRealHubScript, /BOTSTER_REAL_HUB_ABLATE_RECONNECT_CLOSE/);

@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import {
   candidateBinaryProvenance,
   candidateTargetDirectoryFromHubRealPath,
+  harnessEventMatches,
   HOST_CHROME,
   packageEnsureDecision
 } from "./live-packaged-protocol-helpers.mjs";
@@ -372,7 +373,12 @@ function gitHeadForCargoRoot(repoRoot) {
   }
 }
 
-export function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserver = false } = {}) {
+export async function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserver = false } = {}) {
+  // The pure harness event matcher runs in the page, so waits are page-condition waits
+  // (Playwright waitForFunction) instead of a Node-side poll over copied event arrays.
+  await targetPage.addInitScript({
+    content: `globalThis.__botsterHarnessEventMatches = ${harnessEventMatches.toString()};`
+  });
   return targetPage.addInitScript(({ bounded }) => {
     const createBoundedObserver = () => {
       const outstanding = new Map();

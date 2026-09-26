@@ -16,7 +16,6 @@ import {
   convergeEntityFamily,
   durableSeedSessionIdsForDiagnosticsLimit,
   formatWorkspacesLifecycleFailure,
-  harnessEventMatches,
   deleteSessionTypeTestId,
   editSessionTypeTestId,
   HOST_CHROME,
@@ -5248,15 +5247,17 @@ async function harnessEventCount(page) {
 }
 
 async function waitForHarnessEvent(page, criteria, label, sinceIndex = 0) {
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    const events = await page.evaluate(
-      () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []
-    );
-    if (events.slice(sinceIndex).some((entry) => harnessEventMatches(entry, criteria))) return;
-    await page.waitForTimeout(100);
-  }
-  throw new Error(`timed out waiting for ${label}`);
+  // A page-condition wait: the matcher runs in the page against the live event array.
+  await page.waitForFunction(
+    ({ matchCriteria, fromIndex }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .slice(fromIndex)
+        .some((entry) => globalThis.__botsterHarnessEventMatches(entry, matchCriteria)),
+    { matchCriteria: criteria, fromIndex: sinceIndex },
+    { timeout: 45_000 }
+  ).catch((error) => {
+    throw new Error(`timed out waiting for ${label}: ${error.message}`);
+  });
 }
 
 async function latestLocalWebrtcGrantId(page) {
@@ -5605,8 +5606,12 @@ async function latestHarnessRequest(page, type, sinceIndex) {
       .at(-1), { since: sinceIndex, requestType: type });
 }
 
+/**
+ * Waits for the action_result of a request type since an index. A request being sent does not
+ * mean its result arrived, so callers wait for the result itself (a page-condition wait).
+ */
 async function latestHarnessActionResult(page, requestType, sinceIndex) {
-  return page.evaluate(({ since, expectedType }) => {
+  return page.waitForFunction(({ since, expectedType }) => {
     const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
     for (let index = events.length - 1; index >= since; index -= 1) {
       const entry = events[index];
@@ -5616,8 +5621,12 @@ async function latestHarnessActionResult(page, requestType, sinceIndex) {
         return entry.payload.payload;
       }
     }
-    return undefined;
-  }, { since: sinceIndex, expectedType: requestType });
+    return null;
+  }, { since: sinceIndex, expectedType: requestType }, { timeout: 45_000 })
+    .then((handle) => handle.jsonValue())
+    .catch((error) => {
+      throw new Error(`timed out waiting for the ${requestType} action result: ${error.message}`);
+    });
 }
 
 /**
