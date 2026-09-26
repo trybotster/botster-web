@@ -75,6 +75,24 @@ function assertNoInputFrames(frames, stage) {
   }
 }
 
+function assertNoResizeFrames(frames, stage) {
+  if (frames.some((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RESIZE)) {
+    throw new Error(`Web sent RESIZE ${stage}: ${JSON.stringify(frames.map((frame) => frame.slice(0, 12)))}`);
+  }
+}
+
+/** Exactly one RESIZE, sent after SNAPSHOT_FINISH, with the latest local grid. */
+function assertOneLatestResize(frames, framesBeforeFinish, grid, stage) {
+  const resizes = frames.filter((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RESIZE);
+  if (resizes.length !== 1 || frames.indexOf(resizes[0]) < framesBeforeFinish) {
+    throw new Error(`${stage}: Web did not send exactly one RESIZE after SNAPSHOT_FINISH: ${JSON.stringify(frames.map((frame) => frame.slice(0, 12)))}`);
+  }
+  const resize = resizeOf(resizes[0]);
+  if (!grid || resize.rows !== grid.rows || resize.cols !== grid.columns) {
+    throw new Error(`${stage}: the RESIZE is not the latest local grid: ${JSON.stringify({ resize, grid })}`);
+  }
+}
+
 let vite;
 let browser;
 
@@ -88,8 +106,9 @@ try {
 
   browser = await chromium.launch();
 
-  // Complete attach: READY paints before history, live output waits for FINISH, queued
-  // input and coalesced resize are released only after the attach completes.
+  // Complete attach: no input leaves before ATTACH_STATE attached; queued input is then
+  // released in order. READY paints before history, and every history page decodes at the
+  // READY grid. Live output and one RESIZE with the latest local grid wait for FINISH.
   const { page, errors: pageErrors, api } = await openSmokePage(browser, address);
   await api.call("deliverAttaching");
   await page.evaluate(() => {
@@ -100,6 +119,12 @@ try {
   });
   assertNoInputFrames((await api.state()).frames, "before ATTACH_STATE attached");
   await api.call("deliverAttached");
+  await page.waitForFunction(() => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames().length >= 2);
+  const releasedAtAttached = (await api.state()).frames;
+  assertNoResizeFrames(releasedAtAttached, "before SNAPSHOT_FINISH");
+  if (releasedAtAttached.map(rawTextOf).join("|") !== "queued-input-one|queued-input-two") {
+    throw new Error(`Web did not release queued input in order at ATTACH_STATE attached: ${JSON.stringify(releasedAtAttached.map(rawTextOf))}`);
+  }
   await api.call("deliverModes", 0, 40, 120);
   await api.call("deliverSnapshotReady", readyPage);
 
@@ -110,22 +135,24 @@ try {
   if (readyState.statuses.at(-1)?.state !== "attaching") {
     throw new Error(`READY did not keep attaching status: ${JSON.stringify(readyState.statuses)}`);
   }
-  assertNoInputFrames(readyState.frames, "before SNAPSHOT_FINISH");
+  assertNoResizeFrames(readyState.frames, "before SNAPSHOT_FINISH");
 
   await api.call("deliverOutput", Array.from(new TextEncoder().encode("LIVE-AFTER-BARRIER")));
-  for (const historyPage of historyPages) {
+  // The last history page carries the GHOSTSNP finish record (see the fixture README). Every
+  // page before it decodes at the READY grid; the finish record reflows once to the local grid.
+  for (const [pageIndex, historyPage] of historyPages.entries()) {
     await api.call("deliverSnapshotHistory", historyPage);
-    assertNoInputFrames((await api.state()).frames, "before SNAPSHOT_FINISH");
+    const pageState = await api.state();
+    assertNoResizeFrames(pageState.frames, "before SNAPSHOT_FINISH");
+    const finishRecord = pageIndex === historyPages.length - 1;
+    if (!finishRecord && JSON.stringify(pageState.grid) !== JSON.stringify(readyState.grid)) {
+      throw new Error(`A history page did not decode at the READY grid: ${JSON.stringify({ ready: readyState.grid, page: pageState.grid })}`);
+    }
   }
 
   const beforeFinish = await api.state();
   if (beforeFinish.rows.some((row) => row.includes("LIVE-AFTER-BARRIER"))) {
     throw new Error("Web painted live output before SNAPSHOT_FINISH.");
-  }
-  if (JSON.stringify(beforeFinish.grid) !== JSON.stringify(readyState.grid)) {
-    throw new Error(
-      `Restty resized between READY and FINISH: ${JSON.stringify({ ready: readyState.grid, beforeFinish: beforeFinish.grid })}`
-    );
   }
 
   await api.call("deliverSnapshotFinish");
@@ -136,15 +163,8 @@ try {
   );
 
   const finalState = await api.state();
-  const resizes = finalState.frames.filter((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RESIZE);
   const inputs = finalState.frames.filter((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RAW_BYTES);
-  if (resizes.length !== 1 || resizes[0] !== finalState.frames[0]) {
-    throw new Error(`Web did not send one coalesced RESIZE ahead of queued input: ${JSON.stringify(finalState.frames.map((frame) => frame.slice(0, 12)))}`);
-  }
-  const resize = resizeOf(resizes[0]);
-  if (resize.rows !== 40 || resize.cols !== 120) {
-    throw new Error(`Web sent a stale RESIZE: ${JSON.stringify(resize)}`);
-  }
+  assertOneLatestResize(finalState.frames, beforeFinish.frames.length, finalState.grid, "complete attach");
   if (inputs.map(rawTextOf).join("|") !== "queued-input-one|queued-input-two") {
     throw new Error(`Web changed queued input order: ${JSON.stringify(inputs.map(rawTextOf))}`);
   }
@@ -177,7 +197,7 @@ try {
   if (degradedBeforeFinish.statuses.at(-1)?.state !== "attaching") {
     throw new Error(`Degraded history did not remain attaching before FINISH: ${JSON.stringify(degradedBeforeFinish.statuses)}`);
   }
-  assertNoInputFrames(degradedBeforeFinish.frames, "before SNAPSHOT_FINISH on the degraded attach");
+  assertNoResizeFrames(degradedBeforeFinish.frames, "before SNAPSHOT_FINISH on the degraded attach");
   if (degradedBeforeFinish.rows.some((row) => row.includes("DEGRADED-LIVE"))) {
     throw new Error("Degraded history painted live output before SNAPSHOT_FINISH.");
   }
@@ -191,10 +211,7 @@ try {
     return harness.getSentFrames().length >= 2 && harness.readViewportRows().some((row) => row.includes("DEGRADED-LIVE"));
   });
   const degradedFinal = await degraded.api.state();
-  const degradedResize = degradedFinal.frames.find((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RESIZE);
-  if (!degradedResize || JSON.stringify(resizeOf(degradedResize)) !== JSON.stringify({ rows: 36, cols: 110 })) {
-    throw new Error(`Degraded attach did not send the queued RESIZE: ${JSON.stringify(degradedFinal.frames.map((frame) => frame.slice(0, 12)))}`);
-  }
+  assertOneLatestResize(degradedFinal.frames, degradedBeforeFinish.frames.length, degradedFinal.grid, "degraded attach");
   if (!degradedFinal.frames.some((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RAW_BYTES && rawTextOf(frame) === "degraded-input")) {
     throw new Error("Degraded attach did not send the queued input.");
   }

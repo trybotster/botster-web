@@ -49,6 +49,8 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   });
   private readonly inputOutcomeListeners = new Set<(outcome: TerminalInputOutcome) => void>();
   private terminal?: Restty;
+  /** The initial pane app's init() promise: the one readiness signal for snapshot install. */
+  private resttyReady?: Promise<void>;
   private container?: HTMLElement;
   private inputCapture?: TerminalInputCapture;
   private uninstallPaletteProbe?: () => void;
@@ -79,9 +81,20 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
       root: container,
       createInitialPane: { focus: false },
       fontSources: botsterResttyFontSources,
+      // Init is started here and its promise kept: Restty's own autoInit discards it, which
+      // left snapshot install and reader creation polling for wasm readiness.
+      autoInit: false,
       // Restty's default context menu keeps every item; only its Paste action is redirected
       // to the explicit paste owner through the pane app's paste entry point.
-      onPaneCreated: (pane) => this.installContextMenuPasteOwner(pane),
+      onPaneCreated: (pane) => {
+        this.installContextMenuPasteOwner(pane);
+        const init = pane.app?.init?.();
+        if (!this.resttyReady) {
+          this.resttyReady = init ?? Promise.reject(new Error("Restty pane app has no init()."));
+          // Awaiters still see a rejection; this only keeps it from being reported unhandled.
+          this.resttyReady.catch(() => undefined);
+        }
+      },
       appOptions: {
         // Pure renderer: the session owns PTY queries including OSC color replies.
         readOnly: true,
@@ -114,39 +127,32 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
 
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
 
-    // Pane construction starts Restty init without awaiting. Snapshot import requires
-    // wasmReady + wasmHandle; wait for readiness rather than re-entering init().
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      try {
-        const ok = await this.ptyTransport.installSnapshot(
-          () => terminal.loadBinarySnapshot(bytes),
-          (grid) => this.applyGridToRestty(grid)
-        );
-        if (ok) {
-          recordLiveHarnessTerminal("restty_load_binary_snapshot", {
-            ok: true,
-            bytes: bytes.byteLength,
-            attempt,
-            sessionId: this.descriptor.sessionId
-          });
-          return true;
-        }
-      } catch (error: unknown) {
-        recordLiveHarnessTerminal("restty_load_binary_snapshot_error", {
-          attempt,
-          message: error instanceof Error ? error.message : String(error),
-          sessionId: this.descriptor.sessionId
-        });
-      }
-      await delay(50);
+    // Snapshot import requires wasmReady + wasmHandle: wait once for Restty's own init.
+    try {
+      await this.whenResttyReady();
+      const ok = await this.ptyTransport.installSnapshot(
+        () => terminal.loadBinarySnapshot(bytes),
+        (grid) => this.applyGridToRestty(grid)
+      );
+      recordLiveHarnessTerminal("restty_load_binary_snapshot", {
+        ok,
+        bytes: bytes.byteLength,
+        sessionId: this.descriptor.sessionId
+      });
+      return ok;
+    } catch (error: unknown) {
+      recordLiveHarnessTerminal("restty_load_binary_snapshot_error", {
+        message: error instanceof Error ? error.message : String(error),
+        sessionId: this.descriptor.sessionId
+      });
+      return false;
     }
+  }
 
-    recordLiveHarnessTerminal("restty_load_binary_snapshot", {
-      ok: false,
-      bytes: bytes.byteLength,
-      sessionId: this.descriptor.sessionId
-    });
-    return false;
+  /** Resolves when the pane app's init (wasm load) has completed. */
+  private async whenResttyReady(): Promise<void> {
+    if (!this.resttyReady) throw new Error("Restty pane was not created.");
+    await this.resttyReady;
   }
 
   attachDataPlane(dataPlane: TerminalDataPlaneAttachment): TerminalSubscription {
@@ -198,13 +204,11 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
     let firstFrame = true;
     let cancelled = false;
     const acquireReader = async (): Promise<ResttySnapshotReader> => {
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        if (cancelled) throw new Error("Restty incremental snapshot reader was cancelled.");
-        const candidate = this.terminal?.createBinarySnapshotReader();
-        if (candidate) return candidate;
-        await delay(50);
-      }
-      throw new Error("Restty incremental snapshot reader is unavailable.");
+      await this.whenResttyReady();
+      if (cancelled) throw new Error("Restty incremental snapshot reader was cancelled.");
+      const reader = this.terminal?.createBinarySnapshotReader();
+      if (!reader) throw new Error("Restty incremental snapshot reader is unavailable.");
+      return reader;
     };
 
     return {
@@ -432,11 +436,6 @@ export class ResttyTerminalRenderer implements TerminalRendererAdapter {
   }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
 
 function recordLiveHarnessTerminal(kind: string, payload: unknown): void {
   if (typeof window === "undefined") return;

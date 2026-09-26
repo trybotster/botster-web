@@ -78,7 +78,13 @@ const dataPlane = createHubTerminalDataPlane({
 const renderer = new ResttyTerminalRenderer({ sessionId, renderer: "restty" });
 renderer.mount(root);
 renderer.attachDataPlane(dataPlane);
-dataPlane.subscribeStatus?.((status) => statuses.push({ ...status }));
+const attachedWaiters: Array<() => void> = [];
+dataPlane.subscribeStatus?.((status) => {
+  statuses.push({ ...status });
+  if (status.state === "attached") {
+    for (const wake of attachedWaiters.splice(0)) wake();
+  }
+});
 dataPlane.subscribeInputOutcomes?.((outcome) => outcomes.push({ ...outcome }));
 
 async function deliver(event: TerminalEvent, streamEpoch = 0): Promise<void> {
@@ -153,10 +159,10 @@ const harness: IncrementalAttachSmoke = {
   },
   getStatuses: () => statuses.map((status) => ({ ...status })),
   readViewportRows,
-  async attached() {
-    while (!statuses.some((status) => status.state === "attached")) {
-      await new Promise((resolve) => window.setTimeout(resolve, 10));
-    }
+  /** Resolves on the attached status itself; the smoke's caller owns the deadline. */
+  attached() {
+    if (statuses.some((status) => status.state === "attached")) return Promise.resolve();
+    return new Promise<void>((resolve) => attachedWaiters.push(resolve));
   }
 };
 

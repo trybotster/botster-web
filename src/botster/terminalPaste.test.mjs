@@ -370,8 +370,8 @@ export async function runTerminalPasteTests(helpers) {
       await fixture.assertComplete();
     });
 
-    // (p6) Ordering: keys keep their place around a paste; a resize goes ahead of queued
-    // operations but never lands inside BEGIN..COMMIT; every id increases in send order.
+    // (p6) Ordering: keys keep their place around a paste; a resize never lands inside
+    // BEGIN..COMMIT; one geometry operation is in flight at a time; ids increase in send order.
     await runScenario("p6-ordering", async () => {
       const fixture = await attachPlane("p6");
       const noMods = { shift: false, ctrl: false, alt: false, super: false, capsLock: false, numLock: false };
@@ -386,11 +386,15 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(new TextDecoder().decode(frames[4].body.subarray(12)), "b");
       await fixture.result(2, "written", { accepted: 6, written: 6 });
       assert.equal((await paste).outcome, "written");
-      // A resize that arrives while a later paste is queued is sent ahead of it.
+      // One geometry operation at a time: a newer geometry waits for the in-flight RESIZE's
+      // result, and it never lands inside a paste's BEGIN..COMMIT.
       const laterPaste = fixture.plane.writePaste("later\n");
       fixture.plane.resize({ rows: 31, cols: 101, widthPx: 1010, heightPx: 620 });
-      const later = await waitFrameCount(fixture, 10, "p6: later paste and resize");
-      assert.deepEqual(later.slice(6).map((frame) => frame.name), ["paste_begin", "paste_chunk", "paste_commit", "resize"]);
+      const pasted = await waitFrameCount(fixture, 9, "p6: later paste");
+      assert.deepEqual(pasted.slice(6).map((frame) => frame.name), ["paste_begin", "paste_chunk", "paste_commit"]);
+      await fixture.result(4, "written", { accepted: 0, written: 0 });
+      const later = await waitFrameCount(fixture, 10, "p6: newer resize after the RESIZE result");
+      assert.equal(later[9].name, "resize");
       await fixture.result(5, "written", { accepted: 6, written: 6 });
       assert.equal((await laterPaste).outcome, "written");
       await fixture.assertComplete();

@@ -123,6 +123,16 @@ interface PendingUnsafePaste {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+function sameGeometry(left: TerminalResizeGeometry, right: TerminalResizeGeometry | undefined): boolean {
+  return (
+    right !== undefined &&
+    left.rows === right.rows &&
+    left.cols === right.cols &&
+    left.widthPx === right.widthPx &&
+    left.heightPx === right.heightPx
+  );
+}
+
 export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   readonly sessionId: string;
 
@@ -171,7 +181,12 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   private inflightInputBytes = 0;
   private readonly inflightInputs = new Map<number, InflightInputOperation>();
   private inputSendChain: Promise<void> = Promise.resolve();
-  private pendingResize: TerminalResizeGeometry | undefined;
+  /** The latest local geometry; every resize() overwrites it. It survives a re-attach. */
+  private desiredGeometry: TerminalResizeGeometry | undefined;
+  /** The last geometry written to this attachment's route; reset with the attachment. */
+  private sentGeometry: TerminalResizeGeometry | undefined;
+  /** The one RESIZE operation appended to the send chain or in flight. */
+  private geometryOperation: InflightInputOperation | undefined;
   private pasteAttempt = 0;
   private pendingUnsafePaste: PendingUnsafePaste | undefined;
   private consentRetainedBytes = 0;
@@ -252,8 +267,8 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
   resize(geometry: TerminalResizeGeometry): void {
     if (this.detached) return;
     recordLiveHarnessTerminal("resize", geometry);
-    // Coalesce: only the latest geometry is sent, ahead of the next queued operation.
-    this.pendingResize = geometry;
+    // Latest wins: maybeSendGeometry sends it when the route can take a RESIZE.
+    this.desiredGeometry = { ...geometry };
     void this.ensureAttached().catch(() => undefined);
     this.pumpInputs();
   }
@@ -370,76 +385,134 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     return true;
   }
 
+  /**
+   * True after SNAPSHOT_FINISH completes the hydration of this attachment. Between
+   * ATTACH_STATE attached and SNAPSHOT_FINISH, and again during a ROUTE_RESYNC hydration,
+   * it is false.
+   */
+  private screenHydrated(): boolean {
+    const hydration = this.hydration;
+    return hydration?.generation === this.attachmentGeneration && hydration.completed;
+  }
+
+  /**
+   * Appends the one RESIZE operation when the route can take it: attached, hydrated, window
+   * capacity free, no RESIZE already appended or in flight, and the latest local geometry
+   * differs from the last one sent. The operation reads the geometry again when it is sent.
+   * Every event that can change one of these conditions reaches this through pumpInputs.
+   */
+  private maybeSendGeometry(): void {
+    const stream = this.streamSubscription;
+    const geometry = this.desiredGeometry;
+    if (!stream?.sendFrame || !this.attachedReceived || this.detached) return;
+    if (!geometry || this.geometryOperation || !this.screenHydrated()) return;
+    if (this.inflightInputs.size >= MAX_INFLIGHT_INPUT_OPERATIONS || sameGeometry(geometry, this.sentGeometry)) return;
+    const encoded = encodeSemanticInput({ kind: "resize", ...geometry });
+    if (!encoded) return;
+    this.geometryOperation = this.appendOperation(
+      { operation: encoded, kind: "resize", requestedBytes: encoded.bodyBytes },
+      stream
+    );
+  }
+
   /** Sends queued operations in order while the route is attached and the window has room. */
   private pumpInputs(): void {
     const stream = this.streamSubscription;
     if (!stream?.sendFrame || !this.attachedReceived || this.detached) return;
-    const generation = this.attachmentGeneration;
+    // The latest geometry goes ahead of queued operations.
+    this.maybeSendGeometry();
     while (this.inflightInputs.size < MAX_INFLIGHT_INPUT_OPERATIONS) {
-      const resize = this.pendingResize;
-      let entry: QueuedInputOperation | undefined;
-      if (resize) {
-        this.pendingResize = undefined;
-        const encoded = encodeSemanticInput({ kind: "resize", ...resize });
-        if (!encoded) continue;
-        entry = { operation: encoded, kind: "resize", requestedBytes: encoded.bodyBytes };
-      } else {
-        entry = this.queuedInputs.shift();
-        if (!entry) return;
-        this.queuedInputBytes -= entry.operation.bodyBytes;
-      }
-      const operationId = this.nextOperationId++;
-      const inflight: InflightInputOperation = {
-        ...entry,
-        generation,
-        operationId,
-        retainedBytes: entry.operation.bodyBytes
-      };
-      this.inflightInputs.set(operationId, inflight);
-      this.inflightInputBytes += inflight.retainedBytes;
-      this.inputSendChain = this.inputSendChain
-        .then(async () => {
-          await this.testHooks?.beforeInputSend?.();
-          if (!this.isCurrentAttachment(generation) || this.streamSubscription !== stream) {
-            this.settleInflight(inflight, "cancelled", "Terminal attachment changed before the operation was sent.");
+      const entry = this.queuedInputs.shift();
+      if (!entry) return;
+      this.queuedInputBytes -= entry.operation.bodyBytes;
+      this.appendOperation(entry, stream);
+    }
+  }
+
+  /** Gives `entry` the next operation id and appends its send to the ordered send chain. */
+  private appendOperation(
+    entry: QueuedInputOperation,
+    stream: DaemonTerminalStreamSubscription
+  ): InflightInputOperation {
+    const generation = this.attachmentGeneration;
+    const operationId = this.nextOperationId++;
+    const inflight: InflightInputOperation = {
+      ...entry,
+      generation,
+      operationId,
+      retainedBytes: entry.operation.bodyBytes
+    };
+    this.inflightInputs.set(operationId, inflight);
+    this.inflightInputBytes += inflight.retainedBytes;
+    this.inputSendChain = this.inputSendChain
+      .then(async () => {
+        await this.testHooks?.beforeInputSend?.();
+        if (!this.isCurrentAttachment(generation) || this.streamSubscription !== stream) {
+          this.settleInflight(inflight, "cancelled", "Terminal attachment changed before the operation was sent.");
+          return;
+        }
+        if (inflight === this.geometryOperation) {
+          // The RESIZE reads the latest geometry now. It is not sent while a ROUTE_RESYNC
+          // hydration is incomplete or when the route already has this geometry; then its
+          // slot is released without a send (the unused id leaves a gap, which Core allows:
+          // ids must only increase) and the pump runs again.
+          const geometry = this.desiredGeometry;
+          const encoded =
+            geometry && this.screenHydrated() && !sameGeometry(geometry, this.sentGeometry)
+              ? encodeSemanticInput({ kind: "resize", ...geometry })
+              : undefined;
+          if (!geometry || !encoded) {
+            this.releaseUnsentOperation(inflight);
+            this.pumpInputs();
             return;
           }
-          // Frames are built once, sent in order, and released; the payload closure goes
-          // with them so a paste holds no third copy while Core retains the operation.
-          const frames = inflight.operation.frames(operationId);
-          const abortFrame = inflight.operation.abortFrame?.(operationId);
-          const frameCount = frames.length;
-          inflight.operation = releasedOperation(inflight.retainedBytes);
-          let sentFrames = 0;
-          try {
-            for (const frame of frames) {
-              await stream.sendFrame!(frame);
-              sentFrames += 1;
-            }
-          } catch (error: unknown) {
-            // A paste that stopped after PASTE_BEGIN leaves Core assembling; abort it on the
-            // same stream, best effort, so the route's one assembling paste is released.
-            if (abortFrame && sentFrames > 0 && sentFrames < frameCount && this.streamSubscription === stream) {
-              await stream.sendFrame!(abortFrame).catch(() => undefined);
-            }
-            throw error;
+          inflight.operation = encoded;
+          this.sentGeometry = { ...geometry };
+        }
+        // Frames are built once, sent in order, and released; the payload closure goes
+        // with them so a paste holds no third copy while Core retains the operation.
+        const frames = inflight.operation.frames(operationId);
+        const abortFrame = inflight.operation.abortFrame?.(operationId);
+        const frameCount = frames.length;
+        inflight.operation = releasedOperation(inflight.retainedBytes);
+        let sentFrames = 0;
+        try {
+          for (const frame of frames) {
+            await stream.sendFrame!(frame);
+            sentFrames += 1;
           }
-          recordLiveHarnessTerminal("input_sent", {
-            kind: inflight.kind,
-            operation_id: operationId,
-            frames: frameCount,
-            bytes: inflight.retainedBytes,
-            generation
-          });
-        })
-        .catch((error: unknown) => {
-          this.settleInflight(
-            inflight,
-            "cancelled",
-            `Input was not sent: ${error instanceof Error ? error.message : String(error)}`
-          );
+        } catch (error: unknown) {
+          // A paste that stopped after PASTE_BEGIN leaves Core assembling; abort it on the
+          // same stream, best effort, so the route's one assembling paste is released.
+          if (abortFrame && sentFrames > 0 && sentFrames < frameCount && this.streamSubscription === stream) {
+            await stream.sendFrame!(abortFrame).catch(() => undefined);
+          }
+          throw error;
+        }
+        recordLiveHarnessTerminal("input_sent", {
+          kind: inflight.kind,
+          operation_id: operationId,
+          frames: frameCount,
+          bytes: inflight.retainedBytes,
+          generation
         });
-    }
+      })
+      .catch((error: unknown) => {
+        this.settleInflight(
+          inflight,
+          "cancelled",
+          `Input was not sent: ${error instanceof Error ? error.message : String(error)}`
+        );
+      });
+    return inflight;
+  }
+
+  /** Releases an operation that was never sent: no INPUT_RESULT will arrive for it. */
+  private releaseUnsentOperation(inflight: InflightInputOperation): void {
+    if (this.inflightInputs.get(inflight.operationId) !== inflight) return;
+    this.inflightInputs.delete(inflight.operationId);
+    this.inflightInputBytes -= inflight.retainedBytes;
+    if (this.geometryOperation === inflight) this.geometryOperation = undefined;
   }
 
   private settleInflight(
@@ -451,6 +524,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     if (this.inflightInputs.get(inflight.operationId) !== inflight) return;
     this.inflightInputs.delete(inflight.operationId);
     this.inflightInputBytes -= inflight.retainedBytes;
+    if (this.geometryOperation === inflight) this.geometryOperation = undefined;
     let unsafePasteConsent: UnsafePasteConsent | undefined;
     if (
       outcome === "rejected_unsafe_paste" &&
@@ -514,7 +588,9 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     this.queuedInputBytes = 0;
     this.inflightInputBytes = 0;
     this.releaseUnsafePasteConsent();
-    this.pendingResize = undefined;
+    // The new attachment gets the latest geometry after its first FINISH.
+    this.sentGeometry = undefined;
+    this.geometryOperation = undefined;
     this.nextOperationId = 1;
   }
 

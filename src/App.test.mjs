@@ -9658,6 +9658,7 @@ function fakeRouteBridge(sessionId, options = {}) {
         ready: Promise.resolve(),
         generation: options.generation ?? 1,
         sendFrame(frame) {
+          if (options.rejectSend?.(frame)) return Promise.reject(new Error("fake route send failure"));
           const copy = new Uint8Array(frame);
           stream.frames.push(copy);
           state.frames.push(copy);
@@ -9671,8 +9672,8 @@ function fakeRouteBridge(sessionId, options = {}) {
   return state;
 }
 
-// The data plane sends input only after ATTACH_STATE attached, places the latest resize ahead
-// of queued operations, assigns increasing operation ids, keeps 32 operations in flight with
+// The data plane sends input only after ATTACH_STATE attached, holds RESIZE until SNAPSHOT_FINISH
+// and then sends only the latest geometry, once, assigns increasing operation ids, keeps 32 operations in flight with
 // later ones queued locally, reports every INPUT_RESULT once, and sends a paste as one operation.
 {
   const sessionId = "dedicated-data-plane-session";
@@ -9696,26 +9697,34 @@ function fakeRouteBridge(sessionId, options = {}) {
   assert.equal(wire.frames.length, 0, "nothing is sent before ATTACH_STATE attached");
 
   await deliver({ kind: "attach_state", state: "attached" });
+  await waitForTestCondition(() => wire.frames.length === 1);
+  assert.deepEqual(headers().map((header) => [header.kind, header.operationId]), [[TerminalInputKind.raw_bytes, 1]]);
+  // A later geometry during the hydration replaces the held one.
+  plane.resize({ rows: 34, cols: 112, widthPx: 1000, heightPx: 680 });
+  await flushMicrotasks();
+  assert.equal(wire.frames.length, 1, "RESIZE waits for SNAPSHOT_FINISH");
+  for (const frame of standardAttachFrames(subscriptionId, { generation }).slice(1)) await route.onEvent(frame);
   await waitForTestCondition(() => wire.frames.length === 2);
-  assert.deepEqual(headers().map((header) => header.kind), [TerminalInputKind.resize, TerminalInputKind.raw_bytes]);
-  assert.deepEqual(headers().map((header) => header.operationId), [1, 2]);
-  const resizeView = new DataView(wire.frames[0].buffer, wire.frames[0].byteOffset, wire.frames[0].byteLength);
+  assert.deepEqual(headers().map((header) => [header.kind, header.operationId]), [
+    [TerminalInputKind.raw_bytes, 1],
+    [TerminalInputKind.resize, 2]
+  ]);
+  const resizeView = new DataView(wire.frames[1].buffer, wire.frames[1].byteOffset, wire.frames[1].byteLength);
   assert.deepEqual(
     [resizeView.getUint16(12, false), resizeView.getUint16(14, false), resizeView.getUint32(16, false), resizeView.getUint32(20, false)],
-    [33, 111, 999, 660],
-    "RESIZE carries cells and pixels"
+    [34, 112, 1000, 680],
+    "one RESIZE with the latest cells and pixels"
   );
-  for (const frame of standardAttachFrames(subscriptionId, { generation }).slice(1)) await route.onEvent(frame);
 
-  await deliverBody(inputResultBody(2, "written", { accepted: 18, written: 18 }));
+  await deliverBody(inputResultBody(1, "written", { accepted: 18, written: 18 }));
   assert.deepEqual(
     outcomes.map((outcome) => [outcome.kind, outcome.outcome, outcome.operationId, outcome.acceptedPayloadBytes, outcome.writtenPtyBytes]),
-    [["raw", "written", 2, 18, 18]]
+    [["raw", "written", 1, 18, 18]]
   );
-  await deliverBody(inputResultBody(1, "written", { accepted: 12, written: 0 }));
+  await deliverBody(inputResultBody(2, "written", { accepted: 12, written: 0 }));
   assert.equal(outcomes.length, 2);
   // A result for an unknown or completed id is ignored, never retained.
-  await deliverBody(inputResultBody(2, "written", { accepted: 18, written: 18 }));
+  await deliverBody(inputResultBody(1, "written", { accepted: 18, written: 18 }));
   await deliverBody(inputResultBody(99, "written"));
   assert.equal(outcomes.length, 2);
 
@@ -9833,7 +9842,8 @@ function fakeRouteBridge(sessionId, options = {}) {
 
 // Under a sustained flood Core may resync repeatedly, including mid-snapshot. Each accepted
 // ROUTE_RESYNC abandons the partial hydration; only the snapshot of the latest epoch replaces
-// the screen, and the route never closes or re-attaches.
+// the screen, and the route never closes or re-attaches. RESIZE waits for the latest epoch's
+// SNAPSHOT_FINISH and carries only the latest geometry.
 {
   const sessionId = "repeated-resync-session";
   const subscriptionId = "repeated-resync-subscription";
@@ -9852,9 +9862,11 @@ function fakeRouteBridge(sessionId, options = {}) {
   await send({ kind: "output", payload: new TextEncoder().encode("epoch-0") }, 0);
   // Epoch 1 starts a snapshot, then Core resyncs again before SNAPSHOT_FINISH.
   await send({ kind: "route_resync", from_epoch: 0, to_epoch: 1 }, 1);
+  plane.resize({ rows: 25, cols: 81, widthPx: 810, heightPx: 500 });
   await send({ kind: "modes", mode_bits: 2, rows: 24, cols: 80 }, 1);
   await send({ kind: "snapshot_ready", payload: ghostsnpFixture() }, 1);
   await send({ kind: "route_resync", from_epoch: 1, to_epoch: 2 }, 2);
+  plane.resize({ rows: 26, cols: 82, widthPx: 820, heightPx: 520 });
   // The abandoned epoch's remaining frames are dropped.
   await send({ kind: "snapshot_finish" }, 1);
   await send({ kind: "output", payload: new TextEncoder().encode("epoch-1-live") }, 1);
@@ -9864,13 +9876,251 @@ function fakeRouteBridge(sessionId, options = {}) {
   await send({ kind: "modes", mode_bits: 2, rows: 24, cols: 80 }, 2);
   await send({ kind: "snapshot_ready", payload: ghostsnpFixture() }, 2);
   await send({ kind: "snapshot_history", payload: opaqueFinishPage }, 2);
+  await flushMicrotasks();
+  assert.equal(wire.frames.length, 0, "RESIZE waits for the latest epoch's SNAPSHOT_FINISH");
   await send({ kind: "snapshot_finish" }, 2);
+  await waitForTestCondition(() => wire.frames.length === 1);
+  await flushMicrotasks();
+  assert.deepEqual(wire.frames.map((frame) => inputFrameHeader(frame).kind), [TerminalInputKind.resize], "exactly one RESIZE");
+  const resyncResize = new DataView(wire.frames[0].buffer, wire.frames[0].byteOffset, wire.frames[0].byteLength);
+  assert.deepEqual([resyncResize.getUint16(12, false), resyncResize.getUint16(14, false)], [26, 82], "the latest geometry");
   assert.ok(installs.length > installsBeforeLatest, "the latest epoch's snapshot replaces the screen");
   assert.deepEqual(outputs, ["epoch-0", "epoch-2-early"]);
   await send({ kind: "output", payload: new TextEncoder().encode("epoch-2-live") }, 2);
   assert.deepEqual(outputs, ["epoch-0", "epoch-2-early", "epoch-2-live"]);
   assert.equal(statuses.at(-1).state, "attached");
   assert.equal(wire.streams.length, 1, "a resync never re-attaches or opens another route");
+  await plane.detach();
+}
+
+// The one geometry operation reads the latest geometry when it is sent. Behind a blocked send, a
+// ROUTE_RESYNC hydration keeps it from being sent; a newer geometry replaces an older one; and
+// exactly one RESIZE, the newest, leaves after FINISH, also when FINISH arrives before the
+// blocked send is released. Operation ids increase and accounting returns to zero.
+const geometryOf = ([rows, cols]) => ({ rows, cols, widthPx: cols * 10, heightPx: rows * 20 });
+const sentResizes = (wire) => wire.frames.filter((frame) => inputFrameHeader(frame).kind === TerminalInputKind.resize);
+const resizeCells = (frame) => {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  return [view.getUint16(12, false), view.getUint16(14, false)];
+};
+async function gatedHydratedPlane(name, generation, bridgeOptions = {}) {
+  const sessionId = `geometry-${name}-session`;
+  const subscriptionId = `geometry-${name}-subscription`;
+  const wire = fakeRouteBridge(sessionId, { generation, ...bridgeOptions });
+  const gate = { current: undefined };
+  const plane = createHubTerminalDataPlane({
+    sessionId,
+    subscriptionId,
+    bridge: wire.bridge,
+    testHooks: { beforeInputSend: () => gate.current?.promise }
+  });
+  bindGhostsnpInstaller(plane);
+  plane.subscribeOutput(() => undefined);
+  await waitForTestCondition(() => wire.streams.length === 1);
+  const route = wire.streams[0];
+  const send = (event, streamEpoch) => route.onEvent(routeFrame(subscriptionId, event, { generation, streamEpoch }));
+  const result = (operationId, streamEpoch = 0) =>
+    route.onEvent({ route: subscriptionId, generation, streamEpoch, body: inputResultBody(operationId, "written") });
+  for (const frame of standardAttachFrames(subscriptionId, { generation })) await route.onEvent(frame);
+  const block = () => {
+    let release;
+    gate.current = { promise: new Promise((resolve) => { release = resolve; }) };
+    return () => {
+      gate.current = undefined;
+      release();
+    };
+  };
+  const finishResync = async (streamEpoch) => {
+    await send({ kind: "modes", mode_bits: 2, rows: 24, cols: 80 }, streamEpoch);
+    await send({ kind: "snapshot_ready", payload: ghostsnpFixture() }, streamEpoch);
+    await send({ kind: "snapshot_history", payload: opaqueFinishPage }, streamEpoch);
+    await send({ kind: "snapshot_finish" }, streamEpoch);
+  };
+  const assertSettled = async (label, streamEpoch = 0) => {
+    await plane.inputSendChain;
+    for (const frame of wire.frames) await result(inputFrameHeader(frame).operationId, streamEpoch);
+    assert.equal(plane.inflightInputs.size, 0, `${label}: no in-flight operation remains`);
+    assert.equal(plane.inflightInputBytes, 0, `${label}: in-flight bytes return to zero`);
+    assert.equal(plane.retainedInputBytes(), 0, `${label}: retained bytes return to zero`);
+  };
+  return { wire, plane, route, send, result, block, finishResync, assertSettled };
+}
+
+for (const scenario of [
+  { name: "one-behind-send", before: [[27, 83]], during: undefined, expected: [27, 83] },
+  { name: "newer-replaces-older", before: [[27, 83], [28, 84]], during: undefined, expected: [28, 84] },
+  { name: "newest-during-resync", before: [[27, 83], [28, 84]], during: [29, 85], expected: [29, 85] },
+  { name: "finish-before-release", before: [[30, 100], [35, 110]], during: [40, 120], expected: [40, 120], releaseAfterFinish: true }
+]) {
+  const fixture = await gatedHydratedPlane(scenario.name, 5);
+  const { wire, plane } = fixture;
+  const release = fixture.block();
+  plane.sendInput({ kind: "raw", bytes: new TextEncoder().encode("ahead") });
+  for (const cells of scenario.before) plane.resize(geometryOf(cells));
+  assert.equal(plane.inflightInputs.size, 2, `${scenario.name}: one RAW and ONE geometry operation, whatever the resize count`);
+  await fixture.send({ kind: "route_resync", from_epoch: 0, to_epoch: 1 }, 1);
+  if (scenario.during) plane.resize(geometryOf(scenario.during));
+  if (scenario.releaseAfterFinish) {
+    await fixture.finishResync(1);
+    assert.equal(wire.frames.length, 0, `${scenario.name}: the send chain is still blocked`);
+  }
+  release();
+  await waitForTestCondition(() => wire.frames.length >= 1);
+  await plane.inputSendChain;
+  if (!scenario.releaseAfterFinish) {
+    assert.deepEqual(wire.frames.map((frame) => inputFrameHeader(frame).kind), [TerminalInputKind.raw_bytes], `${scenario.name}: no RESIZE during the resync hydration`);
+    await fixture.finishResync(1);
+  }
+  await waitForTestCondition(() => wire.frames.length >= 2);
+  await plane.inputSendChain;
+  assert.equal(sentResizes(wire).length, 1, `${scenario.name}: exactly one RESIZE`);
+  const headers = wire.frames.map((frame) => inputFrameHeader(frame));
+  assert.deepEqual(headers.map((header) => header.kind), [TerminalInputKind.raw_bytes, TerminalInputKind.resize]);
+  assert.ok(headers[1].operationId > headers[0].operationId, `${scenario.name}: operation ids increase in send order`);
+  assert.deepEqual(resizeCells(wire.frames[1]), scenario.expected, `${scenario.name}: the newest geometry`);
+  await fixture.assertSettled(scenario.name, 1);
+  await plane.detach();
+}
+
+// A full window of ordinary operations holds the geometry and later input locally. The first
+// INPUT_RESULT that frees a slot sends the latest geometry ahead of the queued input, with no
+// other event.
+{
+  const fixture = await gatedHydratedPlane("full-window", 6);
+  const { wire, plane } = fixture;
+  const release = fixture.block();
+  for (let index = 0; index < MAX_INFLIGHT_INPUT_OPERATIONS; index += 1) {
+    plane.sendInput({ kind: "raw", bytes: new TextEncoder().encode(`w${index}`) });
+  }
+  plane.resize(geometryOf([31, 91]));
+  plane.resize(geometryOf([32, 92]));
+  plane.sendInput({ kind: "raw", bytes: new TextEncoder().encode("queued-after") });
+  assert.equal(plane.inflightInputs.size, MAX_INFLIGHT_INPUT_OPERATIONS, "ordinary operations fill the window");
+  release();
+  await waitForTestCondition(() => wire.frames.length === MAX_INFLIGHT_INPUT_OPERATIONS);
+  await plane.inputSendChain;
+  assert.equal(sentResizes(wire).length, 0, "no RESIZE while the window is full");
+  await fixture.result(1);
+  await waitForTestCondition(() => wire.frames.length === MAX_INFLIGHT_INPUT_OPERATIONS + 1);
+  await plane.inputSendChain;
+  assert.equal(inputFrameHeader(wire.frames.at(-1)).kind, TerminalInputKind.resize, "the freed slot sends the geometry first");
+  assert.deepEqual(resizeCells(wire.frames.at(-1)), [32, 92], "the latest geometry");
+  await fixture.result(2);
+  await waitForTestCondition(() => wire.frames.length === MAX_INFLIGHT_INPUT_OPERATIONS + 2);
+  await plane.inputSendChain;
+  assert.equal(new TextDecoder().decode(wire.frames.at(-1).subarray(12)), "queued-after", "then the queued input");
+  for (let operationId = 3; operationId <= MAX_INFLIGHT_INPUT_OPERATIONS + 2; operationId += 1) await fixture.result(operationId);
+  assert.equal(plane.inflightInputs.size, 0);
+  assert.equal(plane.inflightInputBytes, 0);
+  assert.equal(plane.retainedInputBytes(), 0);
+  await plane.detach();
+}
+
+// A geometry operation that sends nothing (the route already has the latest geometry) frees
+// its window slot at once: queued input behind a full window leaves with no INPUT_RESULT.
+{
+  const fixture = await gatedHydratedPlane("no-send-frees-slot", 9);
+  const { wire, plane } = fixture;
+  plane.resize(geometryOf([38, 98]));
+  await waitForTestCondition(() => wire.frames.length === 1);
+  await fixture.result(1);
+  const release = fixture.block();
+  for (let index = 0; index < MAX_INFLIGHT_INPUT_OPERATIONS - 1; index += 1) {
+    plane.sendInput({ kind: "raw", bytes: new TextEncoder().encode(`f${index}`) });
+  }
+  plane.resize(geometryOf([39, 99]));
+  plane.sendInput({ kind: "raw", bytes: new TextEncoder().encode("behind-full-window") });
+  assert.equal(plane.inflightInputs.size, MAX_INFLIGHT_INPUT_OPERATIONS, "31 RAW and the geometry operation fill the window");
+  plane.resize(geometryOf([38, 98]));
+  release();
+  await waitForTestCondition(() => wire.frames.length === MAX_INFLIGHT_INPUT_OPERATIONS + 1);
+  await plane.inputSendChain;
+  assert.equal(sentResizes(wire).length, 1, "the route already has the latest geometry: no second RESIZE");
+  assert.equal(new TextDecoder().decode(wire.frames.at(-1).subarray(12)), "behind-full-window", "the freed slot sends the queued input");
+  await fixture.assertSettled("no-send-frees-slot");
+  await plane.detach();
+}
+
+// An unchanged geometry is not sent again: not on a repeated resize(), and not after a resync
+// FINISH when the route already has it.
+{
+  const fixture = await gatedHydratedPlane("unchanged", 7);
+  const { wire, plane } = fixture;
+  plane.resize(geometryOf([33, 93]));
+  await waitForTestCondition(() => wire.frames.length === 1);
+  await fixture.result(inputFrameHeader(wire.frames[0]).operationId);
+  plane.resize(geometryOf([33, 93]));
+  await fixture.send({ kind: "route_resync", from_epoch: 0, to_epoch: 1 }, 1);
+  await fixture.finishResync(1);
+  await plane.inputSendChain;
+  await flushMicrotasks();
+  assert.equal(wire.frames.length, 1, "the unchanged geometry is sent once");
+  plane.resize(geometryOf([34, 94]));
+  await waitForTestCondition(() => wire.frames.length === 2);
+  assert.deepEqual(resizeCells(wire.frames[1]), [34, 94], "a changed geometry is sent");
+  await fixture.assertSettled("unchanged", 1);
+  await plane.detach();
+}
+
+// A RESIZE whose send fails is settled as cancelled and is not resent in a loop. The next local
+// geometry change sends again.
+{
+  let failNextResize = true;
+  const fixture = await gatedHydratedPlane("send-failure", 8, {
+    rejectSend: (frame) => {
+      if (!failNextResize || inputFrameHeader(frame).kind !== TerminalInputKind.resize) return false;
+      failNextResize = false;
+      return true;
+    }
+  });
+  const { wire, plane } = fixture;
+  const outcomes = recorder();
+  plane.subscribeInputOutcomes((outcome) => outcomes.push(outcome));
+  plane.resize(geometryOf([35, 95]));
+  await waitForTestCondition(() => outcomes.length === 1);
+  await plane.inputSendChain;
+  await flushMicrotasks();
+  assert.deepEqual(outcomes.map((outcome) => [outcome.kind, outcome.outcome]), [["resize", "cancelled"]]);
+  assert.equal(wire.frames.length, 0, "the failed RESIZE is not resent");
+  assert.equal(plane.inflightInputs.size, 0);
+  assert.equal(plane.inflightInputBytes, 0);
+  plane.resize(geometryOf([36, 96]));
+  await waitForTestCondition(() => wire.frames.length === 1);
+  assert.deepEqual(resizeCells(wire.frames[0]), [36, 96]);
+  await fixture.assertSettled("send-failure");
+  await plane.detach();
+}
+
+// A recovered route (new attachment) gets the retained local geometry after its first FINISH,
+// even when the geometry did not change.
+{
+  const sessionId = "geometry-recovery-session";
+  const wire = fakeRouteBridge(sessionId);
+  const plane = createHubTerminalDataPlane({
+    sessionId,
+    testHooks: { hydrationProgressBoundMs: 20 },
+    bridge: wire.bridge
+  });
+  bindGhostsnpInstaller(plane);
+  plane.subscribeOutput(() => undefined);
+  await waitForTestCondition(() => wire.streams.length === 1);
+  const first = wire.streams[0];
+  for (const frame of standardAttachFrames(first.subscriptionId)) await first.onEvent(frame);
+  plane.resize(geometryOf([37, 97]));
+  await waitForTestCondition(() => first.frames.length === 1);
+  // A resync that never completes trips the hydration bound, and the route re-attaches.
+  await first.onEvent(routeFrame(first.subscriptionId, { kind: "route_resync", from_epoch: 0, to_epoch: 1 }, { streamEpoch: 1 }));
+  await waitForTestCondition(() => wire.streams.length === 2);
+  const second = wire.streams[1];
+  const secondFrames = standardAttachFrames(second.subscriptionId);
+  for (const frame of secondFrames.slice(0, -1)) await second.onEvent(frame);
+  await flushMicrotasks();
+  assert.equal(second.frames.length, 0, "no RESIZE before the new attachment's FINISH");
+  await second.onEvent(secondFrames.at(-1));
+  await waitForTestCondition(() => second.frames.length === 1);
+  assert.equal(inputFrameHeader(second.frames[0]).kind, TerminalInputKind.resize);
+  assert.equal(inputFrameHeader(second.frames[0]).operationId, 1, "operation ids restart with the new attachment");
+  assert.deepEqual(resizeCells(second.frames[0]), [37, 97], "the retained local geometry");
   await plane.detach();
 }
 
@@ -16174,7 +16424,8 @@ async function flushMicrotasks() {
 
 /** The single shared bounded wait: re-checks the predicate on each progress notification. */
 async function waitForTestCondition(predicate, { label, deadlineMs = 5_000 } = {}) {
-  if (await predicate()) return;
+  // The deadline starts before the first predicate: an async predicate that never settles
+  // still fails at the deadline.
   const caller = new Error().stack?.split("\n").find((line) => line.includes(".test.mjs") && !line.includes("waitForTestCondition"))?.trim();
   label ??= `test condition at ${caller ?? "unknown caller"}`;
   let timer;

@@ -53,7 +53,9 @@ try {
 }
 const socketPath = hubConnection.transport.path;
 try {
-  await waitForSocket(socketPath);
+  // Hub launches package entrypoints only after its socket accepts, so connect once: a refusal is
+  // a real error, not a reason to retry.
+  await connectHubOnce(socketPath);
 } catch (error) {
   console.error(JSON.stringify({
     kind: "operator_error",
@@ -401,21 +403,13 @@ function contentTypeFor(filePath) {
   }
 }
 
-async function waitForSocket(path) {
-  const deadline = Date.now() + 10_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const socket = connect(path);
-      await once(socket, "connect");
-      socket.end();
-      return;
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+async function connectHubOnce(path) {
+  const socket = connect(path);
+  try {
+    await once(socket, "connect");
+  } finally {
+    socket.end();
   }
-  throw lastError ?? new Error("timed out waiting for injected hub socket");
 }
 
 function configuredPort(value) {
