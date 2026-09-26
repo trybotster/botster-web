@@ -222,8 +222,9 @@ let hubStderr = "";
 // the Hub. Best effort and bounded; the normal success path shuts it down explicitly.
 let productionSessionStarted = false;
 let productionSessionShutDown = false;
-// Sessions the Workspaces lifecycle stage spawned; failure cleanup shuts them down too.
-const lifecycleSeedSessionIds = new Set();
+// Sessions a harness stage spawned. Session workers outlive the Hub by design, so these are
+// shut down before the Hub on success and on failure.
+const harnessSpawnedSessionIds = new Set();
 const ownsWebrtcDataDir = suppliedDataDir === undefined;
 let harnessFailed = false;
 const webrtcDataDir =
@@ -748,6 +749,17 @@ async function requestDaemonShutdown() {
   if (productionSessionStarted && !productionSessionShutDown && !sharedSessionMode) {
     await shutdownProductionSession();
   }
+  if (webrtcDataDir) {
+    const socketPath = join(webrtcDataDir, "botster-hub.sock");
+    for (const sessionId of harnessSpawnedSessionIds) {
+      // An already-ended session may refuse a second shutdown; that is not a leak.
+      const response = await sendDaemonRequest(socketPath, { type: "shutdown_session", session_id: sessionId });
+      if (response.error) {
+        console.error(`[harness cleanup] shutdown_session ${sessionId}: ${JSON.stringify(response.error)}`);
+      }
+    }
+    harnessSpawnedSessionIds.clear();
+  }
   await requestHubShutdown({ ...hubLaneContext(), dataDir: webrtcDataDir, hubProcess });
 }
 
@@ -1113,6 +1125,7 @@ async function exerciseContractSessionBindings(page) {
     if (response.error) {
       throw new Error(`contract.sessions spawn failed for ${sessionId}: ${JSON.stringify(response.error)}`);
     }
+    harnessSpawnedSessionIds.add(sessionId);
     await waitForHarnessEvent(
       page,
       { kind: "hub_frame", family: "session", id: sessionId, lifecycle_class: "current" },
@@ -3494,7 +3507,7 @@ async function exerciseWorkspacesLifecycle(page) {
     if (response.error) {
       throw new Error(`Workspaces lifecycle seed spawn failed for ${sessionId}: ${JSON.stringify(response.error)}`);
     }
-    lifecycleSeedSessionIds.add(sessionId);
+    harnessSpawnedSessionIds.add(sessionId);
     await waitForHarnessEvent(page, {
       kind: "hub_frame",
       family: "session",
@@ -3619,7 +3632,7 @@ async function exerciseWorkspacesLifecycle(page) {
   }
   for (const sessionId of scenario.transitions) {
     const response = await sendDaemonRequest(socketPath, { type: "remove_session", session_id: sessionId });
-    if (!response.error) lifecycleSeedSessionIds.delete(sessionId);
+    if (!response.error) harnessSpawnedSessionIds.delete(sessionId);
   }
   console.log(`Workspaces lifecycle acceptance passed ${JSON.stringify({
     scenario,
@@ -6240,7 +6253,7 @@ async function shutdownProductionSession() {
 async function cleanupProductionSessionBestEffort() {
   if (!webrtcDataDir || hubProcess?.exitCode !== null) return;
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
-  for (const sessionId of lifecycleSeedSessionIds) {
+  for (const sessionId of harnessSpawnedSessionIds) {
     const bound = new Promise((resolve) => setTimeout(() => resolve({ error: { kind: "cleanup_bound" } }), 3_000));
     const response = await Promise.race([
       sendDaemonRequest(socketPath, { type: "shutdown_session", session_id: sessionId }).catch((error) => ({ error: { message: error.message } })),
