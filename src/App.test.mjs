@@ -5773,8 +5773,16 @@ try {
   );
   assert.equal(releaseBeforeAckChannels[0].createdDataChannels.length, 1);
   assert.equal(lateEvents.length, 0);
+  // With reconnect demand, the close queues recoverConnection as a microtask, which emits
+  // reconnect-attempt and creates the next peer. One macrotask turn (an ordering boundary)
+  // drains that microtask, so after it a released subscription must show neither.
+  const releaseLifecycleIndex = lifecycleEvents.length;
   releaseBeforeAckChannels[0].close();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await new Promise((resolve) => setImmediate(resolve));
+  const releaseCloseEvents = lifecycleEvents.slice(releaseLifecycleIndex).map((event) => event.detail.type);
+  assert.equal(releaseCloseEvents.includes("data-channel-closed"), true, "the close decision point was reached");
+  assert.equal(releaseCloseEvents.includes("reconnect-attempt"), false, "a released subscription leaves no reconnect demand");
+  assert.equal(releaseBeforeAckChannels[1].testPeerGeneration, undefined, "no next peer was created");
   assert.equal(releaseBeforeAckChannels[1].sent.length, 0);
   releaseBeforeAckClient.disconnect();
 
@@ -7029,13 +7037,31 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "disarmed");
     assert.equal(dropControl.getDropNextInboundEntityFrameState().reason, "manual");
 
-    // Bounded arm timeout is reachable (short test timeout; real wall clock).
-    const timeoutArm = dropControl.armDropNextInboundEntityFrame(
-      { entity_type: "botster-workspaces.membership" },
-      { timeout_ms: 25 }
-    );
+    // Bounded arm timeout is reachable: the arm timer is captured by its distinctive delay and
+    // fired explicitly, so expiry is an event the test drives rather than a wall-clock sleep.
+    const armWindowMs = 7_331;
+    const armTimers = [];
+    const windowSetTimeout = globalThis.window.setTimeout;
+    globalThis.window.setTimeout = (callback, delay, ...args) => {
+      if (delay === armWindowMs) {
+        armTimers.push(callback);
+        return -1;
+      }
+      return windowSetTimeout(callback, delay, ...args);
+    };
+    let timeoutArm;
+    try {
+      timeoutArm = dropControl.armDropNextInboundEntityFrame(
+        { entity_type: "botster-workspaces.membership" },
+        { timeout_ms: armWindowMs }
+      );
+    } finally {
+      globalThis.window.setTimeout = windowSetTimeout;
+    }
     assert.equal(timeoutArm.ok, true);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(armTimers.length, 1, "exactly one arm timeout timer");
+    assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "armed");
+    armTimers[0]();
     assert.equal(dropControl.getDropNextInboundEntityFrameState().state, "timed_out");
 
     // closeDataChannel remains a separate reconnect control.
@@ -9881,21 +9907,42 @@ function fakeRouteBridge(sessionId, options = {}) {
 {
   const sessionId = "public-detach-positive-control-session";
   const wire = fakeRouteBridge(sessionId);
-  const plane = createHubTerminalDataPlane({
-    sessionId,
-    testHooks: { hydrationProgressBoundMs: 20 },
-    bridge: wire.bridge
-  });
-  const installs = bindGhostsnpInstaller(plane);
-  plane.subscribeOutput(() => undefined);
-  await waitForTestCondition(() => wire.streams.length === 1);
-  const frames = standardAttachFrames(wire.streams[0].subscriptionId);
-  await wire.streams[0].onEvent(frames[0]);
-  await wire.streams[0].onEvent(frames[1]);
-  await wire.streams[0].onEvent(frames[2]);
-  await waitForTestCondition(() => installs.length === 1);
+  // The hydration bound is a controlled timer: captured by its distinctive delay so the test can
+  // fire it after detach, the exact point where a live plane would recover.
+  const hydrationBoundMs = 7_919;
+  const hydrationTimers = [];
+  const globalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (delay === hydrationBoundMs) {
+      hydrationTimers.push(callback);
+      return globalSetTimeout(() => undefined, 0);
+    }
+    return globalSetTimeout(callback, delay, ...args);
+  };
+  let plane;
+  let installs;
+  try {
+    plane = createHubTerminalDataPlane({
+      sessionId,
+      testHooks: { hydrationProgressBoundMs: hydrationBoundMs },
+      bridge: wire.bridge
+    });
+    installs = bindGhostsnpInstaller(plane);
+    plane.subscribeOutput(() => undefined);
+    await waitForTestCondition(() => wire.streams.length === 1);
+    const frames = standardAttachFrames(wire.streams[0].subscriptionId);
+    await wire.streams[0].onEvent(frames[0]);
+    await wire.streams[0].onEvent(frames[1]);
+    await wire.streams[0].onEvent(frames[2]);
+    await waitForTestCondition(() => installs.length === 1);
+  } finally {
+    globalThis.setTimeout = globalSetTimeout;
+  }
+  assert.ok(hydrationTimers.length >= 1, "the stalled hydration armed its progress bound");
   await plane.detach();
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Fire every captured bound after detach: a detached plane must not recover the route.
+  for (const fire of hydrationTimers) fire();
+  await flushMicrotasks();
   assert.equal(wire.detachRequests.length, 1);
   assert.equal(wire.detachRequests[0].subscription_id, wire.streams[0].subscriptionId);
   assert.equal(wire.streams.length, 1, "a detached plane does not recover a stalled route");
@@ -16016,10 +16063,13 @@ async function startPackageServerRuntime({
   serverProcess.stderr.setEncoding("utf8");
   serverProcess.stdout.on("data", (chunk) => {
     stdout += chunk;
+    testProgress.notify();
   });
   serverProcess.stderr.on("data", (chunk) => {
     stderr += chunk;
+    testProgress.notify();
   });
+  serverProcess.once("exit", () => testProgress.notify());
 
   if (occupiedPort) {
     const [code] = await once(serverProcess, "exit");
@@ -16037,14 +16087,19 @@ async function startPackageServerRuntime({
     return { code, stdout, stderr, launchResultPublished };
   }
 
-  const origin = port === undefined
-    ? (await readLaunchResult(launchResultPath)).local_url
-    : `http://127.0.0.1:${port}`;
-  await waitForHttpOk(`${origin}/health`, () => {
+  // Readiness is the server's own "listening" line, printed in its listen callback after the
+  // launch result is written: no health polling.
+  const listeningLine = /botster-web local package server listening at (http:\/\/[^\s]+)\/request/;
+  await waitForTestCondition(() => {
     if (serverProcess.exitCode !== null) {
       throw new Error(`package server exited before readiness: stdout=${stdout} stderr=${stderr}`);
     }
-  });
+    return listeningLine.test(stdout);
+  }, { label: "package server listening line" });
+  const origin = stdout.match(listeningLine)[1];
+  if (port !== undefined) assert.equal(origin, `http://127.0.0.1:${port}`);
+  const readiness = await fetch(`${origin}/health`);
+  assert.equal(readiness.ok, true, `package server health after its listening line: ${readiness.status}`);
 
   return {
     origin,
@@ -16063,18 +16118,9 @@ async function startPackageServerRuntime({
   };
 }
 
+/** The server writes its launch result before printing its listening line, so it is present. */
 async function readLaunchResult(path) {
-  const deadline = Date.now() + 2_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      return JSON.parse(await readFile(path, "utf8"));
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  throw lastError ?? new Error("timed out waiting for launch result");
+  return JSON.parse(await readFile(path, "utf8"));
 }
 
 async function findAvailablePort() {
@@ -16094,25 +16140,6 @@ async function findAvailablePort() {
   return port;
 }
 
-
-async function waitForHttpOk(url, assertStillRunning) {
-  const deadline = Date.now() + 5_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    assertStillRunning();
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-      lastError = new Error(`HTTP ${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw lastError ?? new Error(`timed out waiting for ${url}`);
-}
 
 async function compileTsModule(sourcePath, outputPath) {
   const source = await readFile(new URL(sourcePath, import.meta.url), "utf8");
