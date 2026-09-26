@@ -28,6 +28,7 @@ import {
   reconnectGenerationEvidence,
   assertCallerOwnedSharedSessionContract,
   classifyAltExitRendererWrites,
+  normalReaderRecovery,
   productionSessionScriptSource,
   receiverReadyOrErrorPattern,
   receiverReceiptPattern,
@@ -1746,10 +1747,10 @@ async function exercisePackageEvents(page, { forceGap }) {
     expectedSubscriptionId: subscriptionId,
     expectedOwner: packageEventsPackageName,
     expectedName: packageEventsEventName
-  }, { label: "emptySubjectSubscribe condition 1", deadlineMs: 15_000 });
+  }, { label: "exercisePackageEvents condition 1", deadlineMs: 15_000 });
 
   await waitForDom(page, () => page.evaluate(() =>
-    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.demandEntityFamily === "function", undefined), { label: "emptySubjectSubscribe condition 2", deadlineMs: 30_000 });
+    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.demandEntityFamily === "function", undefined), { label: "exercisePackageEvents condition 2", deadlineMs: 30_000 });
   await page.evaluate((family) =>
     globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.demandEntityFamily(family),
     packageEventsItemFamily
@@ -1769,7 +1770,7 @@ async function exercisePackageEvents(page, { forceGap }) {
     const text = `${toast.textContent ?? ""} ${toast.getAttribute("message") ?? ""}`;
     const color = toast.getAttribute("color") ?? "";
     return open && text.includes("Matching session notice") && color === "warning";
-  }, undefined), { label: "emptySubjectSubscribe condition 3", deadlineMs: 15_000 }).catch((error) => {
+  }, undefined), { label: "exercisePackageEvents condition 3", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`matching sample.notice never showed a transient notice: ${error.message}`);
   });
   const matchedNotice = await readPackageEventNotice(page);
@@ -1777,12 +1778,15 @@ async function exercisePackageEvents(page, { forceGap }) {
     throw new Error("matching sample.notice toast was not open");
   }
 
-  // Ordering sentinel: a matching event emitted after the mismatching one travels on the same
-  // ordered package-event channel, so once it arrives, a delivered mismatch would already be here.
+  // Ordering sentinel on one open subscription: a matching event emitted after the mismatching one
+  // travels on the same ordered package-event channel, so once it arrives, a delivered mismatch
+  // would already be here. The sentinel carries its own notice text.
+  const sentinelNonce = Date.now().toString(36);
+  const mismatchSentinel = `Matching session notice mismatch-sentinel-${sentinelNonce}`;
   const mismatchSince = await harnessEventCount(page);
   await emitPackageEventFixtureAction(page, packageEventsMismatchAction);
-  await emitPackageEventFixtureAction(page, packageEventsMatchAction);
-  await waitForPackageEventNotice(page, "Matching session notice", mismatchSince, "package-events sentinel after the mismatch");
+  await emitPackageEventFixtureAction(page, packageEventsMatchAction, { notice: mismatchSentinel });
+  await waitForPackageEventNotice(page, mismatchSentinel, mismatchSince, "package-events sentinel after the mismatch");
   const mismatchDeliveries = await packageEventNoticesSince(page, mismatchSince);
   if (mismatchDeliveries.includes("Mismatching session notice")) {
     throw new Error(`the Hub delivered a mismatching sample.notice: ${JSON.stringify(mismatchDeliveries)}`);
@@ -1792,13 +1796,14 @@ async function exercisePackageEvents(page, { forceGap }) {
     throw new Error("mismatching sample.notice showed a transient notice");
   }
 
+  const leaveSince = await harnessEventCount(page);
   await openHomeView(page);
   await waitForDom(page, () => page.evaluate(() => {
     const toast = globalThis.document.querySelector("[data-testid='package-event-notice']");
     if (!toast) return true;
     const attr = toast.getAttribute("is-open");
     return attr === "false" || (!toast.hasAttribute("is-open") && toast.isOpen !== true);
-  }, undefined), { label: "emptySubjectSubscribe condition 4", deadlineMs: 5_000 }).catch(() => {
+  }, undefined), { label: "exercisePackageEvents condition 4", deadlineMs: 5_000 }).catch(() => {
     throw new Error("package-event notice stayed open after leaving the session view");
   });
   const dashboardToastBefore = await readPackageEventNotice(page);
@@ -1813,26 +1818,47 @@ async function exercisePackageEvents(page, { forceGap }) {
   ) {
     throw new Error("leaving the session view subscribed with an empty subject set");
   }
+  // Release boundary: leaving the session view releases its package-event subscription; the
+  // Hub's answer to unsubscribe_events is the acknowledgement. After it, the Hub has no
+  // subscriber for the subject, so the dashboard emission has nowhere to go.
+  await waitForHarnessEvent(
+    page,
+    (since) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).some((entry) =>
+      entry.kind === "webrtc_response_assembly" && entry.payload?.request_type === "unsubscribe_events"
+    ),
+    leaveSince,
+    { label: "package-event subscription released after leaving the session view", deadlineMs: 15_000 }
+  );
+  const dashboardNotice = `Matching session notice dashboard-${sentinelNonce}`;
+  const dashboardSentinel = `Matching session notice dashboard-sentinel-${sentinelNonce}`;
   const dashboardSince = await harnessEventCount(page);
-  await emitPackageEventFixtureAction(page, packageEventsMatchAction);
-  // Ordering sentinel: return to the session view, which subscribes to the subject again, and
-  // emit once more. The package-event channel is ordered, so once the sentinel arrives, the
-  // dashboard emission would already have arrived if the Hub had delivered it.
+  await emitPackageEventFixtureAction(page, packageEventsMatchAction, { notice: dashboardNotice });
+  // Admission boundary: the session view subscribes again; its package-event channel is ready
+  // before the sentinel is emitted, and the sentinel carries its own notice text.
+  const remountSince = await harnessEventCount(page);
   await openSessionTerminal(page, productionSessionId);
   await waitForTerminalSession(page, productionSessionId);
-  await emitPackageEventFixtureAction(page, packageEventsMatchAction);
-  await waitForPackageEventNotice(page, "Matching session notice", dashboardSince, "package-events sentinel after the dashboard emission");
+  await waitForHarnessEvent(
+    page,
+    (since) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).some((entry) =>
+      entry.kind === "subscription_data_channel" && entry.payload?.class === "package_event" && entry.payload?.state === "ready"
+    ),
+    remountSince,
+    { label: "package-event subscription admitted after the remount", deadlineMs: 15_000 }
+  );
+  await emitPackageEventFixtureAction(page, packageEventsMatchAction, { notice: dashboardSentinel });
+  await waitForPackageEventNotice(page, dashboardSentinel, dashboardSince, "package-events sentinel after the dashboard emission");
   const dashboardDeliveries = await packageEventNoticesSince(page, dashboardSince);
-  if (dashboardDeliveries.length !== 1) {
+  if (dashboardDeliveries.includes(dashboardNotice) || dashboardDeliveries.length !== 1) {
     throw new Error(`the dashboard emission was delivered without a session subject: ${JSON.stringify(dashboardDeliveries)}`);
   }
-  const dashboardNoticesAfter = await page.evaluate((since) =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).filter(
-      (entry) => entry.kind === "package_event_notice"
-    ).length,
+  const dashboardNoticeTexts = await page.evaluate((since) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since)
+      .filter((entry) => entry.kind === "package_event_notice")
+      .map((entry) => entry.payload?.message ?? null),
   dashboardSince);
-  if (dashboardNoticesAfter !== 1) {
-    throw new Error(`dashboard view showed a transient notice without a session subject: ${dashboardNoticesAfter} notices`);
+  if (dashboardNoticeTexts.some((text) => String(text).includes(dashboardNotice))) {
+    throw new Error(`dashboard view showed a transient notice without a session subject: ${JSON.stringify(dashboardNoticeTexts)}`);
   }
   await page.evaluate(async (family) => {
     const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
@@ -1840,7 +1866,7 @@ async function exercisePackageEvents(page, { forceGap }) {
     await harness.demandEntityFamily?.(family);
   }, packageEventsItemFamily);
   await waitForDom(page, () => page.evaluate((family) =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? []).length > 0, packageEventsItemFamily), { label: "dashboardSubscribeAfterLeave condition 1", deadlineMs: 15_000 }).catch((error) => {
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? []).length > 0, packageEventsItemFamily), { label: "exercisePackageEvents condition 5", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`durable notice item was not visible after emit: ${error.message}`);
   });
 
@@ -1861,7 +1887,7 @@ async function exercisePackageEvents(page, { forceGap }) {
     await emitPackageEventFixtureAction(page, packageEventsBurstAction, { count: 20 });
     await waitForHarnessEvent(page, (prior) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
         (entry) => entry.kind === "daemon_event" && (entry.payload?.type === "event_gap" || entry.type === "event_gap")
-      ).length > prior, beforeGap, { label: "dashboardSubscribeAfterLeave condition 2", deadlineMs: 15_000 }).catch(() => {
+      ).length > prior, beforeGap, { label: "exercisePackageEvents condition 6", deadlineMs: 15_000 }).catch(() => {
       throw new Error("forced-gap lane observed no event_gap");
     });
     const afterItems = await page.evaluate((family) =>
@@ -1912,7 +1938,7 @@ async function exercisePackageEvents(page, { forceGap }) {
     console.log(`package-events closed-channel unix emit skipped: ${error instanceof Error ? error.message : String(error)}`);
   }
   await waitForHarnessEvent(page, ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before, { before: openEventsBefore }, { label: "dashboardSubscribeAfterLeave condition 3", deadlineMs: 20_000 }).catch((error) => {
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before, { before: openEventsBefore }, { label: "exercisePackageEvents condition 7", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(`package-events reconnect never reopened the data channel: ${error.message}`);
   });
   const subscriptionReconnect = await waitForSubscriptionChannelReconnect(
@@ -1945,7 +1971,7 @@ async function exercisePackageEvents(page, { forceGap }) {
       packageEventsItemFamily
     );
     await waitForDom(page, () => page.evaluate((family) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? []).length > 0, packageEventsItemFamily), { label: "dashboardSubscribeAfterLeave condition 4", deadlineMs: 15_000 }).catch((error) => {
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? []).length > 0, packageEventsItemFamily), { label: "exercisePackageEvents condition 8", deadlineMs: 15_000 }).catch((error) => {
       throw new Error(`durable notice item missing after reconnect: ${error.message}`);
     });
   }
@@ -2023,7 +2049,7 @@ async function exercisePackageEvents(page, { forceGap }) {
     const ids = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? [])
       .map((record) => record.id);
     return ids.some((id) => !priorIds.includes(id));
-  }, { priorIds: preFloodQuestionIds, family: packageEventsItemFamily }), { label: "dashboardSubscribeAfterLeave condition 5", deadlineMs: 15_000 }).catch((error) => {
+  }, { priorIds: preFloodQuestionIds, family: packageEventsItemFamily }), { label: "exercisePackageEvents condition 9", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`entity reconciliation exceeded 15000ms during flood: ${error.message}`);
   });
   const entityMs = Date.now() - entityStarted;
@@ -3952,7 +3978,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
         .map((record) => record.id)
         .filter((id) => ids.includes(id));
       return remaining.length === 0 ? [] : null;
-    }, { ids: seededSessions }), { label: "cleanupSeededSessions condition 1", deadlineMs: 15_000 })
+    }, { ids: seededSessions }), { label: "exerciseWorkspacesEntityOptionsMembershipReactive condition 1", deadlineMs: 15_000 })
       .catch(async () => {
         const list = await page.evaluate(() => {
           const fn = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities;
@@ -3974,7 +4000,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
         .map((record) => record.id ?? record.session_uuid)
         .filter((id) => ids.includes(id));
       return remaining.length === 0 ? [] : null;
-    }, { ids: seededSessions }), { label: "cleanupSeededSessions condition 2", deadlineMs: 15_000 })
+    }, { ids: seededSessions }), { label: "exerciseWorkspacesEntityOptionsMembershipReactive condition 2", deadlineMs: 15_000 })
       .catch(async () => page.evaluate(({ ids }) => {
         const list = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities;
         if (typeof list !== "function") return null;
@@ -4152,7 +4178,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     }, {
       formId: `botster-workspaces-add-form-${state.workspaceId}`,
       expected: sessionA
-    }), { label: "cleanupSeededSessions condition 3", deadlineMs: 45_000 }).catch(async (error) => {
+    }), { label: "exerciseWorkspacesEntityOptionsMembershipReactive condition 3", deadlineMs: 45_000 }).catch(async (error) => {
       const wire = await membershipWireEvidence();
       throw new Error(
         `${stage}: warmup claim A never settled P1 membership/exclusion; wire=${JSON.stringify(wire)}: ${error.message}`
@@ -4209,7 +4235,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
         generation: drop.payload.generation,
         drop_state: state
       };
-    }, undefined), { label: "cleanupSeededSessions condition 4", deadlineMs: 30_000 }).catch(async (error) => {
+    }, undefined), { label: "exerciseWorkspacesEntityOptionsMembershipReactive condition 4", deadlineMs: 30_000 }).catch(async (error) => {
       const wire = await membershipWireEvidence();
       throw new Error(
         `${stage}: harness never dropped claim-B membership delta; wire=${JSON.stringify(wire)}: ${error.message}`
@@ -4336,7 +4362,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       baselineN: activeBaseline.client_baseline_n,
       droppedSeq: harnessDrop.dropped_snapshot_seq,
       dropSubscriptionId: harnessDrop.subscription_id
-    }), { label: "cleanupSeededSessions condition 5", deadlineMs: 45_000 }).catch(async (error) => {
+    }), { label: "exerciseWorkspacesEntityOptionsMembershipReactive condition 5", deadlineMs: 45_000 }).catch(async (error) => {
       const diagnostics = await page.evaluate(() => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
         return {
@@ -4440,7 +4466,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
           && !btn.hasAttribute("disabled")
           && !native?.disabled
           && !native?.hasAttribute?.("disabled");
-      }, { formId, actionId: addActionId }), { label: "cleanupSeededSessions condition 6", deadlineMs: 10_000 }).catch((error) => {
+      }, { formId, actionId: addActionId }), { label: "exerciseWorkspacesEntityOptionsMembershipReactive condition 6", deadlineMs: 10_000 }).catch((error) => {
         throw new Error(`${stage}: ablation did not restore valid Add control state: ${error.message}`);
       });
       await waitForDom(page, { locator: formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`), state: "actionable" }, { label: "formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`) before click" });
@@ -4490,7 +4516,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       actionId: addActionId,
       formId,
       ablate: ablateStaleSubmit
-    }), { label: "cleanupSeededSessions condition 7", deadlineMs: 10_000 }).catch((error) => {
+    }), { label: "exerciseWorkspacesEntityOptionsMembershipReactive condition 7", deadlineMs: 10_000 }).catch((error) => {
       throw new Error(`${stage}: production Add click/dispatch path never completed: ${error.message}`);
     });
 
@@ -4536,7 +4562,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
             || values["botster-workspaces-add-session-id-advanced"] === args.sessionId;
         });
         return found.length > 0 ? found : null;
-      }, staleAddSessionArgs, { label: "cleanupSeededSessions condition 8", deadlineMs: 15_000 }).catch((error) => {
+      }, staleAddSessionArgs, { label: "exerciseWorkspacesEntityOptionsMembershipReactive condition 8", deadlineMs: 15_000 }).catch((error) => {
         if (ablateStaleSubmit) {
           throw new Error(
             `${stage}: ablation restored stale dispatch but real action collector emitted no add_session: ${error.message}`
@@ -5055,7 +5081,7 @@ async function waitForPackageEffectiveConfiguration(page, packageName, expectedV
         }
         return value;
       }
-    }, { nextPackageName: packageName, nextExpectedValues: expectedValues }, { label: "waitForPackageEffectiveConfiguration condition 1", deadlineMs: 15_000 }).catch(async (error) => {
+    }, { nextPackageName: packageName, nextExpectedValues: expectedValues }, { label: "normalizeJson condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observedConfigurations = await page.evaluate((nextPackageName) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .flatMap((entry) => {
@@ -7069,255 +7095,195 @@ async function proveByteFaithfulLiveTerminal(page) {
 }
 
 /**
+ * Opens a proof stream in the page: spawns `command` as `sessionId`, streams its route, and
+ * records every frame into an observed log at harness.proofStreams[name]. With `holdOutput`, the
+ * handler holds on the first OUTPUT frame until release(). Returns { ok, label } or the failure.
+ */
+async function openProofStream(page, name, sessionId, command, { holdOutput = false } = {}) {
+  return page.evaluate(async ({ proofName, floodSessionId, floodCommand, hold }) => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    const control = harness?.transportControl;
+    const decode = harness?.decodeTerminalBody;
+    if (!control?.request || !control.streamTerminal || typeof decode !== "function") {
+      return { ok: false, reason: "transportControl or decodeTerminalBody missing" };
+    }
+    const spawn = await control.request({ type: "spawn", session_id: floodSessionId, command: floodCommand });
+    if (spawn?.error) return { ok: false, reason: "flood session spawn failed", spawn };
+    let release = () => undefined;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    const frames = globalThis.__botsterWaits.observe([]);
+    const subscriptionId = `${floodSessionId}-sub`;
+    const stream = control.streamTerminal(floodSessionId, subscriptionId, (event) => {
+      if (!("body" in event)) {
+        frames.push({ kind: event.type, event });
+        return undefined;
+      }
+      const decoded = decode(event.body);
+      frames.push({
+        kind: decoded.kind,
+        state: decoded.kind === "attach_state" ? decoded.state : undefined,
+        from_epoch: decoded.from_epoch,
+        to_epoch: decoded.to_epoch,
+        bytes: decoded.kind === "output" ? decoded.payload?.byteLength ?? 0 : 0,
+        route: event.route,
+        generation: event.generation,
+        stream_epoch: event.streamEpoch
+      });
+      return hold && decoded.kind === "output" ? held : undefined;
+    });
+    harness.proofStreams ??= {};
+    harness.proofStreams[proofName] = { frames, stream, release, sessionId: floodSessionId, subscriptionId };
+    await stream.ready;
+    return { ok: true, label: stream.label, subscriptionId };
+  }, { proofName: name, floodSessionId: sessionId, floodCommand: command, hold: holdOutput });
+}
+
+/** Releases a held proof stream, abandons it, and shuts its session down; returns the shutdown reply. */
+async function closeProofStream(page, name) {
+  return page.evaluate(async (proofName) => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    const proof = harness?.proofStreams?.[proofName];
+    if (!proof) return null;
+    delete harness.proofStreams[proofName];
+    proof.release();
+    proof.stream.abandon();
+    return harness.transportControl.request({ type: "shutdown_session", session_id: proof.sessionId })
+      .catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+  }, name);
+}
+
+/**
  * Client inbound admission bound: a client whose terminal handler stops reading fills its own
  * inbound admission bound, closes that channel, and the route closes; the sibling session and
  * the Hub stay up. A Core-side slow WebRTC reader is not reproducible from the browser harness
  * (the browser keeps draining the transport); Core and TUI tests cover it.
  */
 async function proveClientInboundAdmissionBound(page, siblingSessionId) {
-  // Node owns the flood session's cleanup: it is registered before the page can spawn it, so
-  // any exit (an exception in the page, a rejected attach, a failed status) still shuts it down.
+  // Node owns the flood session's cleanup: it is registered before the page can spawn it.
   const floodSessionId = `web-flood-${Date.now().toString(36)}`;
   harnessSpawnedSessionIds.add(floodSessionId);
-  const proof = await page.evaluate(async ({ siblingSessionId: liveSessionId, floodSessionId }) => {
-    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
-    if (!control?.request || !control.streamTerminal) {
-      return { ok: false, reason: "transportControl missing request/streamTerminal" };
-    }
-    const floodSubscriptionId = `${floodSessionId}-sub`;
-    const events = globalThis.__botsterWaits.observe([]);
-    const spawn = await control.request({
-      type: "spawn",
-      session_id: floodSessionId,
-      command: "yes write-budget-stall"
-    });
-    if (spawn?.error) {
-      return { ok: false, reason: "slow-client flood session spawn failed", spawn };
-    }
-    let releaseHeldTerminalOutput;
-    let reportHeldTerminalOutput;
-    const heldTerminalOutput = new Promise((resolve) => {
-      releaseHeldTerminalOutput = resolve;
-    });
-    const heldTerminalOutputSeen = new Promise((resolve) => {
-      reportHeldTerminalOutput = resolve;
-    });
-    const decode = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.decodeTerminalBody;
-    if (typeof decode !== "function") {
-      return { ok: false, reason: "harness decodeTerminalBody missing" };
-    }
-    const stream = control.streamTerminal(floodSessionId, floodSubscriptionId, (event) => {
-      if ("body" in event) {
-        const decoded = decode(event.body);
-        events.push({
-          type: decoded.kind,
-          state: decoded.kind === "attach_state" ? decoded.state : undefined,
-          route: event.route,
-          generation: event.generation,
-          stream_epoch: event.streamEpoch
-        });
-        if (decoded.kind === "output") {
-          reportHeldTerminalOutput();
-          return heldTerminalOutput;
-        }
-        return undefined;
-      }
-      events.push(event);
-      return undefined;
-    });
-    await stream.ready;
-    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
-    const waits = globalThis.__botsterWaits;
-    // Every wait below re-checks only when a harness log or the proof's own event log grows.
-    const until = (check) => new Promise((resolve) => {
-      let stop = () => undefined;
-      const evaluate = () => {
-        const value = check();
-        if (value) {
-          stop();
-          resolve(value);
-        }
-      };
-      stop = waits.onChange(evaluate);
-      evaluate();
-    });
-    let deadlineTimer;
-    const expired = new Promise((resolve) => {
-      // timer: deadline — bounds the whole admission-bound proof; expiry fails the proof.
-      deadlineTimer = setTimeout(() => resolve("expired"), 20_000);
-    });
-    const within = (promise) => Promise.race([promise, expired]);
-    const closedEvent = () => events.find((event) =>
-      event.type === "terminal_subscription_closed" &&
-      event.reason === "core_adapter_closed" &&
-      event.session_id === floodSessionId &&
-      event.subscription_id === floodSubscriptionId
-    );
-    // The held handler stops the client's message queue. Frames then fill the client's own
+  let proof;
+  try {
+    const opened = await openProofStream(page, "admission", floodSessionId, "yes write-budget-stall", { holdOutput: true });
+    if (!opened.ok) throw new Error(`client inbound admission bound proof failed: ${JSON.stringify(opened)}`);
+    // The held handler stops the client's message queue; frames then fill the client's own
     // inbound admission bound, and the client closes the channel.
-    const overflowSeen = await within(heldTerminalOutputSeen.then(() => until(() =>
-      harness.events.find((entry) =>
-        entry.kind === "terminal_data_channel_admission_overflow" && entry.payload?.label === stream.label
-      )
-    )));
-    // The close event uses the same ordered channel as terminal output. Release the held
-    // output before this proof waits for the later close event.
-    releaseHeldTerminalOutput();
-    const closed = overflowSeen === "expired" ? undefined : await within(until(closedEvent));
-    clearTimeout(deadlineTimer);
-    {
-      if (closed && closed !== "expired") {
-        // Intended slow-client outcome: the route bound first and delivered frames, and only
-        // then did Core close it for backpressure. A close with no prior output is an attach failure.
-        const closeIndex = events.indexOf(closed);
-        const framesBeforeClose = events.slice(0, closeIndex).filter((entry) => entry.type !== "terminal_subscription_closed");
-        const frameKindsBeforeClose = framesBeforeClose.reduce((counts, entry) => {
-          counts[entry.type] = (counts[entry.type] ?? 0) + 1;
-          return counts;
-        }, {});
-        const attachedBeforeClose = framesBeforeClose.some((entry) => entry.type === "attach_state" && entry.state === "attached");
-        if (!attachedBeforeClose || !frameKindsBeforeClose.output) {
-          stream.abandon();
-          await control.request({ type: "shutdown_session", session_id: floodSessionId }).catch(() => undefined);
-          return { ok: false, reason: "slow-client route closed before it was attached and delivered output", closed, frameKindsBeforeClose };
-        }
-        const status = await control.request({ type: "status" });
-        const cleanup = await control.request({
-          type: "shutdown_session",
-          session_id: floodSessionId
-        });
-        stream.abandon();
-        if (cleanup.error) {
-          return { ok: false, reason: "slow-client session cleanup failed", cleanup };
-        }
-        return {
-          ok: true,
-          closed,
-          attachedBeforeClose,
-          frameKindsBeforeClose,
-          statusKind: status.kind,
-          cleanupKind: cleanup.kind,
-          siblingSessionId: liveSessionId,
-          overflow: overflowSeen.payload
-        };
-      }
-    }
-    stream.abandon();
-    // The flood session's worker outlives the Hub by design; shut it down on failure too.
-    const failedCleanup = await control.request({ type: "shutdown_session", session_id: floodSessionId }).catch(
-      (error) => ({ error: error instanceof Error ? error.message : String(error) })
+    const overflow = await waitForHarnessEvent(
+      page,
+      (label) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).find((entry) =>
+        entry.kind === "terminal_data_channel_admission_overflow" && entry.payload?.label === label
+      ) ?? false,
+      opened.label,
+      { label: "client inbound admission overflow", deadlineMs: 20_000 }
     );
-    return {
-      ok: false,
-      reason: overflowSeen === "expired"
-        ? "timed out waiting for the client inbound admission overflow"
-        : "timed out waiting for core_adapter_closed after the admission overflow",
-      spawn_kind: spawn?.kind ?? null,
-      cleanup_kind: failedCleanup?.kind ?? null,
-      cleanup_error: failedCleanup?.error ?? null,
-      events: events.slice(-8)
-    };
-  }, { siblingSessionId, floodSessionId });
-  if (!proof.ok) {
-    throw new Error(`client inbound admission bound proof failed: ${JSON.stringify(proof)}`);
+    // The close event uses the same ordered channel as terminal output: release the hold first.
+    await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.proofStreams.admission.release());
+    await waitForHarnessEvent(
+      page,
+      ({ sessionId, subscriptionId }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.proofStreams?.admission?.frames ?? [])
+        .some((frame) =>
+          frame.kind === "terminal_subscription_closed" &&
+          frame.event?.reason === "core_adapter_closed" &&
+          frame.event?.session_id === sessionId &&
+          frame.event?.subscription_id === subscriptionId
+        ),
+      { sessionId: floodSessionId, subscriptionId: opened.subscriptionId },
+      { label: "route close after the admission overflow", deadlineMs: 20_000 }
+    );
+    proof = await page.evaluate(async (liveSessionId) => {
+      const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+      const frames = harness.proofStreams.admission.frames;
+      const closeIndex = frames.findIndex((frame) => frame.kind === "terminal_subscription_closed");
+      const beforeClose = frames.slice(0, closeIndex);
+      const frameKindsBeforeClose = beforeClose.reduce((counts, frame) => {
+        counts[frame.kind] = (counts[frame.kind] ?? 0) + 1;
+        return counts;
+      }, {});
+      const status = await harness.transportControl.request({ type: "status" });
+      return {
+        closed: frames[closeIndex].event,
+        attachedBeforeClose: beforeClose.some((frame) => frame.kind === "attach_state" && frame.state === "attached"),
+        frameKindsBeforeClose,
+        statusKind: status.kind,
+        siblingSessionId: liveSessionId
+      };
+    }, siblingSessionId);
+    // Intended outcome: the route bound first and delivered frames, and only then closed.
+    if (!proof.attachedBeforeClose || !proof.frameKindsBeforeClose.output) {
+      throw new Error(`the admission-bound route closed before it was attached and delivered output: ${JSON.stringify(proof)}`);
+    }
+    proof.overflow = overflow.payload;
+  } finally {
+    const cleanup = await closeProofStream(page, "admission").catch((error) => ({ error: String(error) }));
+    if (cleanup && !cleanup.error) harnessSpawnedSessionIds.delete(floodSessionId);
+    if (proof) proof.cleanupKind = cleanup?.kind ?? null;
   }
-  // The proof shut the flood session down itself on success.
-  harnessSpawnedSessionIds.delete(floodSessionId);
+  proof.ok = true;
   await proveLiveTerminalAfterAttach(page, `sibling-still-live-${Date.now().toString(36)}`);
   recordProofNote("client_inbound_admission_bound", proof);
 }
 
 /**
- * A normally reading client attaches over WebRTC to a session that floods output. It must
- * reach ATTACHED, keep receiving live output for the whole observation window, and never be
- * closed. Core may answer egress overflow with ROUTE_RESYNC; every resync must be followed by a
- * fresh SNAPSHOT_READY, which the client treats as a screen replacement.
+ * A normally reading client attaches over WebRTC to a session that floods output. It must reach
+ * ATTACHED, then keep receiving output (8 MiB more) without being closed. Core may answer egress
+ * overflow with ROUTE_RESYNC; every resync must be recovered in its own epoch or superseded by a
+ * chained resync (normalReaderRecovery).
  */
 async function proveNormalReaderAttachToFloodingSession(page) {
-  // Node owns the flood session's cleanup: it is registered before the page can spawn it.
   const floodSessionId = `web-flood-reader-${Date.now().toString(36)}`;
   harnessSpawnedSessionIds.add(floodSessionId);
-  const proof = await page.evaluate(async (sessionId) => {
-    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
-    const decode = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.decodeTerminalBody;
-    if (!control?.request || !control.streamTerminal || typeof decode !== "function") {
-      return { ok: false, reason: "transportControl or decodeTerminalBody missing" };
-    }
-    const subscriptionId = `${sessionId}-sub`;
-    const spawn = await control.request({ type: "spawn", session_id: sessionId, command: "yes normal-reader-flood" });
-    if (spawn?.error) return { ok: false, reason: "flood session spawn failed", spawn };
-    const kinds = {};
-    const sequence = [];
-    let attached = false;
-    let outputBytes = 0;
-    let closed;
-    // Each received frame or close wakes the current wait; nothing is re-checked on a timer.
-    let wake = () => undefined;
-    const until = (check, timeoutMs) => new Promise((resolve) => {
-      // timer: deadline — bounds one wait of this proof; expiry ends the wait unmet.
-      const timer = setTimeout(() => resolve(false), timeoutMs);
-      wake = () => {
-        if (!check()) return;
-        clearTimeout(timer);
-        resolve(true);
-      };
-      wake();
-    });
-    const stream = control.streamTerminal(sessionId, subscriptionId, (event) => {
-      if (!("body" in event)) {
-        if (event.type === "terminal_subscription_closed") closed = event;
-        wake();
-        return undefined;
-      }
-      const decoded = decode(event.body);
-      kinds[decoded.kind] = (kinds[decoded.kind] ?? 0) + 1;
-      if (decoded.kind === "route_resync" || decoded.kind === "snapshot_ready") sequence.push(decoded.kind);
-      if (decoded.kind === "attach_state" && decoded.state === "attached") attached = true;
-      if (decoded.kind === "output") outputBytes += decoded.payload?.byteLength ?? 0;
-      wake();
-      return undefined;
-    });
-    const cleanup = async () => {
-      stream.abandon();
-      return control.request({ type: "shutdown_session", session_id: sessionId }).catch((error) => ({ error: String(error) }));
+  const progressBytes = 8 * 1024 * 1024;
+  let proof;
+  try {
+    const opened = await openProofStream(page, "normalReader", floodSessionId, "yes normal-reader-flood");
+    if (!opened.ok) throw new Error(`normal-reader flood attach proof failed: ${JSON.stringify(opened)}`);
+    const readerState = ({ minimumOutputFrames, targetBytes }) => {
+      const frames = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.proofStreams?.normalReader?.frames ?? [];
+      const closed = frames.find((frame) => frame.kind === "terminal_subscription_closed");
+      if (closed) return { closed: closed.event };
+      const attached = frames.some((frame) => frame.kind === "attach_state" && frame.state === "attached");
+      const outputs = frames.filter((frame) => frame.kind === "output");
+      const bytes = outputs.reduce((total, frame) => total + frame.bytes, 0);
+      if (!attached || outputs.length < minimumOutputFrames || bytes < targetBytes) return false;
+      return { output_frames: outputs.length, output_bytes: bytes };
     };
-    try {
-      await stream.ready;
-    } catch (error) {
-      await cleanup();
-      return { ok: false, reason: `attach failed: ${error instanceof Error ? error.message : String(error)}`, kinds };
-    }
-    await until(() => (attached && (kinds.output ?? 0) >= 20) || Boolean(closed), 20_000);
-    const outputAtAttach = kinds.output ?? 0;
-    // Observation window: the route must stay open for the full 5 s and keep delivering output.
-    // A close ends the window early and fails the proof.
-    await until(() => Boolean(closed), 5_000);
-    const outputAfterHold = kinds.output ?? 0;
-    const cleanupResult = await cleanup();
-    // Every ROUTE_RESYNC must be followed by a fresh SNAPSHOT_READY (screen replacement).
-    const resyncsWithoutSnapshot = sequence.filter(
-      (kind, index) => kind === "route_resync" && !sequence.slice(index + 1).includes("snapshot_ready")
-    ).length;
-    const ok = attached && outputAtAttach >= 20 && outputAfterHold > outputAtAttach && !closed && resyncsWithoutSnapshot === 0;
-    return {
-      ok,
-      reason: ok ? null : "normal reader did not stay attached with live output",
-      attached,
-      closed: closed ?? null,
-      kinds,
-      route_resyncs: kinds.route_resync ?? 0,
-      resyncs_without_snapshot: resyncsWithoutSnapshot,
-      output_frames_at_attach: outputAtAttach,
-      output_frames_after_hold: outputAfterHold,
-      output_bytes: outputBytes,
-      cleanup_error: cleanupResult?.error ?? null
+    const atAttach = await waitForHarnessEvent(page, readerState, { minimumOutputFrames: 20, targetBytes: 0 }, {
+      label: "normal reader attached with output",
+      deadlineMs: 20_000
+    });
+    if (atAttach.closed) throw new Error(`the normal reader was closed before it attached: ${JSON.stringify(atAttach)}`);
+    // Positive progress, not a quiet window: the route keeps delivering output without a close.
+    const progressed = await waitForHarnessEvent(
+      page,
+      readerState,
+      { minimumOutputFrames: atAttach.output_frames + 1, targetBytes: atAttach.output_bytes + progressBytes },
+      { label: "normal reader keeps receiving output", deadlineMs: 30_000 }
+    );
+    if (progressed.closed) throw new Error(`the normal reader was closed during the flood: ${JSON.stringify(progressed)}`);
+    const frames = await page.evaluate(() =>
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.proofStreams.normalReader.frames
+        .filter((frame) => frame.kind !== "output")
+        .map((frame) => ({ ...frame, event: undefined }))
+    );
+    const recovery = normalReaderRecovery(frames);
+    proof = {
+      output_frames_at_attach: atAttach.output_frames,
+      output_bytes_at_attach: atAttach.output_bytes,
+      output_frames_after: progressed.output_frames,
+      output_bytes_after: progressed.output_bytes,
+      ...recovery
     };
-  }, floodSessionId);
-  if (!proof.ok) {
-    throw new Error(`normal-reader flood attach proof failed: ${JSON.stringify(proof)}`);
+    if (recovery.unrecovered.length > 0 || recovery.foreign_frames > 0) {
+      throw new Error(`normal-reader route recovery failed: ${JSON.stringify(proof)}`);
+    }
+  } finally {
+    const cleanup = await closeProofStream(page, "normalReader").catch((error) => ({ error: String(error) }));
+    if (cleanup && !cleanup.error) harnessSpawnedSessionIds.delete(floodSessionId);
+    if (proof) proof.cleanupKind = cleanup?.kind ?? null;
   }
-  // The proof shut the flood session down itself on success.
-  if (!proof.cleanup_error) harnessSpawnedSessionIds.delete(floodSessionId);
+  proof.ok = true;
   console.log(`normal-reader-flood-attach passed ${JSON.stringify(proof)}`);
   recordProofNote("normal_reader_flood_attach", proof);
 }
@@ -7527,7 +7493,7 @@ async function proveMountedClipboardPaste(page) {
         .filter((entry) => entry.kind === "paste_outcome")
         .slice(beforeCount)
         .find((entry) => outcomes.includes(entry.payload?.outcome) && entry.payload?.requestedBytes === bytes)
-        ?.payload ?? null, { beforeCount: outcomesBefore, bytes: expectedBytes, outcomes }, { label: "waitForPasteOutcome condition 1", deadlineMs: 45_000 }).catch(async (error) => {
+        ?.payload ?? null, { beforeCount: outcomesBefore, bytes: expectedBytes, outcomes }, { label: "proveMountedClipboardPaste condition 2", deadlineMs: 45_000 }).catch(async (error) => {
     throw new Error(`mounted clipboard paste did not reach ${label}: ${error.message}; telemetry=${JSON.stringify(await pasteTelemetry())}`);
   });
   // The payload ends in a newline. Without bracketed paste, Core rejects it as unsafe with zero
@@ -7556,7 +7522,7 @@ async function proveMountedClipboardPaste(page) {
         .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
         .join("");
       return text.includes(marker);
-    }, { since: outputBefore, marker: "botster-web-production-large-paste-ok" }, { label: "waitForPasteOutcome condition 2", deadlineMs: 45_000 }).catch(async (error) => {
+    }, { since: outputBefore, marker: "botster-web-production-large-paste-ok" }, { label: "proveMountedClipboardPaste condition 3", deadlineMs: 45_000 }).catch(async (error) => {
     // Show what the shell actually echoed, so input contamination is visible, not inferred.
     const output = await daemonTerminalOutputSince(page, outputBefore);
     const echoes = [...output.matchAll(/botster-web-production-echo:([^\r\n]{0,120})/g)].map((match) => match[1]);
@@ -7586,7 +7552,7 @@ async function proveMountedClipboardPaste(page) {
         .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
         .join("");
       return text.indexOf("botster-web-production-large-paste-ok") < text.indexOf(marker);
-    }, { since: outputBefore, marker: "botster-web-production-echo:after-paste" }, { label: "waitForPasteOutcome condition 3", deadlineMs: 45_000 }).catch((error) => {
+    }, { since: outputBefore, marker: "botster-web-production-echo:after-paste" }, { label: "proveMountedClipboardPaste condition 4", deadlineMs: 45_000 }).catch((error) => {
     throw new Error(`key typed after the mounted paste was not echoed after the paste acknowledgement: ${error.message}`);
   });
   recordProofNote("mounted_clipboard_paste", {
@@ -7636,7 +7602,7 @@ async function proveLivePasteCases(page) {
             .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
             .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
             .join("")
-        ), { from: since, expected: source }, { label: "waitForLine condition 1", deadlineMs: 45_000 }).catch(async (error) => {
+        ), { from: since, expected: source }, { label: "proveLivePasteCases condition 1", deadlineMs: 45_000 }).catch(async (error) => {
       const tail = (await daemonOutputSince(since)).slice(-400);
       throw new Error(`${label}: complete line /${source}/ not observed: ${error.message}; output tail=${JSON.stringify(tail)}`);
     });
@@ -7647,7 +7613,7 @@ async function proveLivePasteCases(page) {
   // Dispatch never clicks: focus and the strict clean-input flush happen before the receiver
   // is armed, so no pointer input can land between arming and the paste bytes.
   const dispatchClipboardPaste = async (text) => {
-    await waitForDom(page, () => page.evaluate(() => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement, undefined), { label: "dispatchClipboardPaste condition 1", deadlineMs: 5_000 }).catch((error) => {
+    await waitForDom(page, () => page.evaluate(() => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement, undefined), { label: "proveLivePasteCases condition 2", deadlineMs: 5_000 }).catch((error) => {
       throw new Error(`paste dispatch: Restty textarea is not focused: ${error.message}`);
     });
     return page.evaluate((data) => {
@@ -7661,7 +7627,7 @@ async function proveLivePasteCases(page) {
   };
   const nextPasteOutcome = async (beforeCount, label) => {
     await waitForHarnessEvent(page, ({ before }) =>
-        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "paste_outcome").length > before, { before: beforeCount }, { label: "nextPasteOutcome condition 1", deadlineMs: 45_000 }).catch(async (error) => {
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "paste_outcome").length > before, { before: beforeCount }, { label: "proveLivePasteCases condition 3", deadlineMs: 45_000 }).catch(async (error) => {
       const telemetry = await page.evaluate(() =>
         (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
           .filter((entry) => ["paste", "paste_outcome", "input_sent", "clipboard_paste", "paste_routed", "input_result", "modes", "restty_input_uncaptured"].includes(entry.kind))
@@ -9133,7 +9099,7 @@ async function waitForAutomaticTerminalRestore(page) {
         cols: modeFlags.payload?.cols ?? null,
         message: status.payload.message
       };
-    }, undefined, { label: "hydrateDebug condition 1", deadlineMs: 20_000 }).catch(async (error) => {
+    }, undefined, { label: "waitForAutomaticTerminalRestore condition 1", deadlineMs: 20_000 }).catch(async (error) => {
     throw new Error(
       `timed out waiting for automatic snapshot restoration: ${error.message}; hydrate_debug=${JSON.stringify(await hydrateDebug())}`,
       { cause: error }

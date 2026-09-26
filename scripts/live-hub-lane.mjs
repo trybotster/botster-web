@@ -178,6 +178,7 @@ export async function waitForHttpOk(url, exitMessage) {
     } catch (error) {
       lastError = error;
     }
+    // timer-exception: app-lifecycle-entity — polls until the Hub app lifecycle entity lands (README Known issues).
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw lastError ?? new Error(`timed out waiting for ${url}`);
@@ -197,6 +198,7 @@ export async function waitForHtmlShell(url) {
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
     }
+    // timer-exception: app-lifecycle-entity — polls until the Hub app lifecycle entity lands (README Known issues).
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
   throw lastError ?? new Error(`timed out waiting for packaged UI shell from ${url}`);
@@ -216,6 +218,7 @@ export async function waitForPackageAppUrl(socketPath) {
     if (app?.launch_target?.local_url) {
       return app.launch_target.local_url;
     }
+    // timer-exception: app-lifecycle-entity — polls until the Hub app lifecycle entity lands (README Known issues).
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(

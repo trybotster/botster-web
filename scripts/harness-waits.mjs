@@ -189,8 +189,8 @@ export async function waitForDom(page, check, { label, deadlineMs = 15_000 } = {
   if (typeof target?.page === "function") page = target.page();
   const token = `wait-${(waitTokens += 1)}`;
   let timer;
-  // timer: deadline — bounds one DOM wait; expiry fails the wait with its label.
   const expired = new Promise((_, reject) => {
+    // timer: deadline — bounds one DOM wait; expiry fails the wait with its label.
     timer = setTimeout(
       () => reject(new Error(`timed out after ${deadlineMs} ms waiting for ${label ?? "DOM condition"}`)),
       deadlineMs

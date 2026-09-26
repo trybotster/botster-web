@@ -144,7 +144,8 @@ async function readTtyState(label) {
 /**
  * Waits for the OS exit events of `pids` (kqueue EVFILT_PROC NOTE_EXIT through the system
  * Python) and returns the pids still alive at the bound. A pid that is already gone when it is
- * registered counts as exited. The kqueue wait itself is the deadline; nothing polls.
+ * registered (ESRCH) counts as exited; any other registration error throws. The kqueue wait
+ * itself is the deadline; nothing polls.
  */
 function waitForAllDead(pids, boundMs) {
   if (pids.length === 0) return Promise.resolve([]);
@@ -156,7 +157,8 @@ function waitForAllDead(pids, boundMs) {
     "    try:",
     "        kq.control([select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT)], 0, 0)",
     "        pending.add(pid)",
-    "    except OSError:",
+    // Only ESRCH (the process is already gone) counts as exited; any other error fails the wait.
+    "    except ProcessLookupError:",
     "        pass",
     "deadline = time.monotonic() + bound",
     "while pending:",

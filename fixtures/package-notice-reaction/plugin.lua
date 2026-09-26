@@ -85,7 +85,12 @@ local function handle_action(request)
   local payload = request.payload or {}
 
   if action_id == "package-notice-reaction.emit_match" then
-    local token = emit_notice(MATCH_SUBJECT, "Matching session notice")
+    -- A caller-chosen notice text gives each emission its own identity in the proof.
+    local notice = "Matching session notice"
+    if type(payload.notice) == "string" and payload.notice ~= "" then
+      notice = payload.notice
+    end
+    local token = emit_notice(MATCH_SUBJECT, notice)
     return {
       request_id = request.request_id,
       surface_id = request.surface_id,

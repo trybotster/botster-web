@@ -391,6 +391,25 @@ health:    `${local_url}/health`
 
 The package server binds an ephemeral loopback port by default. Set `BOTSTER_WEB_PACKAGE_SERVER_PORT` for an explicit generic override. Once the actual `local_url` is known, it requests an initial grant from the injected Hub connection and requires Hub to bind that grant to the exact origin before serving HTML. It fails closed when the descriptor or grant is missing or malformed, and `/request` rejects daemon operations other than `issue_local_webrtc_bootstrap` and `local_webrtc_signal`.
 
+## Known issues
+
+- **App-lifecycle polls (timer guard exception `app-lifecycle-entity`, 5 sites).**
+  `waitForHttpOk`, `waitForHtmlShell`, and `waitForPackageAppUrl` in
+  `scripts/live-hub-lane.mjs`, and `waitForPackageAppUrl` and `waitForHttpOk` in
+  `scripts/live-shared-session-coordinator.mjs`, still poll `list_apps` and the
+  package server's health or HTML shell every 100 ms. The Hub has no app lifecycle
+  entity to subscribe to yet. Each site carries a
+  `// timer-exception: app-lifecycle-entity` marker. `scripts/check-timer-markers.mjs`
+  accepts only that named exception, at exactly 5 sites. When the Hub app lifecycle
+  entity lands, one follow-up commit switches these sites to it and removes the
+  exception.
+
+The timer guard (`npm test` runs `scripts/check-timer-markers.mjs`) fails on any
+timer call without a `// timer: <deadline|backoff|rate-limit|ui-lifetime|measurement-window|os-no-event> — <reason>`
+marker on the same or the previous line, and on any polling library wait
+(`waitForTimeout`, `waitForFunction`, locator `waitFor`, `waitForURL`, `networkidle`).
+Browser harness waits use the two event-driven helpers in `scripts/harness-waits.mjs`.
+
 ## License
 
 botster-web is distributed under the [O'Saasy License Agreement](LICENSE).

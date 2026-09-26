@@ -47,6 +47,7 @@ import {
   extractTerminalSessionIdsFromMarkup,
   formatWorkspacesLifecycleFailure,
   harnessEventMatches,
+  normalReaderRecovery,
   isDaemonHostCloseEntry,
   isDaemonTerminalBodyEntry,
   selectHostCloseEvents,
@@ -2490,6 +2491,23 @@ assert.match(liveProtocolHarnessScript, /callTerminalControl\(page, "focus"\)/);
 assert.match(liveHubLaneScript, /args\.push\("--ready-fd", "3"\)/);
 assert.match(liveHubLaneScript, /export function waitForHubReady\(child/);
 assert.doesNotMatch(liveHubLaneScript, /export async function waitForSocket/);
+// Normal-reader recovery rule: a resync to E is recovered by a later READY in E or superseded
+// by a later resync from E; the last resync must be recovered; one route and generation only.
+{
+  const frame = (kind, epoch, extra = {}) => ({ kind, route: "r", generation: 1, stream_epoch: epoch, ...extra });
+  const resync = (from, to) => frame("route_resync", to, { from_epoch: from, to_epoch: to });
+  const unrecovered = (frames) => normalReaderRecovery(frames).unrecovered.map((entry) => entry.to_epoch);
+  assert.deepEqual(unrecovered([frame("output", 0)]), [], "no resync, nothing to recover");
+  assert.deepEqual(unrecovered([resync(0, 1), frame("snapshot_ready", 1)]), []);
+  assert.deepEqual(unrecovered([resync(0, 1), resync(1, 2), frame("snapshot_ready", 2)]), [], "a chained resync supersedes its predecessor");
+  assert.deepEqual(unrecovered([resync(0, 1), resync(1, 2)]), [2], "the last resync must be recovered");
+  assert.deepEqual(unrecovered([resync(0, 1), frame("snapshot_ready", 0)]), [1], "READY in another epoch does not recover");
+  assert.deepEqual(unrecovered([frame("snapshot_ready", 1), resync(0, 1)]), [1], "READY before the resync does not recover");
+  assert.deepEqual(unrecovered([resync(0, 1), resync(5, 6), frame("snapshot_ready", 6)]), [1], "an unchained later resync does not supersede");
+  assert.equal(normalReaderRecovery([frame("output", 0), { ...frame("output", 0), route: "other" }]).foreign_frames, 1);
+  assert.equal(normalReaderRecovery([resync(0, 1), resync(1, 2), frame("snapshot_ready", 2)]).route_resyncs, 2);
+}
+
 // Harness waits are event-driven: the page support is installed before any page script, and
 // no library polling wait (waitForFunction, waitForTimeout, locator waitFor, waitForURL) remains.
 assert.match(liveHubLaneScript, /addInitScript\(\{ content: harnessWaitSupportScript \}\)/);
@@ -10297,7 +10315,14 @@ assert.match(hubTerminalDataPlane, /DaemonTerminalStreamSubscription|abandon\(\)
 assert.match(hubTransport, /abandon\(\):\s*void|interface DaemonTerminalStreamSubscription/);
 assert.match(liveProtocolHarnessScript, /requiredSubscriptionId/);
 // Node registers the flood session for cleanup before the page can spawn it, so every exit path shuts it down.
-assert.match(liveProtocolHarnessScript, /harnessSpawnedSessionIds\.add\(floodSessionId\);\n {2}const proof = await page\.evaluate/);
+// Both flood proofs register their session for Node-owned cleanup before the page can spawn it,
+// and always close the proof stream in finally.
+for (const proofName of ["proveClientInboundAdmissionBound", "proveNormalReaderAttachToFloodingSession"]) {
+  const proofSource = liveProtocolHarnessScript.slice(liveProtocolHarnessScript.indexOf(`async function ${proofName}(`));
+  const registered = proofSource.indexOf("harnessSpawnedSessionIds.add(floodSessionId);");
+  assert.ok(registered >= 0 && registered < proofSource.indexOf("openProofStream("), `${proofName} registers cleanup before the spawn`);
+  assert.match(proofSource.slice(0, proofSource.indexOf("\n}\n")), /} finally {\n\s+const cleanup = await closeProofStream\(/, `${proofName} closes its stream in finally`);
+}
 assert.doesNotMatch(liveProtocolHarnessScript, /disableTerminalTransportRecovery/);
 assert.match(liveProtocolHarnessScript, /entry\.kind !== "renderer_write"/);
 assert.doesNotMatch(hubTerminalDataPlane, /holdLiveSnapshotInstallIfArmed|armSnapshotInstallHold|ablateCancelDetach/);

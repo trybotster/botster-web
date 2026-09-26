@@ -284,6 +284,7 @@ async function waitForPackageAppUrl(path) {
     );
     lastApp = app;
     if (app?.launch_target?.local_url) return app.launch_target.local_url;
+    // timer-exception: app-lifecycle-entity — polls until the Hub app lifecycle entity lands (README Known issues).
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
   throw new Error(`timed out waiting for botster-web/web-client local_url; app=${JSON.stringify(lastApp)}`);
@@ -301,6 +302,7 @@ async function waitForHttpOk(appUrl) {
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
     }
+    // timer-exception: app-lifecycle-entity — polls until the Hub app lifecycle entity lands (README Known issues).
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
   throw lastError ?? new Error(`timed out waiting for ${health}`);

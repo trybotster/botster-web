@@ -235,7 +235,7 @@ try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     await installLiveHarnessPageHooks(page, { boundedTerminalObserver: true });
     await page.goto(appUrl, { waitUntil: "domcontentloaded" });
-    await step(`${name}-transport`, { page }, () => waitForDom(page, () => page.evaluate(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl), undefined), { label: "openPeer condition 1", deadlineMs: STEP_MS }));
+    await step(`${name}-transport`, { page }, () => waitForDom(page, () => page.evaluate(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl), undefined), { label: "oneRow condition 1", deadlineMs: STEP_MS }));
     await step(`${name}-connection`, { page }, () => waitForPeerReadiness(page, name));
     await step(`${name}-dashboard-session`, { page }, () => waitForDashboardSessionRow(page, name));
     await step(`${name}-open-session`, { page }, async () => {
@@ -518,7 +518,7 @@ try {
     }
   } else {
     await step("ws5-close-data-channel", contextA(), async () => {
-      await waitForDom(peerA, () => peerA.evaluate(() => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function", undefined), { label: "waitForFreshAttachment condition 1", deadlineMs: STEP_MS });
+      await waitForDom(peerA, () => peerA.evaluate(() => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function", undefined), { label: "oneRow condition 2", deadlineMs: STEP_MS });
       const closed = await peerA.evaluate(() =>
         globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.closeDataChannel()
       );

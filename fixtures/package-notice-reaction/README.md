@@ -5,7 +5,8 @@ proof of descriptor-driven transient notices.
 
 The package declares one session-scoped notice reaction for `sample.notice`.
 Matching emits set `payload.subject` to the production session `web-prod`.
-Mismatching emits use a different subject. Web subscribes with the viewed
+Mismatching emits use a different subject. `emit_match` accepts an optional
+`payload.notice` text, so a proof can tell its emissions apart. Web subscribes with the viewed
 session subject and must not fall back to an empty subject set.
 
 Durable rows live on `package-notice-reaction.item` and are committed before

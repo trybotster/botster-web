@@ -1173,3 +1173,32 @@ export function packageRuntimeNavigation({ appUrl, currentUrl, mode }) {
   }
   throw new Error(`unsupported package runtime navigation mode ${JSON.stringify(mode)}`);
 }
+
+/**
+ * Route recovery check for the normal-reader flood proof. `frames` are the proof route's frames
+ * in arrival order: { kind, route, generation, stream_epoch, from_epoch?, to_epoch? }.
+ * Rule (the data plane's ROUTE_RESYNC contract: a resync is accepted only from the accepted
+ * epoch, and it abandons the partial hydration):
+ * - a ROUTE_RESYNC to epoch E is recovered by a later SNAPSHOT_READY in epoch E, or superseded
+ *   by a later ROUTE_RESYNC whose from_epoch is E;
+ * - the last ROUTE_RESYNC cannot be superseded, so it must be recovered;
+ * - every frame belongs to one route and one generation.
+ * Self-contained: the harness also runs it in the page by source.
+ */
+export function normalReaderRecovery(frames) {
+  const first = frames[0];
+  const foreign = frames.filter((frame) => frame.route !== first?.route || frame.generation !== first?.generation).length;
+  const unrecovered = [];
+  frames.forEach((frame, index) => {
+    if (frame.kind !== "route_resync") return;
+    const later = frames.slice(index + 1);
+    const recovered = later.some((next) => next.kind === "snapshot_ready" && next.stream_epoch === frame.to_epoch);
+    const superseded = later.some((next) => next.kind === "route_resync" && next.from_epoch === frame.to_epoch);
+    if (!recovered && !superseded) unrecovered.push({ index, from_epoch: frame.from_epoch, to_epoch: frame.to_epoch });
+  });
+  return {
+    route_resyncs: frames.filter((frame) => frame.kind === "route_resync").length,
+    unrecovered,
+    foreign_frames: foreign
+  };
+}
