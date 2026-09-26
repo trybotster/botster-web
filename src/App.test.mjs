@@ -126,6 +126,43 @@ import {
  */
 const fakeHubTerminalGenerations = new Map();
 
+/**
+ * Test progress notifier. Fakes and recorders call notify() when observable state changes; the
+ * shared wait helper re-checks its predicate only on a notification, never on a clock.
+ */
+const testProgress = (() => {
+  let waiters = [];
+  return {
+    notify() {
+      const current = waiters;
+      waiters = [];
+      for (const wake of current) wake();
+    },
+    next() {
+      return new Promise((resolve) => waiters.push(resolve));
+    }
+  };
+})();
+
+/** An array whose push() reports test progress, for state a test waits on. */
+function recorder(initial = []) {
+  const items = [...initial];
+  const push = items.push.bind(items);
+  // Non-enumerable, so a recorder still deep-equals a plain array.
+  Object.defineProperty(items, "push", {
+    value: (...values) => {
+      const length = push(...values);
+      testProgress.notify();
+      return length;
+    },
+    enumerable: false,
+    writable: true,
+    configurable: true
+  });
+  return items;
+}
+
+
 const hostForTests = "127.0.0.1";
 const activeHubSessionId = "test-hub-session";
 let nextTestResponseMessageId = 0;
@@ -5090,7 +5127,7 @@ assert.equal(
   "Package asset revision unknown"
 );
 const originalWindow = globalThis.window;
-const lifecycleEvents = [];
+const lifecycleEvents = recorder();
 const windowEventListeners = new Map();
 globalThis.window = {
   location: { origin: "http://127.0.0.1:41821" },
@@ -5159,7 +5196,7 @@ try {
   const dataChannels = [createFakeDataChannel(), createFakeDataChannel()];
   let nextPeerConnectionIndex = 0;
   const dataChannel = dataChannels[0];
-  const signalingRequests = [];
+  const signalingRequests = recorder();
   const refreshedBootstraps = [
     refreshedBootstrapFixture,
     {
@@ -5305,7 +5342,7 @@ try {
     entitySubscriptionIdGenerator: (_entityType, generation) =>
       `session-generation-${generation}-${++nextEntitySubscriptionId}`
   });
-  const receivedEntityFrames = [];
+  const receivedEntityFrames = recorder();
   const entitySubscription = entityClient.subscribeEntityFrames("session", (frame) => {
     receivedEntityFrames.push(frame);
   });
@@ -5597,7 +5634,7 @@ try {
     eventSubscriptionIdGenerator: (_spec, generation) =>
       `event-generation-${generation}-${++nextPackageEventSubscriptionId}`
   });
-  const receivedPackageEvents = [];
+  const receivedPackageEvents = recorder();
   const packageEventSubscription = packageEventClient.subscribePackageEvents(
     { owner: "package-notice-reaction", name: "sample.notice", subjects: ["web-prod"] },
     (event) => receivedPackageEvents.push(event)
@@ -6026,8 +6063,8 @@ try {
     entitySubscriptionIdGenerator: () => "sibling-entity-id",
     eventSubscriptionIdGenerator: () => "sibling-event-id"
   });
-  const siblingEntityFrames = [];
-  const siblingPackageEvents = [];
+  const siblingEntityFrames = recorder();
+  const siblingPackageEvents = recorder();
   const siblingEntity = eventSiblingClient.subscribeEntityFrames("session", (frame) => siblingEntityFrames.push(frame));
   const siblingEvents = eventSiblingClient.subscribePackageEvents(
     { owner: "package-notice-reaction", name: "sample.notice", subjects: ["web-prod"] },
@@ -6061,7 +6098,7 @@ try {
 
   // A terminal Attach timeout is terminal-owner local. The original control peer,
   // one sibling terminal, one entity subscription, and one event holder remain usable.
-  const siblingTerminalEvents = [];
+  const siblingTerminalEvents = recorder();
   const siblingTerminal = eventSiblingClient.streamTerminal(
     "sibling-terminal-session",
     "sibling-terminal-subscription",
@@ -6091,7 +6128,7 @@ try {
   );
   assert.equal(siblingTerminalChannel.readyState, "open");
 
-  const failedTerminalStatuses = [];
+  const failedTerminalStatuses = recorder();
   const failedTerminal = createHubTerminalDataPlane({
     sessionId: "timed-out-terminal-session",
     bridge: eventSiblingClient
@@ -6212,7 +6249,7 @@ try {
 // Local request failures retain the exact encrypted request identity.
 for (const failureKind of ["timeout", "closed", "send_throw"]) {
   const channel = createFakeDataChannel();
-  const sendAttempts = [];
+  const sendAttempts = recorder();
   if (failureKind === "send_throw") {
     channel.send = (data) => {
       sendAttempts.push(data);
@@ -6295,9 +6332,17 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     const active = abandonClient.streamTerminal("active-session", "active-subscription", () => undefined);
     const activeRejection = assert.rejects(active.ready, /local WebRTC request timed out: attach/);
     await waitForTestCondition(() => abandonChannel.sent.length === 2);
-    const abandonedFrame = await decodeTestClientFrame(localWebrtcBootstrapFixture.grant_secret, abandonChannel.sent[0]);
-    assert.equal(abandonedFrame.request.type, "attach");
-    assert.equal(abandonedFrame.request.subscription_id, "abandoned-subscription");
+    // The two attaches are encrypted concurrently, so their wire order is not fixed: find the
+    // abandoned attach by its subscription id.
+    const attachFrames = await Promise.all(
+      abandonChannel.sent.map((envelope) => decodeTestClientFrame(localWebrtcBootstrapFixture.grant_secret, envelope))
+    );
+    const abandonedFrame = attachFrames.find((frame) => frame.request.subscription_id === "abandoned-subscription");
+    assert.equal(abandonedFrame?.request.type, "attach");
+    assert.deepEqual(
+      attachFrames.map((frame) => frame.request.subscription_id).sort(),
+      ["abandoned-subscription", "active-subscription"]
+    );
     abandoned.abandon();
     const attachTimeouts = [...abandonTimers.values()].slice(timersBefore);
     assert.equal(attachTimeouts.length, 2, "one request timeout per attach");
@@ -6381,7 +6426,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
   const attachEnvelopes = async () =>
     (await Promise.all(barrierChannel.sent.map((sent) => decodeTestClientFrame(localWebrtcBootstrapFixture.grant_secret, sent))))
       .filter((frame) => frame?.frame === "request" && frame.request.type === "attach");
-  const streams = [];
+  const streams = recorder();
   try {
     const total = hostControlRequestLimits.maxOutstandingRequests + 8;
     for (let index = 0; index < total; index += 1) {
@@ -6449,7 +6494,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
   // Gate only the client's own request frames; Hello, Hello acks, and test envelopes pass.
   const subtlePrototype = Object.getPrototypeOf(globalThis.crypto.subtle);
   const originalEncrypt = subtlePrototype.encrypt;
-  const heldRequests = [];
+  const heldRequests = recorder();
   const isRequestFrame = (data) => {
     try {
       return new TextDecoder().decode(data).includes('"frame":"request"');
@@ -6644,7 +6689,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
   const entityErrorClient = createWebrtcTestClient([entityErrorChannel], localWebrtcBootstrapFixture, {
     entitySubscriptionIdGenerator: () => "entity-error-subscription-1"
   });
-  const entityErrorFrames = [];
+  const entityErrorFrames = recorder();
   const entityErrorSubscription = entityErrorClient.subscribeEntityFrames(
     "session",
     (frame) => entityErrorFrames.push(frame)
@@ -6726,7 +6771,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
   assert.equal(globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__, undefined);
   noHarnessClient.disconnect();
 
-  globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = { events: [] };
+  globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = { events: recorder() };
   try {
     const seamChannel = createFakeDataChannel();
     const seamClient = createWebrtcTestClient([seamChannel], localWebrtcBootstrapFixture, {
@@ -6767,7 +6812,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     const dropClient = createWebrtcTestClient([dropChannel], localWebrtcBootstrapFixture, {
       entitySubscriptionIdGenerator: () => `drop-subscription-${++nextDropSubscriptionId}`
     });
-    const dropFrames = [];
+    const dropFrames = recorder();
     const dropSubscription = dropClient.subscribeEntityFrames("botster-workspaces.membership", (frame) => {
       dropFrames.push(frame);
     });
@@ -7021,7 +7066,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
       entitySubscriptionIdGenerator: () => `session-type-subscription-${++nextSubscriptionErrorId}`
     }
   );
-  const subscriptionErrorFrames = [];
+  const subscriptionErrorFrames = recorder();
   const sessionTypeSubscription = subscriptionErrorClient.subscribeEntityFrames(
     "session_type",
     (frame) => subscriptionErrorFrames.push(frame)
@@ -7471,7 +7516,8 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
       }));
     }
     aggregateChunkIndex += 1;
-    if (aggregateChunkIndex % 20 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    // Ordering boundary, not a timer: yield one macrotask so the client processes the batch.
+    if (aggregateChunkIndex % 20 === 0) await new Promise((resolve) => setImmediate(resolve));
     if (aggregateChunkIndex > 1_000) assert.fail("aggregate retained-byte limit did not reject bounded state");
   }
   await aggregateRejection;
@@ -7538,7 +7584,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     [dedicatedControlChannel],
     localWebrtcBootstrapFixture
   );
-  const firstTerminalEvents = [];
+  const firstTerminalEvents = recorder();
   const firstStream = dedicatedClient.streamTerminal(
     "dedicated-session-a",
     "dedicated-subscription-a",
@@ -7668,7 +7714,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
   assert.equal(firstTerminalEvents[1].reason, "core_adapter_closed");
   assert.equal(dedicatedControlChannel.readyState, "open");
 
-  const secondTerminalEvents = [];
+  const secondTerminalEvents = recorder();
   const secondStream = dedicatedClient.streamTerminal(
     "dedicated-session-b",
     "dedicated-subscription-b",
@@ -7888,6 +7934,8 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     createFakePeerConnection,
     installAutoHelloAck,
     fakeHubTerminalGenerations,
+    recorder,
+    notifyTestProgress: () => testProgress.notify(),
     decryptTestEnvelope,
     emitChunkedTestResponse,
     waitForTestCondition,
@@ -7915,6 +7963,9 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     createFakePeerConnection,
     installAutoHelloAck,
     fakeHubTerminalGenerations,
+    recorder,
+    notifyTestProgress: () => testProgress.notify(),
+    waitForTestCondition,
     decryptTestEnvelope,
     decryptTestEnvelopeBytes,
     emitChunkedTestResponse,
@@ -9553,7 +9604,7 @@ assert.match(
 const noMods = { shift: false, ctrl: false, alt: false, super: false, capsLock: false, numLock: false };
 
 function fakeRouteBridge(sessionId, options = {}) {
-  const state = { frames: [], requests: [], streams: [], detachRequests: [] };
+  const state = { frames: recorder(), requests: recorder(), streams: recorder(), detachRequests: recorder() };
   state.bridge = {
     async request(request) {
       state.requests.push(request);
@@ -9568,7 +9619,7 @@ function fakeRouteBridge(sessionId, options = {}) {
     },
     streamTerminal(nextSessionId, subscriptionId, onEvent) {
       assert.equal(nextSessionId, sessionId);
-      const stream = { subscriptionId, onEvent, frames: [] };
+      const stream = { subscriptionId, onEvent, frames: recorder() };
       state.streams.push(stream);
       return {
         ready: Promise.resolve(),
@@ -9897,7 +9948,7 @@ assert.match(productionSessionScriptSource(), /1049l/);
   const sessionId = "malformed-body-session";
   const subscriptionId = "malformed-body-sub";
   const wire = fakeRouteBridge(sessionId);
-  const statuses = [];
+  const statuses = recorder();
   const outputs = [];
   const plane = createHubTerminalDataPlane({ sessionId, subscriptionId, bridge: wire.bridge });
   bindGhostsnpInstaller(plane);
@@ -9908,7 +9959,7 @@ assert.match(productionSessionScriptSource(), /1049l/);
   for (const frame of standardAttachFrames(subscriptionId)) await route.onEvent(frame);
   const truncated = outputBody("keep-me").subarray(0, 6);
   await route.onEvent({ route: subscriptionId, generation: 1, streamEpoch: 0, body: truncated });
-  await waitFor(() => statuses.some((status) => status.state === "failed"));
+  await waitForTestCondition(() => statuses.some((status) => status.state === "failed"));
   assert.deepEqual(outputs, []);
   assert.match(statuses.at(-1).message, /could not be decoded/);
 }
@@ -11022,6 +11073,8 @@ try {
 
   // Input-outcome message surface and the attach cancellation fence, mounted through React.
   await (await import("./botster/terminalViewHostPaste.test.mjs")).runTerminalViewHostPasteTests({
+    waitForTestCondition,
+    notifyTestProgress: () => testProgress.notify(),
     TerminalViewHost,
     act,
     createElement,
@@ -16042,14 +16095,6 @@ async function findAvailablePort() {
   return port;
 }
 
-async function waitFor(predicate) {
-  const deadline = Date.now() + 2_000;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("timed out waiting for condition");
-}
 
 async function waitForHttpOk(url, assertStillRunning) {
   const deadline = Date.now() + 5_000;
@@ -16093,12 +16138,26 @@ async function flushMicrotasks() {
   await Promise.resolve();
 }
 
-async function waitForTestCondition(predicate) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 0));
+/** The single shared bounded wait: re-checks the predicate on each progress notification. */
+async function waitForTestCondition(predicate, { label, deadlineMs = 5_000 } = {}) {
+  if (await predicate()) return;
+  const caller = new Error().stack?.split("\n").find((line) => line.includes(".test.mjs") && !line.includes("waitForTestCondition"))?.trim();
+  label ??= `test condition at ${caller ?? "unknown caller"}`;
+  let timer;
+  // timer: deadline — bounds one test wait; expiry fails the test with its label.
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), deadlineMs);
+  });
+  try {
+    // Subscribe before re-checking, so a change during an async predicate is not missed.
+    for (;;) {
+      const progressed = testProgress.next();
+      if (await Promise.race([predicate(), expired])) return;
+      await Promise.race([progressed, expired]);
+    }
+  } finally {
+    clearTimeout(timer);
   }
-  assert.fail("timed out waiting for test condition");
 }
 
 function createFakeDataChannel() {
@@ -16119,28 +16178,33 @@ function createFakeDataChannel() {
     },
     send(data) {
       this.sent.push(data);
+      testProgress.notify();
     },
     open() {
       this.readyState = "open";
       for (const listener of listeners.get("open") ?? []) listener({});
+      testProgress.notify();
     },
     close() {
       if (this.readyState === "closed") return;
       this.readyState = "closed";
       for (const listener of listeners.get("close") ?? []) listener({});
+      testProgress.notify();
     },
     /** A transport error report; browsers follow it with a close event. */
     error() {
       for (const listener of listeners.get("error") ?? []) listener({});
+      testProgress.notify();
     },
     emitMessage(data) {
       for (const listener of listeners.get("message") ?? []) listener({ data });
+      testProgress.notify();
     }
   };
 }
 
 function createFakePeerConnection(dataChannel, secret, { autoAckTerminal = true, autoOpenReserved = true } = {}) {
-  const createdDataChannels = [];
+  const createdDataChannels = recorder();
   let remoteDescriptionSet = false;
   dataChannel.label = "botster-daemon";
   dataChannel.options = undefined;
@@ -16282,6 +16346,7 @@ function installAutoHelloAck(dataChannel, secret) {
       ).then(async () => {
         await flushMicrotasks();
         dataChannel.helloAckDelivered = true;
+        testProgress.notify();
       });
       return;
     }
@@ -16521,16 +16586,18 @@ async function decryptTestEnvelopeBytes(secret, envelopeJson) {
 }
 
 async function waitForEncryptedRequest(dataChannel, secret, predicate) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  let match;
+  await waitForTestCondition(async () => {
     for (const envelope of dataChannel.sent) {
       const request = await decryptTestEnvelope(secret, envelope);
       if (request && predicate(request)) {
-        return request;
+        match = request;
+        return true;
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-  assert.fail("timed out waiting for encrypted WebRTC request");
+    return false;
+  }, { label: "encrypted WebRTC request" });
+  return match;
 }
 
 /** 33-byte binary terminal chunk header from the Hub-generated daemon-protocol.ts. */
@@ -16611,7 +16678,7 @@ async function openTestTerminalChunk(secret, message) {
 
 /** Reassembles every Web-to-Hub binary message on a terminal channel into complete input frames. */
 async function sentTestInputFrames(channel, secret, { allowTrailingPartial = false } = {}) {
-  const frames = [];
+  const frames = recorder();
   const partial = new Map();
   for (const sent of channel.sent) {
     if (typeof sent === "string") continue;
@@ -17321,7 +17388,7 @@ function removeCssAtRules(source) {
     const encodedClient = createWebrtcTestClient(encodedChannels, localWebrtcBootstrapFixture);
     const encodedTransport = createHubTransport({ bridge: encodedClient });
     const encodedRuntime = createBotsterWebClient({ transport: encodedTransport });
-    const diagnostics = [];
+    const diagnostics = recorder();
     const rootEl = globalThis.document.createElement("div");
     globalThis.document.body.appendChild(rootEl);
     const root = createRoot(rootEl);
@@ -17337,12 +17404,12 @@ function removeCssAtRules(source) {
     }
 
     async function waitForRequestCount(channel, type, minCount) {
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        const matches = (await decryptSent(channel)).filter((request) => request.type === type);
-        if (matches.length >= minCount) return matches;
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      assert.fail(`timed out waiting for ${minCount} encoded ${type} request(s)`);
+      let matches = [];
+      await waitForTestCondition(async () => {
+        matches = (await decryptSent(channel)).filter((request) => request.type === type);
+        return matches.length >= minCount;
+      }, { label: `${minCount} encoded ${type} request(s)` });
+      return matches;
     }
 
     async function ackResponse(channel, payload, messageId) {
@@ -17367,7 +17434,7 @@ function removeCssAtRules(source) {
           recordDiagnostic: (diagnostic) => {
             if (diagnostic) diagnostics.push(diagnostic);
           },
-          onNotices: (next) => { latest = next; }
+          onNotices: (next) => { latest = next; testProgress.notify(); }
         }));
       });
     }

@@ -60,8 +60,9 @@ const SESSION_FRAME = {
 // Drain every microtask chain started by the hook (promise hops plus queueMicrotask frame
 // delivery) inside act so state writes are flushed and observable.
 async function settle() {
+  // Ordering boundary, not a timer: one macrotask turn drains every queued microtask chain.
   await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setImmediate(resolve));
   });
 }
 

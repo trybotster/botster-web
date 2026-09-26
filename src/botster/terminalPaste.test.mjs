@@ -17,6 +17,9 @@ export async function runTerminalPasteTests(helpers) {
     createFakePeerConnection,
     installAutoHelloAck,
     fakeHubTerminalGenerations,
+    recorder,
+    notifyTestProgress,
+    waitForTestCondition,
     decryptTestEnvelope,
     emitChunkedTestResponse,
     flushMicrotasks,
@@ -46,7 +49,7 @@ export async function runTerminalPasteTests(helpers) {
   }
   let currentStage = "start";
   const stage = (label) => { currentStage = label; };
-  const scenarioFixtures = [];
+  const scenarioFixtures = recorder();
   const cleanupFixture = async (fixture) => {
     try {
       await Promise.race([
@@ -75,11 +78,7 @@ export async function runTerminalPasteTests(helpers) {
   };
   const waitCondition = async (predicate, label) => {
     stage(label);
-    for (let round = 0; round < 400; round += 1) {
-      if (await predicate()) return;
-      await new Promise((resolve) => realSetTimeout(resolve, 5));
-    }
-    assert.fail(`${label} did not complete within 2 s`);
+    await waitForTestCondition(predicate, { label, deadlineMs: 2_000 });
   };
 
   const kindName = (kind) => Object.entries(TerminalInputKind).find(([, value]) => value === kind)?.[0] ?? String(kind);
@@ -101,7 +100,7 @@ export async function runTerminalPasteTests(helpers) {
    * attach and detach requests are answered by the responder; nothing else is requested.
    */
   const attachPlane = async (name, { modeBits = ModeBits.CURSOR_VISIBLE, autoAckTerminal = true, testHooks } = {}) => {
-    const channels = [];
+    const channels = recorder();
     const client = createWebrtcDaemonClient({
       bootstrap: localWebrtcBootstrapFixture,
       peerConnectionFactory: () => {
@@ -119,9 +118,9 @@ export async function runTerminalPasteTests(helpers) {
     });
     const sessionId = `paste-${name}-session`;
     const generation = 9200;
-    const statuses = [];
-    const outputs = [];
-    const outcomes = [];
+    const statuses = recorder();
+    const outputs = recorder();
+    const outcomes = recorder();
     const plane = createHubTerminalDataPlane({ sessionId, bridge: client, testHooks });
     const fixtureRecord = { client, plane };
     scenarioFixtures.push(fixtureRecord);
@@ -154,11 +153,11 @@ export async function runTerminalPasteTests(helpers) {
               label: `r-${name}-${request.subscription_id}`,
               expires_in_seconds: 30
             },
-            events: []
+            events: recorder()
           }, { messageId: `${name}-reservation-${index}`, requestType: "attach" });
         } else if (request?.type === "detach") {
           answered.add(index);
-          await emitChunkedTestResponse(control, secret, { kind: "events", events: [] }, { messageId: `${name}-detach-${index}`, requestType: "detach" });
+          await emitChunkedTestResponse(control, secret, { kind: "events", events: recorder() }, { messageId: `${name}-detach-${index}`, requestType: "detach" });
         }
       }
     };
@@ -203,7 +202,7 @@ export async function runTerminalPasteTests(helpers) {
     return { client, control, plane, statuses, outputs, outcomes, sessionId, answerControl, admit, ...first };
   };
   const waitFrameCount = async (fixture, count, label) => {
-    let frames = [];
+    let frames = recorder();
     await waitCondition(async () => {
       await fixture.answerControl?.();
       frames = await fixture.framesSince();
@@ -267,7 +266,7 @@ export async function runTerminalPasteTests(helpers) {
     // (p3) Bracketed paste on and off: byte-identical frames; the worker adds the markers.
     await runScenario("p3-bracketed-modes", async () => {
       const text = "bracket-me\n";
-      const collected = [];
+      const collected = recorder();
       for (const bracketed of [false, true]) {
         const fixture = await attachPlane(`p3-${bracketed ? "on" : "off"}`, {
           modeBits: bracketed ? ModeBits.CURSOR_VISIBLE | ModeBits.BRACKETED_PASTE : ModeBits.CURSOR_VISIBLE
@@ -660,13 +659,34 @@ export async function runTerminalPasteTests(helpers) {
       assert.equal(fixture.plane.inflightInputBytes, 0, "resync does not alter settled input accounting");
       await fixture.assertComplete();
 
-      const expiryFixture = await attachPlane("p16-expiry", { testHooks: { unsafePasteConsentTimeoutMs: 25 } });
-      const expired = expiryFixture.plane.writePaste("expire\n");
-      await waitFrameCount(expiryFixture, 3, "p16: expiring paste");
-      await expiryFixture.result(1, "rejected_unsafe_paste", { accepted: 0, written: 0 });
-      const expiredConsent = (await expired).unsafePasteConsent;
+      // The consent window is a controlled timer: captured by its distinctive test-hook delay and
+      // fired explicitly, so the expiry is an event the test drives, not a wall-clock wait.
+      const consentWindowMs = 7_777;
+      const consentTimers = [];
+      const globalSetTimeout = globalThis.setTimeout;
+      globalThis.setTimeout = (callback, delay, ...args) => {
+        if (delay === consentWindowMs) {
+          consentTimers.push(callback);
+          return globalSetTimeout(() => undefined, 0);
+        }
+        return globalSetTimeout(callback, delay, ...args);
+      };
+      let expiryFixture;
+      let expiredConsent;
+      try {
+        expiryFixture = await attachPlane("p16-expiry", { testHooks: { unsafePasteConsentTimeoutMs: consentWindowMs } });
+        const expired = expiryFixture.plane.writePaste("expire\n");
+        await waitFrameCount(expiryFixture, 3, "p16: expiring paste");
+        await expiryFixture.result(1, "rejected_unsafe_paste", { accepted: 0, written: 0 });
+        expiredConsent = (await expired).unsafePasteConsent;
+      } finally {
+        globalThis.setTimeout = globalSetTimeout;
+      }
       assert.ok(expiredConsent);
-      await waitCondition(() => expiryFixture.plane.consentRetainedBytes === 0, "p16: consent expiry");
+      assert.equal(consentTimers.length, 1, "p16: exactly one consent window timer");
+      assert.ok(expiryFixture.plane.consentRetainedBytes > 0, "p16: consent retained before expiry");
+      consentTimers[0]();
+      assert.equal(expiryFixture.plane.consentRetainedBytes, 0, "p16: consent expiry releases the retained bytes");
       assert.equal(expiryFixture.plane.retainedInputBytes(), 0);
       assert.equal(expiryFixture.plane.confirmUnsafePaste(expiredConsent), false);
       await expiryFixture.assertComplete();
@@ -689,7 +709,7 @@ export async function runTerminalPasteTests(helpers) {
       assert.ok(consent);
       assert.equal(fixture.plane.consentRetainedBytes, 7);
       let detached = false;
-      const detaching = fixture.plane.detach().then(() => { detached = true; });
+      const detaching = fixture.plane.detach().then(() => { detached = true; notifyTestProgress(); });
       await waitCondition(async () => {
         await fixture.answerControl();
         return detached;
@@ -702,8 +722,8 @@ export async function runTerminalPasteTests(helpers) {
 
     // (p10) Transport without a data plane: explicit local rejection, no key path.
     await runScenario("p10-unattached", async () => {
-      const records = [];
-      const uncaptured = [];
+      const records = recorder();
+      const uncaptured = recorder();
       const transport = new BotsterTerminalPtyTransport({
         record: (kind, payload) => records.push({ kind, payload }),
         onUncapturedInput: (source, data) => uncaptured.push({ source, data })

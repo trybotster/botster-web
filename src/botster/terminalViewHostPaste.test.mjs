@@ -5,7 +5,7 @@
 
 import { strict as assert } from "node:assert";
 
-export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, createElement, createRoot }) {
+export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, createElement, createRoot, waitForTestCondition, notifyTestProgress }) {
   const realSetTimeout = setTimeout;
   const realClearTimeout = clearTimeout;
   const SCENARIO_BOUND_MS = 10_000;
@@ -29,9 +29,11 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
       }
     }
   };
+  // Ordering boundary, not a timer: one macrotask turn inside act lets every queued microtask
+  // chain finish and React flush before the next assertion.
   const settle = async () => {
     await act(async () => {
-      await new Promise((resolve) => realSetTimeout(resolve, 0));
+      await new Promise((resolve) => setImmediate(resolve));
     });
   };
   const findAll = (node, predicate, found = []) => {
@@ -77,7 +79,17 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     };
   };
   const makeBridge = ({ attach } = {}) => {
-    const calls = { mount: 0, unmount: 0, attach: 0, detach: 0, focus: 0, subscribeInputOutcomes: 0, outcomeUnsubscribes: 0 };
+    // Every counter write reports test progress, so a wait on a call count is event-driven.
+    const calls = new Proxy(
+      { mount: 0, unmount: 0, attach: 0, detach: 0, focus: 0, subscribeInputOutcomes: 0, outcomeUnsubscribes: 0 },
+      {
+        set(target, key, value) {
+          target[key] = value;
+          notifyTestProgress();
+          return true;
+        }
+      }
+    );
     let outcomeListener;
     let mountId = 0;
     return {
@@ -131,7 +143,8 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
     const { dataPlane, state } = makeDataPlane("delayed");
     const host = await mountHost({ bridge, dataPlane, descriptor: { sessionId: "delayed", renderer: "restty" } });
     stage("v1: attach requested");
-    for (let round = 0; round < 40 && calls.attach === 0; round += 1) await settle();
+    await waitForTestCondition(() => calls.attach !== 0, { label: "calls.attach" });
+    await settle();
     assert.equal(calls.attach, 1, "attach was requested");
     assert.equal(state.statusSubscriptions, 1, "status subscribed before attach");
     // The scenario: cleanup runs while attach is still pending.
@@ -158,7 +171,8 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
       descriptor: { sessionId: "outcomes", renderer: "restty" },
       onInputOutcome: (sessionId, outcome) => forwarded.push({ sessionId, outcome: outcome.outcome })
     });
-    for (let round = 0; round < 40 && calls.subscribeInputOutcomes === 0; round += 1) await settle();
+    await waitForTestCondition(() => calls.subscribeInputOutcomes !== 0, { label: "calls.subscribeInputOutcomes" });
+    await settle();
     assert.equal(calls.subscribeInputOutcomes, 1, "outcome subscription installed once after attach");
     assert.equal(inputMessage(host.element), null, "no message before any outcome");
     await act(async () => {
@@ -217,7 +231,8 @@ export async function runTerminalViewHostPasteTests({ TerminalViewHost, act, cre
       dataPlane,
       descriptor: { sessionId: "consent", renderer: "restty" }
     });
-    for (let round = 0; round < 40 && calls.subscribeInputOutcomes === 0; round += 1) await settle();
+    await waitForTestCondition(() => calls.subscribeInputOutcomes !== 0, { label: "calls.subscribeInputOutcomes" });
+    await settle();
     const consent = { attachmentGeneration: 4, rejectedOperationId: 9, expiresAt: Date.now() + 30_000 };
     const secretClipboardText = "never-render-this-control-text\n";
     await act(async () => {

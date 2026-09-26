@@ -16,6 +16,8 @@ export async function runWebrtcReconnectTests(helpers) {
     createFakePeerConnection,
     installAutoHelloAck,
     fakeHubTerminalGenerations,
+    recorder,
+    notifyTestProgress,
     decryptTestEnvelope,
     emitChunkedTestResponse,
     waitForTestCondition,
@@ -153,8 +155,9 @@ export async function runWebrtcReconnectTests(helpers) {
     return scheduled;
   };
   const waitCondition = async (predicate) => {
-    stage(`waitCondition ${predicate.toString().replace(/\s+/g, " ")}`);
-    await waitForTestCondition(predicate);
+    const label = `waitCondition ${predicate.toString().replace(/\s+/g, " ")}`;
+    stage(label);
+    await waitForTestCondition(predicate, { label });
   };
   const decryptAll = async (channel) => {
     const requests = [];
@@ -173,7 +176,7 @@ export async function runWebrtcReconnectTests(helpers) {
    * across the client's lifetime) and otherwise returns a fresh fake peer with auto Hello.
    */
   const makeClient = ({ failAttempts = new Set(), fetchImpl, refreshBootstrap, autoHello = true, blockAttempts = new Map(), onLifecycle } = {}) => {
-    const channels = [];
+    const channels = recorder();
     let attempts = 0;
     let signalCalls = 0;
     const client = createWebrtcDaemonClient({
@@ -225,7 +228,7 @@ export async function runWebrtcReconnectTests(helpers) {
     await runScenario("a", async () => {
       const before = lifecycleEvents.length;
       const { client, channels, attempts } = makeClient({ failAttempts: new Set([2, 3]) });
-      const frames = [];
+      const frames = recorder();
       const subscription = client.subscribeEntityFrames("session", (frame) => frames.push(frame));
       await answerEntitySubscribe(channels, 0, "reconnect-a-subscribe-1");
       stage("subscription.ready");
@@ -318,11 +321,11 @@ export async function runWebrtcReconnectTests(helpers) {
     await runScenario("b", async () => {
       const before = lifecycleEvents.length;
       const { client, channels, attempts } = makeClient({ failAttempts: new Set([2, 3]) });
-      const statuses = [];
+      const statuses = recorder();
       const plane = createHubTerminalDataPlane({ sessionId: "reconnect-terminal-session", bridge: client });
-      const installs = [];
+      const installs = recorder();
       bindGhostsnpInstaller(plane, installs);
-      const outputs = [];
+      const outputs = recorder();
       plane.subscribeStatus((status) => statuses.push(status));
       plane.subscribeOutput((data) => outputs.push(data));
       await waitCondition(() => channels.length === 1 && channels[0].sent.length >= 1);
@@ -456,7 +459,7 @@ export async function runWebrtcReconnectTests(helpers) {
       let resolveSignal;
       let signalInit;
       const signalClient = makeClient({
-        fetchImpl: (_url, init) => new Promise((resolve) => { signalInit = init; resolveSignal = resolve; })
+        fetchImpl: (_url, init) => new Promise((resolve) => { signalInit = init; resolveSignal = resolve; notifyTestProgress(); })
       });
       const signalBefore = lifecycleEvents.length;
       const signalPending = signalClient.client.request({ type: "status" });
@@ -686,7 +689,7 @@ export async function runWebrtcReconnectTests(helpers) {
           }
         }
       });
-      const statuses = [];
+      const statuses = recorder();
       const plane = createHubTerminalDataPlane({ sessionId: "reconnect-terminal-callback-session", bridge: client });
       plane.subscribeStatus((status) => statuses.push(status));
       plane.subscribeOutput(() => undefined);
@@ -750,7 +753,7 @@ export async function runWebrtcReconnectTests(helpers) {
     await runScenario("i", async () => {
       const a = makeClient();
       const b = makeClient();
-      const statuses = [];
+      const statuses = recorder();
       const plane = createHubTerminalDataPlane({ sessionId: "isolation-terminal-session", bridge: a.client });
       bindGhostsnpInstaller(plane);
       plane.subscribeStatus((status) => statuses.push(status));
