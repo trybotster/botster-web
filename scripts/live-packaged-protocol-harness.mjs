@@ -693,6 +693,24 @@ try {
       entry.kind === "frame_stale_epoch"
     ).slice(-120);
     diagnosticMessage += `\nterminal lifecycle tail:\n${JSON.stringify(terminalLifecycleTail, null, 2)}`;
+    // Route-loss evidence for any proof: remote channel closes, Hub close events and channel
+    // rejects, and the client's transport_lost records, with their order preserved.
+    const routeLossEvents = (harnessState.events ?? [])
+      .map((entry, index) => ({ index, entry }))
+      .filter(({ entry }) =>
+        (entry.kind === "terminal_data_channel" && entry.payload?.state === "closed") ||
+        (entry.kind === "daemon_event" && (
+          entry.payload?.type === "terminal_subscription_closed" ||
+          String(entry.payload?.kind ?? "").startsWith("subscription_channel_rejected:")
+        )) ||
+        (entry.kind === "webrtc_lifecycle" && entry.payload?.type === "terminal-data-channel-closed")
+      )
+      .slice(-40)
+      .map(({ index, entry }) => ({ index, kind: entry.kind, payload: entry.payload }));
+    const transportLost = (harnessState.terminal ?? []).filter((entry) => entry.kind === "transport_lost" || entry.kind === "transport_recovered");
+    if (routeLossEvents.length > 0 || transportLost.length > 0) {
+      diagnosticMessage += `\nroute loss evidence:\n${JSON.stringify({ routeLossEvents, transportLost }, null, 2)}`;
+    }
     const terminalStreamEvents = harnessState.events?.filter((entry) => entry.kind.startsWith("terminal_stream_")) ?? [];
     if (terminalStreamEvents.length > 0) {
       diagnosticMessage += `\nterminal stream events:\n${JSON.stringify(terminalStreamEvents.slice(-120), null, 2)}`;
