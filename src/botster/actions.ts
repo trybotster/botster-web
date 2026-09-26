@@ -113,6 +113,7 @@ export class CorrelatedActionDispatcher implements ActionDispatcher {
         origin: request.origin
       };
 
+      // timer: deadline — the plugin action result; expiry resolves the action as not accepted.
       pending.timer = setTimeout(() => {
         this.resolve(requestId, {
           accepted: false,

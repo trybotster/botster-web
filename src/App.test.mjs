@@ -7962,6 +7962,70 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     (error) => connectionFailureDiagnostic(false, error).id === "webrtc-signaling-failed"
   );
 
+  // ICE gathering: completion (the gathering-complete event) proceeds with no degraded record;
+  // a gathering still running at the 5 s deadline proceeds DEGRADED with its partial candidates
+  // and records ice_gathering_deadline, so the two outcomes are never confused.
+  for (const outcome of ["complete", "deadline"]) {
+    const harness = { events: recorder() };
+    const previousHarness = globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = harness;
+    const iceDeadlines = recorder();
+    const windowSetTimeout = globalThis.window.setTimeout;
+    // The ICE deadline is a controlled timer, captured by its 5 s delay and fired by the test.
+    globalThis.window.setTimeout = (callback, delay, ...args) => {
+      if (delay === 5_000) {
+        iceDeadlines.push(callback);
+        return -1;
+      }
+      return windowSetTimeout(callback, delay, ...args);
+    };
+    const iceListeners = recorder();
+    const signals = recorder();
+    try {
+      const client = createWebrtcDaemonClient({
+        bootstrap: localWebrtcBootstrapFixture,
+        peerConnectionFactory: () => {
+          const peer = createFakePeerConnection(createFakeDataChannel());
+          peer.iceGatheringState = "gathering";
+          peer.localDescription = {
+            type: "offer",
+            sdp: "v=0\r\na=candidate:1 1 udp 1 127.0.0.1 5000 typ host\r\na=candidate:2 1 udp 1 10.0.0.2 5001 typ host\r\n",
+            toJSON() { return { type: this.type, sdp: this.sdp }; }
+          };
+          peer.createOffer = async function createOffer() { return this.localDescription; };
+          peer.addEventListener = (type, listener) => {
+            if (type === "icegatheringstatechange") iceListeners.push(() => { peer.iceGatheringState = "complete"; listener(); });
+          };
+          return peer;
+        },
+        fetchImpl: async () => {
+          signals.push(true);
+          return { ok: false, status: 503, json: async () => ({}) };
+        }
+      });
+      const request = client.request({ type: "status" });
+      await waitForTestCondition(() => iceListeners.length === 1 && iceDeadlines.length === 1, { label: `${outcome}: ICE wait armed` });
+      assert.equal(signals.length, 0, `${outcome}: no signal before gathering ends`);
+      if (outcome === "complete") iceListeners[0]();
+      else iceDeadlines[0]();
+      await assert.rejects(request, (error) => connectionFailureDiagnostic(false, error).id === "webrtc-signaling-failed");
+      assert.equal(signals.length, 1, `${outcome}: the offer was signalled`);
+      const degraded = harness.events.filter((entry) => entry.kind === "ice_gathering_deadline");
+      if (outcome === "complete") {
+        assert.deepEqual(degraded, [], "a completed gathering records no degraded outcome");
+      } else {
+        assert.deepEqual(
+          degraded.map((entry) => entry.payload),
+          [{ gathering_state: "gathering", candidate_count: 2, deadline_ms: 5_000 }],
+          "the deadline records the degraded outcome with the partial candidate count"
+        );
+      }
+    } finally {
+      globalThis.window.setTimeout = windowSetTimeout;
+      globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = previousHarness;
+    }
+  }
+
   // Resilient reconnect: recovery through capped retries without a new caller request.
   await (await import("./botster/webrtcReconnect.test.mjs")).runWebrtcReconnectTests({
     createFakeDataChannel,

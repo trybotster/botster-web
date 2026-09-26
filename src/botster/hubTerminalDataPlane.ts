@@ -544,6 +544,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       const pending: PendingUnsafePaste = {
         consent: unsafePasteConsent,
         data: inflight.pasteData,
+        // timer: ui-lifetime — the unsafe-paste consent window; one wake at its expiry releases the retained text.
         timeout: setTimeout(() => {
           if (this.pendingUnsafePaste === pending) this.releaseUnsafePasteConsent();
         }, this.testHooks?.unsafePasteConsentTimeoutMs ?? UNSAFE_PASTE_CONSENT_TIMEOUT_MS)
@@ -1003,6 +1004,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
     });
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
+      // timer: deadline — the Detach request; expiry rejects the detach with its bound.
       timeoutId = setTimeout(() => {
         reject(new Error(`detach request exceeded ${boundMs}ms bound`));
       }, boundMs);
@@ -1441,6 +1443,7 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       clearTimeout(hydration.progressTimeout);
     }
     const boundMs = this.testHooks?.hydrationProgressBoundMs ?? localWebrtcResponseChunkLimits.requestTimeoutMs;
+    // timer: deadline — hydration progress; expiry recovers the route (re-attach once).
     hydration.progressTimeout = setTimeout(() => {
       hydration.progressTimeout = undefined;
       if (this.hydration !== hydration || hydration.completed) return;

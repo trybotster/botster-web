@@ -63,6 +63,7 @@ export function TerminalViewHost({
   useEffect(() => {
     if (!unsafePasteConsent) return;
     const remaining = Math.max(0, unsafePasteConsent.expiresAt - Date.now());
+    // timer: ui-lifetime — the unsafe-paste confirmation prompt; one wake at the consent's expiresAt.
     const timeout = setTimeout(() => {
       terminalDataPlane.cancelUnsafePaste?.(unsafePasteConsent);
       setInputMessage((current) => {

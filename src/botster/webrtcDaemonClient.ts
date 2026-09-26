@@ -1107,6 +1107,7 @@ class WebrtcDaemonTransport {
         nextIndex: 0,
         body: new Uint8Array(header.totalBytes),
         receivedBytes: 0,
+        // timer: deadline — terminal delivery reassembly; expiry closes the channel as failed.
         timeout: window.setTimeout(() => {
           if (!binding.closed) {
             binding.rejectReady(webrtcFailure("data-plane", "terminal delivery assembly timed out"));
@@ -1332,6 +1333,7 @@ class WebrtcDaemonTransport {
         nextIndex: 0,
         payloads: [],
         receivedBytes: 0,
+        // timer: deadline — subscription delivery reassembly; expiry closes the channel as failed.
         timeout: window.setTimeout(() => {
           if (!binding.closed) {
             const error = webrtcFailure("data-plane", "subscription delivery assembly timed out");
@@ -1559,6 +1561,7 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("data-plane", `local WebRTC request id ${requestId} is already pending on generation ${generation}`);
     }
     return new Promise<T>((resolve, reject) => {
+      // timer: deadline — one control request; expiry rejects it as local_request_timeout.
       const timeout = window.setTimeout(() => {
         const error = new WebrtcDaemonClientError(
           "data-plane",
@@ -1805,6 +1808,7 @@ class WebrtcDaemonTransport {
     this.peerFailed = false;
     // Install every owned resource before the lifecycle callback boundary, so a callback
     // that disconnects clears the deadline through the attempt and this method stops.
+    // timer: deadline — one connection attempt; expiry fails the attempt.
     attempt.deadlineTimer = window.setTimeout(() => {
       attempt.deadlineTimer = undefined;
       this.failAttempt(
@@ -1919,6 +1923,7 @@ class WebrtcDaemonTransport {
     });
     // Install the timer before the lifecycle callback boundary. A callback that disconnects
     // or starts a connection cancels this timer through cancelRetryTimer.
+    // timer: backoff — reconnect after a failed connection, with exponential delay.
     this.retryTimer = window.setTimeout(() => {
       this.retryTimer = undefined;
       if (this.disconnected || !this.reconnectDemand) return;
@@ -2013,6 +2018,7 @@ class WebrtcDaemonTransport {
       filter: normalized,
       armed_at: armedAt
     };
+    // timer: deadline — the armed test drop; expiry records timed_out.
     this.dropNextInboundEntityFrameTimeout = window.setTimeout(() => {
       if (this.dropNextInboundEntityFrameState.state !== "armed") return;
       if (this.dropNextInboundEntityFrameState.armed_at !== armedAt) return;
@@ -2177,8 +2183,17 @@ class WebrtcDaemonTransport {
       throw webrtcFailure("transport", `local WebRTC offer creation failed: ${errorMessage(error)}`);
     }
     if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
-    await waitForIceGatheringComplete(peerConnection);
+    const iceGathering = await waitForIceGatheringComplete(peerConnection);
     if (!this.ownsAttempt(attempt)) throw this.staleAttemptFailure();
+    if (iceGathering === "deadline") {
+      // Degraded, not complete: the offer goes out with the candidates gathered so far.
+      const sdp = peerConnection.localDescription?.sdp ?? "";
+      recordLiveHarnessEvent("ice_gathering_deadline", {
+        gathering_state: peerConnection.iceGatheringState,
+        candidate_count: (sdp.match(/^a=candidate:/gm) ?? []).length,
+        deadline_ms: ICE_GATHERING_DEADLINE_MS
+      });
+    }
 
     const signalRequest: DaemonRequest = {
       type: "local_webrtc_signal",
@@ -2291,6 +2306,7 @@ class WebrtcDaemonTransport {
         receivedBytes: utf8ByteLength(chunk.payload),
         retainedBytes,
         startedAt,
+        // timer: deadline — control delivery reassembly; expiry fails the peer generation.
         timeout: window.setTimeout(() => {
           if (!applyAssemblyTimeoutCleanup) return;
           // An ordered channel that stops mid-message is a transport fault for the whole
@@ -3389,21 +3405,28 @@ function cryptoInput(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   return new Uint8Array(bytes);
 }
 
-function waitForIceGatheringComplete(peerConnection: RTCPeerConnection): Promise<void> {
+const ICE_GATHERING_DEADLINE_MS = 5_000;
+
+/**
+ * Resolves "complete" on the gathering-complete event, or "deadline" when the bound expires
+ * first. The caller proceeds either way; "deadline" means the offer carries partial candidates.
+ */
+function waitForIceGatheringComplete(peerConnection: RTCPeerConnection): Promise<"complete" | "deadline"> {
   if (peerConnection.iceGatheringState === "complete") {
-    return Promise.resolve();
+    return Promise.resolve("complete");
   }
 
   return new Promise((resolve) => {
-    const timeout = window.setTimeout(done, 5_000);
-    function done() {
+    // timer: deadline — ICE gathering; expiry proceeds DEGRADED with partial candidates.
+    const timeout = window.setTimeout(() => done("deadline"), ICE_GATHERING_DEADLINE_MS);
+    function done(outcome: "complete" | "deadline") {
       window.clearTimeout(timeout);
       peerConnection.removeEventListener("icegatheringstatechange", onChange);
-      resolve();
+      resolve(outcome);
     }
     function onChange() {
       if (peerConnection.iceGatheringState === "complete") {
-        done();
+        done("complete");
       }
     }
     peerConnection.addEventListener("icegatheringstatechange", onChange);
