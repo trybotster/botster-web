@@ -2016,6 +2016,48 @@ assert.match(hubTerminalDataPlane, /streamTerminal/);
 assert.match(hubTransport, /ready: Promise<void>/);
 assert.match(hubTransport, /export interface TerminalRouteFrame/);
 assert.match(hubTransport, /streamEpoch: number;/);
+// The live-harness Unix client reads a control frame larger than the socket high-water mark.
+// A sized socket.read(n) deadlocked on such frames: a list_packages reply past about 60 KB
+// never completed, which looked like a Hub hang in the plugin contract matrix smoke.
+{
+  const { sendDaemonUnixRequest } = await import("../scripts/daemon-unix-client.mjs");
+  const socketDir = await mkdtemp(join(tmpdir(), "botster-unix-reader-"));
+  const socketPath = join(socketDir, "hub.sock");
+  const encode = (value) => {
+    const payload = Buffer.from(JSON.stringify(value), "utf8");
+    const frame = Buffer.alloc(5 + payload.length);
+    frame.writeUInt32LE(1 + payload.length, 0);
+    frame[4] = 0;
+    payload.copy(frame, 5);
+    return frame;
+  };
+  const compatibility = { protocol: "test-protocol", protocol_version: 1, features: [], conformance_fixture_revision: 1 };
+  const server = createNetServer((socket) => {
+    socket.on("error", () => {});
+    let helloSeen = false;
+    socket.on("data", () => {
+      if (!helloSeen) {
+        helloSeen = true;
+        socket.write(encode({ frame: "hello_ack", ack: { protocol: "test-protocol", compatibility } }));
+        return;
+      }
+      socket.write(encode({ frame: "response", request_id: "1", response: { kind: "packages", pad: "x".repeat(200_000) } }));
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  const startedAt = Date.now();
+  const response = await sendDaemonUnixRequest({
+    socketPath,
+    request: { type: "list_packages" },
+    protocol: "test-protocol",
+    compatibilityRequirement: { protocol: "test-protocol", protocol_version: 1, required_features: [], minimum_conformance_fixture_revision: 1 },
+    framing: { lengthPrefixBytes: 4, maxFrameBytes: 16 * 1024 * 1024, controlContainer: 0, terminalContainer: 1 }
+  });
+  assert.equal(response.pad.length, 200_000);
+  assert.ok(Date.now() - startedAt < 5_000, "a large control frame must not wait for the request deadline");
+  await new Promise((resolve) => server.close(resolve));
+  await rm(socketDir, { recursive: true, force: true });
+}
 assert.match(webrtcDaemonClient, /await listener\.onEvent\(event\)/);
 assert.doesNotMatch(webrtcDaemonClient, /enqueueTerminalDelivery|receiveTerminalFrame|pendingMatchesResponse|daemon_terminal_frame|payload_base64/);
 assert.match(webrtcDaemonClient, /daemon_hello/);

@@ -142,10 +142,20 @@ async function readSocketBytes(socket, length, deadlineAt) {
   let received = 0;
   while (received < length) {
     assertWithinDeadline(deadlineAt);
-    const chunk = socket.read(length - received);
+    // Read whatever is buffered. A sized read(n) returns null until n bytes are buffered,
+    // and the socket stops filling at its high-water mark, so a frame larger than that
+    // mark would never arrive. Any bytes past this frame go back to the stream.
+    const chunk = socket.read();
     if (chunk !== null) {
-      chunks.push(chunk);
-      received += chunk.length;
+      const needed = length - received;
+      if (chunk.length > needed) {
+        socket.unshift(chunk.subarray(needed));
+        chunks.push(chunk.subarray(0, needed));
+        received += needed;
+      } else {
+        chunks.push(chunk);
+        received += chunk.length;
+      }
       continue;
     }
     if (socket.readableEnded || socket.destroyed) {
