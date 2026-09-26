@@ -8262,6 +8262,59 @@ async function collectAlternateScreenDifferential({
   };
 }
 
+/**
+ * Evidence for a live write that never reached the renderer after a reattach: which side lost it.
+ * Client side: route frames after the attach (kind and epoch), discarded frames, DataChannel
+ * states, hydration and status. Hub side: whether the PTY printed the marker (read_screen over the
+ * Hub socket) and the session entity record.
+ */
+async function collectLiveOutputLossEvidence(page, sessionId, attachment, liveMarker) {
+  const client = await page.evaluate(({ subscriptionId, attachIndex, marker }) => {
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ ?? {};
+    const events = harness.events ?? [];
+    const terminal = harness.terminal ?? [];
+    const routeFrames = events.filter((entry) =>
+      entry.kind === "terminal_route_frame" && entry.payload?.route === subscriptionId
+    );
+    const decodedOutput = routeFrames
+      .filter((entry) => entry.payload?.frame?.kind === "output")
+      .map((entry) => {
+        try { return globalThis.atob(entry.payload.frame.payload_base64 ?? ""); } catch { return ""; }
+      })
+      .join("");
+    return {
+      subscription_id: subscriptionId,
+      route_frame_kinds: routeFrames.reduce((counts, entry) => {
+        const key = `${entry.payload?.frame?.kind}@${entry.payload?.stream_epoch}`;
+        counts[key] = (counts[key] ?? 0) + 1;
+        return counts;
+      }, {}),
+      route_output_contains_marker: decodedOutput.includes(marker),
+      discarded: events.filter((entry) => entry.kind === "webrtc_terminal_frame_discarded").slice(-10).map((entry) => entry.payload),
+      data_channels: events.filter((entry) => entry.kind === "terminal_data_channel").slice(-8).map((entry) => entry.payload),
+      lifecycle: events.filter((entry) => entry.kind === "webrtc_lifecycle").slice(-6).map((entry) => entry.payload),
+      terminal_after_attach: terminal.slice(attachIndex).map((entry) => entry.kind).slice(-40),
+      statuses: terminal.filter((entry) => entry.kind === "status").slice(-4).map((entry) => entry.payload)
+    };
+  }, { subscriptionId: attachment.subscriptionId, attachIndex: attachment.attachIndex, marker: liveMarker });
+  let hub;
+  try {
+    const socketPath = join(webrtcDataDir, "botster-hub.sock");
+    const screen = await sendDaemonRequest(socketPath, { type: "read_screen", session_id: sessionId });
+    const sessions = await sendDaemonRequest(socketPath, { type: "list_sessions" });
+    const record = (sessions.sessions ?? []).find((entry) => (entry.session_uuid ?? entry.session_id ?? entry.id) === sessionId);
+    hub = {
+      read_screen_error: screen.error ?? null,
+      pty_screen_contains_marker: typeof screen.read_screen?.text === "string" ? screen.read_screen.text.includes(liveMarker) : null,
+      session_record: record ?? null,
+      list_sessions_error: sessions.error ?? null
+    };
+  } catch (error) {
+    hub = { error: error instanceof Error ? error.message : String(error) };
+  }
+  return { client, hub };
+}
+
 async function proveRapidAlternateScreenReattach(page, sessionId) {
   const iterations = 20;
   const cycles = [];
@@ -8364,7 +8417,11 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
 
     const liveMarker = `${marker}-live`;
     await typeThroughMountedTerminal(page, `echo ${liveMarker}\n`);
-    await waitForTerminalRendererWrite(page, liveMarker);
+    await waitForTerminalRendererWrite(page, liveMarker).catch(async (error) => {
+      const evidence = await collectLiveOutputLossEvidence(page, sessionId, attachment, liveMarker);
+      recordProofNote("rapid_alternate_screen_live_output_loss", evidence);
+      throw new Error(`alternate-screen cycle ${cycle}: ${error.message}; evidence=${JSON.stringify(evidence)}`);
+    });
 
     const finalRowPrefix = `${marker}-final-row-`;
     const rowPrefix = `${marker}-row-`;
