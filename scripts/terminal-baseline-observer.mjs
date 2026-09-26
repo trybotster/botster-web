@@ -406,6 +406,7 @@ export async function createLogWatcher(logPath) {
       const existing = lines.find((entry) => predicate(entry.line));
       if (existing) return existing;
       return await new Promise((resolve, reject) => {
+        // timer: deadline — bounds one wait for a log line; each appended line re-checks.
         const timer = setTimeout(() => {
           const index = waiters.indexOf(onLine);
           if (index >= 0) waiters.splice(index, 1);
@@ -536,38 +537,6 @@ export function transformStable(samples) {
 export function sustainedFrames(frames, startedAt, endedAt) {
   const windowed = frames.filter((frame) => frame.at >= startedAt && frame.at <= endedAt);
   return windowed.length >= 2;
-}
-
-export async function waitForHashChange(oracle, previousHash, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const latest = oracle.frames.at(-1);
-    if (latest && latest.hash !== previousHash) {
-      return latest;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 16));
-  }
-  throw new Error("paint oracle did not observe a sampled-region hash change");
-}
-
-export async function waitForHashSettle(oracle, settleWindowMs = FROZEN_INPUTS.settle_window_ms, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs;
-  let last = oracle.frames.at(-1);
-  if (!last) {
-    throw new Error("paint oracle has no frames to settle");
-  }
-  let stableSince = Date.now();
-  while (Date.now() < deadline) {
-    const latest = oracle.frames.at(-1);
-    if (latest.hash !== last.hash) {
-      last = latest;
-      stableSince = Date.now();
-    } else if (Date.now() - stableSince >= settleWindowMs) {
-      return last;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 16));
-  }
-  throw new Error("paint oracle did not stay stable for the settle window");
 }
 
 export async function readLastEnterStamp(page) {

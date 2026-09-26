@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { chromium } from "playwright";
 import { createServer } from "vite";
+import { harnessWaitSupportScript, waitForDom } from "./harness-waits.mjs";
 
 const host = "127.0.0.1";
 const fixturePath = new URL("../fixtures/ghostsnp/rich-matrix-v1.bin", import.meta.url);
@@ -25,19 +26,15 @@ try {
 
   browser = await chromium.launch();
   const page = await browser.newPage();
+  await page.addInitScript({ content: harnessWaitSupportScript });
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.goto(`http://${host}:${address.port}/ghostsnp-grid-smoke.html`, {
     waitUntil: "domcontentloaded"
   });
 
-  await page.waitForFunction(
-    () => Boolean(globalThis.__BOTSTER_GHOSTSNP_GRID_SMOKE__),
-    undefined,
-    { timeout: 15_000 }
-  );
-  await page.waitForFunction(
-    () => {
+  await waitForDom(page, () => page.evaluate(() => Boolean(globalThis.__BOTSTER_GHOSTSNP_GRID_SMOKE__), undefined), { label: "GHOSTSNP grid smoke fixture", deadlineMs: 15_000 });
+  await waitForDom(page, () => page.evaluate(() => {
       const mounted = globalThis.__BOTSTER_GHOSTSNP_GRID_SMOKE__.getMountedGrid();
       const rendered = globalThis.__BOTSTER_GHOSTSNP_GRID_SMOKE__.getRenderGrid();
       return Boolean(
@@ -46,10 +43,7 @@ try {
         mounted.columns === rendered.columns &&
         mounted.rows === rendered.rows
       );
-    },
-    undefined,
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+    }, undefined), { label: "mounted grid equals the Restty render grid", deadlineMs: 15_000 }).catch(async (error) => {
     const state = await page.evaluate(() => ({
       mounted: globalThis.__BOTSTER_GHOSTSNP_GRID_SMOKE__.getMountedGrid(),
       rendered: globalThis.__BOTSTER_GHOSTSNP_GRID_SMOKE__.getRenderGrid()

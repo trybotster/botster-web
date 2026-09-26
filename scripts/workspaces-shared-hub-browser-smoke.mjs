@@ -112,12 +112,21 @@ try {
       if (hub.exitCode === null) throw error;
     });
     if (hub.exitCode === null) {
+      let exitTimer;
       await Promise.race([
         once(hub, "exit"),
-        new Promise((resolve) => setTimeout(resolve, 5_000))
+        new Promise((resolve) => {
+          // timer: deadline — bounds the Hub's exit after shutdown; expiry is a recorded failure.
+          exitTimer = setTimeout(resolve, 5_000);
+        })
       ]);
+      clearTimeout(exitTimer);
     }
-    if (hub.exitCode === null) hub.kill("SIGTERM");
+    if (hub.exitCode === null) {
+      console.error("cleanup failure: the Hub did not exit within 5 s of shutdown; sending SIGTERM");
+      process.exitCode = 1;
+      hub.kill("SIGTERM");
+    }
   }
   await rm(fixtureRoot, { recursive: true, force: true });
 }

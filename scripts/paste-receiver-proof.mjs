@@ -12,6 +12,7 @@
  * where <dir> defaults to node_modules/.botster-foundation-evidence/web-paste/receiver-proof.
  */
 import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -49,6 +50,11 @@ let child;
 let childExit;
 let transcript = Buffer.alloc(0);
 let text = "";
+/** Line waits re-check when the transcript grows or the child exits, never on a timer. */
+const transcriptWaiters = new Set();
+const wakeTranscriptWaiters = () => {
+  for (const waiter of [...transcriptWaiters]) waiter();
+};
 
 function childPidsOf(pid) {
   try {
@@ -91,21 +97,32 @@ function isAlive(pid) {
   }
 }
 
-const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-
-async function waitForLine(since, pattern, boundMs, label) {
+function waitForLine(since, pattern, boundMs, label) {
   const startedAt = Date.now();
-  for (;;) {
-    const match = matchCompleteLine(text.slice(since), pattern);
-    if (match) return { match, elapsedMs: Date.now() - startedAt };
-    if (childExit !== undefined) {
-      throw new Error(`${label}: session shell exited (${JSON.stringify(childExit)}) before /${pattern.source}/; tail=${escapeText(text.slice(-300))}`);
-    }
-    if (Date.now() - startedAt > boundMs) {
-      throw new Error(`${label}: /${pattern.source}/ not observed within ${boundMs} ms; tail=${escapeText(text.slice(-300))}`);
-    }
-    await sleep(25);
-  }
+  return new Promise((resolve, reject) => {
+    let timer;
+    const finish = () => {
+      transcriptWaiters.delete(check);
+      clearTimeout(timer);
+    };
+    const check = () => {
+      const match = matchCompleteLine(text.slice(since), pattern);
+      if (match) {
+        finish();
+        resolve({ match, elapsedMs: Date.now() - startedAt });
+      } else if (childExit !== undefined) {
+        finish();
+        reject(new Error(`${label}: session shell exited (${JSON.stringify(childExit)}) before /${pattern.source}/; tail=${escapeText(text.slice(-300))}`));
+      }
+    };
+    transcriptWaiters.add(check);
+    // timer: deadline — one line wait; expiry fails the case with the transcript tail.
+    timer = setTimeout(() => {
+      finish();
+      reject(new Error(`${label}: /${pattern.source}/ not observed within ${boundMs} ms; tail=${escapeText(text.slice(-300))}`));
+    }, boundMs);
+    check();
+  });
 }
 
 function send(bytes) {
@@ -124,14 +141,35 @@ async function readTtyState(label) {
   return match[1];
 }
 
-async function waitForAllDead(pids, boundMs) {
-  const startedAt = Date.now();
-  for (;;) {
-    const alive = pids.filter(isAlive);
-    if (alive.length === 0) return [];
-    if (Date.now() - startedAt > boundMs) return alive;
-    await sleep(50);
-  }
+/**
+ * Waits for the OS exit events of `pids` (kqueue EVFILT_PROC NOTE_EXIT through the system
+ * Python) and returns the pids still alive at the bound. A pid that is already gone when it is
+ * registered counts as exited. The kqueue wait itself is the deadline; nothing polls.
+ */
+function waitForAllDead(pids, boundMs) {
+  if (pids.length === 0) return Promise.resolve([]);
+  const program = [
+    "import json, select, sys, time",
+    "pids = json.loads(sys.argv[1]); bound = float(sys.argv[2])",
+    "kq = select.kqueue(); pending = set()",
+    "for pid in pids:",
+    "    try:",
+    "        kq.control([select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT)], 0, 0)",
+    "        pending.add(pid)",
+    "    except OSError:",
+    "        pass",
+    "deadline = time.monotonic() + bound",
+    "while pending:",
+    "    remaining = deadline - time.monotonic()",
+    "    if remaining <= 0: break",
+    "    for event in kq.control(None, len(pending), remaining):",
+    "        pending.discard(event.ident)",
+    "print(json.dumps(sorted(pending)))"
+  ].join("\n");
+  const stdout = execFileSync("/usr/bin/python3", ["-c", program, JSON.stringify(pids), String(boundMs / 1000)], {
+    encoding: "utf8"
+  });
+  return Promise.resolve(JSON.parse(stdout));
 }
 
 function recordCase(entry) {
@@ -151,11 +189,11 @@ async function receive({ label, wireLength, deliver, receiptBoundMs, shPid }) {
   if (ready.match[1] !== undefined) {
     throw new Error(`${label}: receiver failed closed: ${ready.match[1]}${ready.match[2] !== undefined ? `:${ready.match[2]}` : ""}`);
   }
-  // Ready is printed after the reader and watchdog start. The watchdog forks its sleep child a
-  // moment later, so snapshot twice and keep the union.
+  // Ready is printed after the reader and watchdog start; the watchdog reports its sleep child
+  // once it exists. After both lines, every armed process exists.
+  const watchdogArmed = await waitForLine(readySince, /botster-web-production-receive-watchdog-armed:(\d+)\r?\n/, 10_000, `${label} watchdog armed`);
   const armedPids = new Set(descendantsOf(shPid));
-  await sleep(200);
-  for (const pid of descendantsOf(shPid)) armedPids.add(pid);
+  armedPids.add(Number.parseInt(watchdogArmed.match[1], 10));
   const armed = [...armedPids].map((pid) => ({ pid, command: commandOf(pid) }));
   for (const entry of armed) ownedPids.add(entry.pid);
   const receiptSince = text.length;
@@ -198,11 +236,13 @@ async function main() {
   child.stdout.on("data", (chunk) => {
     transcript = Buffer.concat([transcript, chunk]);
     text += chunk.toString("latin1");
+    wakeTranscriptWaiters();
   });
   child.stderr.on("data", (chunk) => log(`script(1) stderr: ${escapeText(chunk.toString("latin1"))}`));
   child.on("exit", (code, signal) => {
     childExit = { code, signal };
     log(`script(1) exited ${JSON.stringify(childExit)}`);
+    wakeTranscriptWaiters();
   });
 
   await waitForLine(0, /botster-web-production-ready\r?\n/, 10_000, "session ready");
@@ -368,6 +408,7 @@ async function main() {
       deliver: async () => {
         send("z");
         ticks = 1;
+        // timer: rate-limit — one byte every 5 s keeps the reader's 10 s idle bound from firing, so only the wall-clock watchdog can end the read.
         timer = setInterval(() => {
           send("z");
           ticks += 1;
@@ -414,9 +455,9 @@ async function main() {
     const readySince = text.length;
     send("botster-web-production-receive:4096\n");
     await waitForLine(readySince, receiverReadyOrErrorPattern(4096), 10_000, "signal-cleanup ready");
+    const watchdogArmed = await waitForLine(readySince, /botster-web-production-receive-watchdog-armed:(\d+)\r?\n/, 10_000, "signal-cleanup watchdog armed");
     const armedPids = new Set(descendantsOf(shPid));
-    await sleep(200);
-    for (const pid of descendantsOf(shPid)) armedPids.add(pid);
+    armedPids.add(Number.parseInt(watchdogArmed.match[1], 10));
     const armed = [...armedPids].map((pid) => ({ pid, command: commandOf(pid) }));
     for (const entry of armed) ownedPids.add(entry.pid);
     const receiveFile = join(evidenceDir, `botster-web-production-receive.${shPid}`);
@@ -453,8 +494,17 @@ async function teardown() {
   if (child && childExit === undefined) {
     try { child.stdin.end(); } catch { /* ignored */ }
   }
-  const deadline = Date.now() + 5_000;
-  while (child && childExit === undefined && Date.now() < deadline) await sleep(50);
+  if (child && childExit === undefined) {
+    let exitTimer;
+    await Promise.race([
+      once(child, "exit"),
+      new Promise((done) => {
+        // timer: deadline — the PTY supervisor's exit after its stdin closes; expiry leaves it to the kill below.
+        exitTimer = setTimeout(done, 5_000);
+      })
+    ]);
+    clearTimeout(exitTimer);
+  }
   const owned = [...ownedPids];
   const aliveBefore = owned.filter(isAlive);
   for (const pid of aliveBefore) {
@@ -476,6 +526,7 @@ async function teardown() {
   return aliveAfter;
 }
 
+// timer: deadline — the whole proof; expiry records a failure, tears down, and exits 2.
 const supervisor = setTimeout(() => {
   results.failure = `supervisor bound ${SUPERVISOR_MS} ms exceeded`;
   log(results.failure);

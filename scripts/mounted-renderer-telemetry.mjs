@@ -1,8 +1,10 @@
 import { strict as assert } from "node:assert";
+import { harnessWaitSupportScript, waitForDom } from "./harness-waits.mjs";
 
 export async function verifyMountedRendererTelemetry(browser, baseUrl) {
   for (const enabled of [false, true]) {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await page.addInitScript({ content: harnessWaitSupportScript });
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
@@ -10,10 +12,10 @@ export async function verifyMountedRendererTelemetry(browser, baseUrl) {
       await page.goto(`${baseUrl}/mounted-terminal-keyboard-smoke.html?rendererTelemetry=${enabled ? "on" : "off"}`, {
         waitUntil: "domcontentloaded"
       });
-      await page.waitForFunction(() => {
+      await waitForDom(page, () => page.evaluate(() => {
         const fixture = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
         return fixture?.outputSubscribers === 1 && fixture.viewportMeta().hasRuntime;
-      }, undefined, { timeout: 15_000 }).catch(async (cause) => {
+      }, undefined), { label: "verifyMountedRendererTelemetry condition 1", deadlineMs: 15_000 }).catch(async (cause) => {
         const state = await page.evaluate(() => {
           const fixture = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
           return { subscribers: fixture?.outputSubscribers, rows: fixture?.readViewportRows(), meta: fixture?.viewportMeta() };
@@ -47,9 +49,8 @@ export async function verifyMountedRendererTelemetry(browser, baseUrl) {
           };
         }, { marker, suppressed });
 
-        await page.waitForFunction((marker) =>
-          globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__.readViewportRows().some((row) => row.includes(marker)),
-        marker, { timeout: 15_000 });
+        await waitForDom(page, () => page.evaluate((marker) =>
+          globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__.readViewportRows().some((row) => row.includes(marker)), marker), { label: "verifyMountedRendererTelemetry condition 2", deadlineMs: 15_000 });
         assert.equal(result.hasRecorder, enabled);
         assert.equal(result.encodings, enabled && !suppressed ? 1 : 0);
         assert.equal(result.writes.length, enabled && !suppressed ? 1 : 0);

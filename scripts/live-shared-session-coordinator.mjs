@@ -8,7 +8,7 @@ import {
   DEFAULT_SHARED_SESSION_ID,
   productionSessionScriptSource
 } from "./live-packaged-protocol-helpers.mjs";
-import { sendDaemonUnixRequest } from "./daemon-unix-client.mjs";
+import { sendDaemonUnixRequest, waitForDaemonUnixEntities } from "./daemon-unix-client.mjs";
 import { waitForHubReady } from "./live-hub-lane.mjs";
 import {
   daemonCompatibilityRequirement,
@@ -102,12 +102,21 @@ try {
       if (hub.exitCode === null) throw error;
     });
     if (hub.exitCode === null) {
+      let exitTimer;
       await Promise.race([
         once(hub, "exit"),
-        new Promise((resolveWait) => setTimeout(resolveWait, 5_000))
+        new Promise((resolveWait) => {
+          // timer: deadline — bounds the Hub's exit after shutdown; expiry is a recorded failure.
+          exitTimer = setTimeout(resolveWait, 5_000);
+        })
       ]);
+      clearTimeout(exitTimer);
     }
-    if (hub.exitCode === null) hub.kill("SIGTERM");
+    if (hub.exitCode === null) {
+      console.error("cleanup failure: the Hub did not exit within 5 s of shutdown; sending SIGTERM");
+      process.exitCode = 1;
+      hub.kill("SIGTERM");
+    }
   }
   await rm(dataDir, { recursive: true, force: true });
 }
@@ -205,20 +214,22 @@ async function runDriver(overrides = {}) {
   return { code, output };
 }
 
+/** Waits on the Hub's session entity subscription; re-checks only when a session frame arrives. */
 async function waitForSessionLifecycle(expectedSessionId, expected) {
   const accepted = Array.isArray(expected) ? expected : [expected];
-  const deadline = Date.now() + 15_000;
-  let lastSessions = [];
-  while (Date.now() < deadline) {
-    const response = await sendDaemonRequest(socketPath, { type: "list_sessions" });
-    lastSessions = response.sessions ?? [];
-    const row = lastSessions.find((session) => session.session_id === expectedSessionId);
-    if (row && accepted.includes(row.lifecycle)) return row;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  }
-  throw new Error(
-    `timed out waiting for ${expectedSessionId} lifecycle ${accepted.join("|")}; observed=${JSON.stringify(lastSessions)}`
-  );
+  return waitForDaemonUnixEntities({
+    socketPath,
+    entityType: "session",
+    until: (sessions) => {
+      const row = sessions.get(expectedSessionId);
+      return row && accepted.includes(row.lifecycle) ? row : null;
+    },
+    label: `${expectedSessionId} lifecycle ${accepted.join("|")}`,
+    deadlineMs: 15_000,
+    protocol: daemonProtocol,
+    compatibilityRequirement: daemonCompatibilityRequirement("botster-web-live-shared-session-coordinator", ["sessions"]),
+    framing: daemonUnixFraming
+  });
 }
 
 async function runHub(args) {

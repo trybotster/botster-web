@@ -1,4 +1,7 @@
 import { Restty, ResttyWasm } from "../vendor/restty/internal.js";
+import { signalResttyChanges } from "./smokeWaitSignals";
+
+signalResttyChanges();
 
 type Grid = { columns: number; rows: number };
 

@@ -1369,8 +1369,19 @@ assert.match(appFeatureSources.join("\n"), /hubUpdateOutcomeFromResult\(result\)
         globalThis.IS_REACT_ACT_ENVIRONMENT = true;
         if (!globalThis.window) globalThis.window = globalThis;
         globalThis.getComputedStyle = () => new Proxy({}, { get: () => "" });
-        globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
-        globalThis.cancelAnimationFrame = (id) => clearTimeout(id);
+        // Controlled frames: each callback runs in the microtask after its request, in order,
+        // unless cancelled first. No timer stands in for a frame.
+        let nextFrameId = 0;
+        const cancelledFrames = new Set();
+        globalThis.requestAnimationFrame = (cb) => {
+          const id = (nextFrameId += 1);
+          queueMicrotask(() => {
+            if (cancelledFrames.delete(id)) return;
+            cb(performance.now());
+          });
+          return id;
+        };
+        globalThis.cancelAnimationFrame = (id) => cancelledFrames.add(id);
       }
 
       installMinimalDom();
@@ -2266,7 +2277,7 @@ assert.match(pluginSurfaceRouteDescriptorSource, /daemonPackages\.find\(\(record
 assert.match(pluginSurfaceRouteDescriptorSource, /projectedPackages\.find\(\(record\) => record\.id === packageName\)/);
 assert.match(pluginSurfaceRouteDescriptorSource, /const surfaces = projectedPackage\?\.app_surfaces \?\? \[\]/);
 assert.doesNotMatch(pluginSurfaceRouteDescriptorSource, /package_name \?\? record\.name \?\? record\.id/);
-assert.match(liveProtocolHarnessScript, /\.slice\(fromIndex\)\s*\.some\(\(entry\) => globalThis\.__botsterHarnessEventMatches/);
+assert.match(liveProtocolHarnessScript, /import \{ waitForDom, waitForHarnessEvent \} from "\.\/harness-waits\.mjs";/);
 assert.match(liveProtocolHarnessScript, /openContractAppFromNavigation/);
 assert.match(liveProtocolHarnessScript, /getByLabel\("Admitted plugin navigation"\)/);
 assert.match(liveProtocolHarnessScript, /proveRapidAlternateScreenReattach/);
@@ -2479,9 +2490,12 @@ assert.match(liveProtocolHarnessScript, /callTerminalControl\(page, "focus"\)/);
 assert.match(liveHubLaneScript, /args\.push\("--ready-fd", "3"\)/);
 assert.match(liveHubLaneScript, /export function waitForHubReady\(child/);
 assert.doesNotMatch(liveHubLaneScript, /export async function waitForSocket/);
-// Harness event waits are page-condition waits with the matcher installed in the page.
-assert.match(liveHubLaneScript, /__botsterHarnessEventMatches = \$\{harnessEventMatches\.toString\(\)\}/);
-assert.match(liveProtocolHarnessScript, /globalThis\.__botsterHarnessEventMatches\(entry, matchCriteria\)/);
+// Harness waits are event-driven: the page support is installed before any page script, and
+// no library polling wait (waitForFunction, waitForTimeout, locator waitFor, waitForURL) remains.
+assert.match(liveHubLaneScript, /addInitScript\(\{ content: harnessWaitSupportScript \}\)/);
+for (const [name, script] of [["live harness", liveProtocolHarnessScript], ["live hub lane", liveHubLaneScript]]) {
+  assert.doesNotMatch(script, /\.waitForFunction\(|\.waitForTimeout\(|\.waitFor\(|\.waitForURL\(/, `${name} uses a polling wait`);
+}
 assert.match(liveHubLaneScript, /page\.keyboard\.(insertText|type)\(data/);
 assert.match(smokeRealHubScript, /transportControl\?\.closeDataChannel/);
 assert.match(smokeRealHubScript, /BOTSTER_REAL_HUB_ABLATE_RECONNECT_CLOSE/);
@@ -2949,7 +2963,7 @@ assert.doesNotMatch(
     liveProtocolHarnessScript.indexOf("async function proveInFlightAttachCancellation"),
     liveProtocolHarnessScript.indexOf("async function proveSharedSessionExit")
   ),
-  /proveSiblingSlowClientAndHostStayUp/
+  /proveClientInboundAdmissionBound/
 );
 assert.match(liveProtocolHarnessScript, /live-shared-session-cancel-passed/);
 assert.doesNotMatch(liveProtocolHarnessScript, /TerminalSessionManager/);
@@ -16429,10 +16443,21 @@ async function startPackageServerRuntime({
     daemonRequests,
     async stop() {
       serverProcess.kill("SIGTERM");
-      await Promise.race([
-        once(serverProcess, "exit"),
-        new Promise((resolve) => setTimeout(resolve, 1_000))
-      ]);
+      if (serverProcess.exitCode === null && serverProcess.signalCode === null) {
+        let exitTimer;
+        const exited = await Promise.race([
+          once(serverProcess, "exit").then(() => true),
+          new Promise((resolve) => {
+            // timer: deadline — bounds the server's exit after SIGTERM; expiry fails the test.
+            exitTimer = setTimeout(() => resolve(false), 1_000);
+          })
+        ]);
+        clearTimeout(exitTimer);
+        if (!exited) {
+          serverProcess.kill("SIGKILL");
+          throw new Error("package server did not exit within 1 s of SIGTERM");
+        }
+      }
       daemon.close();
       await once(daemon, "close");
       await rm(root, { recursive: true, force: true });
@@ -16493,8 +16518,8 @@ async function waitForTestCondition(predicate, { label, deadlineMs = 5_000 } = {
   const caller = new Error().stack?.split("\n").find((line) => line.includes(".test.mjs") && !line.includes("waitForTestCondition"))?.trim();
   label ??= `test condition at ${caller ?? "unknown caller"}`;
   let timer;
-  // timer: deadline — bounds one test wait; expiry fails the test with its label.
   const expired = new Promise((_, reject) => {
+    // timer: deadline — bounds one test wait; expiry fails the test with its label.
     timer = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), deadlineMs);
   });
   try {

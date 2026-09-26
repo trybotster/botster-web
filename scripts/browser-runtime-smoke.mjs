@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize, relative, sep } from "node:path";
 import { chromium } from "playwright";
+import { harnessWaitSupportScript, waitForDom } from "./harness-waits.mjs";
 
 const host = "127.0.0.1";
 const distRoot = join(process.cwd(), "dist");
@@ -54,16 +55,18 @@ try {
 
 async function proveHubSettingsOnMobile() {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await page.addInitScript({ content: harnessWaitSupportScript });
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
-  await page.goto(`${origin}/missing-bootstrap`, { waitUntil: "networkidle" });
+  await page.goto(`${origin}/missing-bootstrap`, { waitUntil: "domcontentloaded" });
   await openHubSettings(page);
-  await page.getByRole("heading", { name: "Hub settings", exact: true }).waitFor();
+  await waitForDom(page, page.getByRole("heading", { name: "Hub settings", exact: true }), { label: "page.getByRole(\"heading\", { name: \"Hub settings\", exact: true })" });
   const settingsNavigation = page.getByLabel("Hub settings sections");
   await assertHubSettingsHeadingHierarchy(page, settingsNavigation);
+  await waitForDom(page, { locator: settingsNavigation.getByRole("button", { name: /Spawn points/ }), state: "actionable" }, { label: "settingsNavigation.getByRole('button', { name: /Spawn points/ }) before click" });
   await settingsNavigation.getByRole("button", { name: /Spawn points/ }).click();
-  await page.getByTestId("spawn-points-view").waitFor();
+  await waitForDom(page, page.getByTestId("spawn-points-view"), { label: "page.getByTestId(\"spawn-points-view\")" });
   await assertSessionTypesSurfaceRenders(page, settingsNavigation);
   assertNoPageErrors("mobile Hub settings", pageErrors);
   await page.close();
@@ -79,13 +82,14 @@ async function proveHubSettingsOnMobile() {
  */
 async function proveHubGeneralWithoutHub() {
   const page = await browser.newPage();
+  await page.addInitScript({ content: harnessWaitSupportScript });
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
-  await page.goto(`${origin}/settings`, { waitUntil: "networkidle" });
+  await page.goto(`${origin}/settings`, { waitUntil: "domcontentloaded" });
   const general = page.getByTestId("hub-settings-general");
-  await general.waitFor();
-  await page.getByRole("heading", { name: "General", exact: true }).waitFor({ state: "visible" });
+  await waitForDom(page, general, { label: "general" });
+  await waitForDom(page, { locator: page.getByRole("heading", { name: "General", exact: true }), state: "visible" }, { label: "page.getByRole(\"heading\", { name: \"General\", exact: true })" });
 
   // Honest fallbacks with no Hub reachable: never a fabricated version, and never the
   // permanently-"unknown" rendering that numeric coercion used to produce.
@@ -118,8 +122,9 @@ async function proveHubGeneralWithoutHub() {
   // Check for updates is present and, with no Hub reachable, renders the offline outcome
   // from the rejected action result rather than any DaemonHubUpdateState.
   const updateRegion = general.getByTestId("hub-software-update");
+  await waitForDom(page, { locator: updateRegion.getByRole("button", { name: "Check for updates", exact: true }), state: "actionable" }, { label: "updateRegion.getByRole('button', { name: 'Check for updates', exact... before click" });
   await updateRegion.getByRole("button", { name: "Check for updates", exact: true }).click();
-  await general.getByTestId("hub-update-outcome").filter({ hasText: /Update check failed/ }).waitFor();
+  await waitForDom(page, general.getByTestId("hub-update-outcome").filter({ hasText: /Update check failed/ }), { label: "general.getByTestId(\"hub-update-outcome\").filter({ hasText: /Update check failed/ })" });
   const updateOutcome = await general.getByTestId("hub-update-outcome").innerText();
   if (await updateRegion.getAttribute("data-hub-update-state") !== null) {
     throw new Error(`Offline update check synthesized a DaemonHubUpdateState: ${updateOutcome}`);
@@ -143,10 +148,11 @@ async function assertSessionTypesSurfaceRenders(page, settingsNavigation) {
     if (body) daemonRequests.push(body);
   });
 
+  await waitForDom(page, { locator: settingsNavigation.getByRole("button", { name: /Session types/ }), state: "actionable" }, { label: "settingsNavigation.getByRole('button', { name: /Session types/ }) before click" });
   await settingsNavigation.getByRole("button", { name: /Session types/ }).click();
   const sessionTypesView = page.getByTestId("session-types-view");
-  await sessionTypesView.waitFor();
-  await page.getByRole("heading", { name: "Session types", exact: true }).waitFor();
+  await waitForDom(page, sessionTypesView, { label: "sessionTypesView" });
+  await waitForDom(page, page.getByRole("heading", { name: "Session types", exact: true }), { label: "page.getByRole(\"heading\", { name: \"Session types\", exact: true })" });
 
   const legacyRequest = daemonRequests.find((body) => body.includes("list_session_templates"));
   if (legacyRequest) {
@@ -156,11 +162,12 @@ async function assertSessionTypesSurfaceRenders(page, settingsNavigation) {
 
 async function proveMissingBootstrapDiagnostic() {
   const page = await browser.newPage();
+  await page.addInitScript({ content: harnessWaitSupportScript });
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
-  await page.goto(`${origin}/missing-bootstrap`, { waitUntil: "networkidle" });
-  await page.getByRole("heading", { name: "Your sessions" }).waitFor();
+  await page.goto(`${origin}/missing-bootstrap`, { waitUntil: "domcontentloaded" });
+  await waitForDom(page, page.getByRole("heading", { name: "Your sessions" }), { label: "page.getByRole(\"heading\", { name: \"Your sessions\" })" });
 
   const sidebarGeometry = await page.locator("ion-menu.app-sidebar").evaluate((menu) => {
     const container = menu.shadowRoot?.querySelector(".menu-inner");
@@ -185,12 +192,14 @@ async function proveMissingBootstrapDiagnostic() {
   }
 
   await openHubSettings(page);
+  await waitForDom(page, { locator: page.getByLabel("Hub settings sections").getByRole("button", { name: /Support/ }), state: "actionable" }, { label: "page.getByLabel('Hub settings sections').getByRole('button', { name... before click" });
   await page.getByLabel("Hub settings sections").getByRole("button", { name: /Support/ }).click();
   const diagnosticsView = page.getByTestId("diagnostics-view");
+  await waitForDom(page, { locator: diagnosticsView.getByText("Developer details", { exact: true }), state: "actionable" }, { label: "diagnosticsView.getByText('Developer details', { exact: true }) before click" });
   await diagnosticsView.getByText("Developer details", { exact: true }).click();
   const diagnosticsWorkflow = page.getByTestId("diagnostics-workflow");
-  await diagnosticsWorkflow.getByText("Local WebRTC bootstrap failed", { exact: true }).waitFor();
-  await diagnosticsWorkflow.getByText("Botster package runtime requires a valid local WebRTC bootstrap grant.", { exact: true }).waitFor();
+  await waitForDom(page, diagnosticsWorkflow.getByText("Local WebRTC bootstrap failed", { exact: true }), { label: "diagnosticsWorkflow.getByText(\"Local WebRTC bootstrap failed\", { exact: true })" });
+  await waitForDom(page, diagnosticsWorkflow.getByText("Botster package runtime requires a valid local WebRTC bootstrap grant.", { exact: true }), { label: "diagnosticsWorkflow.getByText(\"Botster package runtime requires a valid local WebRTC b..." });
   assertNoPageErrors("missing-bootstrap diagnostic", pageErrors);
   await page.close();
 }
@@ -198,11 +207,12 @@ async function proveMissingBootstrapDiagnostic() {
 async function openHubSettings(page) {
   const menuButton = page.getByRole("button", { name: "Open navigation", exact: true });
   if (await menuButton.isVisible()) {
+    await waitForDom(page, { locator: menuButton, state: "actionable" }, { label: "menuButton before click" });
     await menuButton.click();
   }
   const sidebar = page.locator("ion-menu.app-sidebar");
   const settingsButton = sidebar.getByRole("button", { name: "Hub settings", exact: true });
-  await settingsButton.waitFor({ state: "visible" });
+  await waitForDom(page, { locator: settingsButton, state: "visible" }, { label: "settingsButton" });
   const [sidebarBounds, settingsBounds] = await Promise.all([
     sidebar.boundingBox(),
     settingsButton.boundingBox()
@@ -213,6 +223,7 @@ async function openHubSettings(page) {
   if (bottomGap === undefined || bottomGap > 20) {
     throw new Error(`Hub settings is not pinned to the bottom of the sidebar: gap=${String(bottomGap)}`);
   }
+  await waitForDom(page, { locator: settingsButton, state: "actionable" }, { label: "settingsButton before click" });
   await settingsButton.click();
 }
 
@@ -226,9 +237,10 @@ async function assertHubSettingsHeadingHierarchy(page, settingsNavigation) {
   ];
   const headingSizes = [];
   for (const [tabName, headingName] of sections) {
+    await waitForDom(page, { locator: settingsNavigation.getByRole("button", { name: new RegExp(`^${tabName}`) }), state: "actionable" }, { label: "settingsNavigation.getByRole('button', { name: new RegExp(`^${tabNa... before click" });
     await settingsNavigation.getByRole("button", { name: new RegExp(`^${tabName}`) }).click();
     const heading = page.getByRole("heading", { name: headingName, exact: true });
-    await heading.waitFor({ state: "visible" });
+    await waitForDom(page, { locator: heading, state: "visible" }, { label: "heading" });
     headingSizes.push(await heading.evaluate((element) => globalThis.getComputedStyle(element).fontSize));
   }
   if (new Set(headingSizes).size !== 1) {

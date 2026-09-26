@@ -73,6 +73,79 @@ export async function sendDaemonUnixRequest({
   }
 }
 
+/**
+ * Subscribes to one entity type on its own Unix socket connection and resolves with
+ * `until(records)` once that returns a truthy value. `records` is a Map from entity id to the
+ * current record, built from the authoritative snapshot and every later upsert, patch, and
+ * remove. The condition is evaluated only when an entity frame arrives, never on a timer; one
+ * deadline bounds the whole wait.
+ */
+export async function waitForDaemonUnixEntities({
+  socketPath,
+  entityType,
+  until,
+  label,
+  deadlineMs = DAEMON_REQUEST_MS,
+  protocol,
+  compatibilityRequirement,
+  framing
+}) {
+  const socket = connect(socketPath);
+  const deadlineAt = Date.now() + deadlineMs;
+  const subscriptionId = `web-harness-${entityType}-${process.pid}-${Date.now().toString(36)}`;
+  const records = new Map();
+  let snapshotSeen = false;
+  try {
+    await waitForSocketConnect(socket, deadlineAt);
+    socket.write(encodeUnixControlFrame({ frame: "hello", hello: { protocol, compatibility: compatibilityRequirement } }, framing));
+    const hello = await readUnixControlFrame(socket, deadlineAt, framing);
+    assertServerFrame(hello);
+    if (hello.frame !== "hello_ack" || !isRecord(hello.ack) || hello.ack.protocol !== protocol) {
+      throw new Error(`daemon hello failed: ${JSON.stringify(hello)}`);
+    }
+    assertDaemonCompatibility(hello.ack.compatibility, compatibilityRequirement);
+    socket.write(encodeUnixControlFrame({
+      frame: "request",
+      request_id: "1",
+      request: { type: "subscribe_entities", entity_type: entityType, subscription_id: subscriptionId }
+    }, framing));
+    while (true) {
+      const frame = await readUnixControlFrame(socket, deadlineAt, framing);
+      assertServerFrame(frame);
+      if (frame.frame === "close") throw new Error(`daemon closed the ${entityType} subscription: ${JSON.stringify(frame.reason)}`);
+      if (frame.frame === "response") {
+        if (frame.response?.error) throw new Error(`subscribe_entities ${entityType} failed: ${JSON.stringify(frame.response.error)}`);
+        continue;
+      }
+      if (frame.frame !== "entity" || !isRecord(frame.entity) || frame.entity.subscription_id !== subscriptionId) continue;
+      const entity = frame.entity;
+      if (entity.type === "entity_error") throw new Error(`${entityType} subscription error: ${JSON.stringify(entity)}`);
+      if (entity.type === "entity_snapshot") {
+        records.clear();
+        for (const item of entity.items ?? []) {
+          const id = item?.id ?? item?.session_uuid ?? item?.session_id;
+          if (id != null) records.set(String(id), { ...item });
+        }
+        snapshotSeen = true;
+      } else if (entity.type === "entity_upsert") {
+        records.set(String(entity.id), { ...entity.entity });
+      } else if (entity.type === "entity_patch") {
+        records.set(String(entity.id), { ...records.get(String(entity.id)), ...entity.patch });
+      } else if (entity.type === "entity_remove") {
+        records.delete(String(entity.id));
+      }
+      if (!snapshotSeen) continue;
+      const value = until(records);
+      if (value) return value;
+    }
+  } catch (error) {
+    const observed = JSON.stringify([...records.values()]);
+    throw new Error(`${label ?? `${entityType} entity condition`}: ${error instanceof Error ? error.message : String(error)}; observed=${observed}`, { cause: error });
+  } finally {
+    socket.destroy();
+  }
+}
+
 function waitForSocketConnect(socket, deadlineAt) {
   return new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -97,6 +170,7 @@ function waitForSocketConnect(socket, deadlineAt) {
       cleanup();
       reject(new Error(`daemon request deadline ${DAEMON_REQUEST_MS} ms exceeded`));
     };
+    // timer: deadline — bounds the connection within the request deadline.
     const timer = setTimeout(onTimeout, remainingDeadlineMs(deadlineAt));
     socket.once("connect", onConnect);
     socket.once("error", onError);
@@ -196,6 +270,7 @@ function waitForSocketReadable(socket, deadlineAt) {
       reject(new Error(`daemon request deadline ${DAEMON_REQUEST_MS} ms exceeded`));
     };
 
+    // timer: deadline — bounds one read within the request deadline.
     const timer = setTimeout(onTimeout, remainingDeadlineMs(deadlineAt));
     socket.once("readable", onReadable);
     socket.once("error", onError);

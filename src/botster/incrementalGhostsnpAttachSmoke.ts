@@ -3,6 +3,7 @@ import type { DaemonRequest } from "./realHubDaemonDto";
 import type { TerminalStreamEvent } from "./hubTransport";
 import { ResttyTerminalRenderer } from "./resttyRenderer";
 import { ResttyWasm } from "../vendor/restty/internal.js";
+import { observeLog, signalResttyChanges } from "./smokeWaitSignals";
 import type { TerminalAttachmentStatus, TerminalInputOutcome } from "./terminal";
 import {
   encodeTerminalBody,
@@ -21,6 +22,8 @@ const routeGeneration = 1;
 const root = document.getElementById("root");
 if (!root) throw new Error("Incremental attach smoke root is missing.");
 
+signalResttyChanges();
+
 let runtime: ResttyWasm | undefined;
 let activeHandle = 0;
 const originalCreate = ResttyWasm.prototype.create;
@@ -36,9 +39,9 @@ ResttyWasm.prototype.create = function create(columns, rows, maxScrollback) {
 
 let deliverEvent: ((event: TerminalStreamEvent) => void | Promise<void>) | undefined;
 const requests: DaemonRequest[] = [];
-const sentFrames: Uint8Array[] = [];
-const statuses: TerminalAttachmentStatus[] = [];
-const outcomes: TerminalInputOutcome[] = [];
+const sentFrames: Uint8Array[] = observeLog([]);
+const statuses: TerminalAttachmentStatus[] = observeLog([]);
+const outcomes: TerminalInputOutcome[] = observeLog([]);
 const dataPlane = createHubTerminalDataPlane({
   sessionId,
   subscriptionId,

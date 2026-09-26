@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chromium } from "playwright";
 import ts from "typescript";
 import { createServer as createViteServer } from "vite";
+import { waitForDom, waitForHarnessEvent } from "./harness-waits.mjs";
 import {
   assertDurableStateOwnership,
   assertPackageReused,
@@ -49,6 +50,7 @@ import {
   requestDaemonShutdown as requestHubShutdown,
   runHubCommand as runHubCliCommand,
   sendDaemonRequest,
+  waitForDaemonSessions,
   spawnHubProcess as spawnHubChild,
   typeThroughMountedTerminal,
   waitForDirectTerminalChannelClosed,
@@ -96,12 +98,12 @@ const { decodeModeFlags, encodePaste, encodeRawBytes, encodeResize, MAX_PASTE_BY
  * read_mode_flags. Returns the decoded flags with rows, cols, and mode_bits.
  */
 async function waitForPushedModes(page, bit, expected, label, timeout = 15_000) {
-  const modes = await page.waitForFunction(({ modeBit, wanted }) => {
+  const modes = await waitForHarnessEvent(page, ({ modeBit, wanted }) => {
     const latest = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).findLast((entry) => entry.kind === "modes");
     const bits = latest?.payload?.modeBits;
     if (typeof bits !== "number") return null;
     return ((bits & modeBit) !== 0) === wanted ? latest.payload : null;
-  }, { modeBit: bit, wanted: expected }, { timeout }).then((handle) => handle.jsonValue()).catch(async (error) => {
+  }, { modeBit: bit, wanted: expected }, { label: "waitForPushedModes condition 1", deadlineMs: timeout }).catch(async (error) => {
     const latest = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).findLast((entry) => entry.kind === "modes")?.payload ?? null
     );
@@ -300,9 +302,9 @@ try {
 
   await page.goto(appUrl, { waitUntil: "domcontentloaded" });
   await openDiagnosticsView(page);
-  await page.getByText("Local Botster health").waitFor();
+  await waitForDom(page, page.getByText("Local Botster health"), { label: "page.getByText(\"Local Botster health\")" });
   await waitForTransportLabel(page);
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, "status request");
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, undefined, { label: "status request", deadlineMs: 45_000 });
   const authoritativeHubStatus = await assertCurrentHubCompatibilityAndSchema(page);
   if (directTerminalMode) {
     const directTerminalProof = await proveDirectBinaryTerminalLane(page, productionSessionId);
@@ -317,30 +319,14 @@ try {
     })}`);
     process.exit(0);
   }
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, "list_apps request");
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, "list_packages request");
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_apps" }, undefined, { label: "list_apps request", deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, undefined, { label: "list_packages request", deadlineMs: 45_000 });
   const originalRemoteAccessValue = await waitForRemoteAccessPackageConfiguration(page);
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "subscribe_entities", entity_type: "session" },
-    "session entity subscription request"
-  );
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", family: "session" },
-    "authoritative session snapshot"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "subscribe_entities", entity_type: "session" }, undefined, { label: "session entity subscription request", deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "hub_frame", family: "session" }, undefined, { label: "authoritative session snapshot", deadlineMs: 45_000 });
   await assertNoLegacySessionHydration(page);
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "subscribe_entities", entity_type: "session_type" },
-    "session type entity subscription request"
-  );
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", family: "session_type" },
-    "authoritative session type snapshot"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "subscribe_entities", entity_type: "session_type" }, undefined, { label: "session type entity subscription request", deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "hub_frame", family: "session_type" }, undefined, { label: "authoritative session type snapshot", deadlineMs: 45_000 });
   await assertNoSessionTypeListHydration(page);
   await assertCurrentHubSchemaPresentation(page, authoritativeHubStatus);
   const initialHubIdentity = await assertAuthoritativeHubIdentity(page, authoritativeHubStatus, "initial connect");
@@ -454,7 +440,8 @@ try {
   await waitForTerminalSession(page, productionSessionId);
   responseAssemblyTelemetry.push({ cycle: 0, ...await waitForAutomaticTerminalRestore(page) });
   await proveLiveTerminalAfterAttach(page, `${attachProbe}-0`);
-  await proveSiblingSlowClientAndHostStayUp(page, productionSessionId);
+  await proveClientInboundAdmissionBound(page, productionSessionId);
+  await proveNormalReaderAttachToFloodingSession(page);
   attachChronology.push({ cycle: 0, ...await assertTerminalAttachChronology(page, productionSessionId) });
   await proveExternalSessionLifecycle(page);
 
@@ -523,12 +510,8 @@ try {
       `expected KEY operations for mounted echo ${echoProbe}, observed delta ${keyOperationsAfterEcho - keyOperationsBeforeEcho}`
     );
   }
-  await page.waitForFunction(
-    ({ before, expected }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "input_result").length >= before + expected,
-    { before: resultsBeforeEcho, expected: keyOperationsAfterEcho - keyOperationsBeforeEcho },
-    { timeout: 30_000 }
-  ).catch((error) => {
+  await waitForHarnessEvent(page, ({ before, expected }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "input_result").length >= before + expected, { before: resultsBeforeEcho, expected: keyOperationsAfterEcho - keyOperationsBeforeEcho }, { label: "waitForPushedModes condition 2", deadlineMs: 30_000 }).catch((error) => {
     throw new Error(`every KEY operation must receive one INPUT_RESULT: ${error.message}`);
   });
   const uncapturedSeen = await terminalTelemetryCount(page, "restty_input_uncaptured");
@@ -537,7 +520,7 @@ try {
   }
 
   const readScreen = await callTerminalControl(page, "readScreen");
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_screen" }, "read_screen request");
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_screen" }, undefined, { label: "read_screen request", deadlineMs: 45_000 });
   if (
     readScreen?.session_id !== productionSessionId ||
     !readScreen.text?.includes(`botster-web-production-echo:${echoProbe}`)
@@ -547,8 +530,8 @@ try {
 
   // Readback is paged host control: CaptureSnapshot then ReadSnapshotPage per page.
   const captureSnapshot = await callTerminalControl(page, "captureSnapshot");
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "capture_snapshot" }, "capture_snapshot request");
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_snapshot_page" }, "read_snapshot_page request");
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "capture_snapshot" }, undefined, { label: "capture_snapshot request", deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "read_snapshot_page" }, undefined, { label: "read_snapshot_page request", deadlineMs: 45_000 });
   const captureBytes = captureSnapshot ? Object.keys(captureSnapshot).length : 0;
   if (!captureSnapshot || captureBytes <= 8 || captureSnapshot[0] !== "G".charCodeAt(0)) {
     throw new Error(`unexpected capture_snapshot bytes: ${JSON.stringify({ bytes: captureBytes })}`);
@@ -762,10 +745,20 @@ try {
   await cleanupProductionSessionBestEffort();
   if (hubProcess && hubProcess.exitCode === null) {
     hubProcess.kill("SIGTERM");
-    await Promise.race([
-      once(hubProcess, "exit"),
-      new Promise((resolve) => setTimeout(resolve, 2_000))
+    let exitTimer;
+    const exited = await Promise.race([
+      once(hubProcess, "exit").then(() => true),
+      new Promise((resolve) => {
+        // timer: deadline — bounds the Hub's exit after SIGTERM; expiry is a recorded failure.
+        exitTimer = setTimeout(() => resolve(false), 2_000);
+      })
     ]);
+    clearTimeout(exitTimer);
+    if (!exited) {
+      console.error("cleanup failure: the Hub did not exit within 2 s of SIGTERM; sending SIGKILL");
+      process.exitCode = 1;
+      hubProcess.kill("SIGKILL");
+    }
   }
   // On failure, keep the Hub's own logs and state for diagnosis before the owned data
   // directory is removed. Sockets are not copied.
@@ -972,10 +965,10 @@ async function navigatePackageRuntimeAndAssertWebrtc(
     await openDiagnosticsView(page);
     await waitForTransportLabel(page);
   }
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "local_webrtc_signal" }, `${label} local_webrtc_signal request`);
-  await waitForHarnessEvent(page, { kind: "webrtc_data_channel", state: "open" }, `${label} data channel open`);
-  await waitForHarnessEvent(page, { kind: "webrtc_lifecycle", type: "data-channel-open" }, `${label} lifecycle data-channel-open`);
-  await waitForHarnessEvent(page, { kind: "webrtc_lifecycle", type: "encrypted-stream-ready" }, `${label} encrypted stream ready`);
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "local_webrtc_signal" }, undefined, { label: `${label} local_webrtc_signal request`, deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "webrtc_data_channel", state: "open" }, undefined, { label: `${label} data channel open`, deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "webrtc_lifecycle", type: "data-channel-open" }, undefined, { label: `${label} lifecycle data-channel-open`, deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "webrtc_lifecycle", type: "encrypted-stream-ready" }, undefined, { label: `${label} encrypted stream ready`, deadlineMs: 45_000 });
   await assertNoGrantSecretLeak(page, label);
 
   const grantId = await latestLocalWebrtcGrantId(page);
@@ -987,21 +980,13 @@ async function navigatePackageRuntimeAndAssertWebrtc(
   }
 
   if (inspectDiagnostics) {
-    await page.getByText("WebRTC DataChannel open").waitFor({ timeout: 15_000 });
-    await page.getByText("Encrypted client stream ready").waitFor({ timeout: 15_000 });
+    await waitForDom(page, page.getByText("WebRTC DataChannel open"), { label: "page.getByText(\"WebRTC DataChannel open\")", deadlineMs: 15_000 });
+    await waitForDom(page, page.getByText("Encrypted client stream ready"), { label: "page.getByText(\"Encrypted client stream ready\")", deadlineMs: 15_000 });
   }
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, `${label} status request`);
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, `${label} list_packages request`);
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "subscribe_entities", entity_type: "session" },
-    `${label} session entity subscription`
-  );
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", family: "session" },
-    `${label} authoritative session snapshot`
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "status" }, undefined, { label: `${label} status request`, deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, undefined, { label: `${label} list_packages request`, deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "subscribe_entities", entity_type: "session" }, undefined, { label: `${label} session entity subscription`, deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "hub_frame", family: "session" }, undefined, { label: `${label} authoritative session snapshot`, deadlineMs: 45_000 });
   const subscriptionId = await latestSessionEntitySubscriptionId(page);
   if (!subscriptionId) {
     throw new Error(`package runtime navigation ${label} did not create a session entity subscription`);
@@ -1014,25 +999,29 @@ async function navigatePackageRuntimeAndAssertWebrtc(
 }
 
 async function openAppsView(page) {
-  await page
-    .getByLabel(HOST_CHROME.workbenchNavLabel)
-    .getByRole("button", { name: HOST_CHROME.appsNavButtonName, exact: true })
-    .click();
-  await page.getByTestId(HOST_CHROME.appsViewTestId).waitFor();
+  {
+    const target = page.getByLabel(HOST_CHROME.workbenchNavLabel).getByRole("button", { name: HOST_CHROME.appsNavButtonName, exact: true });
+    await waitForDom(page, { locator: target, state: "actionable" }, { label: "page.getByLabel(HOST_CHROME.workbenchNavLabel).getByRole('button', { n before click" });
+    await target.click();
+  }
+  await waitForDom(page, page.getByTestId(HOST_CHROME.appsViewTestId), { label: "page.getByTestId(HOST_CHROME.appsViewTestId)" });
 }
 
 async function openDiagnosticsView(page) {
-  await page
-    .locator("ion-menu.app-sidebar")
-    .getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true })
-    .click();
-  await page
-    .getByLabel(HOST_CHROME.hubSettingsSectionsLabel)
-    .getByRole("button", { name: new RegExp(HOST_CHROME.supportSectionLabel) })
-    .click();
-  await page.getByTestId(HOST_CHROME.diagnosticsViewTestId).waitFor();
+  {
+    const target = page.locator("ion-menu.app-sidebar").getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true });
+    await waitForDom(page, { locator: target, state: "actionable" }, { label: "page.locator('ion-menu.app-sidebar').getByRole('button', { name: HOST_ before click" });
+    await target.click();
+  }
+  {
+    const target = page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole("button", { name: new RegExp(HOST_CHROME.supportSectionLabel) });
+    await waitForDom(page, { locator: target, state: "actionable" }, { label: "page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole('butto before click" });
+    await target.click();
+  }
+  await waitForDom(page, page.getByTestId(HOST_CHROME.diagnosticsViewTestId), { label: "page.getByTestId(HOST_CHROME.diagnosticsViewTestId)" });
   const developerDetails = page.locator(`details.${HOST_CHROME.developerDiagnosticsClass}`);
   if (!(await developerDetails.evaluate((details) => details.open))) {
+    await waitForDom(page, { locator: developerDetails.locator("summary"), state: "actionable" }, { label: "developerDetails.locator('summary') before click" });
     await developerDetails.locator("summary").click();
   }
 }
@@ -1057,7 +1046,7 @@ async function openFirstPartyUiAppSurface(page, mode) {
         packageNamePattern: mode === "webrtc" ? "^botster-web$" : "^(project-pipelines|botster-workspaces)$"
       };
   const candidate = installed.getByText(target.visiblePattern).first();
-  const foundSurface = await candidate.waitFor({ timeout: 15_000 }).then(() => true).catch(async (error) => {
+  const foundSurface = await waitForDom(page, candidate, { label: "candidate", deadlineMs: 15_000 }).then(() => true).catch(async (error) => {
     const installedText = await installed.innerText().catch(() => "");
     const message = `no first-party UI surface row was visible; installed=${JSON.stringify(installedText)}: ${error.message}`;
     if (!requireWorkspacesMode && process.env.BOTSTER_LIVE_ALLOW_SURFACE_SKIP === "1") {
@@ -1067,12 +1056,9 @@ async function openFirstPartyUiAppSurface(page, mode) {
     throw new Error(`timed out waiting for first-party app surface proof; ${message}`);
   });
   if (!foundSurface) return;
+  await waitForDom(page, { locator: candidate, state: "actionable" }, { label: "candidate before click" });
   await candidate.click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "plugin_surface_render", package_name_pattern: target.packageNamePattern },
-    "first-party app plugin_surface_render request"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_render", package_name_pattern: target.packageNamePattern }, undefined, { label: "first-party app plugin_surface_render request", deadlineMs: 45_000 });
   await assertSelectedAppSurfaceRendered(page, target);
   if (target.packageName && target.surfaceId) {
     if (!workspacesLifecycleMode && !sharedHubDriverMode) {
@@ -1106,8 +1092,7 @@ async function exercisePluginContractMatrix(page) {
 }
 
 async function assertContractMatrixPackageLoaded(page) {
-  await page.waitForFunction(
-    ({ packageName }) => {
+  await waitForHarnessEvent(page, ({ packageName }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       const daemonPackages = [];
       const projectedPackages = [];
@@ -1139,10 +1124,7 @@ async function assertContractMatrixPackageLoaded(page) {
         ["contract.app", "contract.empty", "contract.sessions", "contract.blocked"]
           .every((surfaceId) => projectedAppSurfaces.some((surface) => surface.surface_id === surfaceId)) &&
         projectedSettingsSurfaces.some((surface) => surface.surface_id === "contract.settings");
-    },
-    { packageName: contractMatrixPackageName },
-    { timeout: 45_000 }
-  ).catch(async (error) => {
+    }, { packageName: contractMatrixPackageName }, { label: "assertContractMatrixPackageLoaded condition 1", deadlineMs: 45_000 }).catch(async (error) => {
     const installedText = await installedList(page).innerText().catch(() => "");
     throw new Error(
       `contract matrix package/app descriptors were not visible; installed=${JSON.stringify(installedText)}: ${error.message}`
@@ -1175,11 +1157,7 @@ async function exerciseContractSessionBindings(page) {
       throw new Error(`contract.sessions spawn failed for ${sessionId}: ${JSON.stringify(response.error)}`);
     }
     harnessSpawnedSessionIds.add(sessionId);
-    await waitForHarnessEvent(
-      page,
-      { kind: "hub_frame", family: "session", id: sessionId, lifecycle_class: "current" },
-      `contract.sessions current row ${sessionId}`
-    );
+    await waitForHarnessEvent(page, { kind: "hub_frame", family: "session", id: sessionId, lifecycle_class: "current" }, undefined, { label: `contract.sessions current row ${sessionId}`, deadlineMs: 45_000 });
   }
 
   const endedResponse = await sendDaemonRequest(socketPath, {
@@ -1189,22 +1167,13 @@ async function exerciseContractSessionBindings(page) {
   if (endedResponse.error) {
     throw new Error(`contract.sessions ended transition failed: ${JSON.stringify(endedResponse.error)}`);
   }
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", family: "session", id: "session-ended", lifecycle_class: "ended" },
-    "contract.sessions ended row"
-  );
+  await waitForHarnessEvent(page, { kind: "hub_frame", family: "session", id: "session-ended", lifecycle_class: "ended" }, undefined, { label: "contract.sessions ended row", deadlineMs: 45_000 });
 
   await navigateToContractSurface(page, "contract.sessions");
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", family: "session" },
-    "contract.sessions authoritative session snapshot"
-  );
+  await waitForHarnessEvent(page, { kind: "hub_frame", family: "session" }, undefined, { label: "contract.sessions authoritative session snapshot", deadlineMs: 45_000 });
   await assertContractSurfaceRoute(page, "contract.sessions", "Session lifecycle projection");
-  await page.waitForFunction(() =>
-    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchAction === "function"
-  );
+  await waitForDom(page, () => page.evaluate(() =>
+    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchAction === "function", undefined), { label: "exerciseContractSessionBindings condition 1", deadlineMs: 30_000 });
   await dispatchContractSessionsSurface(page, references);
   await assertContractSessionBindingText(page);
   await assertContractSessionRows(page, expectedRows);
@@ -1213,24 +1182,16 @@ async function exerciseContractSessionBindings(page) {
 
   const previousSubscriptionId = await latestSessionEntitySubscriptionId(page);
   await page.reload({ waitUntil: "domcontentloaded" });
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", family: "session" },
-    "contract.sessions reconnect authoritative snapshot"
-  );
-  await page.waitForFunction(
-    (priorId) => {
+  await waitForHarnessEvent(page, { kind: "hub_frame", family: "session" }, undefined, { label: "contract.sessions reconnect authoritative snapshot", deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, (priorId) => {
       const ids = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities")
         .map((entry) => entry.payload?.subscription_id);
       return ids.some((id) => typeof id === "string" && id !== priorId);
-    },
-    previousSubscriptionId
-  );
+    }, previousSubscriptionId, { label: "exerciseContractSessionBindings condition 2", deadlineMs: 30_000 });
   await assertContractSurfaceRoute(page, "contract.sessions", "Session lifecycle projection");
-  await page.waitForFunction(() =>
-    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchAction === "function"
-  );
+  await waitForDom(page, () => page.evaluate(() =>
+    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchAction === "function", undefined), { label: "exerciseContractSessionBindings condition 3", deadlineMs: 30_000 });
   await dispatchContractSessionsSurface(page, references);
   await assertContractSessionBindingText(page);
   await assertContractSessionRows(page, expectedRows);
@@ -1263,8 +1224,7 @@ async function dispatchContractSessionsSurface(page, references) {
     },
     { packageName: contractMatrixPackageName, sessionUuids: references }
   );
-  await page.waitForFunction(
-    ({ packageName, sessionUuids, sinceIndex }) =>
+  await waitForHarnessEvent(page, ({ packageName, sessionUuids, sinceIndex }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .slice(sinceIndex)
         .some((entry) =>
@@ -1273,15 +1233,13 @@ async function dispatchContractSessionsSurface(page, references) {
           entry.payload?.package_name === packageName &&
           entry.payload?.surface_id === "contract.sessions" &&
           JSON.stringify(entry.payload?.payload?.session_uuids) === JSON.stringify(sessionUuids)
-        ),
-    { packageName: contractMatrixPackageName, sessionUuids: references, sinceIndex: eventCount }
-  );
+        ), { packageName: contractMatrixPackageName, sessionUuids: references, sinceIndex: eventCount }, { label: "dispatchContractSessionsSurface condition 1", deadlineMs: 30_000 });
 }
 
 async function assertContractSessionBindingText(page) {
   const selectedSurface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
-  await selectedSurface.getByText("current", { exact: true }).first().waitFor({ timeout: 45_000 });
-  await selectedSurface.getByText("ended", { exact: true }).waitFor({ timeout: 45_000 });
+  await waitForDom(page, selectedSurface.getByText("current", { exact: true }).first(), { label: "selectedSurface.getByText(\"current\", { exact: true }).first()", deadlineMs: 45_000 });
+  await waitForDom(page, selectedSurface.getByText("ended", { exact: true }), { label: "selectedSurface.getByText(\"ended\", { exact: true })", deadlineMs: 45_000 });
   const unavailableCount = await selectedSurface.getByText("Session unavailable", { exact: true }).count();
   if (unavailableCount !== 1) {
     throw new Error(`contract.sessions expected one absent reference, observed ${unavailableCount}`);
@@ -1292,10 +1250,10 @@ async function assertContractSessionRows(page, expectedRows) {
   const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   for (const row of expectedRows) {
     const renderedRow = surface.locator(`[data-ui-node-id='${row.node_id}']`);
-    await renderedRow.waitFor({ timeout: 45_000 });
+    await waitForDom(page, renderedRow, { label: "renderedRow", deadlineMs: 45_000 });
     for (const control of row.controls) {
       const renderedControl = renderedRow.locator(`[data-ui-node-id='${control.node_id}']`);
-      await renderedControl.waitFor({ timeout: 45_000 });
+      await waitForDom(page, renderedControl, { label: "renderedControl", deadlineMs: 45_000 });
       const actionId = await renderedControl.getAttribute("data-action-id");
       if (actionId !== "contract.action") {
         throw new Error(
@@ -1321,14 +1279,15 @@ async function activateContractSessionControl(page, expectedControl, activation)
 
   if (activation === "keyboard") {
     const keyboardTarget = control.locator("button").first();
+    await waitForDom(page, { locator: keyboardTarget, state: "actionable" }, { label: "keyboardTarget before focus" });
     await keyboardTarget.focus();
     await keyboardTarget.press("Enter");
   } else {
+    await waitForDom(page, { locator: control, state: "actionable" }, { label: "control before click" });
     await control.click();
   }
 
-  await page.waitForFunction(
-    ({ sinceIndex, packageName, actionId, nodeId, actionPayload }) => {
+  await waitForHarnessEvent(page, ({ sinceIndex, packageName, actionId, nodeId, actionPayload }) => {
       const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex);
       const requests = events.filter((entry) => {
         const request = entry.payload?.request;
@@ -1355,16 +1314,13 @@ async function activateContractSessionControl(page, expectedControl, activation)
           JSON.stringify(plugin.payload) === JSON.stringify(actionPayload);
       });
       return requests.length === 1 && acceptedResult;
-    },
-    {
+    }, {
       sinceIndex,
       packageName: contractMatrixPackageName,
       actionId,
       nodeId,
       actionPayload: expectedControl.action_payload
-    },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+    }, { label: "activateContractSessionControl condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observed = await page.evaluate((since) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since),
     sinceIndex);
@@ -1375,13 +1331,8 @@ async function activateContractSessionControl(page, expectedControl, activation)
 }
 
 async function openContractAppFromNavigation(page) {
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "list_package_navigation" },
-    "list_package_navigation request"
-  );
-  await page.waitForFunction(
-    ({ packageName }) => {
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_package_navigation" }, undefined, { label: "list_package_navigation request", deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, ({ packageName }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       const daemonNavigation = events
         .filter((entry) => entry.kind === "daemon_response" && entry.payload?.kind === "package_navigation")
@@ -1402,26 +1353,24 @@ async function openContractAppFromNavigation(page) {
           entry.item_id === "contract.app" &&
           entry.route_path === `/packages/${packageName}/surfaces/contract.app`
       );
-    },
-    { packageName: contractMatrixPackageName },
-    { timeout: 45_000 }
-  );
+    }, { packageName: contractMatrixPackageName }, { label: "openContractAppFromNavigation condition 1", deadlineMs: 45_000 });
   const shortcut = page
     .getByLabel("Admitted plugin navigation")
     .getByRole("button", { name: "Contract App", exact: true });
-  await shortcut.waitFor({ timeout: 15_000 });
+  await waitForDom(page, shortcut, { label: "shortcut", deadlineMs: 15_000 });
   await shortcut.click();
 }
 
 async function openContractAppFromApps(page) {
   const installed = installedList(page);
   const row = installed.getByText(/Contract App|plugin contract matrix|botster\.plugin-contract-matrix/i).first();
-  await row.waitFor({ timeout: 15_000 }).catch(async (error) => {
+  await waitForDom(page, row, { label: "row", deadlineMs: 15_000 }).catch(async (error) => {
     const installedText = await installed.innerText().catch(() => "");
     throw new Error(
       `timed out waiting for contract matrix app/package row; installed=${JSON.stringify(installedText)}: ${error.message}`
     );
   });
+  await waitForDom(page, { locator: row, state: "actionable" }, { label: "row before click" });
   await row.click();
 }
 
@@ -1440,15 +1389,10 @@ async function navigateToContractSurface(page, surfaceId) {
 }
 
 async function assertContractSurfaceRoute(page, surfaceId, visibleText, sinceIndex = 0) {
-  await page.waitForURL(new RegExp(escapedRoutePathPattern(contractSurfaceRoutePath(surfaceId))), { timeout: 15_000 });
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: surfaceId },
-    `${surfaceId} plugin_surface_render request`,
-    sinceIndex
-  );
-  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).waitFor({ timeout: 15_000 });
-  await page.getByText(visibleText).waitFor({ timeout: 45_000 });
+  await waitForDom(page, async () => (new RegExp(escapedRoutePathPattern(contractSurfaceRoutePath(surfaceId)))).test(await page.evaluate(() => globalThis.location.href)), { label: "URL new RegExp(escapedRoutePathPattern(contractSurfaceRoutePath(surfaceId)", deadlineMs: 15_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: surfaceId }, undefined, { label: `${surfaceId} plugin_surface_render request`, deadlineMs: 45_000, sinceIndex: sinceIndex });
+  await waitForDom(page, page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId), { label: "page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)", deadlineMs: 15_000 });
+  await waitForDom(page, page.getByText(visibleText), { label: "page.getByText(visibleText)", deadlineMs: 45_000 });
   await assertSelectedSurfaceNotLoading(page, surfaceId);
 }
 
@@ -1456,7 +1400,7 @@ async function assertContractSurfaceRouteReloadAndDirectLoad(page, surfaceId, vi
   const routePath = contractSurfaceRoutePath(surfaceId);
   const routeUrl = new URL(routePath, appUrl).toString();
 
-  await page.waitForURL(new RegExp(escapedRoutePathPattern(routePath)), { timeout: 15_000 });
+  await waitForDom(page, async () => (new RegExp(escapedRoutePathPattern(routePath))).test(await page.evaluate(() => globalThis.location.href)), { label: "URL new RegExp(escapedRoutePathPattern(routePath))", deadlineMs: 15_000 });
   await page.reload({ waitUntil: "domcontentloaded" });
   await assertContractSurfaceRoute(page, surfaceId, visibleText);
 
@@ -1499,27 +1443,19 @@ async function assertContractSurfaceRouteReconnect(page, surfaceId, visibleText)
 }
 
 async function assertSelectedSurfaceNotLoading(page, surfaceId) {
-  await page.waitForFunction(
-    ({ testId }) => {
+  await waitForDom(page, () => page.evaluate(({ testId }) => {
       const text = globalThis.document.querySelector(`[data-testid="${testId}"]`)?.textContent ?? "";
       return !/Loading package surfaces from the hub|Rendering plugin surface from the hub|Rendering Contract/i.test(text);
-    },
-    { testId: HOST_CHROME.selectedAppSurfaceTestId },
-    { timeout: 45_000 }
-  ).catch(async (error) => {
+    }, { testId: HOST_CHROME.selectedAppSurfaceTestId }), { label: "assertSelectedSurfaceNotLoading condition 1", deadlineMs: 45_000 }).catch(async (error) => {
     const selectedText = await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).innerText().catch(() => "");
     throw new Error(`${surfaceId} remained in a loading/rendering state; text=${JSON.stringify(selectedText)}: ${error.message}`);
   });
 }
 
 async function assertContractBlockedSurface(page) {
-  await page.waitForURL(new RegExp(escapedRoutePathPattern(contractSurfaceRoutePath("contract.blocked"))), { timeout: 15_000 });
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: "contract.blocked" },
-    "contract.blocked plugin_surface_render request"
-  );
-  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).waitFor({ timeout: 15_000 });
+  await waitForDom(page, async () => (new RegExp(escapedRoutePathPattern(contractSurfaceRoutePath("contract.blocked")))).test(await page.evaluate(() => globalThis.location.href)), { label: "URL new RegExp(escapedRoutePathPattern(contractSurfaceRoutePath('contract.", deadlineMs: 15_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: "contract.blocked" }, undefined, { label: "contract.blocked plugin_surface_render request", deadlineMs: 45_000 });
+  await waitForDom(page, page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId), { label: "page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)", deadlineMs: 15_000 });
   await waitForVisibleContractMatrixText(
     page,
     ["contract matrix blocked render", "Plugin surface render was rejected", "Hub action failed"],
@@ -1531,28 +1467,21 @@ async function assertContractBlockedSurface(page) {
 async function assertDaemonResponsiveAfterBlockedSurface(page) {
   await revisitPackageRuntime(page);
   await openAppsView(page);
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "list_packages" },
-    "post-blocked-surface list_packages request"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_packages" }, undefined, { label: "post-blocked-surface list_packages request", deadlineMs: 45_000 });
 }
 
 async function exerciseContractMatrixSettings(page) {
   const endpoint = "https://example.invalid/contract-matrix-web-smoke";
   await openPackageSettings(page, contractMatrixPackageName);
-  await page.waitForURL(new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/settings`));
-  await page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).getByText(HOST_CHROME.packageConfigurationLabel, { exact: true }).waitFor();
-  await page.getByText("Endpoint").waitFor();
-  await page.getByText("Mode").waitFor();
-  await page.getByText("API token").waitFor();
+  await waitForDom(page, async () => (new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/settings`)).test(await page.evaluate(() => globalThis.location.href)), { label: "URL new RegExp(`/apps/${contractMatrixPackageName.replaceAll('.', '\\.')}/", deadlineMs: 30_000 });
+  await waitForDom(page, page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).getByText(HOST_CHROME.packageConfigurationLabel, { exact: true }), { label: "page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).getByText(HOST_CHROME.packageCo..." });
+  await waitForDom(page, page.getByText("Endpoint"), { label: "page.getByText(\"Endpoint\")" });
+  await waitForDom(page, page.getByText("Mode"), { label: "page.getByText(\"Mode\")" });
+  await waitForDom(page, page.getByText("API token"), { label: "page.getByText(\"API token\")" });
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).getByText("Contract Settings", { exact: true }), state: "actionable" }, { label: "page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).getByText('... before click" });
   await page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).getByText("Contract Settings", { exact: true }).click();
-  await page.waitForURL(new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/settings/contract\\.settings`));
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: "contract.settings" },
-    "contract.settings plugin_surface_render request"
-  );
+  await waitForDom(page, async () => (new RegExp(`/apps/${contractMatrixPackageName.replaceAll(".", "\\.")}/settings/contract\\.settings`)).test(await page.evaluate(() => globalThis.location.href)), { label: "URL new RegExp(`/apps/${contractMatrixPackageName.replaceAll('.', '\\.')}/", deadlineMs: 30_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_render", package_name: contractMatrixPackageName, surface_id: "contract.settings" }, undefined, { label: "contract.settings plugin_surface_render request", deadlineMs: 45_000 });
   await assertContractSettingsSummary(page, [
     `endpoint=${contractMatrixSeedEndpoint} mode=write api_token_state=redacted`,
     "endpoint=https://example.invalid/plugin-contract-matrix mode=read api_token_state="
@@ -1560,10 +1489,13 @@ async function exerciseContractMatrixSettings(page) {
   await assertRawSecretNotVisible(page);
 
   await openPackageSettings(page, contractMatrixPackageName);
+  await waitForDom(page, { locator: page.locator("ion-input[data-configuration-field='endpoint'] input"), state: "actionable" }, { label: "page.locator('ion-input[data-configuration-field='endpoint'] input') before fill" });
   await page.locator("ion-input[data-configuration-field='endpoint'] input").fill(endpoint);
   await setIonicSelectValue(page, "mode", "write");
+  await waitForDom(page, { locator: page.locator("ion-input[data-configuration-field='api_token'] input"), state: "actionable" }, { label: "page.locator('ion-input[data-configuration-field='api_token'] input') before fill" });
   await page.locator("ion-input[data-configuration-field='api_token'] input").fill("contract-matrix-secret");
   const configActionResultCountBeforeSave = await packageConfigurationActionResultCount(page, contractMatrixPackageName);
+  await waitForDom(page, { locator: page.locator("[data-testid='package-configuration-save']"), state: "actionable" }, { label: "page.locator('[data-testid='package-configuration-save']') before click" });
   await page.locator("[data-testid='package-configuration-save']").click();
   await waitForPackageConfigurationRequest(page, {
     packageName: contractMatrixPackageName,
@@ -1583,6 +1515,7 @@ async function exerciseContractMatrixSettings(page) {
   await openPackageSettings(page, contractMatrixPackageName);
   const requestCountBeforeInvalidSave = await daemonRequestCount(page, { type: "set_package_configuration" });
   await setIonicSelectValue(page, "mode", "invalid-mode");
+  await waitForDom(page, { locator: page.locator("[data-testid='package-configuration-save']"), state: "actionable" }, { label: "page.locator('[data-testid='package-configuration-save']') before click" });
   await page.locator("[data-testid='package-configuration-save']").click();
   await waitForDaemonRequestCount(
     page,
@@ -1598,27 +1531,25 @@ async function exerciseContractMatrixSettings(page) {
   });
   await closePackageSettingsRoute(page);
   await openDiagnosticsView(page);
-  await page.getByText(/select_option_unknown|invalid-mode/).first().waitFor({ timeout: 15_000 });
+  await waitForDom(page, page.getByText(/select_option_unknown|invalid-mode/).first(), { label: "page.getByText(/select_option_unknown|invalid-mode/).first()", deadlineMs: 15_000 });
 }
 
 async function exerciseContractMatrixActions(page) {
   await navigateToContractSurface(page, "contract.app");
   await assertContractSurfaceRoute(page, "contract.app", "plugin_surface_render");
+  await waitForDom(page, { locator: page.getByRole("button", { name: "Toggle contract state" }), state: "actionable" }, { label: "page.getByRole('button', { name: 'Toggle contract state' }) before click" });
   await page.getByRole("button", { name: "Toggle contract state" }).click();
-  await page.getByText("Contract toggle active", { exact: true }).waitFor({ timeout: 15_000 });
+  await waitForDom(page, page.getByText("Contract toggle active", { exact: true }), { label: "page.getByText(\"Contract toggle active\", { exact: true })", deadlineMs: 15_000 });
 
+  await waitForDom(page, { locator: page.getByRole("button", { name: "Open contract dialog" }), state: "actionable" }, { label: "page.getByRole('button', { name: 'Open contract dialog' }) before click" });
   await page.getByRole("button", { name: "Open contract dialog" }).click();
-  await waitForHarnessEvent(
-    page,
-    {
+  await waitForHarnessEvent(page, {
       kind: "daemon_request",
       type: "plugin_surface_action",
       package_name: contractMatrixPackageName,
       surface_id: "contract.app",
       action_id: "contract.action"
-    },
-    "contract.action open plugin_surface_action request"
-  );
+    }, undefined, { label: "contract.action open plugin_surface_action request", deadlineMs: 45_000 });
   await waitForContractActionResult(
     page,
     {
@@ -1628,25 +1559,23 @@ async function exerciseContractMatrixActions(page) {
       label: "contract.action accepted presentation set result"
     }
   );
-  await page.locator("[data-ui-node-id='contract-dialog']").waitFor({ timeout: 15_000 });
-  await page.getByText("Workspace alpha selected", { exact: true }).waitFor({ timeout: 15_000 });
+  await waitForDom(page, page.locator("[data-ui-node-id='contract-dialog']"), { label: "page.locator(\"[data-ui-node-id='contract-dialog']\")", deadlineMs: 15_000 });
+  await waitForDom(page, page.getByText("Workspace alpha selected", { exact: true }), { label: "page.getByText(\"Workspace alpha selected\", { exact: true })", deadlineMs: 15_000 });
 
   const form = page.locator("form[data-ui-node-id='contract-app-form']");
   const input = form.locator("[data-ui-node-id='contract-app-message'] input");
   const submit = form.locator(":scope > ion-button[data-action-id='contract.action']:not([data-ui-node-id])");
+  await waitForDom(page, { locator: input, state: "actionable" }, { label: "input before fill" });
   await input.fill("   ");
+  await waitForDom(page, { locator: submit, state: "actionable" }, { label: "submit before click" });
   await submit.click();
-  await waitForHarnessEvent(
-    page,
-    {
+  await waitForHarnessEvent(page, {
       kind: "daemon_request",
       type: "plugin_surface_action",
       package_name: contractMatrixPackageName,
       surface_id: "contract.app",
       action_id: "contract.action"
-    },
-    "contract.action rejected form plugin_surface_action request"
-  );
+    }, undefined, { label: "contract.action rejected form plugin_surface_action request", deadlineMs: 45_000 });
   await waitForContractActionResult(
     page,
     {
@@ -1656,15 +1585,17 @@ async function exerciseContractMatrixActions(page) {
       label: "contract.action rejected form result"
     }
   );
-  await page.locator("[data-ui-node-id='contract-dialog']").waitFor({ timeout: 15_000 });
-  await form.locator("[data-ui-node-id='contract-app-message'] .uinode-field-error").getByText("Message is required", { exact: true }).waitFor({ timeout: 15_000 });
-  await form.locator(".uinode-form-error").getByText("Message is required", { exact: true }).waitFor({ timeout: 15_000 });
-  await input.waitFor({ state: "visible" });
+  await waitForDom(page, page.locator("[data-ui-node-id='contract-dialog']"), { label: "page.locator(\"[data-ui-node-id='contract-dialog']\")", deadlineMs: 15_000 });
+  await waitForDom(page, form.locator("[data-ui-node-id='contract-app-message'] .uinode-field-error").getByText("Message is required", { exact: true }), { label: "form.locator(\"[data-ui-node-id='contract-app-message'] .uinode-field-error\").getByTex...", deadlineMs: 15_000 });
+  await waitForDom(page, form.locator(".uinode-form-error").getByText("Message is required", { exact: true }), { label: "form.locator(\".uinode-form-error\").getByText(\"Message is required\", { exact: true })", deadlineMs: 15_000 });
+  await waitForDom(page, { locator: input, state: "visible" }, { label: "input" });
   if (await input.inputValue() !== "   ") {
     throw new Error("rejected contract action discarded the typed form draft");
   }
 
+  await waitForDom(page, { locator: input, state: "actionable" }, { label: "input before fill" });
   await input.fill("Ship canonical values");
+  await waitForDom(page, { locator: submit, state: "actionable" }, { label: "submit before click" });
   await submit.click();
   await waitForPluginSurfaceRequest(page, {
     packageName: contractMatrixPackageName,
@@ -1684,13 +1615,12 @@ async function exerciseContractMatrixActions(page) {
       label: "contract.action accepted replacement and clear result"
     }
   );
-  await page.getByText("Contract action accepted", { exact: true }).waitFor({ timeout: 15_000 });
-  await page.waitForFunction(() => !globalThis.document.querySelector("[data-ui-node-id='contract-dialog']"), null, { timeout: 15_000 });
+  await waitForDom(page, page.getByText("Contract action accepted", { exact: true }), { label: "page.getByText(\"Contract action accepted\", { exact: true })", deadlineMs: 15_000 });
+  await waitForDom(page, () => page.evaluate(() => !globalThis.document.querySelector("[data-ui-node-id='contract-dialog']"), null), { label: "exerciseContractMatrixActions condition 1", deadlineMs: 15_000 });
 }
 
 async function waitForPluginSurfaceRequest(page, { packageName, surfaceId, actionId, nodeId, values, payload }) {
-  await page.waitForFunction(
-    (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
+  await waitForHarnessEvent(page, (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
       const request = entry.payload?.request;
       return entry.kind === "daemon_request" &&
         entry.payload?.type === "plugin_surface_action" &&
@@ -1701,10 +1631,7 @@ async function waitForPluginSurfaceRequest(page, { packageName, surfaceId, actio
         request?.kind === "submit" &&
         JSON.stringify(request?.values) === JSON.stringify(expected.values) &&
         JSON.stringify(request?.payload) === JSON.stringify(expected.payload);
-    }),
-    { packageName, surfaceId, actionId, nodeId, values, payload },
-    { timeout: 15_000 }
-  );
+    }), { packageName, surfaceId, actionId, nodeId, values, payload }, { label: "waitForPluginSurfaceRequest condition 1", deadlineMs: 15_000 });
 }
 
 function packageEventNoticeSnapshotFromDocument() {
@@ -1725,9 +1652,8 @@ async function readPackageEventNotice(page) {
 }
 
 async function emitPackageEventFixtureAction(page, actionId, payload) {
-  await page.waitForFunction(() =>
-    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchPluginSurfaceAction === "function"
-  );
+  await waitForDom(page, () => page.evaluate(() =>
+    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.dispatchPluginSurfaceAction === "function", undefined), { label: "emitPackageEventFixtureAction condition 1", deadlineMs: 30_000 });
   const before = await page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length);
   await page.evaluate(
     ({ packageName, surfaceId, actionId: nextActionId, payload: nextPayload }) => {
@@ -1745,11 +1671,28 @@ async function emitPackageEventFixtureAction(page, actionId, payload) {
       payload: payload ?? {}
     }
   );
-  await waitForHarnessEvent(
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_action", action_id: actionId }, undefined, { label: `package-events ${actionId} plugin_surface_action`, deadlineMs: 45_000, sinceIndex: before });
+}
+
+/** Notice texts of the package events the page received after `since`. */
+function packageEventNoticesSince(page, since) {
+  return page.evaluate((from) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .slice(from)
+      .filter((entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event")
+      .map((entry) => entry.payload?.payload?.notice ?? null),
+  since);
+}
+
+function waitForPackageEventNotice(page, notice, since, label) {
+  return waitForHarnessEvent(
     page,
-    { kind: "daemon_request", type: "plugin_surface_action", action_id: actionId },
-    `package-events ${actionId} plugin_surface_action`,
-    before
+    ({ from, text }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .slice(from)
+        .some((entry) => entry.kind === "daemon_event" && entry.payload?.type === "package_event" && entry.payload?.payload?.notice === text),
+    { from: since, text: notice },
+    { label, deadlineMs: 15_000 }
   );
 }
 
@@ -1769,16 +1712,8 @@ async function exercisePackageEvents(page, { forceGap }) {
   if (!requiredFeatures.includes("package_event_subscriptions")) {
     throw new Error("Web Hello omitted required feature package_event_subscriptions");
   }
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_hello_ack" },
-    "package-events hello ack"
-  );
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "subscribe_events" },
-    "package-events subscribe_events"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_hello_ack" }, undefined, { label: "package-events hello ack", deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "subscribe_events" }, undefined, { label: "package-events subscribe_events", deadlineMs: 45_000 });
   const subscribe = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
       .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "subscribe_events")
@@ -1797,7 +1732,7 @@ async function exercisePackageEvents(page, { forceGap }) {
     throw new Error("session-scoped notice subscribed with an empty subject set");
   }
   const subscriptionId = subscribe.subscription_id;
-  await page.waitForFunction(({ expectedSubscriptionId, expectedOwner, expectedName }) => {
+  await waitForHarnessEvent(page, ({ expectedSubscriptionId, expectedOwner, expectedName }) => {
     const ready = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).find((entry) =>
       entry.kind === "subscription_data_channel" &&
       entry.payload?.state === "ready" &&
@@ -1811,11 +1746,10 @@ async function exercisePackageEvents(page, { forceGap }) {
     expectedSubscriptionId: subscriptionId,
     expectedOwner: packageEventsPackageName,
     expectedName: packageEventsEventName
-  }, { timeout: 15_000 }).then((handle) => handle.jsonValue());
+  }, { label: "emptySubjectSubscribe condition 1", deadlineMs: 15_000 });
 
-  await page.waitForFunction(() =>
-    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.demandEntityFamily === "function"
-  );
+  await waitForDom(page, () => page.evaluate(() =>
+    typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.demandEntityFamily === "function", undefined), { label: "emptySubjectSubscribe condition 2", deadlineMs: 30_000 });
   await page.evaluate((family) =>
     globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.demandEntityFamily(family),
     packageEventsItemFamily
@@ -1826,12 +1760,8 @@ async function exercisePackageEvents(page, { forceGap }) {
   }
 
   await emitPackageEventFixtureAction(page, packageEventsMatchAction);
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_event", type: "package_event" },
-    "package-events matching package_event"
-  );
-  await page.waitForFunction(() => {
+  await waitForHarnessEvent(page, { kind: "daemon_event", type: "package_event" }, undefined, { label: "package-events matching package_event", deadlineMs: 45_000 });
+  await waitForDom(page, () => page.evaluate(() => {
     const toast = globalThis.document.querySelector("[data-testid='package-event-notice']");
     if (!toast) return false;
     const attr = toast.getAttribute("is-open");
@@ -1839,7 +1769,7 @@ async function exercisePackageEvents(page, { forceGap }) {
     const text = `${toast.textContent ?? ""} ${toast.getAttribute("message") ?? ""}`;
     const color = toast.getAttribute("color") ?? "";
     return open && text.includes("Matching session notice") && color === "warning";
-  }, undefined, { timeout: 15_000 }).catch((error) => {
+  }, undefined), { label: "emptySubjectSubscribe condition 3", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`matching sample.notice never showed a transient notice: ${error.message}`);
   });
   const matchedNotice = await readPackageEventNotice(page);
@@ -1847,20 +1777,28 @@ async function exercisePackageEvents(page, { forceGap }) {
     throw new Error("matching sample.notice toast was not open");
   }
 
+  // Ordering sentinel: a matching event emitted after the mismatching one travels on the same
+  // ordered package-event channel, so once it arrives, a delivered mismatch would already be here.
+  const mismatchSince = await harnessEventCount(page);
   await emitPackageEventFixtureAction(page, packageEventsMismatchAction);
-  await page.waitForTimeout(500);
+  await emitPackageEventFixtureAction(page, packageEventsMatchAction);
+  await waitForPackageEventNotice(page, "Matching session notice", mismatchSince, "package-events sentinel after the mismatch");
+  const mismatchDeliveries = await packageEventNoticesSince(page, mismatchSince);
+  if (mismatchDeliveries.includes("Mismatching session notice")) {
+    throw new Error(`the Hub delivered a mismatching sample.notice: ${JSON.stringify(mismatchDeliveries)}`);
+  }
   const mismatchNotice = await readPackageEventNotice(page);
   if (mismatchNotice.text.includes("Mismatching session notice")) {
     throw new Error("mismatching sample.notice showed a transient notice");
   }
 
   await openHomeView(page);
-  await page.waitForFunction(() => {
+  await waitForDom(page, () => page.evaluate(() => {
     const toast = globalThis.document.querySelector("[data-testid='package-event-notice']");
     if (!toast) return true;
     const attr = toast.getAttribute("is-open");
     return attr === "false" || (!toast.hasAttribute("is-open") && toast.isOpen !== true);
-  }, undefined, { timeout: 5_000 }).catch(() => {
+  }, undefined), { label: "emptySubjectSubscribe condition 4", deadlineMs: 5_000 }).catch(() => {
     throw new Error("package-event notice stayed open after leaving the session view");
   });
   const dashboardToastBefore = await readPackageEventNotice(page);
@@ -1875,35 +1813,34 @@ async function exercisePackageEvents(page, { forceGap }) {
   ) {
     throw new Error("leaving the session view subscribed with an empty subject set");
   }
-  const dashboardNoticesBefore = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
-      (entry) => entry.kind === "package_event_notice"
-    ).length
-  );
+  const dashboardSince = await harnessEventCount(page);
   await emitPackageEventFixtureAction(page, packageEventsMatchAction);
-  await page.waitForTimeout(500);
-  const dashboardNoticesAfter = await page.evaluate(() =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
-      (entry) => entry.kind === "package_event_notice"
-    ).length
-  );
-  if (dashboardNoticesAfter !== dashboardNoticesBefore) {
-    throw new Error("dashboard view showed a transient notice without a session subject");
+  // Ordering sentinel: return to the session view, which subscribes to the subject again, and
+  // emit once more. The package-event channel is ordered, so once the sentinel arrives, the
+  // dashboard emission would already have arrived if the Hub had delivered it.
+  await openSessionTerminal(page, productionSessionId);
+  await waitForTerminalSession(page, productionSessionId);
+  await emitPackageEventFixtureAction(page, packageEventsMatchAction);
+  await waitForPackageEventNotice(page, "Matching session notice", dashboardSince, "package-events sentinel after the dashboard emission");
+  const dashboardDeliveries = await packageEventNoticesSince(page, dashboardSince);
+  if (dashboardDeliveries.length !== 1) {
+    throw new Error(`the dashboard emission was delivered without a session subject: ${JSON.stringify(dashboardDeliveries)}`);
   }
-  const dashboardToastAfter = await readPackageEventNotice(page);
-  if (dashboardToastAfter.open && dashboardToastAfter.text.includes("Matching session notice")) {
-    throw new Error("dashboard view showed a transient notice without a session subject");
+  const dashboardNoticesAfter = await page.evaluate((since) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).filter(
+      (entry) => entry.kind === "package_event_notice"
+    ).length,
+  dashboardSince);
+  if (dashboardNoticesAfter !== 1) {
+    throw new Error(`dashboard view showed a transient notice without a session subject: ${dashboardNoticesAfter} notices`);
   }
   await page.evaluate(async (family) => {
     const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
     await harness.releaseEntityFamily?.(family);
     await harness.demandEntityFamily?.(family);
   }, packageEventsItemFamily);
-  await page.waitForFunction((family) =>
-    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? []).length > 0,
-    packageEventsItemFamily,
-    { timeout: 15_000 }
-  ).catch((error) => {
+  await waitForDom(page, () => page.evaluate((family) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? []).length > 0, packageEventsItemFamily), { label: "dashboardSubscribeAfterLeave condition 1", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`durable notice item was not visible after emit: ${error.message}`);
   });
 
@@ -1915,25 +1852,16 @@ async function exercisePackageEvents(page, { forceGap }) {
     await waitForSessionStatus(page, "running");
     await openSessionTerminal(page, productionSessionId);
     await waitForTerminalSession(page, productionSessionId);
-    await waitForHarnessEvent(
-      page,
-      { kind: "daemon_request", type: "subscribe_events" },
-      "package-events gap-lane resubscribe",
-      beforeResubscribe
-    );
+    await waitForHarnessEvent(page, { kind: "daemon_request", type: "subscribe_events" }, undefined, { label: "package-events gap-lane resubscribe", deadlineMs: 45_000, sinceIndex: beforeResubscribe });
     const beforeGap = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
         (entry) => entry.kind === "daemon_event" && entry.payload?.type === "event_gap"
       ).length
     );
     await emitPackageEventFixtureAction(page, packageEventsBurstAction, { count: 20 });
-    await page.waitForFunction(
-      (prior) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
+    await waitForHarnessEvent(page, (prior) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
         (entry) => entry.kind === "daemon_event" && (entry.payload?.type === "event_gap" || entry.type === "event_gap")
-      ).length > prior,
-      beforeGap,
-      { timeout: 15_000 }
-    ).catch(() => {
+      ).length > prior, beforeGap, { label: "dashboardSubscribeAfterLeave condition 2", deadlineMs: 15_000 }).catch(() => {
       throw new Error("forced-gap lane observed no event_gap");
     });
     const afterItems = await page.evaluate((family) =>
@@ -1983,12 +1911,8 @@ async function exercisePackageEvents(page, { forceGap }) {
   } catch (error) {
     console.log(`package-events closed-channel unix emit skipped: ${error instanceof Error ? error.message : String(error)}`);
   }
-  await page.waitForFunction(
-    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before,
-    { before: openEventsBefore },
-    { timeout: 20_000 }
-  ).catch((error) => {
+  await waitForHarnessEvent(page, ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before, { before: openEventsBefore }, { label: "dashboardSubscribeAfterLeave condition 3", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(`package-events reconnect never reopened the data channel: ${error.message}`);
   });
   const subscriptionReconnect = await waitForSubscriptionChannelReconnect(
@@ -2020,20 +1944,13 @@ async function exercisePackageEvents(page, { forceGap }) {
       globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.demandEntityFamily(family),
       packageEventsItemFamily
     );
-    await page.waitForFunction((family) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? []).length > 0,
-      packageEventsItemFamily,
-      { timeout: 15_000 }
-    ).catch((error) => {
+    await waitForDom(page, () => page.evaluate((family) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? []).length > 0, packageEventsItemFamily), { label: "dashboardSubscribeAfterLeave condition 4", deadlineMs: 15_000 }).catch((error) => {
       throw new Error(`durable notice item missing after reconnect: ${error.message}`);
     });
   }
   await emitPackageEventFixtureAction(page, packageEventsMatchAction);
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_event", type: "package_event" },
-    "package-events live event after reconnect"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_event", type: "package_event" }, undefined, { label: "package-events live event after reconnect", deadlineMs: 45_000 });
 
   const floodStarted = Date.now();
   const floodCount = 200;
@@ -2102,11 +2019,11 @@ async function exercisePackageEvents(page, { forceGap }) {
     await harness.releaseEntityFamily?.(family);
     await harness.demandEntityFamily?.(family);
   }, packageEventsItemFamily);
-  await page.waitForFunction(({ priorIds, family }) => {
+  await waitForDom(page, () => page.evaluate(({ priorIds, family }) => {
     const ids = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? [])
       .map((record) => record.id);
     return ids.some((id) => !priorIds.includes(id));
-  }, { priorIds: preFloodQuestionIds, family: packageEventsItemFamily }, { timeout: 15_000 }).catch((error) => {
+  }, { priorIds: preFloodQuestionIds, family: packageEventsItemFamily }), { label: "dashboardSubscribeAfterLeave condition 5", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`entity reconciliation exceeded 15000ms during flood: ${error.message}`);
   });
   const entityMs = Date.now() - entityStarted;
@@ -2220,31 +2137,19 @@ async function exerciseEntityOptionsReactive(page) {
   await page.goto(new URL(`/packages/${packageName}/surfaces/${surfaceId}`, appUrl).toString(), {
     waitUntil: "domcontentloaded"
   });
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "plugin_surface_render", package_name: packageName, surface_id: surfaceId },
-    "entity-options plugin_surface_render request"
-  );
-  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).waitFor({ timeout: 30_000 });
-  await page.locator("[data-ui-node-id='entity-options-select']").waitFor({ timeout: 30_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_render", package_name: packageName, surface_id: surfaceId }, undefined, { label: "entity-options plugin_surface_render request", deadlineMs: 45_000 });
+  await waitForDom(page, page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId), { label: "page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)", deadlineMs: 30_000 });
+  await waitForDom(page, page.locator("[data-ui-node-id='entity-options-select']"), { label: "page.locator(\"[data-ui-node-id='entity-options-select']\")", deadlineMs: 30_000 });
 
   // Demand path must subscribe both source and exclude families (held subscribe_entities).
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "subscribe_entities", entity_type: itemFamily },
-    "entity-options source family subscribe_entities"
-  );
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "subscribe_entities", entity_type: excludeFamily },
-    "entity-options exclude family subscribe_entities"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "subscribe_entities", entity_type: itemFamily }, undefined, { label: "entity-options source family subscribe_entities", deadlineMs: 45_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "subscribe_entities", entity_type: excludeFamily }, undefined, { label: "entity-options exclude family subscribe_entities", deadlineMs: 45_000 });
 
   const select = page.locator("[data-ui-node-id='entity-options-select'] ion-select");
-  await page.waitForFunction(() => {
+  await waitForDom(page, () => page.evaluate(() => {
     const options = [...globalThis.document.querySelectorAll("[data-ui-node-id='entity-options-select'] ion-select-option")];
     return options.some((option) => (option.value ?? option.getAttribute("value")) === "opt-alpha");
-  }, undefined, { timeout: 30_000 }).catch((error) => {
+  }, undefined), { label: "exerciseEntityOptionsReactive condition 1", deadlineMs: 30_000 }).catch((error) => {
     throw new Error(`entity-options options never projected from snapshots: ${error.message}`);
   });
 
@@ -2261,12 +2166,9 @@ async function exerciseEntityOptionsReactive(page) {
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
       .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length
   );
+  await waitForDom(page, { locator: page.locator("[data-action-id='entity-options.remove']"), state: "actionable" }, { label: "page.locator('[data-action-id='entity-options.remove']') before click" });
   await page.locator("[data-action-id='entity-options.remove']").click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "plugin_surface_action", package_name: packageName, surface_id: surfaceId },
-    "entity-options.remove plugin_surface_action request"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_action", package_name: packageName, surface_id: surfaceId }, undefined, { label: "entity-options.remove plugin_surface_action request", deadlineMs: 45_000 });
 
   const closed = await page.evaluate(
     () => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
@@ -2274,23 +2176,19 @@ async function exerciseEntityOptionsReactive(page) {
   if (!closed) {
     throw new Error("entity-options live proof could not close the live WebRTC data channel for resubscribe");
   }
-  await page.waitForFunction(
-    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before,
-    { before: openEventsBeforeRemove },
-    { timeout: 20_000 }
-  ).catch((error) => {
+  await waitForHarnessEvent(page, ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before, { before: openEventsBeforeRemove }, { label: "exerciseEntityOptionsReactive condition 2", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(`entity-options reconnect never reopened the data channel: ${error.message}`);
   });
 
   // Fresh snapshot must drop opt-alpha and mark the draft selection invalid without surface re-render.
-  await page.waitForFunction(() => {
+  await waitForDom(page, () => page.evaluate(() => {
     const form = globalThis.document.querySelector("[data-ui-node-id='entity-options-form']");
     const field = globalThis.document.querySelector("[data-ui-node-id='entity-options-select']");
     return form?.getAttribute("data-form-invalid") === "true"
       || field?.getAttribute("data-selection-invalid") === "true"
       || !!globalThis.document.querySelector("[data-testid='entity-options-invalid']");
-  }, undefined, { timeout: 30_000 }).catch((error) => {
+  }, undefined), { label: "exerciseEntityOptionsReactive condition 3", deadlineMs: 30_000 }).catch((error) => {
     throw new Error(`entity-options invalid selection UI never appeared after remove+reconnect: ${error.message}`);
   });
 
@@ -2308,11 +2206,12 @@ async function exerciseEntityOptionsReactive(page) {
     globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.formSubmitClickSeq ?? 0
   );
   const staleSubmitButton = page.locator("[data-action-id='entity-options.submit']");
+  await waitForDom(page, { locator: staleSubmitButton, state: "actionable" }, { label: "staleSubmitButton before click" });
   await staleSubmitButton.click({ timeout: 3_000 }).catch(() => {});
   await page.evaluate(() => new Promise((resolve) => {
     queueMicrotask(() => queueMicrotask(resolve));
   }));
-  const entityOptionsClick = await page.waitForFunction(({ before }) => {
+  const entityOptionsClick = await waitForDom(page, () => page.evaluate(({ before }) => {
     const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
     const attempt = harness?.lastFormSubmitClick;
     if (
@@ -2338,8 +2237,7 @@ async function exerciseEntityOptionsReactive(page) {
       return { phase: "blocked_gate", actionId: "entity-options.submit", settled: true };
     }
     return null;
-  }, { before: clickSeqBeforeEntityOptions }, { timeout: 10_000 })
-    .then((handle) => handle.jsonValue())
+  }, { before: clickSeqBeforeEntityOptions }), { label: "exerciseEntityOptionsReactive condition 4", deadlineMs: 10_000 })
     .catch((error) => {
       throw new Error(`entity-options stale submit path never settled: ${error.message}`);
     });
@@ -2360,16 +2258,17 @@ async function exerciseEntityOptionsReactive(page) {
 
   // Choose a valid replacement and submit exact value.
   await setUiNodeSelectValue(select, "opt-charlie");
-  await page.waitForFunction(() => {
+  await waitForDom(page, () => page.evaluate(() => {
     const form = globalThis.document.querySelector("[data-ui-node-id='entity-options-form']");
     return form?.getAttribute("data-form-invalid") !== "true";
-  }, undefined, { timeout: 10_000 });
+  }, undefined), { label: "exerciseEntityOptionsReactive condition 5", deadlineMs: 10_000 });
 
   const eventsBeforeValid = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length
   );
+  await waitForDom(page, { locator: page.locator("[data-action-id='entity-options.submit']"), state: "actionable" }, { label: "page.locator('[data-action-id='entity-options.submit']') before click" });
   await page.locator("[data-action-id='entity-options.submit']").click();
-  const validSubmit = await page.waitForFunction(({ before, packageName }) => {
+  const validSubmit = await waitForHarnessEvent(page, ({ before, packageName }) => {
     const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(before);
     return entries.find((entry) =>
       entry.kind === "daemon_request"
@@ -2378,7 +2277,7 @@ async function exerciseEntityOptionsReactive(page) {
       && entry.payload?.request?.action_id === "entity-options.submit"
       && entry.payload?.request?.values?.option === "opt-charlie"
     ) ?? null;
-  }, { before: eventsBeforeValid, packageName }, { timeout: 15_000 }).then((handle) => handle.jsonValue());
+  }, { before: eventsBeforeValid, packageName }, { label: "exerciseEntityOptionsReactive condition 6", deadlineMs: 15_000 });
 
   const requestValues = validSubmit?.payload?.request?.values;
   if (requestValues?.option !== "opt-charlie") {
@@ -2400,12 +2299,9 @@ async function exerciseEntityOptionsReactive(page) {
 
 async function exercisePayloadContract(page) {
   await navigateToPayloadContractSurface(page, "payload.app");
+  await waitForDom(page, { locator: page.locator("[data-ui-node-id='payload-contract-list-alpha']"), state: "actionable" }, { label: "page.locator('[data-ui-node-id='payload-contract-list-alpha']') before click" });
   await page.locator("[data-ui-node-id='payload-contract-list-alpha']").click({ position: { x: 12, y: 12 } });
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "plugin_surface_action", package_name: payloadContractPackageName, surface_id: "payload.app" },
-    "payload.list.activate click plugin_surface_action request"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_action", package_name: payloadContractPackageName, surface_id: "payload.app" }, undefined, { label: "payload.list.activate click plugin_surface_action request", deadlineMs: 45_000 });
   await waitForPayloadContractActionResultCount(
     page,
     {
@@ -2416,6 +2312,7 @@ async function exercisePayloadContract(page) {
     }
   );
 
+  await waitForDom(page, { locator: page.locator("[data-ui-node-id='payload-contract-list-alpha']"), state: "actionable" }, { label: "page.locator('[data-ui-node-id='payload-contract-list-alpha']') before focus" });
   await page.locator("[data-ui-node-id='payload-contract-list-alpha']").focus();
   await page.keyboard.press("Enter");
   await waitForPayloadContractActionResultCount(
@@ -2428,12 +2325,9 @@ async function exercisePayloadContract(page) {
     }
   );
 
+  await waitForDom(page, { locator: page.locator("[data-action-id='payload.row.open']"), state: "actionable" }, { label: "page.locator('[data-action-id='payload.row.open']') before click" });
   await page.locator("[data-action-id='payload.row.open']").click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "plugin_surface_action", package_name: payloadContractPackageName, surface_id: "payload.app" },
-    "payload.row.open plugin_surface_action request"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_action", package_name: payloadContractPackageName, surface_id: "payload.app" }, undefined, { label: "payload.row.open plugin_surface_action request", deadlineMs: 45_000 });
   await waitForPayloadContractActionResult(
     page,
     {
@@ -2443,18 +2337,17 @@ async function exercisePayloadContract(page) {
     }
   );
 
-  await page.waitForFunction(() => {
+  await waitForDom(page, () => page.evaluate(() => {
     const table = globalThis.document.querySelector("[data-ui-node-id='payload-contract-table']");
     return table?.getAttribute("data-unsupported-interaction-props") === "activation,row_action";
-  }, null, { timeout: 15_000 });
+  }, null), { label: "exercisePayloadContract condition 1", deadlineMs: 15_000 });
 }
 
 async function waitForContractActionResult(
   page,
   { accepted, expectedTexts = [], expectedStates = [], expectedPresentationKinds = [], label }
 ) {
-  await page.waitForFunction(
-    ({ nextAccepted, texts, states, presentationKinds }) => {
+  await waitForHarnessEvent(page, ({ nextAccepted, texts, states, presentationKinds }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events.some((entry) => {
         if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
@@ -2481,15 +2374,12 @@ async function waitForContractActionResult(
         const presentationMatches = presentationKinds.every((kind) => observedPresentationKinds.includes(kind));
         return stateMatches && textMatches && presentationMatches;
       });
-    },
-    {
+    }, {
       nextAccepted: accepted,
       texts: expectedTexts,
       states: expectedStates,
       presentationKinds: expectedPresentationKinds
-    },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+    }, { label: "waitForContractActionResult condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observedResults = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
@@ -2504,16 +2394,11 @@ async function navigateToPayloadContractSurface(page, surfaceId) {
   await page.goto(new URL(`/packages/${payloadContractPackageName}/surfaces/${surfaceId}`, appUrl).toString(), {
     waitUntil: "domcontentloaded"
   });
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "plugin_surface_render", package_name: payloadContractPackageName, surface_id: surfaceId },
-    `${surfaceId} plugin_surface_render request`
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_render", package_name: payloadContractPackageName, surface_id: surfaceId }, undefined, { label: `${surfaceId} plugin_surface_render request`, deadlineMs: 45_000 });
 }
 
 async function waitForPayloadContractActionResult(page, { actionId, expectedPayload, label }) {
-  await page.waitForFunction(
-    ({ packageName, nextActionId, nextPayload }) => {
+  await waitForHarnessEvent(page, ({ packageName, nextActionId, nextPayload }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events.some((entry) => {
         if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
@@ -2526,10 +2411,7 @@ async function waitForPayloadContractActionResult(page, { actionId, expectedPayl
           result.action_id === nextActionId &&
           JSON.stringify(pluginActionResult.payload) === JSON.stringify(nextPayload);
       });
-    },
-    { packageName: payloadContractPackageName, nextActionId: actionId, nextPayload: expectedPayload },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+    }, { packageName: payloadContractPackageName, nextActionId: actionId, nextPayload: expectedPayload }, { label: "waitForPayloadContractActionResult condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observedResults = await page.evaluate((packageName) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
@@ -2541,8 +2423,7 @@ async function waitForPayloadContractActionResult(page, { actionId, expectedPayl
 }
 
 async function waitForPayloadContractActionResultCount(page, { actionId, expectedPayload, expectedCount, label }) {
-  await page.waitForFunction(
-    ({ packageName, nextActionId, nextPayload, count }) => {
+  await waitForHarnessEvent(page, ({ packageName, nextActionId, nextPayload, count }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       const matching = events.filter((entry) => {
         if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
@@ -2556,10 +2437,7 @@ async function waitForPayloadContractActionResultCount(page, { actionId, expecte
           JSON.stringify(pluginActionResult.payload) === JSON.stringify(nextPayload);
       });
       return matching.length === count;
-    },
-    { packageName: payloadContractPackageName, nextActionId: actionId, nextPayload: expectedPayload, count: expectedCount },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+    }, { packageName: payloadContractPackageName, nextActionId: actionId, nextPayload: expectedPayload, count: expectedCount }, { label: "waitForPayloadContractActionResultCount condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observedResults = await page.evaluate((packageName) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
@@ -2571,14 +2449,10 @@ async function waitForPayloadContractActionResultCount(page, { actionId, expecte
 }
 
 async function waitForVisibleContractMatrixText(page, expectedTexts, label) {
-  await page.waitForFunction(
-    (texts) => {
+  await waitForDom(page, () => page.evaluate((texts) => {
       const bodyText = globalThis.document.body?.textContent ?? "";
       return texts.some((text) => bodyText.includes(text));
-    },
-    expectedTexts,
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+    }, expectedTexts), { label: "waitForVisibleContractMatrixText condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const bodyText = await page.locator("body").innerText().catch(() => "");
     throw new Error(`timed out waiting for ${label}; expected=${JSON.stringify(expectedTexts)} observed=${JSON.stringify(bodyText)}: ${error.message}`);
   });
@@ -2602,26 +2476,22 @@ async function assertPluginSurfaceRouteReloadAndDirectLoad(page, target) {
     : fallbackPath;
   const expectedPathname = new URL(acceptedRoutePath, appUrl).pathname;
 
-  await page.waitForURL((url) => url.pathname === expectedPathname, { timeout: 15_000 }).catch((error) => {
+  await waitForDom(
+    page,
+    async () => (await page.evaluate(() => globalThis.location.pathname)) === expectedPathname,
+    { label: `pathname ${expectedPathname}`, deadlineMs: 15_000 }
+  ).catch((error) => {
     throw new Error(
       `first-party app route mismatch; observed=${JSON.stringify(page.url())} expected_pathname=${JSON.stringify(expectedPathname)} descriptor=${JSON.stringify(routeDescriptor, null, 2)}: ${error.message}`
     );
   });
   const capturedUrl = page.url();
   await page.reload({ waitUntil: "domcontentloaded" });
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "plugin_surface_render", package_name: target.packageName, surface_id: target.surfaceId },
-    "reloaded first-party app plugin_surface_render request"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_render", package_name: target.packageName, surface_id: target.surfaceId }, undefined, { label: "reloaded first-party app plugin_surface_render request", deadlineMs: 45_000 });
   await assertSelectedAppSurfaceRendered(page, target);
 
   await page.goto(capturedUrl, { waitUntil: "domcontentloaded" });
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "plugin_surface_render", package_name: target.packageName, surface_id: target.surfaceId },
-    "direct-loaded first-party app plugin_surface_render request"
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "plugin_surface_render", package_name: target.packageName, surface_id: target.surfaceId }, undefined, { label: "direct-loaded first-party app plugin_surface_render request", deadlineMs: 45_000 });
   await assertSelectedAppSurfaceRendered(page, target);
 }
 
@@ -2686,7 +2556,7 @@ async function loadProductionAppRouteFromPathname() {
 }
 
 async function assertSelectedAppSurfaceRendered(page, target) {
-  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).waitFor({ timeout: 15_000 });
+  await waitForDom(page, page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId), { label: "page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)", deadlineMs: 15_000 });
   if (target.packageName === "botster-workspaces" && target.surfaceId === "workspaces") {
     if (sharedHubDriverMode) {
       await assertWorkspacesNodeIds(page, [
@@ -2746,18 +2616,14 @@ async function assertSelectedAppSurfaceRendered(page, target) {
     return;
   }
 
-  await page.waitForFunction(
-    ({ packageName, surfaceId, testId }) => {
+  await waitForDom(page, () => page.evaluate(({ packageName, surfaceId, testId }) => {
       const text = globalThis.document.querySelector(`[data-testid="${testId}"]`)?.textContent ?? "";
       const expectedRoute = packageName && surfaceId ? `${packageName}/${surfaceId}` : "";
       return /project-pipelines|botster-workspaces|Pipelines|Workspaces|botster-web|Production/i.test(text) &&
         /rendered|\//i.test(text) &&
         !/Render response did not include/i.test(text) &&
         (!expectedRoute || text.includes(expectedRoute));
-    },
-    { ...target, testId: HOST_CHROME.selectedAppSurfaceTestId },
-    { timeout: 45_000 }
-  ).catch(async (error) => {
+    }, { ...target, testId: HOST_CHROME.selectedAppSurfaceTestId }), { label: "assertSelectedAppSurfaceRendered condition 1", deadlineMs: 45_000 }).catch(async (error) => {
     const selectedText = await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).innerText().catch(() => "");
     throw new Error(`selected app surface did not render visible first-party content; text=${JSON.stringify(selectedText)}: ${error.message}`);
   });
@@ -2767,7 +2633,7 @@ async function assertWorkspacesNodeIds(page, expectedNodeIds, stage) {
   const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   await Promise.all(
     expectedNodeIds.map((nodeId) =>
-      surface.locator(`[data-ui-node-id='${nodeId}']`).waitFor({ timeout: 45_000 })
+      waitForDom(page, surface.locator(`[data-ui-node-id='${nodeId}']`), { label: `Workspaces UiNode ${nodeId}`, deadlineMs: 45_000 })
     )
   ).catch(async (error) => {
     const selectedText = await surface.innerText().catch(() => "");
@@ -2830,7 +2696,7 @@ async function exerciseSharedHubWorkspaces(page, assignment) {
 async function observeSharedHubPriorState(page, expected) {
   const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const workspaceTitle = surface.getByText(expected.workspace_name, { exact: true }).first();
-  await workspaceTitle.waitFor({ timeout: 20_000 });
+  await waitForDom(page, workspaceTitle, { label: "workspaceTitle", deadlineMs: 20_000 });
   const workspaceNodeId = await workspaceTitle.evaluate((node) =>
     node.closest("ion-item[data-ui-node-id]")?.getAttribute("data-ui-node-id") ?? null
   );
@@ -2855,11 +2721,12 @@ async function observeSharedHubPriorState(page, expected) {
 async function createSharedHubWorkspace(page, workspaceName, createControlId) {
   const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const openButton = surface.locator(`[data-ui-node-id='${createControlId}']`);
-  await openButton.waitFor({ timeout: 15_000 });
+  await waitForDom(page, openButton, { label: "openButton", deadlineMs: 15_000 });
   const openActionId = await openButton.getAttribute("data-action-id");
   const openNodeId = await openButton.getAttribute("data-ui-node-id");
   if (!openActionId || !openNodeId) throw new Error("rendered workspace create control omitted action metadata");
   const openSince = await harnessEventCount(page);
+  await waitForDom(page, { locator: openButton, state: "actionable" }, { label: "openButton before click" });
   await openButton.click();
   await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId: openActionId,
@@ -2878,12 +2745,14 @@ async function createSharedHubWorkspace(page, workspaceName, createControlId) {
   });
 
   const form = page.locator("form[data-ui-node-id='botster-workspaces-create-form']");
-  await form.waitFor({ timeout: 15_000 });
+  await waitForDom(page, form, { label: "form", deadlineMs: 15_000 });
+  await waitForDom(page, { locator: form.locator("[data-ui-node-id='botster-workspaces-create-name'] input"), state: "actionable" }, { label: "form.locator('[data-ui-node-id='botster-workspaces-create-name'] in... before fill" });
   await form.locator("[data-ui-node-id='botster-workspaces-create-name'] input").fill(workspaceName);
   const submit = form.locator(":scope > ion-button[data-action-id]");
   const actionId = await submit.getAttribute("data-action-id");
   const nodeId = await form.getAttribute("data-ui-node-id");
   const sinceIndex = await harnessEventCount(page);
+  await waitForDom(page, { locator: submit, state: "actionable" }, { label: "submit before click" });
   await submit.click();
   await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId,
@@ -2908,7 +2777,7 @@ async function createSharedHubWorkspace(page, workspaceName, createControlId) {
     throw new Error(`workspace create result omitted structured identity: ${JSON.stringify(result)}`);
   }
   const title = surface.getByText(workspaceName, { exact: true }).first();
-  await title.waitFor({ timeout: 15_000 });
+  await waitForDom(page, title, { label: "title", deadlineMs: 15_000 });
   const rowNodeId = await title.evaluate((node) =>
     node.closest("ion-item[data-ui-node-id]")?.getAttribute("data-ui-node-id") ?? null
   );
@@ -2925,7 +2794,7 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
   const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   await selectSharedHubWorkspace(page, workspace);
   const spawnButtons = surface.locator(WORKSPACES_SPAWN_OPENER_SELECTOR);
-  await spawnButtons.first().waitFor({ timeout: 15_000 }).catch(async (error) => {
+  await waitForDom(page, spawnButtons.first(), { label: "spawnButtons.first()", deadlineMs: 15_000 }).catch(async (error) => {
     throw new Error(
       `${spawnCase.case_id} did not render a semantic Spawn opener; ` +
       `candidates=${JSON.stringify(await renderedActionDiagnostics(surface))}: ${error.message}`
@@ -2949,6 +2818,7 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
     dialog: `spawn-target:${workspace.workspace_id}`
   };
   const openSince = await harnessEventCount(page);
+  await waitForDom(page, { locator: spawnButton, state: "actionable" }, { label: "spawnButton before click" });
   await spawnButton.click();
   await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId: openActionId,
@@ -2972,9 +2842,10 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
   }
 
   const targetForm = page.locator("ion-modal.show-modal form:has([data-ui-node-id='botster-workspaces-spawn-target'])").first();
-  await targetForm.waitFor({ timeout: 15_000 });
+  await waitForDom(page, targetForm, { label: "targetForm", deadlineMs: 15_000 });
   await setUiNodeSelectValue(targetForm.locator("[data-ui-node-id='botster-workspaces-spawn-target'] ion-select"), spawnCase.target_id);
   const targetSubmitMetadata = targetForm.locator(":scope > ion-button[data-action-id]");
+  await waitForDom(page, { locator: targetSubmitMetadata, state: "attached" }, { label: "target form submit metadata" });
   const targetActionId = await targetSubmitMetadata.getAttribute("data-action-id");
   const targetNodeId = await targetForm.getAttribute("data-ui-node-id");
   const targetSince = await harnessEventCount(page);
@@ -2998,7 +2869,8 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
   });
 
   const spawnForm = page.locator("ion-modal.show-modal form:has([data-ui-node-id='botster-workspaces-spawn-branch'])").first();
-  await spawnForm.waitFor({ timeout: 15_000 });
+  await waitForDom(page, spawnForm, { label: "spawnForm", deadlineMs: 15_000 });
+  await waitForDom(page, { locator: spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-branch'] input"), state: "actionable" }, { label: "spawnForm.locator('[data-ui-node-id='botster-workspaces-spawn-branc... before fill" });
   await spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-branch'] input").fill(spawnCase.branch);
   const sessionTypeSelect = spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-template'] ion-select");
   // Observe what Hub and Workspaces actually published BEFORE injecting anything.
@@ -3012,9 +2884,14 @@ async function driveSharedHubSpawnCase(page, workspace, spawnCase, baselineCount
     );
   }
   await setUiNodeSelectValue(sessionTypeSelect, spawnCase.session_type_id);
-  if (spawnCase.prompt) await spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-prompt'] input").fill(spawnCase.prompt);
-  if (spawnCase.ticket_id) await spawnForm.locator("[data-ui-node-id='botster-workspaces-spawn-ticket'] input").fill(spawnCase.ticket_id);
+  for (const [nodeId, value] of [["botster-workspaces-spawn-prompt", spawnCase.prompt], ["botster-workspaces-spawn-ticket", spawnCase.ticket_id]]) {
+    if (!value) continue;
+    const field = spawnForm.locator(`[data-ui-node-id='${nodeId}'] input`);
+    await waitForDom(page, { locator: field, state: "actionable" }, { label: `${nodeId} before fill` });
+    await field.fill(value);
+  }
   const submitMetadata = spawnForm.locator(":scope > ion-button[data-action-id]");
+  await waitForDom(page, { locator: submitMetadata, state: "attached" }, { label: "spawn form submit metadata" });
   const actionId = await submitMetadata.getAttribute("data-action-id");
   const nodeId = await spawnForm.getAttribute("data-ui-node-id");
   const sinceIndex = await harnessEventCount(page);
@@ -3120,13 +2997,14 @@ async function selectSharedHubWorkspace(page, workspace) {
   const surface = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId);
   const row = surface.locator(`[data-ui-node-id='${workspace.rendered_row_node_id}']`);
   // A Workspaces row is a list_item whose activation is the row itself.
-  await row.waitFor({ timeout: 15_000 });
+  await waitForDom(page, row, { label: "row", deadlineMs: 15_000 });
   const actionId = await row.getAttribute("data-activation-action-id");
   if (!actionId) {
     throw new Error(`shared-Hub workspace row ${workspace.rendered_row_node_id} rendered no activation action`);
   }
   const nodeId = await row.getAttribute("data-ui-node-id");
   const sinceIndex = await harnessEventCount(page);
+  await waitForDom(page, { locator: row, state: "actionable" }, { label: "row before click" });
   await row.click();
   await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId, nodeId, kind: "submit", sinceIndex,
@@ -3182,7 +3060,7 @@ async function latestWorkspacesActionRequest(page, sinceIndex, actionId, nodeId)
 }
 
 async function waitForExactSessionLifecycle(page, sessionId, lifecycleClass) {
-  await page.waitForFunction(({ sessionId, lifecycleClass }) => {
+  await waitForHarnessEvent(page, ({ sessionId, lifecycleClass }) => {
     const records = new Map();
     for (const entry of globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []) {
       if (entry.kind !== "hub_frame") continue;
@@ -3200,7 +3078,7 @@ async function waitForExactSessionLifecycle(page, sessionId, lifecycleClass) {
       }
     }
     return records.get(sessionId)?.lifecycle_class === lifecycleClass;
-  }, { sessionId, lifecycleClass }, { timeout: 30_000 });
+  }, { sessionId, lifecycleClass }, { label: "waitForExactSessionLifecycle condition 1", deadlineMs: 30_000 });
   const events = await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []);
   return convergeEntityFamily(events, "session").records.find((record) =>
     (record.session_uuid ?? record.session_id ?? record.id) === sessionId
@@ -3209,8 +3087,8 @@ async function waitForExactSessionLifecycle(page, sessionId, lifecycleClass) {
 
 async function waitForRenderedSessionLifecycle(page, sessionId, lifecycleClass) {
   const exactText = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).getByText(sessionId, { exact: true });
-  await exactText.waitFor({ timeout: 30_000 });
-  await page.waitForFunction(({ sessionId, lifecycleClass, testId }) => {
+  await waitForDom(page, exactText, { label: "exactText", deadlineMs: 30_000 });
+  await waitForDom(page, () => page.evaluate(({ sessionId, lifecycleClass, testId }) => {
     const nodes = [...globalThis.document.querySelectorAll(`[data-testid="${testId}"] [data-ui-node-id]`)];
     return nodes.some((node) => {
       if (node.textContent?.trim() !== sessionId) return false;
@@ -3222,7 +3100,7 @@ async function waitForRenderedSessionLifecycle(page, sessionId, lifecycleClass) 
       }
       return false;
     });
-  }, { sessionId, lifecycleClass, testId: HOST_CHROME.selectedAppSurfaceTestId }, { timeout: 30_000 });
+  }, { sessionId, lifecycleClass, testId: HOST_CHROME.selectedAppSurfaceTestId }), { label: "waitForRenderedSessionLifecycle condition 1", deadlineMs: 30_000 });
   const rendered = await exactText.evaluate((node) => {
     const ancestors = [];
     for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
@@ -3259,6 +3137,7 @@ async function createWorkspacesCompatibilityWorkspace(page) {
   }
 
   const openEventCount = await harnessEventCount(page);
+  await waitForDom(page, { locator: openButton, state: "actionable" }, { label: "openButton before click" });
   await openButton.click();
   await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId: openActionId,
@@ -3277,15 +3156,17 @@ async function createWorkspacesCompatibilityWorkspace(page) {
   });
 
   const form = page.locator("form[data-ui-node-id='botster-workspaces-create-form']");
-  await form.waitFor({ timeout: 15_000 });
+  await waitForDom(page, form, { label: "form", deadlineMs: 15_000 });
   const input = form.locator("[data-ui-node-id='botster-workspaces-create-name'] input");
   const submit = form.locator(
     ":scope > ion-button[data-action-id='botster_workspaces.create']:not([data-ui-node-id])"
   );
   const workspaceName = `Named slot smoke ${process.pid}-${Date.now()}`;
+  await waitForDom(page, { locator: input, state: "actionable" }, { label: "input before fill" });
   await input.fill(workspaceName);
 
   const createEventCount = await harnessEventCount(page);
+  await waitForDom(page, { locator: submit, state: "actionable" }, { label: "submit before click" });
   await submit.click();
   await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId: "botster_workspaces.create",
@@ -3304,16 +3185,12 @@ async function createWorkspacesCompatibilityWorkspace(page) {
     sinceIndex: createEventCount,
     label: "Workspaces accepted create replacement and presentation clear"
   });
-  await page.waitForFunction(
-    () => !globalThis.document.querySelector("[data-ui-node-id='botster-workspaces-create-form']"),
-    null,
-    { timeout: 15_000 }
-  );
+  await waitForDom(page, () => page.evaluate(() => !globalThis.document.querySelector("[data-ui-node-id='botster-workspaces-create-form']"), null), { label: "createWorkspacesCompatibilityWorkspace condition 1", deadlineMs: 15_000 });
 
   const row = surface.locator(
     "ion-item.uinode-list-item[data-ui-node-id^='botster-workspaces-row-']"
   );
-  await row.waitFor({ timeout: 15_000 });
+  await waitForDom(page, row, { label: "row", deadlineMs: 15_000 });
   const rowCount = await row.count();
   if (rowCount !== 1) {
     throw new Error(`Workspaces fresh create expected one rendered row; count=${rowCount}`);
@@ -3359,8 +3236,7 @@ async function waitForWorkspacesPluginSurfaceRequest(
   page,
   { actionId, nodeId, kind, values, payload, sinceIndex, label }
 ) {
-  await page.waitForFunction(
-    (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+  await waitForHarnessEvent(page, (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
       .slice(expected.sinceIndex)
       .some((entry) => {
         const request = entry.payload?.request;
@@ -3380,10 +3256,7 @@ async function waitForWorkspacesPluginSurfaceRequest(
         );
         if (expected.values !== undefined && stableJson(request.values) !== stableJson(expected.values)) return false;
         return expected.payload === undefined || stableJson(request.payload) === stableJson(expected.payload);
-      }),
-    { actionId, nodeId, kind, values, payload, sinceIndex },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+      }), { actionId, nodeId, kind, values, payload, sinceIndex }, { label: "waitForWorkspacesPluginSurfaceRequest condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observed = await page.evaluate((start) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .slice(start)
@@ -3433,8 +3306,7 @@ async function waitForWorkspacesActionResult(
   page,
   { actionId, nodeId, presentation, normalizedName, replacementRootId, sinceIndex, label, requestId }
 ) {
-  await page.waitForFunction(
-    (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+  await waitForHarnessEvent(page, (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
       .slice(expected.sinceIndex)
       .some((entry) => {
         if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
@@ -3470,10 +3342,7 @@ async function waitForWorkspacesActionResult(
         ) return false;
         return expected.replacementRootId === undefined ||
           pluginActionResult.replacement?.id === expected.replacementRootId;
-      }),
-    { actionId, nodeId, presentation, normalizedName, replacementRootId, sinceIndex, requestId },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+      }), { actionId, nodeId, presentation, normalizedName, replacementRootId, sinceIndex, requestId }, { label: "waitForWorkspacesActionResult condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observed = await page.evaluate((start) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .slice(start)
@@ -3562,7 +3431,7 @@ async function exerciseWorkspacesLifecycle(page) {
       family: "session",
       id: sessionId,
       lifecycle_class: "current"
-    }, `Workspaces lifecycle current seed ${sessionId}`);
+    }, undefined, { label: `Workspaces lifecycle current seed ${sessionId}`, deadlineMs: 45_000 });
   }
 
   await selectWorkspacesLifecycleWorkspace(page, workspacesCompatibilityState);
@@ -3601,7 +3470,7 @@ async function exerciseWorkspacesLifecycle(page) {
       family: "session",
       id: sessionId,
       lifecycle_class: "ended"
-    }, `Workspaces lifecycle current-to-ended entity transition ${sessionId}`);
+    }, undefined, { label: `Workspaces lifecycle current-to-ended entity transition ${sessionId}`, deadlineMs: 45_000 });
   }
   // The ended patch alone must move each reference out of Current without it landing in
   // Unavailable, with no surface pull and no session list: the removal is event-driven.
@@ -3639,7 +3508,7 @@ async function exerciseWorkspacesLifecycle(page) {
   if (reconnect.beforeUrl !== selectedRouteUrl || reconnect.afterUrl !== selectedRouteUrl) {
     throw new Error(`Workspaces selected route changed across reconnect: ${JSON.stringify({ selectedRouteUrl, reconnect })}`);
   }
-  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).waitFor({ timeout: 15_000 });
+  await waitForDom(page, page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId), { label: "page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)", deadlineMs: 15_000 });
   await assertWorkspacesNodeIds(page, [
     "botster-workspaces-app",
     "botster-workspaces-list"
@@ -3698,13 +3567,14 @@ async function exerciseWorkspacesLifecycle(page) {
 async function selectWorkspacesLifecycleWorkspace(page, state) {
   const row = page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
     .locator(`[data-ui-node-id='botster-workspaces-row-${state.workspaceId}']`);
-  await row.waitFor({ timeout: 15_000 });
+  await waitForDom(page, row, { label: "row", deadlineMs: 15_000 });
   // A Workspaces row is a list_item whose activation is the row itself.
   const actionId = await row.getAttribute("data-activation-action-id");
   if (actionId !== "botster_workspaces.open") {
     throw new Error(`Workspaces row rendered unexpected activation action id ${JSON.stringify(actionId)}`);
   }
   const sinceIndex = await harnessEventCount(page);
+  await waitForDom(page, { locator: row, state: "actionable" }, { label: "row before click" });
   await row.click();
   await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId,
@@ -3721,9 +3591,11 @@ async function selectWorkspacesLifecycleWorkspace(page, state) {
     sinceIndex,
     label: "Workspaces accepted workspace selection"
   });
-  await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId)
-    .locator(`[data-ui-node-id='botster-workspaces-add-${state.workspaceId}']`)
-    .waitFor({ timeout: 15_000 });
+  await waitForDom(
+    page,
+    page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).locator(`[data-ui-node-id='botster-workspaces-add-${state.workspaceId}']`),
+    { label: "Workspaces add-session control", deadlineMs: 15_000 }
+  );
 }
 
 async function openWorkspacesAddSessionDialog(page, state, labelSuffix) {
@@ -3735,6 +3607,7 @@ async function openWorkspacesAddSessionDialog(page, state, labelSuffix) {
   const openActionId = await openButton.getAttribute("data-action-id");
   const openNodeId = await openButton.getAttribute("data-ui-node-id");
   const openEventCount = await harnessEventCount(page);
+  await waitForDom(page, { locator: openButton, state: "actionable" }, { label: "openButton before click" });
   await openButton.click();
   const openRequest = await waitForWorkspacesPluginSurfaceRequest(page, {
     actionId: openActionId,
@@ -3752,7 +3625,7 @@ async function openWorkspacesAddSessionDialog(page, state, labelSuffix) {
     label: `Workspaces accepted Add-session dialog for ${labelSuffix}`
   });
   const form = page.locator(`form[data-ui-node-id='botster-workspaces-add-form-${state.workspaceId}']`);
-  await form.waitFor({ timeout: 15_000 });
+  await waitForDom(page, form, { label: "form", deadlineMs: 15_000 });
   return form;
 }
 
@@ -3761,17 +3634,13 @@ async function waitForWorkspacesAddSessionOption(page, state, sessionId, timeout
     `form[data-ui-node-id='botster-workspaces-add-form-${state.workspaceId}'] ` +
     "[data-ui-node-id='botster-workspaces-add-session-id'] ion-select"
   );
-  await select.waitFor({ timeout: 15_000 });
-  await page.waitForFunction(
-    ({ formId, expected }) => {
+  await waitForDom(page, select, { label: "select", deadlineMs: 15_000 });
+  await waitForDom(page, () => page.evaluate(({ formId, expected }) => {
       const options = [...globalThis.document.querySelectorAll(
         `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
       )];
       return options.some((option) => (option.value ?? option.getAttribute("value")) === expected);
-    },
-    { formId: `botster-workspaces-add-form-${state.workspaceId}`, expected: sessionId },
-    { timeout: timeoutMs }
-  ).catch(async (error) => {
+    }, { formId: `botster-workspaces-add-form-${state.workspaceId}`, expected: sessionId }), { label: "waitForWorkspacesAddSessionOption condition 1", deadlineMs: timeoutMs }).catch(async (error) => {
     const options = await readUiNodeSelectOptionValues(select);
     throw new Error(
       `Workspaces Available sessions never projected ${sessionId}; options=${JSON.stringify(options)}: ${error.message}`
@@ -3787,12 +3656,16 @@ async function waitForWorkspacesAddSessionOption(page, state, sessionId, timeout
  */
 async function chooseWorkspacesAddSessionControl(page, form, sessionId, { historical = false } = {}) {
   const select = form.locator("[data-ui-node-id='botster-workspaces-add-session-id'] ion-select");
-  await select.waitFor({ timeout: 15_000 });
+  await waitForDom(page, select, { label: "select", deadlineMs: 15_000 });
   const formId = await form.getAttribute("data-ui-node-id");
 
   if (historical) {
-    // Explicit historical absence only — do not treat a short option timeout as absence.
-    await page.waitForTimeout(1_000);
+    // Explicit historical absence only. The select projects its options at render time from the
+    // entity store's session family, so the list is authoritative once that snapshot is held.
+    await waitForHarnessEvent(page, { kind: "hub_frame", frameKind: "entity_snapshot", family: "session" }, undefined, {
+      label: "session entity snapshot held before the historical absence check",
+      deadlineMs: 15_000
+    });
     const options = await readUiNodeSelectOptionValues(select);
     if (options.includes(sessionId)) {
       throw new Error(
@@ -3800,21 +3673,17 @@ async function chooseWorkspacesAddSessionControl(page, form, sessionId, { histor
       );
     }
     const advanced = form.locator("[data-ui-node-id='botster-workspaces-add-session-id-advanced'] input");
-    await advanced.waitFor({ timeout: 15_000 });
+    await waitForDom(page, advanced, { label: "advanced", deadlineMs: 15_000 });
     await advanced.fill(sessionId);
     return { path: "historical_advanced", options };
   }
 
-  await page.waitForFunction(
-    ({ nextFormId, expected }) => {
+  await waitForDom(page, () => page.evaluate(({ nextFormId, expected }) => {
       const options = [...globalThis.document.querySelectorAll(
         `form[data-ui-node-id='${nextFormId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
       )];
       return options.some((option) => (option.value ?? option.getAttribute("value")) === expected);
-    },
-    { nextFormId: formId, expected: sessionId },
-    { timeout: 30_000 }
-  ).catch(async (error) => {
+    }, { nextFormId: formId, expected: sessionId }), { label: "chooseWorkspacesAddSessionControl condition 1", deadlineMs: 30_000 }).catch(async (error) => {
     const options = await readUiNodeSelectOptionValues(select);
     throw new Error(
       `Workspaces Add requires entity_options option ${sessionId}; rendered=${JSON.stringify(options)}: ${error.message}`
@@ -3828,11 +3697,11 @@ async function submitWorkspacesAddSession(page, form, state, sessionId, label) {
   const formNodeId = await form.getAttribute("data-ui-node-id");
   const submit = form.locator(":scope > ion-button[data-action-id='botster_workspaces.add_session']");
   const eventCount = await harnessEventCount(page);
+  await waitForDom(page, { locator: submit, state: "actionable" }, { label: "submit before click" });
   await submit.click();
   // Prefer exact session_id; advanced historical claims may only send session_id_advanced.
   // Draft may also carry empty optional fields — require identity fields, not exact object equality.
-  const matched = await page.waitForFunction(
-    ({ sinceIndex, nodeId, workspaceId, sessionId: expectedSession }) => {
+  const matched = await waitForHarnessEvent(page, ({ sinceIndex, nodeId, workspaceId, sessionId: expectedSession }) => {
       const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).find((candidate) => {
         const request = candidate.payload?.request;
         if (
@@ -3852,15 +3721,12 @@ async function submitWorkspacesAddSession(page, form, state, sessionId, label) {
         return Boolean(request.request_id);
       });
       return entry?.payload?.request?.request_id ?? null;
-    },
-    {
+    }, {
       sinceIndex: eventCount,
       nodeId: formNodeId,
       workspaceId: state.workspaceId,
       sessionId
-    },
-    { timeout: 15_000 }
-  ).then((handle) => handle.jsonValue()).catch(async (error) => {
+    }, { label: "submitWorkspacesAddSession condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observed = await page.evaluate((start) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .slice(start)
@@ -3903,10 +3769,10 @@ async function openSecondaryWorkspacesProductionClient(state) {
   await installLiveHarnessPageHooks(secondary);
   await secondary.goto(appUrl, { waitUntil: "domcontentloaded" });
   await openDiagnosticsView(secondary);
-  await secondary.getByText("Local Botster health").waitFor({ timeout: 30_000 });
+  await waitForDom(page, secondary.getByText("Local Botster health"), { label: "secondary.getByText(\"Local Botster health\")", deadlineMs: 30_000 });
   await waitForTransportLabel(secondary);
-  await waitForHarnessEvent(secondary, { kind: "daemon_request", type: "status" }, "secondary client status request");
-  await waitForHarnessEvent(secondary, { kind: "daemon_request", type: "list_apps" }, "secondary client list_apps request");
+  await waitForHarnessEvent(secondary, { kind: "daemon_request", type: "status" }, undefined, { label: "secondary client status request", deadlineMs: 45_000 });
+  await waitForHarnessEvent(secondary, { kind: "daemon_request", type: "list_apps" }, undefined, { label: "secondary client list_apps request", deadlineMs: 45_000 });
   await openAppsView(secondary);
   await openFirstPartyUiAppSurface(secondary, "webrtc");
   await selectWorkspacesLifecycleWorkspace(secondary, state);
@@ -3922,18 +3788,14 @@ async function workspacesPluginSurfaceRenderCount(page) {
 }
 
 async function assertWorkspacesAddSelectionInvalid(page, state, label) {
-  await page.waitForFunction(
-    ({ formId }) => {
+  await waitForDom(page, () => page.evaluate(({ formId }) => {
       const form = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
       const field = globalThis.document.querySelector(
         `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id']`
       );
       return form?.getAttribute("data-form-invalid") === "true"
         || field?.getAttribute("data-selection-invalid") === "true";
-    },
-    { formId: `botster-workspaces-add-form-${state.workspaceId}` },
-    { timeout: 30_000 }
-  ).catch((error) => {
+    }, { formId: `botster-workspaces-add-form-${state.workspaceId}` }), { label: "assertWorkspacesAddSelectionInvalid condition 1", deadlineMs: 30_000 }).catch((error) => {
     throw new Error(`${label}: invalid selection UI never appeared: ${error.message}`);
   });
 }
@@ -3992,7 +3854,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       family: "session",
       id: sessionId,
       lifecycle_class: "current"
-    }, `${stage} current seed ${label} ${sessionId}`);
+    }, undefined, { label: `${stage} current seed ${label} ${sessionId}`, deadlineMs: 45_000 });
   };
 
   const cleanupSeededSessions = async ({ page2: cleanupPage2, preferProductionRemove = true } = {}) => {
@@ -4011,7 +3873,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       const stillOpen = await formP1.isVisible().catch(() => false);
       if (stillOpen) {
         await page.keyboard.press("Escape").catch(() => {});
-        await formP1.waitFor({ state: "detached", timeout: 10_000 }).catch(() => {});
+        await waitForDom(page, { locator: formP1, state: "detached" }, { label: "formP1", deadlineMs: 10_000 }).catch(() => {});
       }
     }
 
@@ -4027,6 +3889,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
           if (visible) {
             const removeNodeId = await removeButton.getAttribute("data-ui-node-id");
             const removeSince = await harnessEventCount(cleanupPage2);
+            await waitForDom(page, { locator: removeButton, state: "actionable" }, { label: "removeButton before click" });
             await removeButton.click();
             const removeRequest = await waitForWorkspacesPluginSurfaceRequest(cleanupPage2, {
               actionId: "botster_workspaces.remove_session",
@@ -4082,15 +3945,14 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
 
     // Authoritative membership baseline via production entity store (not session removal alone).
     // Poll briefly so late entity_remove frames apply after production remove.
-    const membershipIds = await page.waitForFunction(({ ids }) => {
+    const membershipIds = await waitForDom(page, () => page.evaluate(({ ids }) => {
       const list = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities;
       if (typeof list !== "function") return null;
       const remaining = list("botster-workspaces.membership")
         .map((record) => record.id)
         .filter((id) => ids.includes(id));
       return remaining.length === 0 ? [] : null;
-    }, { ids: seededSessions }, { timeout: 15_000 })
-      .then((handle) => handle.jsonValue())
+    }, { ids: seededSessions }), { label: "cleanupSeededSessions condition 1", deadlineMs: 15_000 })
       .catch(async () => {
         const list = await page.evaluate(() => {
           const fn = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities;
@@ -4105,15 +3967,14 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     cleanupResults.membership_left_cleared = cleanupResults.membership_ids_remaining.length === 0;
 
     // Authoritative session absence via production entity store (not last hub_frame kind race).
-    const sessionIdsLive = await page.waitForFunction(({ ids }) => {
+    const sessionIdsLive = await waitForDom(page, () => page.evaluate(({ ids }) => {
       const list = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities;
       if (typeof list !== "function") return null;
       const remaining = list("session")
         .map((record) => record.id ?? record.session_uuid)
         .filter((id) => ids.includes(id));
       return remaining.length === 0 ? [] : null;
-    }, { ids: seededSessions }, { timeout: 15_000 })
-      .then((handle) => handle.jsonValue())
+    }, { ids: seededSessions }), { label: "cleanupSeededSessions condition 2", deadlineMs: 15_000 })
       .catch(async () => page.evaluate(({ ids }) => {
         const list = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities;
         if (typeof list !== "function") return null;
@@ -4141,10 +4002,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     formP1 = await openWorkspacesAddSessionDialog(page, state, `${stage}-hold`);
     // Entity-options demand must hold both /session and membership exclude family.
     {
-      const demandDeadline = Date.now() + 45_000;
-      let demandEvidence = null;
-      while (Date.now() < demandDeadline) {
-        demandEvidence = await page.evaluate(() => {
+      const membershipDemandEvidence = (requireReady) => {
           const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
           const subscriptions = events
             .filter((entry) =>
@@ -4168,16 +4026,18 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
               };
             })
             .filter((entry) => entry.family === "botster-workspaces.membership");
-          return {
+          const evidence = {
             subscriptions,
             membership_frames: membershipFrames,
             demanded: subscriptions.some((entry) => entry.entity_type === "botster-workspaces.membership"),
             framed: membershipFrames.length > 0
           };
-        });
-        if (demandEvidence.demanded && demandEvidence.framed) break;
-        await page.waitForTimeout(150);
-      }
+          return !requireReady || (evidence.demanded && evidence.framed) ? evidence : false;
+      };
+      const demandEvidence = await waitForHarnessEvent(page, membershipDemandEvidence, true, {
+        label: `${stage} membership demand and frame`,
+        deadlineMs: 45_000
+      }).catch(() => page.evaluate(membershipDemandEvidence, false));
       console.log(`${stage} membership-demand-evidence ${JSON.stringify(demandEvidence)}`);
       if (!demandEvidence?.demanded) {
         throw new Error(
@@ -4274,7 +4134,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       await chooseWorkspacesAddSessionControl(page2, formP2Warm, sessionA);
       await submitWorkspacesAddSession(page2, formP2Warm, state, sessionA, `${stage} P2 warmup claim A`);
     }
-    await page.waitForFunction(({ formId, expected }) => {
+    await waitForDom(page, () => page.evaluate(({ formId, expected }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       const ready = [...events].reverse().find((entry) =>
         entry.kind === "webrtc_entity_subscription"
@@ -4292,7 +4152,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     }, {
       formId: `botster-workspaces-add-form-${state.workspaceId}`,
       expected: sessionA
-    }, { timeout: 45_000 }).catch(async (error) => {
+    }), { label: "cleanupSeededSessions condition 3", deadlineMs: 45_000 }).catch(async (error) => {
       const wire = await membershipWireEvidence();
       throw new Error(
         `${stage}: warmup claim A never settled P1 membership/exclusion; wire=${JSON.stringify(wire)}: ${error.message}`
@@ -4332,7 +4192,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
     console.log(`${stage} wire-before-claim-b ${JSON.stringify(wireBeforeClaimB)}`);
     await submitWorkspacesAddSession(page2, formP2ClaimB, state, sessionB, `${stage} P2 claim B`);
 
-    const harnessDrop = await page.waitForFunction(() => {
+    const harnessDrop = await waitForDom(page, () => page.evaluate(() => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       const drop = [...events].reverse().find((entry) =>
         entry.kind === "webrtc_entity_frame_harness_drop"
@@ -4349,7 +4209,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
         generation: drop.payload.generation,
         drop_state: state
       };
-    }, undefined, { timeout: 30_000 }).then((handle) => handle.jsonValue()).catch(async (error) => {
+    }, undefined), { label: "cleanupSeededSessions condition 4", deadlineMs: 30_000 }).catch(async (error) => {
       const wire = await membershipWireEvidence();
       throw new Error(
         `${stage}: harness never dropped claim-B membership delta; wire=${JSON.stringify(wire)}: ${error.message}`
@@ -4383,7 +4243,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       await submitWorkspacesAddSession(page2, formP2c, state, sessionC, `${stage} P2 claim C`);
     }
 
-    orderedGapEvidence = await page.waitForFunction(({
+    orderedGapEvidence = await waitForDom(page, () => page.evaluate(({
       sessionA: staleA,
       sessionB: droppedB,
       sessionC: gapC,
@@ -4476,7 +4336,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       baselineN: activeBaseline.client_baseline_n,
       droppedSeq: harnessDrop.dropped_snapshot_seq,
       dropSubscriptionId: harnessDrop.subscription_id
-    }, { timeout: 45_000 }).then((handle) => handle.jsonValue()).catch(async (error) => {
+    }), { label: "cleanupSeededSessions condition 5", deadlineMs: 45_000 }).catch(async (error) => {
       const diagnostics = await page.evaluate(() => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
         return {
@@ -4571,7 +4431,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
           sequence: 1_000_000_000
         });
       }, { sessionId: sessionA });
-      await page.waitForFunction(({ formId: id, actionId }) => {
+      await waitForDom(page, () => page.evaluate(({ formId: id, actionId }) => {
         const formEl = globalThis.document.querySelector(`form[data-ui-node-id='${id}']`);
         const btn = formEl?.querySelector(`ion-button[data-action-id='${actionId}']`);
         if (!formEl || !btn) return false;
@@ -4580,14 +4440,16 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
           && !btn.hasAttribute("disabled")
           && !native?.disabled
           && !native?.hasAttribute?.("disabled");
-      }, { formId, actionId: addActionId }, { timeout: 10_000 }).catch((error) => {
+      }, { formId, actionId: addActionId }), { label: "cleanupSeededSessions condition 6", deadlineMs: 10_000 }).catch((error) => {
         throw new Error(`${stage}: ablation did not restore valid Add control state: ${error.message}`);
       });
+      await waitForDom(page, { locator: formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`), state: "actionable" }, { label: "formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`) before click" });
       await formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`).click();
     } else {
       // Normal rendered click only — no force. Disabled controls may suppress onClick;
       // settle via production telemetry or blocked_gate after the non-forced attempt.
       const submitBtn = formP1.locator(`:scope > ion-button[data-action-id='${addActionId}']`);
+      await waitForDom(page, { locator: submitBtn, state: "actionable" }, { label: "submitBtn before click" });
       await submitBtn.click({ timeout: 3_000 }).catch(() => {
         // Playwright may refuse disabled targets; zero outbound + blocked_gate still prove fail-closed.
       });
@@ -4596,7 +4458,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       }));
     }
 
-    const clickCompletion = await page.waitForFunction(({ before, actionId, formId: id, ablate }) => {
+    const clickCompletion = await waitForDom(page, () => page.evaluate(({ before, actionId, formId: id, ablate }) => {
       const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
       const attempt = harness?.lastFormSubmitClick;
       if (attempt && attempt.seq > before && attempt.actionId === actionId) {
@@ -4628,7 +4490,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
       actionId: addActionId,
       formId,
       ablate: ablateStaleSubmit
-    }, { timeout: 10_000 }).then((handle) => handle.jsonValue()).catch((error) => {
+    }), { label: "cleanupSeededSessions condition 7", deadlineMs: 10_000 }).catch((error) => {
       throw new Error(`${stage}: production Add click/dispatch path never completed: ${error.message}`);
     });
 
@@ -4657,7 +4519,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
 
     let staleSubmit = [];
     if (ablateStaleSubmit || clickCompletion.phase === "dispatched") {
-      staleSubmit = await page.waitForFunction((args) => {
+      staleSubmit = await waitForHarnessEvent(page, (args) => {
         const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(args.before);
         const found = entries.filter((entry) => {
           if (
@@ -4674,7 +4536,7 @@ async function exerciseWorkspacesEntityOptionsMembershipReactive(page, sharedBro
             || values["botster-workspaces-add-session-id-advanced"] === args.sessionId;
         });
         return found.length > 0 ? found : null;
-      }, staleAddSessionArgs, { timeout: 15_000 }).then((handle) => handle.jsonValue()).catch((error) => {
+      }, staleAddSessionArgs, { label: "cleanupSeededSessions condition 8", deadlineMs: 15_000 }).catch((error) => {
         if (ablateStaleSubmit) {
           throw new Error(
             `${stage}: ablation restored stale dispatch but real action collector emitted no add_session: ${error.message}`
@@ -5058,26 +4920,28 @@ async function openPackageSettings(page, packageName) {
     name: `Settings for ${packageLabel}`,
     exact: true
   });
-  await settingsButton.waitFor({ timeout: 15_000 }).catch(async (error) => {
+  await waitForDom(page, settingsButton, { label: "settingsButton", deadlineMs: 15_000 }).catch(async (error) => {
     const installedText = await installed.innerText().catch(() => "");
     throw new Error(
       `timed out waiting for ${packageName} settings button; installed=${JSON.stringify(installedText)}: ${error.message}`
     );
   });
+  await waitForDom(page, { locator: settingsButton, state: "actionable" }, { label: "settingsButton before click" });
   await settingsButton.click();
-  await page.waitForURL(new RegExp(`/apps/${packageName}/settings`));
-  await page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).waitFor();
+  await waitForDom(page, async () => (new RegExp(`/apps/${packageName}/settings`)).test(await page.evaluate(() => globalThis.location.href)), { label: "URL new RegExp(`/apps/${packageName}/settings`)", deadlineMs: 30_000 });
+  await waitForDom(page, page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId), { label: "page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId)" });
 }
 
 async function closePackageSettingsRoute(page) {
   // 9753297 relabelled this control from "Apps" to "Back" (App.tsx PluginSettingsRoutePage)
   // without updating the harness, so smoke:live-packaged-protocol has been failing here on
   // main. Repaired only because this ticket's required WebRTC reconnect proof runs after it.
-  await page
-    .getByTestId(HOST_CHROME.pluginSettingsRouteTestId)
-    .getByRole("button", { name: HOST_CHROME.settingsBackButtonName, exact: true })
-    .click();
-  await page.waitForURL(/\/apps(?:[?#]|$)/);
+  {
+    const target = page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).getByRole("button", { name: HOST_CHROME.settingsBackButtonName, exact: true });
+    await waitForDom(page, { locator: target, state: "actionable" }, { label: "page.getByTestId(HOST_CHROME.pluginSettingsRouteTestId).getByRole('but before click" });
+    await target.click();
+  }
+  await waitForDom(page, async () => (/\/apps(?:[?#]|$)/).test(await page.evaluate(() => globalThis.location.href)), { label: "URL /apps", deadlineMs: 30_000 });
 }
 
 async function setIonicSelectValue(page, fieldId, value) {
@@ -5091,8 +4955,7 @@ async function setIonicSelectValue(page, fieldId, value) {
 }
 
 async function waitForPackageConfigurationRequest(page, { packageName, values, omittedKeys = [] }) {
-  await page.waitForFunction(
-    ({ nextPackageName, expectedValues, expectedOmittedKeys }) =>
+  await waitForHarnessEvent(page, ({ nextPackageName, expectedValues, expectedOmittedKeys }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
         if (entry.kind !== "daemon_request") return false;
         const payload = entry.payload ?? {};
@@ -5102,10 +4965,7 @@ async function waitForPackageConfigurationRequest(page, { packageName, values, o
           if (JSON.stringify(payloadValues[key]) !== JSON.stringify(expectedValue)) return false;
         }
         return expectedOmittedKeys.every((key) => !(key in payloadValues));
-      }),
-    { nextPackageName: packageName, expectedValues: values, expectedOmittedKeys: omittedKeys },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+      }), { nextPackageName: packageName, expectedValues: values, expectedOmittedKeys: omittedKeys }, { label: "waitForPackageConfigurationRequest condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observedRequests = await page.evaluate((nextPackageName) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "set_package_configuration")
@@ -5120,7 +4980,7 @@ async function waitForPackageConfigurationRequest(page, { packageName, values, o
 }
 
 async function assertContractSettingsSummary(page, expectedText) {
-  await page.getByText(/endpoint=.* mode=.* api_token_state=.*/).waitFor({ timeout: 45_000 });
+  await waitForDom(page, page.getByText(/endpoint=.* mode=.* api_token_state=.*/), { label: "page.getByText(/endpoint=.* mode=.* api_token_state=.*/)", deadlineMs: 45_000 });
   const expectedTexts = Array.isArray(expectedText) ? expectedText : [expectedText];
   const summaries = await page.locator("text=/endpoint=.* mode=.* api_token_state=.*/").allTextContents();
   if (!expectedTexts.some((expected) => summaries.includes(expected))) {
@@ -5149,8 +5009,7 @@ async function assertContractSettingsSummary(page, expectedText) {
 }
 
 async function waitForPackageEffectiveConfiguration(page, packageName, expectedValues) {
-  await page.waitForFunction(
-    ({ nextPackageName, nextExpectedValues }) => {
+  await waitForHarnessEvent(page, ({ nextPackageName, nextExpectedValues }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       const daemonPackages = events
         .filter((entry) => entry.kind === "daemon_response" && entry.payload?.kind === "packages")
@@ -5196,10 +5055,7 @@ async function waitForPackageEffectiveConfiguration(page, packageName, expectedV
         }
         return value;
       }
-    },
-    { nextPackageName: packageName, nextExpectedValues: expectedValues },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+    }, { nextPackageName: packageName, nextExpectedValues: expectedValues }, { label: "waitForPackageEffectiveConfiguration condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observedConfigurations = await page.evaluate((nextPackageName) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .flatMap((entry) => {
@@ -5238,17 +5094,13 @@ async function packageConfigurationActionResultCount(page, packageName, accepted
 }
 
 async function waitForPackageConfigurationActionResultCount(page, packageName, accepted, expectedCount) {
-  await page.waitForFunction(
-    ({ nextPackageName, nextAccepted, nextExpectedCount }) =>
+  await waitForHarnessEvent(page, ({ nextPackageName, nextAccepted, nextExpectedCount }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) => {
         if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") return false;
         const payload = entry.payload.payload ?? {};
         const result = payload.result ?? {};
         return payload.accepted === nextAccepted && result.package_name === nextPackageName;
-      }).length >= nextExpectedCount,
-    { nextPackageName: packageName, nextAccepted: accepted, nextExpectedCount: expectedCount },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+      }).length >= nextExpectedCount, { nextPackageName: packageName, nextAccepted: accepted, nextExpectedCount: expectedCount }, { label: "waitForPackageConfigurationActionResultCount condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observedResults = await page.evaluate((nextPackageName) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .filter((entry) => entry.kind === "hub_frame" && entry.payload?.kind === "action_result")
@@ -5266,19 +5118,6 @@ async function harnessEventCount(page) {
   );
 }
 
-async function waitForHarnessEvent(page, criteria, label, sinceIndex = 0) {
-  // A page-condition wait: the matcher runs in the page against the live event array.
-  await page.waitForFunction(
-    ({ matchCriteria, fromIndex }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-        .slice(fromIndex)
-        .some((entry) => globalThis.__botsterHarnessEventMatches(entry, matchCriteria)),
-    { matchCriteria: criteria, fromIndex: sinceIndex },
-    { timeout: 45_000 }
-  ).catch((error) => {
-    throw new Error(`timed out waiting for ${label}: ${error.message}`);
-  });
-}
 
 async function latestLocalWebrtcGrantId(page) {
   return page.evaluate(() => {
@@ -5382,50 +5221,50 @@ async function exerciseNewSessionPickerListForTarget(page) {
 
   // Fresh hub data dirs have no admitted spawn points. Create one through the production UI
   // so the pull-family entity snapshot updates (socket-only create would not re-pull the list).
-  await page.locator("ion-menu.app-sidebar")
-    .getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true })
-    .click();
-  await page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel)
-    .getByRole("button", { name: new RegExp(HOST_CHROME.spawnPointsSectionLabel) })
-    .click();
+  {
+    const target = page.locator("ion-menu.app-sidebar").getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true });
+    await waitForDom(page, { locator: target, state: "actionable" }, { label: "page.locator('ion-menu.app-sidebar').getByRole('button', { name: HOST_ before click" });
+    await target.click();
+  }
+  {
+    const target = page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole("button", { name: new RegExp(HOST_CHROME.spawnPointsSectionLabel) });
+    await waitForDom(page, { locator: target, state: "actionable" }, { label: "page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole('butto before click" });
+    await target.click();
+  }
   const spawnPointsView = page.getByTestId(HOST_CHROME.spawnPointsViewTestId);
-  await spawnPointsView.waitFor();
+  await waitForDom(page, spawnPointsView, { label: "spawnPointsView" });
 
   const createTargetSince = await harnessEventCount(page);
+  await waitForDom(page, { locator: spawnPointsView.getByRole("button", { name: /Add spawn point/ }), state: "actionable" }, { label: "spawnPointsView.getByRole('button', { name: /Add spawn point/ }) before click" });
   await spawnPointsView.getByRole("button", { name: /Add spawn point/ }).click();
   const spawnTargetModal = page.locator("ion-modal.show-modal").filter({ hasText: "Add spawn point" }).first();
-  await spawnTargetModal.waitFor();
+  await waitForDom(page, spawnTargetModal, { label: "spawnTargetModal" });
+  await waitForDom(page, { locator: spawnTargetModal.locator('ion-input:has-text("Spawn point name") input').first(), state: "actionable" }, { label: "spawnTargetModal.locator('ion-input:has-text('Spawn point name') in... before fill" });
   await spawnTargetModal.locator('ion-input:has-text("Spawn point name") input').first().fill("Web picker spawn point");
+  await waitForDom(page, { locator: spawnTargetModal.locator('ion-input:has-text("Folder") input').first(), state: "actionable" }, { label: "spawnTargetModal.locator('ion-input:has-text('Folder') input').first() before fill" });
   await spawnTargetModal.locator('ion-input:has-text("Folder") input').first().fill(pickerTargetRoot);
   // Set deterministic identifier in advanced options when present.
   const advanced = spawnTargetModal.locator("details.advanced-spawn-target-options");
   if (await advanced.count() > 0) {
+    await waitForDom(page, { locator: advanced.locator("summary"), state: "actionable" }, { label: "advanced.locator('summary') before click" });
     await advanced.locator("summary").click();
     const idInput = spawnTargetModal.locator('ion-input:has-text("Identifier") input').first();
     if (await idInput.count() > 0) {
+      await waitForDom(page, { locator: idInput, state: "actionable" }, { label: "idInput before fill" });
       await idInput.fill(pickerTargetId);
     }
   }
+  await waitForDom(page, { locator: spawnTargetModal.getByRole("button", { name: "Create", exact: true }), state: "actionable" }, { label: "spawnTargetModal.getByRole('button', { name: 'Create', exact: true }) before click" });
   await spawnTargetModal.getByRole("button", { name: "Create", exact: true }).click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "create_spawn_target" },
-    "web-produced create_spawn_target for picker fixture",
-    createTargetSince
-  );
-  await spawnPointsView.getByText("Web picker spawn point").waitFor({ timeout: 15_000 });
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "create_spawn_target" }, undefined, { label: "web-produced create_spawn_target for picker fixture", deadlineMs: 45_000, sinceIndex: createTargetSince });
+  await waitForDom(page, spawnPointsView.getByText("Web picker spawn point"), { label: "spawnPointsView.getByText(\"Web picker spawn point\")", deadlineMs: 15_000 });
 
   const newSessionButton = spawnPointsView.getByRole("button", { name: /New session/ }).first();
-  await newSessionButton.waitFor();
+  await waitForDom(page, newSessionButton, { label: "newSessionButton" });
   const listSince = await harnessEventCount(page);
   await newSessionButton.click();
 
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "list_session_types_for_target" },
-    "web-produced list_session_types_for_target request on New session open",
-    listSince
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "list_session_types_for_target" }, undefined, { label: "web-produced list_session_types_for_target request on New session open", deadlineMs: 45_000, sinceIndex: listSince });
   const listRequest = await latestHarnessRequest(page, "list_session_types_for_target", listSince);
   if (typeof listRequest?.target_id !== "string" || listRequest.target_id.length === 0) {
     throw new Error(`list_session_types_for_target missing target_id: ${JSON.stringify(listRequest)}`);
@@ -5434,11 +5273,11 @@ async function exerciseNewSessionPickerListForTarget(page) {
   await assertNoSessionTypeListHydration(page);
 
   const modal = page.locator("ion-modal.show-modal").filter({ hasText: HOST_CHROME.newSessionModalTitle }).first();
-  await modal.waitFor();
+  await waitForDom(page, modal, { label: "modal" });
   // Wait until loading settles into the select form (Hub list ready with options).
   const sessionTypeSelect = modal.locator("ion-select").first();
   try {
-    await sessionTypeSelect.waitFor({ timeout: 15_000 });
+    await waitForDom(page, sessionTypeSelect, { label: "sessionTypeSelect", deadlineMs: 15_000 });
   } catch {
     const modalText = await modal.innerText();
     throw new Error(`New session list failed or empty after Hub fixture: ${modalText}`);
@@ -5467,13 +5306,9 @@ async function exerciseNewSessionPickerListForTarget(page) {
 
   await setUiNodeSelectValue(sessionTypeSelect, expectedEffectiveId);
   const spawnSince = await harnessEventCount(page);
+  await waitForDom(page, { locator: modal.getByRole("button", { name: HOST_CHROME.newSessionSubmitName, exact: true }), state: "actionable" }, { label: "modal.getByRole('button', { name: HOST_CHROME.newSessionSubmitName,... before click" });
   await modal.getByRole("button", { name: HOST_CHROME.newSessionSubmitName, exact: true }).click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "spawn_session_type" },
-    "web-produced spawn_session_type from New session modal",
-    spawnSince
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "spawn_session_type" }, undefined, { label: "web-produced spawn_session_type from New session modal", deadlineMs: 45_000, sinceIndex: spawnSince });
   const spawnRequest = await latestHarnessRequest(page, "spawn_session_type", spawnSince);
   if (spawnRequest?.session_type_id !== expectedEffectiveId) {
     throw new Error(
@@ -5487,8 +5322,7 @@ async function exerciseNewSessionPickerListForTarget(page) {
   }
 
   // Ticket success requires Hub acceptance, not only request emission.
-  const acceptedSpawn = await page.waitForFunction(
-    ({ since, sessionTypeId, targetId }) => {
+  const acceptedSpawn = await waitForHarnessEvent(page, ({ since, sessionTypeId, targetId }) => {
       const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since);
       for (const entry of events) {
         if (entry.kind !== "hub_frame" || entry.payload?.kind !== "action_result") continue;
@@ -5506,14 +5340,11 @@ async function exerciseNewSessionPickerListForTarget(page) {
         }
       }
       return null;
-    },
-    {
+    }, {
       since: spawnSince,
       sessionTypeId: expectedEffectiveId,
       targetId: listRequest.target_id
-    },
-    { timeout: 15_000 }
-  ).then((handle) => handle.jsonValue()).catch(async (error) => {
+    }, { label: "exerciseNewSessionPickerListForTarget condition 1", deadlineMs: 15_000 }).catch(async (error) => {
     const observed = await page.evaluate((since) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since)
         .filter((entry) =>
@@ -5528,12 +5359,7 @@ async function exerciseNewSessionPickerListForTarget(page) {
   }
 
   // Observe the authoritative session entity for the spawned id before cleanup.
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", family: "session", id: acceptedSpawn.session_id },
-    `session entity for accepted spawn ${acceptedSpawn.session_id}`,
-    spawnSince
-  ).catch(async () => {
+  await waitForHarnessEvent(page, { kind: "hub_frame", family: "session", id: acceptedSpawn.session_id }, undefined, { label: `session entity for accepted spawn ${acceptedSpawn.session_id}`, deadlineMs: 45_000, sinceIndex: spawnSince }).catch(async () => {
     // Some paths publish the session only on the sessions array of the daemon response;
     // require at least one daemon response carrying the spawned session id.
     const daemonHasSession = await page.evaluate(({ since, sessionId }) => {
@@ -5562,11 +5388,11 @@ async function exerciseNewSessionPickerListForTarget(page) {
   // detaching overlay (that races and fails Verify's live smoke).
   const openModals = page.locator("ion-modal.show-modal");
   try {
-    await openModals.first().waitFor({ state: "detached", timeout: 10_000 });
+    await waitForDom(page, { locator: openModals.first(), state: "detached" }, { label: "openModals.first()", deadlineMs: 10_000 });
   } catch {
     // If a modal remains (spawn-point form leftover), Escape is best-effort only.
     await page.keyboard.press("Escape").catch(() => {});
-    await openModals.first().waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+    await waitForDom(page, { locator: openModals.first(), state: "detached" }, { label: "openModals.first()", deadlineMs: 5_000 }).catch(() => {});
   }
 
   return {
@@ -5587,34 +5413,39 @@ async function exerciseNewSessionPickerListForTarget(page) {
  */
 async function setSessionTypeFormField(page, label, value) {
   const input = page.locator(`ion-input:has-text("${label}") input`).first();
-  await input.waitFor();
+  await waitForDom(page, input, { label: "input" });
   await input.fill(value);
 }
 
 async function setSessionTypeFormTextarea(page, label, value) {
   const textarea = page.locator(`ion-textarea:has-text("${label}") textarea`).first();
-  await textarea.waitFor();
+  await waitForDom(page, textarea, { label: "textarea" });
   await textarea.fill(value);
 }
 
 async function setSessionTypeFormSelect(page, testId, optionLabel) {
   const select = page.getByTestId(testId);
-  await select.waitFor();
+  await waitForDom(page, select, { label: "select" });
   await select.click();
   // interface="popover" presents options in an ion-popover overlay.
   const popover = page.locator("ion-popover").filter({ hasText: optionLabel }).last();
-  await popover.waitFor({ state: "visible" });
+  await waitForDom(page, { locator: popover, state: "visible" }, { label: "popover" });
+  await waitForDom(page, { locator: popover.getByText(optionLabel, { exact: true }), state: "actionable" }, { label: "popover.getByText(optionLabel, { exact: true }) before click" });
   await popover.getByText(optionLabel, { exact: true }).click();
 }
 
 async function openSessionTypesView(page) {
-  await page.locator("ion-menu.app-sidebar")
-    .getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true })
-    .click();
-  await page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel)
-    .getByRole("button", { name: new RegExp(HOST_CHROME.sessionTypesSectionLabel) })
-    .click();
-  await page.getByTestId(HOST_CHROME.sessionTypesViewTestId).waitFor();
+  {
+    const target = page.locator("ion-menu.app-sidebar").getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true });
+    await waitForDom(page, { locator: target, state: "actionable" }, { label: "page.locator('ion-menu.app-sidebar').getByRole('button', { name: HOST_ before click" });
+    await target.click();
+  }
+  {
+    const target = page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole("button", { name: new RegExp(HOST_CHROME.sessionTypesSectionLabel) });
+    await waitForDom(page, { locator: target, state: "actionable" }, { label: "page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole('butto before click" });
+    await target.click();
+  }
+  await waitForDom(page, page.getByTestId(HOST_CHROME.sessionTypesViewTestId), { label: "page.getByTestId(HOST_CHROME.sessionTypesViewTestId)" });
 }
 
 async function latestHarnessRequest(page, type, sinceIndex) {
@@ -5631,7 +5462,7 @@ async function latestHarnessRequest(page, type, sinceIndex) {
  * mean its result arrived, so callers wait for the result itself (a page-condition wait).
  */
 async function latestHarnessActionResult(page, requestType, sinceIndex) {
-  return page.waitForFunction(({ since, expectedType }) => {
+  return waitForHarnessEvent(page, ({ since, expectedType }) => {
     const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
     for (let index = events.length - 1; index >= since; index -= 1) {
       const entry = events[index];
@@ -5642,8 +5473,7 @@ async function latestHarnessActionResult(page, requestType, sinceIndex) {
       }
     }
     return null;
-  }, { since: sinceIndex, expectedType: requestType }, { timeout: 45_000 })
-    .then((handle) => handle.jsonValue())
+  }, { since: sinceIndex, expectedType: requestType }, { label: "latestHarnessActionResult condition 1", deadlineMs: 45_000 })
     .catch((error) => {
       throw new Error(`timed out waiting for the ${requestType} action result: ${error.message}`);
     });
@@ -5658,8 +5488,9 @@ async function createSessionTypeThroughRenderedForm(page) {
   await openSessionTypesView(page);
 
   const sinceIndex = await harnessEventCount(page);
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.createSessionTypeTestId), state: "actionable" }, { label: "page.getByTestId(HOST_CHROME.createSessionTypeTestId) before click" });
   await page.getByTestId(HOST_CHROME.createSessionTypeTestId).click();
-  await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor();
+  await waitForDom(page, page.getByTestId(HOST_CHROME.sessionTypeFormTestId), { label: "page.getByTestId(HOST_CHROME.sessionTypeFormTestId)" });
   // Create defaults to Agent preset. Name derives id (web-authored-agent).
   await setSessionTypeFormField(page, "Name", "web-authored-agent");
   // Execution is independent from the semantic Agent preset and command text.
@@ -5669,6 +5500,7 @@ async function createSessionTypeThroughRenderedForm(page) {
   // Advanced is closed on Agent create; open it for path/env/context.
   const advancedCreate = page.locator("details.advanced-session-type-options");
   if (!(await advancedCreate.evaluate((details) => details.open))) {
+    await waitForDom(page, { locator: advancedCreate.locator("summary"), state: "actionable" }, { label: "advancedCreate.locator('summary') before click" });
     await advancedCreate.locator("summary").click();
   }
   await setSessionTypeFormSelect(page, "session-type-working-directory-policy", "Relative path under source root");
@@ -5676,14 +5508,10 @@ async function createSessionTypeThroughRenderedForm(page) {
   await setSessionTypeFormField(page, "Arguments", "30 --verbose");
   await setSessionTypeFormTextarea(page, "Environment", "LIVE_KEY=live-value");
   await setSessionTypeFormField(page, "Context keys", "prompt");
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.submitSessionTypeTestId), state: "actionable" }, { label: "page.getByTestId(HOST_CHROME.submitSessionTypeTestId) before click" });
   await page.getByTestId(HOST_CHROME.submitSessionTypeTestId).click();
 
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "create_session_type" },
-    "web-produced create_session_type request",
-    sinceIndex
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "create_session_type" }, undefined, { label: "web-produced create_session_type request", deadlineMs: 45_000, sinceIndex: sinceIndex });
   const createRequests = await page.evaluate((since) =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
       .slice(since)
@@ -5726,31 +5554,28 @@ async function createSessionTypeThroughRenderedForm(page) {
 
   // Accepted -> the form closes and the row arrives as a pushed delta, not a refetch.
   const row = page.getByTestId("session-type-device/web-authored-agent");
-  await row.waitFor();
-  await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor({ state: "detached" });
+  await waitForDom(page, row, { label: "row" });
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.sessionTypeFormTestId), state: "detached" }, { label: "page.getByTestId(HOST_CHROME.sessionTypeFormTestId)" });
   await assertNoSessionTypeListHydration(page);
 
   // --- Primary edit path: change only label; prove path/env/context survive ---
   const editSince = await harnessEventCount(page);
+  await waitForDom(page, { locator: page.getByTestId(editSessionTypeTestId("device/web-authored-agent")), state: "actionable" }, { label: "page.getByTestId(editSessionTypeTestId('device/web-authored-agent')) before click" });
   await page.getByTestId(editSessionTypeTestId("device/web-authored-agent")).click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "show_session_type_definition" },
-    "web-produced show_session_type_definition request",
-    editSince
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "show_session_type_definition" }, undefined, { label: "web-produced show_session_type_definition request", deadlineMs: 45_000, sinceIndex: editSince });
   const showRequest = await latestHarnessRequest(page, "show_session_type_definition", editSince);
   if (showRequest?.session_type_id !== "device/web-authored-agent") {
     throw new Error(
       `web show must use composite session_type_id, sent ${JSON.stringify(showRequest?.session_type_id)}`
     );
   }
-  await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor();
+  await waitForDom(page, page.getByTestId(HOST_CHROME.sessionTypeFormTestId), { label: "page.getByTestId(HOST_CHROME.sessionTypeFormTestId)" });
   // Edit opens Advanced by default so Role remains reachable.
   // Form promise pending/rejection: force Hub rejection with an invalid role, keep draft.
   await setSessionTypeFormField(page, "Role", "not a namespaced role");
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.submitSessionTypeTestId), state: "actionable" }, { label: "page.getByTestId(HOST_CHROME.submitSessionTypeTestId) before click" });
   await page.getByTestId(HOST_CHROME.submitSessionTypeTestId).click();
-  await page.getByTestId(HOST_CHROME.sessionTypeFormErrorTestId).waitFor();
+  await waitForDom(page, page.getByTestId(HOST_CHROME.sessionTypeFormErrorTestId), { label: "page.getByTestId(HOST_CHROME.sessionTypeFormErrorTestId)" });
   const formStillOpen = await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).count();
   if (formStillOpen < 1) {
     throw new Error("form closed after Hub rejection; draft must stay open");
@@ -5759,13 +5584,9 @@ async function createSessionTypeThroughRenderedForm(page) {
   await setSessionTypeFormField(page, "Role", "botster.agent");
   await setSessionTypeFormField(page, "Name", "Web authored agent renamed");
   const updateSince = await harnessEventCount(page);
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.submitSessionTypeTestId), state: "actionable" }, { label: "page.getByTestId(HOST_CHROME.submitSessionTypeTestId) before click" });
   await page.getByTestId(HOST_CHROME.submitSessionTypeTestId).click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "update_session_type" },
-    "web-produced update_session_type request",
-    updateSince
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "update_session_type" }, undefined, { label: "web-produced update_session_type request", deadlineMs: 45_000, sinceIndex: updateSince });
   const updateRequest = await latestHarnessRequest(page, "update_session_type", updateSince);
   if (updateRequest?.definition?.id !== "web-authored-agent") {
     throw new Error(
@@ -5799,18 +5620,14 @@ async function createSessionTypeThroughRenderedForm(page) {
       `web update dropped context: ${JSON.stringify(updateRequest?.definition?.context)}`
     );
   }
-  await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor({ state: "detached" });
-  await page.getByText("Web authored agent renamed").waitFor();
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.sessionTypeFormTestId), state: "detached" }, { label: "page.getByTestId(HOST_CHROME.sessionTypeFormTestId)" });
+  await waitForDom(page, page.getByText("Web authored agent renamed"), { label: "page.getByText(\"Web authored agent renamed\")" });
 
   // Read-back: re-open Edit and assert fresh show still carries path/env/context.
   const readbackSince = await harnessEventCount(page);
+  await waitForDom(page, { locator: page.getByTestId(editSessionTypeTestId("device/web-authored-agent")), state: "actionable" }, { label: "page.getByTestId(editSessionTypeTestId('device/web-authored-agent')) before click" });
   await page.getByTestId(editSessionTypeTestId("device/web-authored-agent")).click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "show_session_type_definition" },
-    "read-back show_session_type_definition",
-    readbackSince
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "show_session_type_definition" }, undefined, { label: "read-back show_session_type_definition", deadlineMs: 45_000, sinceIndex: readbackSince });
   const readbackResult = await latestHarnessActionResult(page, "show_session_type_definition", readbackSince);
   const readbackDefinition = readbackResult?.result?.session_type_definition?.definition;
   if (!readbackDefinition) {
@@ -5842,20 +5659,18 @@ async function createSessionTypeThroughRenderedForm(page) {
     throw new Error(`read-back args mismatch: ${JSON.stringify(readbackDefinition.args)}`);
   }
   // Close form without further mutation.
+  await waitForDom(page, { locator: page.getByRole("button", { name: "Close", exact: true }).last(), state: "actionable" }, { label: "page.getByRole('button', { name: 'Close', exact: true }).last() before click" });
   await page.getByRole("button", { name: "Close", exact: true }).last().click();
-  await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor({ state: "detached" });
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.sessionTypeFormTestId), state: "detached" }, { label: "page.getByTestId(HOST_CHROME.sessionTypeFormTestId)" });
   await assertNoSessionTypeListHydration(page);
 
   // Delete through the rendered control must address the BARE authoring id.
   const deleteSince = await harnessEventCount(page);
+  await waitForDom(page, { locator: page.getByTestId(deleteSessionTypeTestId("device/web-authored-agent")), state: "actionable" }, { label: "page.getByTestId(deleteSessionTypeTestId('device/web-authored-agent')) before click" });
   await page.getByTestId(deleteSessionTypeTestId("device/web-authored-agent")).click();
+  await waitForDom(page, { locator: page.getByRole("button", { name: "Delete", exact: true }).last(), state: "actionable" }, { label: "page.getByRole('button', { name: 'Delete', exact: true }).last() before click" });
   await page.getByRole("button", { name: "Delete", exact: true }).last().click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "delete_session_type" },
-    "web-produced delete_session_type request",
-    deleteSince
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "delete_session_type" }, undefined, { label: "web-produced delete_session_type request", deadlineMs: 45_000, sinceIndex: deleteSince });
   const deleteRequest = await page.evaluate((since) =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
       .slice(since)
@@ -5866,7 +5681,7 @@ async function createSessionTypeThroughRenderedForm(page) {
       `web delete must send the bare authoring id, sent ${JSON.stringify(deleteRequest?.session_type_id)}`
     );
   }
-  await row.waitFor({ state: "detached" });
+  await waitForDom(page, { locator: row, state: "detached" }, { label: "row" });
   await assertNoSessionTypeListHydration(page);
 
   return {
@@ -5915,35 +5730,22 @@ async function proveSessionTypeTargetIdSurvival(page, socketPath) {
   if (createResponse.error) {
     throw new Error(`target_id fixture create failed: ${JSON.stringify(createResponse.error)}`);
   }
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", family: "session_type" },
-    "pushed session_type delta after target_id fixture create",
-    createSince
-  );
+  await waitForHarnessEvent(page, { kind: "hub_frame", family: "session_type" }, undefined, { label: "pushed session_type delta after target_id fixture create", deadlineMs: 45_000, sinceIndex: createSince });
 
   await openSessionTypesView(page);
   const row = page.getByTestId("session-type-device/target-id-agent");
-  await row.waitFor();
+  await waitForDom(page, row, { label: "row" });
 
   const editSince = await harnessEventCount(page);
+  await waitForDom(page, { locator: page.getByTestId(editSessionTypeTestId("device/target-id-agent")), state: "actionable" }, { label: "page.getByTestId(editSessionTypeTestId('device/target-id-agent')) before click" });
   await page.getByTestId(editSessionTypeTestId("device/target-id-agent")).click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "show_session_type_definition" },
-    "target_id show_session_type_definition",
-    editSince
-  );
-  await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor();
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "show_session_type_definition" }, undefined, { label: "target_id show_session_type_definition", deadlineMs: 45_000, sinceIndex: editSince });
+  await waitForDom(page, page.getByTestId(HOST_CHROME.sessionTypeFormTestId), { label: "page.getByTestId(HOST_CHROME.sessionTypeFormTestId)" });
   await setSessionTypeFormField(page, "Name", "Target id agent renamed");
   const updateSince = await harnessEventCount(page);
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.submitSessionTypeTestId), state: "actionable" }, { label: "page.getByTestId(HOST_CHROME.submitSessionTypeTestId) before click" });
   await page.getByTestId(HOST_CHROME.submitSessionTypeTestId).click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "update_session_type" },
-    "target_id update_session_type",
-    updateSince
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "update_session_type" }, undefined, { label: "target_id update_session_type", deadlineMs: 45_000, sinceIndex: updateSince });
   const updateRequest = await latestHarnessRequest(page, "update_session_type", updateSince);
   if (updateRequest?.definition?.target_id !== "project-main") {
     throw new Error(
@@ -5955,16 +5757,12 @@ async function proveSessionTypeTargetIdSurvival(page, socketPath) {
       `target_id path oracle failed: ${JSON.stringify(updateRequest?.definition?.working_directory)}`
     );
   }
-  await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor({ state: "detached" });
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.sessionTypeFormTestId), state: "detached" }, { label: "page.getByTestId(HOST_CHROME.sessionTypeFormTestId)" });
 
   const readbackSince = await harnessEventCount(page);
+  await waitForDom(page, { locator: page.getByTestId(editSessionTypeTestId("device/target-id-agent")), state: "actionable" }, { label: "page.getByTestId(editSessionTypeTestId('device/target-id-agent')) before click" });
   await page.getByTestId(editSessionTypeTestId("device/target-id-agent")).click();
-  await waitForHarnessEvent(
-    page,
-    { kind: "daemon_request", type: "show_session_type_definition" },
-    "target_id read-back show",
-    readbackSince
-  );
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "show_session_type_definition" }, undefined, { label: "target_id read-back show", deadlineMs: 45_000, sinceIndex: readbackSince });
   const readbackResult = await latestHarnessActionResult(page, "show_session_type_definition", readbackSince);
   const readbackDefinition = readbackResult?.result?.session_type_definition?.definition;
   if (readbackDefinition?.target_id !== "project-main") {
@@ -5972,8 +5770,9 @@ async function proveSessionTypeTargetIdSurvival(page, socketPath) {
       `read-back dropped definition.target_id: ${JSON.stringify(readbackDefinition?.target_id)}`
     );
   }
+  await waitForDom(page, { locator: page.getByRole("button", { name: "Close", exact: true }).last(), state: "actionable" }, { label: "page.getByRole('button', { name: 'Close', exact: true }).last() before click" });
   await page.getByRole("button", { name: "Close", exact: true }).last().click();
-  await page.getByTestId(HOST_CHROME.sessionTypeFormTestId).waitFor({ state: "detached" });
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.sessionTypeFormTestId), state: "detached" }, { label: "page.getByTestId(HOST_CHROME.sessionTypeFormTestId)" });
 
   const deleteResponse = await sendDaemonRequest(socketPath, {
     type: "delete_session_type",
@@ -5983,7 +5782,7 @@ async function proveSessionTypeTargetIdSurvival(page, socketPath) {
   if (deleteResponse.error) {
     throw new Error(`target_id fixture delete failed: ${JSON.stringify(deleteResponse.error)}`);
   }
-  await row.waitFor({ state: "detached" });
+  await waitForDom(page, { locator: row, state: "detached" }, { label: "row" });
   await assertNoSessionTypeListHydration(page);
 
   return {
@@ -6026,12 +5825,7 @@ async function exerciseSessionTypes(page) {
   if (createResponse.error) {
     throw new Error(`live session type create failed: ${JSON.stringify(createResponse.error)}`);
   }
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", family: "session_type" },
-    "pushed session_type delta after create",
-    createSince
-  );
+  await waitForHarnessEvent(page, { kind: "hub_frame", family: "session_type" }, undefined, { label: "pushed session_type delta after create", deadlineMs: 45_000, sinceIndex: createSince });
 
   const createdRow = await page.evaluate(() => {
     const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
@@ -6073,12 +5867,14 @@ async function exerciseSessionTypes(page) {
   }
 
   // The surface renders from the subscription, not a refetch.
+  await waitForDom(page, { locator: page.locator("ion-menu.app-sidebar").getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true }), state: "actionable" }, { label: "page.locator('ion-menu.app-sidebar').getByRole('button', { name: HO... before click" });
   await page.locator("ion-menu.app-sidebar").getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true }).click();
+  await waitForDom(page, { locator: page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole("button", { name: new RegExp(HOST_CHROME.sessionTypesSectionLabel) }), state: "actionable" }, { label: "page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole('bu... before click" });
   await page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole("button", { name: new RegExp(HOST_CHROME.sessionTypesSectionLabel) }).click();
   const sessionTypesView = page.getByTestId(HOST_CHROME.sessionTypesViewTestId);
-  await sessionTypesView.waitFor();
+  await waitForDom(page, sessionTypesView, { label: "sessionTypesView" });
   const renderedRow = sessionTypesView.getByTestId(`session-type-${createdRow.id}`);
-  await renderedRow.waitFor();
+  await waitForDom(page, renderedRow, { label: "renderedRow" });
   const renderedText = await renderedRow.innerText();
   for (const expected of ["Live harness agent", "botster.agent", "interactive", "task", "device"]) {
     if (!renderedText.includes(expected)) {
@@ -6119,7 +5915,7 @@ async function exerciseSessionTypes(page) {
   if (updateResponse.error) {
     throw new Error(`live session type update failed: ${JSON.stringify(updateResponse.error)}`);
   }
-  await page.getByText("Live harness agent renamed").waitFor();
+  await waitForDom(page, page.getByText("Live harness agent renamed"), { label: "page.getByText(\"Live harness agent renamed\")" });
 
   // Delete yields a pushed remove and the row leaves the surface.
   // Scoped by source, Hub addresses the row by its definition id.
@@ -6131,7 +5927,7 @@ async function exerciseSessionTypes(page) {
   if (deleteResponse.error) {
     throw new Error(`live session type delete failed: ${JSON.stringify(deleteResponse.error)}`);
   }
-  await renderedRow.waitFor({ state: "detached" });
+  await waitForDom(page, { locator: renderedRow, state: "detached" }, { label: "renderedRow" });
 
   await assertNoSessionTypeListHydration(page);
 
@@ -6196,31 +5992,27 @@ async function proveExternalSessionLifecycle(page) {
   if (spawnResponse.error) {
     throw new Error(`external session spawn failed: ${JSON.stringify(spawnResponse.error)}`);
   }
-  await waitForHarnessEvent(
-    page,
-    {
+  await waitForHarnessEvent(page, {
       kind: "hub_frame",
       family: "session",
       id: sessionId,
       lifecycle: "running"
-    },
-    "externally spawned session upsert"
-  );
+    }, undefined, { label: "externally spawned session upsert", deadlineMs: 45_000 });
   if (durableStateMode) {
     await openDiagnosticsView(page);
     const diagnostics = page.getByTestId(HOST_CHROME.diagnosticsViewTestId);
-    await diagnostics.waitFor();
+    await waitForDom(page, diagnostics, { label: "diagnostics" });
     const sessionsPanel = diagnostics.locator(".entity-family-panel").filter({
       has: page.getByRole("heading", { name: HOST_CHROME.sessionsHeadingName, exact: true })
     });
-    await sessionsPanel.getByText(/\d+ more records loaded\./).waitFor();
+    await waitForDom(page, sessionsPanel.getByText(/\d+ more records loaded\./), { label: "sessionsPanel.getByText(/\\d+ more records loaded\\./)" });
     if (await sessionsPanel.getByText(sessionId, { exact: true }).count() !== 0) {
       throw new Error("durable external session unexpectedly appeared inside the capped Diagnostics summary");
     }
   }
   await openHomeView(page);
   const sessionRow = page.getByTestId(HOST_CHROME.dashboardTestId).getByText(sessionId, { exact: true });
-  await sessionRow.waitFor({ state: "visible" });
+  await waitForDom(page, { locator: sessionRow, state: "visible" }, { label: "sessionRow" });
   const shutdownResponse = await sendDaemonRequest(socketPath, {
     type: "shutdown_session",
     session_id: sessionId
@@ -6228,14 +6020,10 @@ async function proveExternalSessionLifecycle(page) {
   if (shutdownResponse.error) {
     throw new Error(`external session shutdown failed: ${JSON.stringify(shutdownResponse.error)}`);
   }
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", family: "session", id: sessionId, lifecycle: "exited" },
-    "external session exit patch"
-  );
+  await waitForHarnessEvent(page, { kind: "hub_frame", family: "session", id: sessionId, lifecycle: "exited" }, undefined, { label: "external session exit patch", deadlineMs: 45_000 });
   if (durableStateMode) {
     const endedSection = page.getByTestId(HOST_CHROME.endedSessionsTestId);
-    await endedSection.getByText(sessionId, { exact: true }).waitFor({ state: "visible" });
+    await waitForDom(page, { locator: endedSection.getByText(sessionId, { exact: true }), state: "visible" }, { label: "endedSection.getByText(sessionId, { exact: true })" });
     const currentList = page.getByTestId(HOST_CHROME.dashboardTestId).locator('ion-list[aria-label="Sessions"]');
     if (await currentList.getByText(sessionId, { exact: true }).count() !== 0) {
       throw new Error(`durable external session ${sessionId} remained in current Sessions after exit`);
@@ -6248,29 +6036,21 @@ async function proveExternalSessionLifecycle(page) {
   if (removeResponse.error) {
     throw new Error(`external session removal failed: ${JSON.stringify(removeResponse.error)}`);
   }
-  await waitForHarnessEvent(
-    page,
-    { kind: "hub_frame", frameKind: "entity_remove", family: "session", id: sessionId },
-    "external session removal"
-  );
-  await sessionRow.waitFor({ state: "detached" });
+  await waitForHarnessEvent(page, { kind: "hub_frame", frameKind: "entity_remove", family: "session", id: sessionId }, undefined, { label: "external session removal", deadlineMs: 45_000 });
+  await waitForDom(page, { locator: sessionRow, state: "detached" }, { label: "sessionRow" });
 }
 
 async function assertDurableSeededSessionsVisible(page) {
   const endedSection = page.getByTestId(HOST_CHROME.endedSessionsTestId);
   const currentList = page.getByTestId(HOST_CHROME.dashboardTestId).locator('ion-list[aria-label="Sessions"]');
   for (const sessionId of durableSeedSessionIds) {
-    await waitForHarnessEvent(
-      page,
-      {
+    await waitForHarnessEvent(page, {
         kind: "hub_frame",
         family: "session",
         id: sessionId,
         lifecycle_class: "ended"
-      },
-      `durable seeded session ${sessionId} lifecycle_class ended`
-    );
-    await endedSection.getByText(sessionId, { exact: true }).waitFor({ state: "visible" });
+      }, undefined, { label: `durable seeded session ${sessionId} lifecycle_class ended`, deadlineMs: 45_000 });
+    await waitForDom(page, { locator: endedSection.getByText(sessionId, { exact: true }), state: "visible" }, { label: "endedSection.getByText(sessionId, { exact: true })" });
     if (await currentList.getByText(sessionId, { exact: true }).count() !== 0) {
       throw new Error(`durable seeded session ${sessionId} appeared in current Sessions`);
     }
@@ -6313,22 +6093,32 @@ async function cleanupProductionSessionBestEffort() {
   if (!webrtcDataDir || hubProcess?.exitCode !== null) return;
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
   for (const sessionId of harnessSpawnedSessionIds) {
-    const bound = new Promise((resolve) => setTimeout(() => resolve({ error: { kind: "cleanup_bound" } }), 3_000));
-    const response = await Promise.race([
-      sendDaemonRequest(socketPath, { type: "shutdown_session", session_id: sessionId }).catch((error) => ({ error: { message: error.message } })),
-      bound
-    ]);
+    const response = await boundedCleanupRequest(socketPath, { type: "shutdown_session", session_id: sessionId });
     console.error(`[failure cleanup] shutdown_session ${sessionId}: ${response?.error ? JSON.stringify(response.error) : "ok"}`);
   }
   if (!productionSessionStarted || productionSessionShutDown) return;
   for (const type of ["shutdown_session", "remove_session"]) {
-    const bound = new Promise((resolve) => setTimeout(() => resolve({ error: { kind: "cleanup_bound" } }), 3_000));
-    const response = await Promise.race([
-      sendDaemonRequest(socketPath, { type, session_id: productionSessionId }).catch((error) => ({ error: { message: error.message } })),
-      bound
-    ]);
+    const response = await boundedCleanupRequest(socketPath, { type, session_id: productionSessionId });
     console.error(`[failure cleanup] ${type} ${productionSessionId}: ${response?.error ? JSON.stringify(response.error) : "ok"}`);
   }
+}
+
+/** One cleanup request with a 3 s bound. Expiry is a recorded failure, never a silent success. */
+async function boundedCleanupRequest(socketPath, request) {
+  let timer;
+  const response = await Promise.race([
+    sendDaemonRequest(socketPath, request).catch((error) => ({ error: { message: error.message } })),
+    new Promise((resolve) => {
+      // timer: deadline — bounds one cleanup request; expiry fails the run.
+      timer = setTimeout(() => resolve({ error: { kind: "cleanup_bound" } }), 3_000);
+    })
+  ]);
+  clearTimeout(timer);
+  if (response?.error?.kind === "cleanup_bound") {
+    console.error(`cleanup failure: ${request.type} ${request.session_id} did not answer within 3 s`);
+    process.exitCode = 1;
+  }
+  return response;
 }
 
 async function assertNoGrantSecretLeak(page, cycle) {
@@ -6360,14 +6150,10 @@ async function assertNoGrantSecretLeak(page, cycle) {
 async function waitForTransportLabel(page) {
   const expectedDataPlane = "WebRTC DataChannel";
   const expectedLayer = "Local WebRTC signaling ready";
-  await page.waitForFunction(
-    ({ expectedDataPlane, expectedLayer }) => {
+  await waitForDom(page, () => page.evaluate(({ expectedDataPlane, expectedLayer }) => {
       const text = globalThis.document.body?.innerText ?? "";
       return text.includes(expectedDataPlane) && text.includes(expectedLayer);
-    },
-    { expectedDataPlane, expectedLayer },
-    { timeout: 45_000 }
-  ).catch((error) => {
+    }, { expectedDataPlane, expectedLayer }), { label: "waitForTransportLabel condition 1", deadlineMs: 45_000 }).catch((error) => {
     throw new Error(`timed out waiting for visible ${expectedDataPlane} transport label: ${error.message}`);
   });
 }
@@ -6377,8 +6163,7 @@ async function assertCurrentHubCompatibilityAndSchema(page) {
   // botster-web.hub_status projection of it. The projection renames host_display_name to
   // title, so asserting identity needs the raw record, while proving statusRecord() carries
   // software/installation needs the projected one.
-  const observed = await page.waitForFunction(
-    () => {
+  const observed = await waitForHarnessEvent(page, () => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       let raw;
       let projected;
@@ -6396,10 +6181,7 @@ async function assertCurrentHubCompatibilityAndSchema(page) {
         }
       }
       return raw ? { raw, projected: projected ?? null } : false;
-    },
-    undefined,
-    { timeout: 15_000 }
-  ).then((handle) => handle.jsonValue()).catch((error) => {
+    }, undefined, { label: "assertCurrentHubCompatibilityAndSchema condition 1", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`timed out waiting for structured hub status: ${error.message}`);
   });
 
@@ -6466,7 +6248,7 @@ async function assertCurrentHubCompatibilityAndSchema(page) {
 async function assertCurrentHubSchemaPresentation(page, status) {
   const reportedSchemaVersion = requiredProvenanceField(status, "schema_version", "status");
   const schemaRow = page.locator(`[data-diagnostic-id="${HOST_CHROME.schemaDiagnosticId}"]`);
-  await schemaRow.waitFor();
+  await waitForDom(page, schemaRow, { label: "schemaRow" });
   const schemaText = await schemaRow.innerText();
   // The point of this assertion is neutrality -- Hub's durable-state schema is reported as
   // server context and never blocks the client (botster-web commit 2246678). Pinning the
@@ -6523,45 +6305,29 @@ async function proveInPageReconnectReplaysHubStatus(page, expectedIdentity) {
   }
 
   // The channel must actually be observed closed, then reopened by the client itself.
-  await page.waitForFunction(
-    () => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .some((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "closed"),
-    undefined,
-    { timeout: 15_000 }
-  ).catch((error) => {
+  await waitForHarnessEvent(page, () => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .some((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "closed"), undefined, { label: "proveInPageReconnectReplaysHubStatus condition 1", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`in-page reconnect never observed a data-channel close: ${error.message}`);
   });
-  await page.waitForFunction(
-    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before,
-    { before: openEventsBefore },
-    { timeout: 20_000 }
-  ).catch((error) => {
+  await waitForHarnessEvent(page, ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open").length > before, { before: openEventsBefore }, { label: "proveInPageReconnectReplaysHubStatus condition 2", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(`in-page reconnect never reopened the data channel: ${error.message}`);
   });
 
   // The listener must issue a fresh status request and a fresh hub_status projection.
-  await page.waitForFunction(
-    ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
-      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "status").length > before,
-    { before: statusRequestsBefore },
-    { timeout: 20_000 }
-  ).catch((error) => {
+  await waitForHarnessEvent(page, ({ before }) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+      .filter((entry) => entry.kind === "daemon_request" && entry.payload?.type === "status").length > before, { before: statusRequestsBefore }, { label: "proveInPageReconnectReplaysHubStatus condition 3", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(
       `data-channel-open did not re-pull botster-web.hub_status on the surviving document: ${error.message}`
     );
   });
-  await page.waitForFunction(
-    ({ before }) => {
+  await waitForHarnessEvent(page, ({ before }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events.filter((entry) =>
         entry.kind === "hub_frame" &&
         entry.payload?.kind === "entity_snapshot" &&
         entry.payload?.payload?.family === "botster-web.hub_status").length > before;
-    },
-    { before: hubStatusFramesBefore },
-    { timeout: 20_000 }
-  ).catch((error) => {
+    }, { before: hubStatusFramesBefore }, { label: "proveInPageReconnectReplaysHubStatus condition 4", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(`reconnect produced no fresh botster-web.hub_status projection: ${error.message}`);
   });
   const subscriptionChannelReconnect = await waitForSubscriptionChannelReconnect(
@@ -6616,7 +6382,7 @@ async function waitForSubscriptionChannelReconnect(page, priorBindings) {
   if (priorBindings.length === 0) {
     throw new Error("in-page reconnect had no active entity or package-event DataChannel baseline");
   }
-  return page.waitForFunction((prior) => {
+  return waitForHarnessEvent(page, (prior) => {
     const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
     const channelEvents = events.filter((entry) => entry.kind === "subscription_data_channel");
     const replacements = [];
@@ -6645,7 +6411,7 @@ async function waitForSubscriptionChannelReconnect(page, priorBindings) {
       });
     }
     return { prior_count: prior.length, replacements };
-  }, priorBindings, { timeout: 20_000 }).then((handle) => handle.jsonValue()).catch((error) => {
+  }, priorBindings, { label: "waitForSubscriptionChannelReconnect condition 1", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(`subscription DataChannels did not reconnect on the surviving document: ${error.message}`);
   });
 }
@@ -6663,8 +6429,7 @@ async function hubStatusProjectionCount(page) {
  * leave the newest generation without its own status response and hub_status projection.
  */
 async function hubStatusRehydrationEvidence(page) {
-  return page.waitForFunction(
-    () => {
+  return waitForHarnessEvent(page, () => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       let generation = 0;
       let statusRequests = 0;
@@ -6684,10 +6449,7 @@ async function hubStatusRehydrationEvidence(page) {
         }
       }
       return latestRecord ? { generation, statusRequests, record: latestRecord } : false;
-    },
-    undefined,
-    { timeout: 20_000 }
-  ).then((handle) => handle.jsonValue()).catch((error) => {
+    }, undefined, { label: "hubStatusRehydrationEvidence condition 1", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(`timed out waiting for hub_status rehydration evidence: ${error.message}`);
   });
 }
@@ -6725,10 +6487,12 @@ function assertHubStatusRehydrated(evidence, expectedIdentity, label) {
 }
 
 async function openHubGeneralView(page) {
+  await waitForDom(page, { locator: page.locator("ion-menu.app-sidebar").getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true }), state: "actionable" }, { label: "page.locator('ion-menu.app-sidebar').getByRole('button', { name: HO... before click" });
   await page.locator("ion-menu.app-sidebar").getByRole("button", { name: HOST_CHROME.hubSettingsNavButtonName, exact: true }).click();
+  await waitForDom(page, { locator: page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole("button", { name: /^General/ }), state: "actionable" }, { label: "page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole('bu... before click" });
   await page.getByLabel(HOST_CHROME.hubSettingsSectionsLabel).getByRole("button", { name: /^General/ }).click();
   const general = page.getByTestId(HOST_CHROME.hubSettingsGeneralTestId);
-  await general.waitFor();
+  await waitForDom(page, general, { label: "general" });
   return general;
 }
 
@@ -6822,12 +6586,13 @@ async function assertAuthoritativeHubIdentity(page, status, label) {
  */
 async function assertHubUpdateCheck(page) {
   const general = await openHubGeneralView(page);
-  await general.getByTestId(HOST_CHROME.hubSoftwareUpdateTestId)
-    .getByRole("button", { name: HOST_CHROME.checkForUpdatesButtonName, exact: true })
-    .click();
-  await waitForHarnessEvent(page, { kind: "daemon_request", type: "check_hub_update" }, "check_hub_update request");
-  const hubUpdate = await page.waitForFunction(
-    () => {
+  {
+    const target = general.getByTestId(HOST_CHROME.hubSoftwareUpdateTestId).getByRole("button", { name: HOST_CHROME.checkForUpdatesButtonName, exact: true });
+    await waitForDom(page, { locator: target, state: "actionable" }, { label: "general.getByTestId(HOST_CHROME.hubSoftwareUpdateTestId).getByRole('bu before click" });
+    await target.click();
+  }
+  await waitForHarnessEvent(page, { kind: "daemon_request", type: "check_hub_update" }, undefined, { label: "check_hub_update request", deadlineMs: 45_000 });
+  const hubUpdate = await waitForHarnessEvent(page, () => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       for (let index = events.length - 1; index >= 0; index -= 1) {
         const entry = events[index];
@@ -6844,10 +6609,7 @@ async function assertHubUpdateCheck(page) {
         }
       }
       return null;
-    },
-    undefined,
-    { timeout: 20_000 }
-  ).then((handle) => handle.jsonValue()).catch((error) => {
+    }, undefined, { label: "assertHubUpdateCheck condition 1", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(`timed out waiting for a structured check_hub_update result: ${error.message}`);
   });
 
@@ -6898,8 +6660,7 @@ async function assertHubUpdateCheck(page) {
  * statusRecord() and the action-result projection, so both are asserted rather than assumed.
  */
 async function assertHubUpdateSupportDiagnostics(page) {
-  const projected = await page.waitForFunction(
-    () => {
+  const projected = await waitForHarnessEvent(page, () => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       let statusDiagnostics;
       let updateDiagnostics;
@@ -6924,10 +6685,7 @@ async function assertHubUpdateSupportDiagnostics(page) {
       return statusDiagnostics === undefined || updateDiagnostics === undefined
         ? false
         : { statusDiagnostics, updateDiagnostics };
-    },
-    undefined,
-    { timeout: 20_000 }
-  ).then((handle) => handle.jsonValue()).catch((error) => {
+    }, undefined, { label: "assertHubUpdateSupportDiagnostics condition 1", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(`timed out waiting for hub_status and check_hub_update diagnostics: ${error.message}`);
   });
 
@@ -6942,13 +6700,12 @@ async function assertHubUpdateSupportDiagnostics(page) {
     throw new Error(`check_hub_update result did not carry a diagnostics array: ${JSON.stringify(projected)}`);
   }
   const supportView = page.getByTestId(HOST_CHROME.diagnosticsViewTestId);
-  await supportView.waitFor();
+  await waitForDom(page, supportView, { label: "supportView" });
   return projected;
 }
 
 async function waitForRemoteAccessPackageConfiguration(page) {
-  return page.waitForFunction(
-    () => {
+  return waitForHarnessEvent(page, () => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       const daemonPackages = [];
       const projectedPackages = [];
@@ -6992,10 +6749,7 @@ async function waitForRemoteAccessPackageConfiguration(page) {
       return rawReady && projectedReady && rawEffectiveValue === projectedEffectiveValue
         ? { effectiveValue: projectedEffectiveValue }
         : false;
-    },
-    undefined,
-    { timeout: 45_000 }
-  ).then((handle) => handle.jsonValue())
+    }, undefined, { label: "waitForRemoteAccessPackageConfiguration condition 1", deadlineMs: 45_000 })
     .then((result) => result.effectiveValue)
     .catch((error) => {
       throw new Error(`timed out waiting for manifest-sourced botster-web remote access configuration: ${error.message}`);
@@ -7007,24 +6761,26 @@ async function assertRemoteAccessSettingsDispatch(page, originalValue) {
   let dispatchError;
   let restorationError;
   try {
+    await waitForDom(page, { locator: page.getByRole("button", { name: "Settings for botster web", exact: true }), state: "actionable" }, { label: "page.getByRole('button', { name: 'Settings for botster web', exact:... before click" });
     await page.getByRole("button", { name: "Settings for botster web", exact: true }).click();
-    await page.getByText(HOST_CHROME.packageConfigurationLabel).waitFor();
-    await page.getByText(HOST_CHROME.remoteBrowserAccessHeading).first().waitFor();
+    await waitForDom(page, page.getByText(HOST_CHROME.packageConfigurationLabel), { label: "page.getByText(HOST_CHROME.packageConfigurationLabel)" });
+    await waitForDom(page, page.getByText(HOST_CHROME.remoteBrowserAccessHeading).first(), { label: "page.getByText(HOST_CHROME.remoteBrowserAccessHeading).first()" });
     const remoteAccessLabelCount = await page.getByText(HOST_CHROME.remoteBrowserAccessHeading).count();
     if (remoteAccessLabelCount !== 1) {
       throw new Error(`live packaged protocol expected one Remote browser access label, observed ${remoteAccessLabelCount}`);
     }
-    await page.getByText(
-      originalValue
-        ? "Remote browser rendezvous is opted in."
-        : "Remote browser rendezvous is off."
-    ).waitFor();
-    await page.getByText("Local installed access stays available. Remote access requires opt-in, pairing, and device approval.").waitFor();
+    await waitForDom(
+      page,
+      page.getByText(originalValue ? "Remote browser rendezvous is opted in." : "Remote browser rendezvous is off."),
+      { label: "remote browser rendezvous state text" }
+    );
+    await waitForDom(page, page.getByText("Local installed access stays available. Remote access requires opt-in, pairing, and device approval."), { label: "page.getByText(\"Local installed access stays available. Remote access requires opt-in,..." });
+    await waitForDom(page, { locator: page.getByRole("button", { name: originalValue ? "Opt out" : "Opt in" }), state: "actionable" }, { label: "page.getByRole('button', { name: originalValue ? 'Opt out' : 'Opt i... before click" });
     await page.getByRole("button", { name: originalValue ? "Opt out" : "Opt in" }).click();
     await waitForRemoteAccessConfigRequest(page, nextValue);
-    await page.getByText("Package action accepted").waitFor();
+    await waitForDom(page, page.getByText("Package action accepted"), { label: "page.getByText(\"Package action accepted\")" });
     await closePackageSettingsRoute(page);
-    await page.getByText(HOST_CHROME.packageConfigurationLabel).waitFor({ state: "detached" });
+    await waitForDom(page, { locator: page.getByText(HOST_CHROME.packageConfigurationLabel), state: "detached" }, { label: "page.getByText(HOST_CHROME.packageConfigurationLabel)" });
   } catch (error) {
     dispatchError = error;
   } finally {
@@ -7065,8 +6821,7 @@ async function restoreRemoteAccessConfiguration(value) {
 }
 
 async function waitForRemoteAccessConfigRequest(page, value) {
-  await page.waitForFunction(
-    ({ expectedValue }) => {
+  await waitForHarnessEvent(page, ({ expectedValue }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return events.some((entry) => {
         const payload = entry.payload ?? {};
@@ -7078,17 +6833,13 @@ async function waitForRemoteAccessConfigRequest(page, value) {
           payload.values?.remote_browser_rendezvous_enabled?.value === expectedValue
         );
       });
-    },
-    { expectedValue: value },
-    { timeout: 45_000 }
-  ).catch((error) => {
+    }, { expectedValue: value }, { label: "waitForRemoteAccessConfigRequest condition 1", deadlineMs: 45_000 }).catch((error) => {
     throw new Error(`timed out waiting for remote access set_package_configuration=${value}: ${error.message}`);
   });
 }
 
 async function waitForTerminalOutput(page, text) {
-  await page.waitForFunction(
-    ({ expectedText }) =>
+  await waitForHarnessEvent(page, ({ expectedText }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
         (entry) => {
           if (entry.kind !== "output") return false;
@@ -7102,17 +6853,13 @@ async function waitForTerminalOutput(page, text) {
             return false;
           }
         }
-      ),
-    { expectedText: text },
-    { timeout: 45_000 }
-  ).catch((error) => {
+      ), { expectedText: text }, { label: "waitForTerminalOutput condition 1", deadlineMs: 45_000 }).catch((error) => {
     throw new Error(`timed out waiting for terminal output ${text}: ${error.message}`);
   });
 }
 
 async function waitForTerminalRendererWrite(page, text) {
-  await page.waitForFunction(
-    ({ expectedText }) =>
+  await waitForHarnessEvent(page, ({ expectedText }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
         (entry) => {
           if (entry.kind !== "renderer_write") return false;
@@ -7126,17 +6873,13 @@ async function waitForTerminalRendererWrite(page, text) {
             return false;
           }
         }
-      ),
-    { expectedText: text },
-    { timeout: 45_000 }
-  ).catch((error) => {
+      ), { expectedText: text }, { label: "waitForTerminalRendererWrite condition 1", deadlineMs: 45_000 }).catch((error) => {
     throw new Error(`timed out waiting for mounted terminal renderer write ${text}: ${error.message}`);
   });
 }
 
 async function waitForResttyBoundBytes(page, expectedBytes, label, timeout = 45_000) {
-  await page.waitForFunction(
-    ({ expected }) =>
+  await waitForHarnessEvent(page, ({ expected }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) => {
         if (entry.kind !== "renderer_write") return false;
         const encoded = entry.payload?.payload_bytes_base64;
@@ -7147,17 +6890,13 @@ async function waitForResttyBoundBytes(page, expectedBytes, label, timeout = 45_
         } catch {
           return false;
         }
-      }),
-    { expected: expectedBytes },
-    { timeout }
-  ).catch((error) => {
+      }), { expected: expectedBytes }, { label: "waitForResttyBoundBytes condition 1", deadlineMs: timeout }).catch((error) => {
     throw new Error(`timed out waiting for Restty renderer_write bytes ${label}: ${error.message}`);
   });
 }
 
 async function waitForDaemonTerminalOutputBytes(page, expectedBytes, label) {
-  await page.waitForFunction(
-    ({ expected }) =>
+  await waitForHarnessEvent(page, ({ expected }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => {
         const frame = entry.payload?.frame;
         if (entry.kind !== "terminal_route_frame" || frame?.kind !== "output") return false;
@@ -7169,10 +6908,7 @@ async function waitForDaemonTerminalOutputBytes(page, expectedBytes, label) {
         } catch {
           return false;
         }
-      }),
-    { expected: expectedBytes },
-    { timeout: 45_000 }
-  ).catch((error) => {
+      }), { expected: expectedBytes }, { label: "waitForDaemonTerminalOutputBytes condition 1", deadlineMs: 45_000 }).catch((error) => {
     throw new Error(`timed out waiting for daemon OUTPUT bytes ${label}: ${error.message}`);
   });
 }
@@ -7203,17 +6939,13 @@ async function proveHydrationBuffersUntilGhostsnpInstall(page) {
     const closed = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.();
     if (!closed) throw new Error("hydration ordering proof requires closing the real RTCDataChannel");
   });
-  const attach = await page.waitForFunction(
-    ({ before }) => {
+  const attach = await waitForHarnessEvent(page, ({ before }) => {
       const attaches = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "attach");
       if (attaches.length <= before) return null;
       const latest = attaches.at(-1)?.payload ?? {};
       if (typeof latest.subscription_id !== "string" || !Number.isInteger(latest.generation)) return null;
       return latest;
-    },
-    { before: attachesBefore },
-    { timeout: 30_000 }
-  ).then((handle) => handle.jsonValue()).catch((error) => {
+    }, { before: attachesBefore }, { label: "proveHydrationBuffersUntilGhostsnpInstall condition 1", deadlineMs: 30_000 }).catch((error) => {
     throw new Error(`timed out waiting for the reattach after the channel close: ${error.message}`);
   });
 
@@ -7227,17 +6959,13 @@ async function proveHydrationBuffersUntilGhostsnpInstall(page) {
   });
   await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.holdInputPromise);
   await waitForDaemonTerminalOutputBytes(page, hydrateHoldBytes, "hydration hold");
-  await page.waitForFunction(
-    ({ expectedGeneration, expectedSubscription }) =>
+  await waitForHarnessEvent(page, ({ expectedGeneration, expectedSubscription }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) =>
         entry.kind === "ghostsnp_install" &&
         entry.payload?.progress === "ready" &&
         entry.payload?.generation === expectedGeneration &&
         entry.payload?.subscription_id === expectedSubscription
-      ),
-    { expectedGeneration: attach.generation, expectedSubscription: attach.subscription_id },
-    { timeout: 20_000 }
-  ).catch((error) => {
+      ), { expectedGeneration: attach.generation, expectedSubscription: attach.subscription_id }, { label: "proveHydrationBuffersUntilGhostsnpInstall condition 2", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(`timed out waiting for the generation-scoped READY install after the reattach: ${error.message}`);
   });
   await waitForResttyBoundBytes(page, hydrateHoldBytes, "hydration flush");
@@ -7340,7 +7068,13 @@ async function proveByteFaithfulLiveTerminal(page) {
   await waitForResttyBoundBytes(page, [0x00, 0x1b, 0x5b, 0x30, 0x6d, 0xff], "nul/esc/invalid");
 }
 
-async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
+/**
+ * Client inbound admission bound: a client whose terminal handler stops reading fills its own
+ * inbound admission bound, closes that channel, and the route closes; the sibling session and
+ * the Hub stay up. A Core-side slow WebRTC reader is not reproducible from the browser harness
+ * (the browser keeps draining the transport); Core and TUI tests cover it.
+ */
+async function proveClientInboundAdmissionBound(page, siblingSessionId) {
   // Node owns the flood session's cleanup: it is registered before the page can spawn it, so
   // any exit (an exception in the page, a rejected attach, a failed status) still shuts it down.
   const floodSessionId = `web-flood-${Date.now().toString(36)}`;
@@ -7351,7 +7085,7 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
       return { ok: false, reason: "transportControl missing request/streamTerminal" };
     }
     const floodSubscriptionId = `${floodSessionId}-sub`;
-    const events = [];
+    const events = globalThis.__botsterWaits.observe([]);
     const spawn = await control.request({
       type: "spawn",
       session_id: floodSessionId,
@@ -7392,23 +7126,47 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
       return undefined;
     });
     await stream.ready;
-    const deadline = Date.now() + 20_000;
-    await Promise.race([
-      heldTerminalOutputSeen,
-      new Promise((resolve) => setTimeout(resolve, 5_000))
-    ]);
-    await new Promise((resolve) => setTimeout(resolve, 5_000));
-    // The close event uses the same ordered channel as terminal output. Release the
-    // held output before this proof waits for the later close event.
+    const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
+    const waits = globalThis.__botsterWaits;
+    // Every wait below re-checks only when a harness log or the proof's own event log grows.
+    const until = (check) => new Promise((resolve) => {
+      let stop = () => undefined;
+      const evaluate = () => {
+        const value = check();
+        if (value) {
+          stop();
+          resolve(value);
+        }
+      };
+      stop = waits.onChange(evaluate);
+      evaluate();
+    });
+    let deadlineTimer;
+    const expired = new Promise((resolve) => {
+      // timer: deadline — bounds the whole admission-bound proof; expiry fails the proof.
+      deadlineTimer = setTimeout(() => resolve("expired"), 20_000);
+    });
+    const within = (promise) => Promise.race([promise, expired]);
+    const closedEvent = () => events.find((event) =>
+      event.type === "terminal_subscription_closed" &&
+      event.reason === "core_adapter_closed" &&
+      event.session_id === floodSessionId &&
+      event.subscription_id === floodSubscriptionId
+    );
+    // The held handler stops the client's message queue. Frames then fill the client's own
+    // inbound admission bound, and the client closes the channel.
+    const overflowSeen = await within(heldTerminalOutputSeen.then(() => until(() =>
+      harness.events.find((entry) =>
+        entry.kind === "terminal_data_channel_admission_overflow" && entry.payload?.label === stream.label
+      )
+    )));
+    // The close event uses the same ordered channel as terminal output. Release the held
+    // output before this proof waits for the later close event.
     releaseHeldTerminalOutput();
-    while (Date.now() < deadline) {
-      const closed = events.find((event) =>
-        event.type === "terminal_subscription_closed" &&
-        event.reason === "core_adapter_closed" &&
-        event.session_id === floodSessionId &&
-        event.subscription_id === floodSubscriptionId
-      );
-      if (closed) {
+    const closed = overflowSeen === "expired" ? undefined : await within(until(closedEvent));
+    clearTimeout(deadlineTimer);
+    {
+      if (closed && closed !== "expired") {
         // Intended slow-client outcome: the route bound first and delivered frames, and only
         // then did Core close it for backpressure. A close with no prior output is an attach failure.
         const closeIndex = events.indexOf(closed);
@@ -7439,10 +7197,10 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
           frameKindsBeforeClose,
           statusKind: status.kind,
           cleanupKind: cleanup.kind,
-          siblingSessionId: liveSessionId
+          siblingSessionId: liveSessionId,
+          overflow: overflowSeen.payload
         };
       }
-      await new Promise((resolve) => setTimeout(resolve, 50));
     }
     stream.abandon();
     // The flood session's worker outlives the Hub by design; shut it down on failure too.
@@ -7451,7 +7209,9 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
     );
     return {
       ok: false,
-      reason: "timed out waiting for core_adapter_closed",
+      reason: overflowSeen === "expired"
+        ? "timed out waiting for the client inbound admission overflow"
+        : "timed out waiting for core_adapter_closed after the admission overflow",
       spawn_kind: spawn?.kind ?? null,
       cleanup_kind: failedCleanup?.kind ?? null,
       cleanup_error: failedCleanup?.error ?? null,
@@ -7459,12 +7219,107 @@ async function proveSiblingSlowClientAndHostStayUp(page, siblingSessionId) {
     };
   }, { siblingSessionId, floodSessionId });
   if (!proof.ok) {
-    throw new Error(`slow-client sibling proof failed: ${JSON.stringify(proof)}`);
+    throw new Error(`client inbound admission bound proof failed: ${JSON.stringify(proof)}`);
   }
   // The proof shut the flood session down itself on success.
   harnessSpawnedSessionIds.delete(floodSessionId);
   await proveLiveTerminalAfterAttach(page, `sibling-still-live-${Date.now().toString(36)}`);
-  recordProofNote("slow_client_sibling", proof);
+  recordProofNote("client_inbound_admission_bound", proof);
+}
+
+/**
+ * A normally reading client attaches over WebRTC to a session that floods output. It must
+ * reach ATTACHED, keep receiving live output for the whole observation window, and never be
+ * closed. Core may answer egress overflow with ROUTE_RESYNC; every resync must be followed by a
+ * fresh SNAPSHOT_READY, which the client treats as a screen replacement.
+ */
+async function proveNormalReaderAttachToFloodingSession(page) {
+  // Node owns the flood session's cleanup: it is registered before the page can spawn it.
+  const floodSessionId = `web-flood-reader-${Date.now().toString(36)}`;
+  harnessSpawnedSessionIds.add(floodSessionId);
+  const proof = await page.evaluate(async (sessionId) => {
+    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
+    const decode = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.decodeTerminalBody;
+    if (!control?.request || !control.streamTerminal || typeof decode !== "function") {
+      return { ok: false, reason: "transportControl or decodeTerminalBody missing" };
+    }
+    const subscriptionId = `${sessionId}-sub`;
+    const spawn = await control.request({ type: "spawn", session_id: sessionId, command: "yes normal-reader-flood" });
+    if (spawn?.error) return { ok: false, reason: "flood session spawn failed", spawn };
+    const kinds = {};
+    const sequence = [];
+    let attached = false;
+    let outputBytes = 0;
+    let closed;
+    // Each received frame or close wakes the current wait; nothing is re-checked on a timer.
+    let wake = () => undefined;
+    const until = (check, timeoutMs) => new Promise((resolve) => {
+      // timer: deadline — bounds one wait of this proof; expiry ends the wait unmet.
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      wake = () => {
+        if (!check()) return;
+        clearTimeout(timer);
+        resolve(true);
+      };
+      wake();
+    });
+    const stream = control.streamTerminal(sessionId, subscriptionId, (event) => {
+      if (!("body" in event)) {
+        if (event.type === "terminal_subscription_closed") closed = event;
+        wake();
+        return undefined;
+      }
+      const decoded = decode(event.body);
+      kinds[decoded.kind] = (kinds[decoded.kind] ?? 0) + 1;
+      if (decoded.kind === "route_resync" || decoded.kind === "snapshot_ready") sequence.push(decoded.kind);
+      if (decoded.kind === "attach_state" && decoded.state === "attached") attached = true;
+      if (decoded.kind === "output") outputBytes += decoded.payload?.byteLength ?? 0;
+      wake();
+      return undefined;
+    });
+    const cleanup = async () => {
+      stream.abandon();
+      return control.request({ type: "shutdown_session", session_id: sessionId }).catch((error) => ({ error: String(error) }));
+    };
+    try {
+      await stream.ready;
+    } catch (error) {
+      await cleanup();
+      return { ok: false, reason: `attach failed: ${error instanceof Error ? error.message : String(error)}`, kinds };
+    }
+    await until(() => (attached && (kinds.output ?? 0) >= 20) || Boolean(closed), 20_000);
+    const outputAtAttach = kinds.output ?? 0;
+    // Observation window: the route must stay open for the full 5 s and keep delivering output.
+    // A close ends the window early and fails the proof.
+    await until(() => Boolean(closed), 5_000);
+    const outputAfterHold = kinds.output ?? 0;
+    const cleanupResult = await cleanup();
+    // Every ROUTE_RESYNC must be followed by a fresh SNAPSHOT_READY (screen replacement).
+    const resyncsWithoutSnapshot = sequence.filter(
+      (kind, index) => kind === "route_resync" && !sequence.slice(index + 1).includes("snapshot_ready")
+    ).length;
+    const ok = attached && outputAtAttach >= 20 && outputAfterHold > outputAtAttach && !closed && resyncsWithoutSnapshot === 0;
+    return {
+      ok,
+      reason: ok ? null : "normal reader did not stay attached with live output",
+      attached,
+      closed: closed ?? null,
+      kinds,
+      route_resyncs: kinds.route_resync ?? 0,
+      resyncs_without_snapshot: resyncsWithoutSnapshot,
+      output_frames_at_attach: outputAtAttach,
+      output_frames_after_hold: outputAfterHold,
+      output_bytes: outputBytes,
+      cleanup_error: cleanupResult?.error ?? null
+    };
+  }, floodSessionId);
+  if (!proof.ok) {
+    throw new Error(`normal-reader flood attach proof failed: ${JSON.stringify(proof)}`);
+  }
+  // The proof shut the flood session down itself on success.
+  if (!proof.cleanup_error) harnessSpawnedSessionIds.delete(floodSessionId);
+  console.log(`normal-reader-flood-attach passed ${JSON.stringify(proof)}`);
+  recordProofNote("normal_reader_flood_attach", proof);
 }
 
 async function proveLiveTerminalAfterAttach(page, probe) {
@@ -7518,24 +7373,20 @@ async function proveMountedMouseInput(page) {
     [0x1b, 0x5b, 0x3f, 0x31, 0x30, 0x30, 0x30, 0x68, 0x1b, 0x5b, 0x3f, 0x31, 0x30, 0x30, 0x36, 0x68],
     "mouse DECSET"
   );
-  const modes = await page.waitForFunction(
-    ({ before, normalBit, sgrBit }) => {
+  const modes = await waitForHarnessEvent(page, ({ before, normalBit, sgrBit }) => {
       const entries = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "modes");
       if (entries.length <= before) return null;
       const latest = entries.at(-1)?.payload ?? {};
       if ((latest.modeBits & normalBit) === 0 || (latest.modeBits & sgrBit) === 0) return null;
       return latest;
-    },
-    { before: modesBefore, normalBit: terminalProtocol.ModeBits.MOUSE_NORMAL, sgrBit: terminalProtocol.ModeBits.MOUSE_SGR },
-    { timeout: 15_000 }
-  ).then((handle) => handle.jsonValue()).catch((error) => {
+    }, { before: modesBefore, normalBit: terminalProtocol.ModeBits.MOUSE_NORMAL, sgrBit: terminalProtocol.ModeBits.MOUSE_SGR }, { label: "proveMountedMouseInput condition 1", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`authoritative MODES did not report mouse tracking after DECSET 1000/1006: ${error.message}`);
   });
   const before = await inputOperationCount(page, "mouse");
   const resultsBefore = await terminalTelemetryCount(page, "input_result");
   // Real Playwright pointer path (synthetic PointerEvent trips setPointerCapture).
   const canvas = page.locator(".terminal-view-container canvas").first();
-  await canvas.waitFor({ state: "visible", timeout: 10_000 });
+  await waitForDom(page, { locator: canvas, state: "visible" }, { label: "canvas", deadlineMs: 10_000 });
   const box = await canvas.boundingBox();
   if (!box) throw new Error("mouse path: terminal canvas has no bounding box");
   const x = box.x + Math.min(40, Math.max(4, box.width / 4));
@@ -7550,12 +7401,8 @@ async function proveMountedMouseInput(page) {
     throw new Error(`pointer press did not produce MOUSE operations (modes=${JSON.stringify(modes)}): ${error.message}; telemetry=${JSON.stringify(telemetry)}`);
   });
   const after = await inputOperationCount(page, "mouse");
-  await page.waitForFunction(
-    ({ before: resultsBeforeCount, expected }) =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "input_result").length >= resultsBeforeCount + expected,
-    { before: resultsBefore, expected: after - before },
-    { timeout: 15_000 }
-  ).catch((error) => {
+  await waitForHarnessEvent(page, ({ before: resultsBeforeCount, expected }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "input_result").length >= resultsBeforeCount + expected, { before: resultsBefore, expected: after - before }, { label: "proveMountedMouseInput condition 2", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`every MOUSE operation must receive one INPUT_RESULT: ${error.message}`);
   });
   const uncaptured = await terminalTelemetryCount(page, "restty_input_uncaptured");
@@ -7587,17 +7434,13 @@ async function daemonTerminalOutputSince(page, since) {
 
 /** Waits for a complete script line (pattern includes its terminator) in the daemon output since an index. */
 async function waitForDaemonOutputLine(page, since, pattern, label, timeout = 45_000) {
-  await page.waitForFunction(
-    ({ from, source }) =>
+  await waitForHarnessEvent(page, ({ from, source }) =>
       new RegExp(source).test(
         (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from)
           .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
           .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
           .join("")
-      ),
-    { from: since, source: pattern.source },
-    { timeout }
-  ).catch(async (error) => {
+      ), { from: since, source: pattern.source }, { label: "waitForDaemonOutputLine condition 1", deadlineMs: timeout }).catch(async (error) => {
     const tail = (await daemonTerminalOutputSince(page, since)).slice(-600);
     throw new Error(`${label}: complete line /${pattern.source}/ not observed: ${error.message}; output tail=${JSON.stringify(tail)}`);
   });
@@ -7645,12 +7488,9 @@ async function establishCleanInputBoundary(page, label) {
 async function focusMountedTerminal(page) {
   await waitForTerminalCanvas(page);
   await callTerminalControl(page, "focus");
+  await waitForDom(page, { locator: page.locator(".terminal-view-container canvas").first(), state: "actionable" }, { label: "page.locator('.terminal-view-container canvas').first() before click" });
   await page.locator(".terminal-view-container canvas").first().click();
-  await page.waitForFunction(
-    () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
-    undefined,
-    { timeout: 5_000 }
-  );
+  await waitForDom(page, () => page.evaluate(() => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement, undefined), { label: "focusMountedTerminal condition 1", deadlineMs: 5_000 });
 }
 
 async function proveMountedClipboardPaste(page) {
@@ -7665,11 +7505,7 @@ async function proveMountedClipboardPaste(page) {
   await assertCleanInputBoundary(page, "mounted paste after focus click");
   const outcomesBefore = await terminalTelemetryCount(page, "paste_outcome");
   const outputBefore = await page.evaluate(() => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length);
-  await page.waitForFunction(
-    () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
-    undefined,
-    { timeout: 5_000 }
-  );
+  await waitForDom(page, () => page.evaluate(() => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement, undefined), { label: "proveMountedClipboardPaste condition 1", deadlineMs: 5_000 });
   const dispatched = await page.evaluate((data) => {
     const target = globalThis.document.activeElement;
     const transfer = new globalThis.DataTransfer();
@@ -7686,16 +7522,12 @@ async function proveMountedClipboardPaste(page) {
       .filter((entry) => ["paste", "paste_outcome", "input_sent", "clipboard_paste", "paste_routed", "input_result", "restty_input_uncaptured"].includes(entry.kind))
       .slice(-12)
   );
-  const waitForPasteOutcome = (outcomes, label) => page.waitForFunction(
-    ({ beforeCount, bytes, outcomes }) =>
+  const waitForPasteOutcome = (outcomes, label) => waitForHarnessEvent(page, ({ beforeCount, bytes, outcomes }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
         .filter((entry) => entry.kind === "paste_outcome")
         .slice(beforeCount)
         .find((entry) => outcomes.includes(entry.payload?.outcome) && entry.payload?.requestedBytes === bytes)
-        ?.payload ?? null,
-    { beforeCount: outcomesBefore, bytes: expectedBytes, outcomes },
-    { timeout: 45_000 }
-  ).then((handle) => handle.jsonValue()).catch(async (error) => {
+        ?.payload ?? null, { beforeCount: outcomesBefore, bytes: expectedBytes, outcomes }, { label: "waitForPasteOutcome condition 1", deadlineMs: 45_000 }).catch(async (error) => {
     throw new Error(`mounted clipboard paste did not reach ${label}: ${error.message}; telemetry=${JSON.stringify(await pasteTelemetry())}`);
   });
   // The payload ends in a newline. Without bracketed paste, Core rejects it as unsafe with zero
@@ -7707,7 +7539,7 @@ async function proveMountedClipboardPaste(page) {
       throw new Error(`unsafe paste rejection was not an exact zero-write consent offer: ${JSON.stringify(firstOutcome)}`);
     }
     const confirm = page.locator('[data-terminal-paste-action="confirm"]');
-    await confirm.waitFor({ state: "visible", timeout: 5_000 });
+    await waitForDom(page, { locator: confirm, state: "visible" }, { label: "confirm", deadlineMs: 5_000 });
     await confirm.click();
     unsafePasteConsent = { rejected_operation_id: firstOutcome.operationId, confirmed: true };
   }
@@ -7717,18 +7549,14 @@ async function proveMountedClipboardPaste(page) {
   if (writtenOutcome.acceptedPayloadBytes !== expectedBytes) {
     throw new Error(`mounted clipboard paste accepted ${writtenOutcome.acceptedPayloadBytes} of ${expectedBytes} bytes`);
   }
-  await page.waitForFunction(
-    ({ since, marker }) => {
+  await waitForHarnessEvent(page, ({ since, marker }) => {
       const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since);
       const text = events
         .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
         .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
         .join("");
       return text.includes(marker);
-    },
-    { since: outputBefore, marker: "botster-web-production-large-paste-ok" },
-    { timeout: 45_000 }
-  ).catch(async (error) => {
+    }, { since: outputBefore, marker: "botster-web-production-large-paste-ok" }, { label: "waitForPasteOutcome condition 2", deadlineMs: 45_000 }).catch(async (error) => {
     // Show what the shell actually echoed, so input contamination is visible, not inferred.
     const output = await daemonTerminalOutputSince(page, outputBefore);
     const echoes = [...output.matchAll(/botster-web-production-echo:([^\r\n]{0,120})/g)].map((match) => match[1]);
@@ -7751,18 +7579,14 @@ async function proveMountedClipboardPaste(page) {
   if (!pasteResult) throw new Error("no written paste input_result with the exact accepted byte count was recorded");
   // A key typed after the paste is delivered and echoed in order.
   await typeThroughMountedTerminal(page, "after-paste\n");
-  await page.waitForFunction(
-    ({ since, marker }) => {
+  await waitForHarnessEvent(page, ({ since, marker }) => {
       const events = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since);
       const text = events
         .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
         .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
         .join("");
       return text.indexOf("botster-web-production-large-paste-ok") < text.indexOf(marker);
-    },
-    { since: outputBefore, marker: "botster-web-production-echo:after-paste" },
-    { timeout: 45_000 }
-  ).catch((error) => {
+    }, { since: outputBefore, marker: "botster-web-production-echo:after-paste" }, { label: "waitForPasteOutcome condition 3", deadlineMs: 45_000 }).catch((error) => {
     throw new Error(`key typed after the mounted paste was not echoed after the paste acknowledgement: ${error.message}`);
   });
   recordProofNote("mounted_clipboard_paste", {
@@ -7806,17 +7630,13 @@ async function proveLivePasteCases(page) {
   // and returns that match. The pattern must include its own line terminator.
   const waitForLine = async (since, pattern, label) => {
     const source = pattern.source;
-    await page.waitForFunction(
-      ({ from, expected }) =>
+    await waitForHarnessEvent(page, ({ from, expected }) =>
         new RegExp(expected).test(
           (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from)
             .filter((entry) => entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "output")
             .map((entry) => globalThis.atob(entry.payload.frame.payload_base64 ?? ""))
             .join("")
-        ),
-      { from: since, expected: source },
-      { timeout: 45_000 }
-    ).catch(async (error) => {
+        ), { from: since, expected: source }, { label: "waitForLine condition 1", deadlineMs: 45_000 }).catch(async (error) => {
       const tail = (await daemonOutputSince(since)).slice(-400);
       throw new Error(`${label}: complete line /${source}/ not observed: ${error.message}; output tail=${JSON.stringify(tail)}`);
     });
@@ -7827,11 +7647,7 @@ async function proveLivePasteCases(page) {
   // Dispatch never clicks: focus and the strict clean-input flush happen before the receiver
   // is armed, so no pointer input can land between arming and the paste bytes.
   const dispatchClipboardPaste = async (text) => {
-    await page.waitForFunction(
-      () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
-      undefined,
-      { timeout: 5_000 }
-    ).catch((error) => {
+    await waitForDom(page, () => page.evaluate(() => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement, undefined), { label: "dispatchClipboardPaste condition 1", deadlineMs: 5_000 }).catch((error) => {
       throw new Error(`paste dispatch: Restty textarea is not focused: ${error.message}`);
     });
     return page.evaluate((data) => {
@@ -7844,12 +7660,8 @@ async function proveLivePasteCases(page) {
     }, text);
   };
   const nextPasteOutcome = async (beforeCount, label) => {
-    await page.waitForFunction(
-      ({ before }) =>
-        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "paste_outcome").length > before,
-      { before: beforeCount },
-      { timeout: 45_000 }
-    ).catch(async (error) => {
+    await waitForHarnessEvent(page, ({ before }) =>
+        (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "paste_outcome").length > before, { before: beforeCount }, { label: "nextPasteOutcome condition 1", deadlineMs: 45_000 }).catch(async (error) => {
       const telemetry = await page.evaluate(() =>
         (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
           .filter((entry) => ["paste", "paste_outcome", "input_sent", "clipboard_paste", "paste_routed", "input_result", "modes", "restty_input_uncaptured"].includes(entry.kind))
@@ -7943,7 +7755,7 @@ async function proveLivePasteCases(page) {
         throw new Error(`${label}: unsafe paste rejection was not an exact zero-write consent offer: ${JSON.stringify(outcome)}`);
       }
       const confirm = page.locator('[data-terminal-paste-action="confirm"]');
-      await confirm.waitFor({ state: "visible", timeout: 5_000 });
+      await waitForDom(page, { locator: confirm, state: "visible" }, { label: "confirm", deadlineMs: 5_000 });
       await confirm.click();
       unsafePasteConsent = { rejected_operation_id: outcome.operationId };
       outcome = await nextPasteOutcome(outcomesBefore + 1, `${label} after consent`);
@@ -8093,8 +7905,16 @@ async function proveZeroBrowserOscColorReplies(page) {
   await page.evaluate(() => {
     globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal?.push({ kind: "osc_stimulus", payload: { queries: ["10", "11", "12"] } });
   });
-  await callTerminalControl(page, "writeInput", "printf '\\033]10;?\\007\\033]11;?\\007\\033]12;?\\007'\n").catch(() => undefined);
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  // The session script echoes the line, and its sh echo interprets the escapes, so the three OSC
+  // queries reach Restty as bytes, followed in the same line by the marker. Restty produces any
+  // reply while it parses the query bytes, so once the marker is on its screen the count is final.
+  const marker = `osc-marker-${Date.now().toString(36)}`;
+  await callTerminalControl(page, "writeInput", `printf '\\033]10;?\\007\\033]11;?\\007\\033]12;?\\007' ${marker}\n`);
+  await waitForDom(
+    page,
+    () => page.evaluate((expected) => (globalThis.__BOTSTER_RESTTY_DEBUG__?.getScreenText?.() ?? "").includes(expected), marker),
+    { label: "OSC stimulus marker on the Restty screen", deadlineMs: 15_000 }
+  );
   const uncapturedAfter = await terminalTelemetryCount(page, "restty_input_uncaptured");
   if (uncapturedAfter !== 0) {
     const records = await page.evaluate(() =>
@@ -8119,17 +7939,13 @@ async function provePaletteProjectionAfterOsc(page, sessionId) {
     throw new Error("palette probe unavailable on mounted Restty renderer (__BOTSTER_RESTTY_DEBUG__.getPaletteColor)");
   }
   await callTerminalControl(page, "writeInput", "printf '\\033]4;1;rgb:ffff/0000/0000\\007'\n");
-  await page.waitForFunction(
-    ({ expected }) => {
+  await waitForDom(page, () => page.evaluate(({ expected }) => {
       const probe = globalThis.__BOTSTER_RESTTY_DEBUG__;
       const get = probe?.getPaletteColor ?? probe?.active?.getPaletteColor;
       if (typeof get !== "function") return false;
       const color = get(1);
       return color === expected;
-    },
-    { expected: expectedColor },
-    { timeout: 10_000 }
-  ).catch(async (error) => {
+    }, { expected: expectedColor }), { label: "provePaletteProjectionAfterOsc condition 1", deadlineMs: 10_000 }).catch(async (error) => {
     const after = await page.evaluate(() => {
       const probe = globalThis.__BOTSTER_RESTTY_DEBUG__;
       const get = probe?.getPaletteColor ?? probe?.active?.getPaletteColor;
@@ -8393,8 +8209,7 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
     await openSessionTerminal(page, sessionId);
     await waitForTerminalSession(page, sessionId);
 
-    const initialAttachment = await page.waitForFunction(
-      ({ previousAttachCount, fromIndex }) => {
+    const initialAttachment = await waitForHarnessEvent(page, ({ previousAttachCount, fromIndex }) => {
         const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
         const attaches = terminal.filter((entry) => entry.kind === "attach");
         if (attaches.length <= previousAttachCount) return null;
@@ -8406,13 +8221,9 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
         );
         if (attachIndex < 0) return null;
         return { subscriptionId, attachIndex };
-      },
-      { previousAttachCount: before.attachCount, fromIndex: before.terminalLength },
-      { timeout: 30_000 }
-    ).then((handle) => handle.jsonValue());
+      }, { previousAttachCount: before.attachCount, fromIndex: before.terminalLength }, { label: "proveRapidAlternateScreenReattach condition 1", deadlineMs: 30_000 });
 
-    const attachment = await page.waitForFunction(
-      ({ fromIndex }) => {
+    const attachment = await waitForHarnessEvent(page, ({ fromIndex }) => {
         const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
         const attaches = terminal
           .map((entry, index) => ({ entry, index }))
@@ -8430,10 +8241,7 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
           if (installed) return { subscriptionId, attachIndex };
         }
         return null;
-      },
-      { fromIndex: before.terminalLength },
-      { timeout: 30_000 }
-    ).then((handle) => handle.jsonValue());
+      }, { fromIndex: before.terminalLength }, { label: "proveRapidAlternateScreenReattach condition 2", deadlineMs: 30_000 });
 
     if (attachment.subscriptionId !== initialAttachment.subscriptionId) {
       const recovered = await page.evaluate(
@@ -8486,15 +8294,15 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
 
     const finalRowPrefix = `${marker}-final-row-`;
     const rowPrefix = `${marker}-row-`;
-    let finalScreen;
-    const pollSummaries = [];
-    const screenDeadline = Date.now() + 20_000;
-    while (Date.now() < screenDeadline) {
-      finalScreen = await callTerminalControl(page, "readScreen");
-      pollSummaries.push(summarizeReadScreenBody(finalScreen, finalRowPrefix, rowPrefix, liveMarker));
-      if (finalScreen?.text?.includes(finalRowPrefix)) break;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    // The client screen shows the final row first (it re-checks on each render); then the Hub
+    // screen is read once. A timeout falls through to the differential below.
+    const clientShowsFinalRow = await waitForDom(
+      page,
+      () => page.evaluate((prefix) => (globalThis.__BOTSTER_RESTTY_DEBUG__?.getScreenText?.() ?? "").includes(prefix), finalRowPrefix),
+      { label: `alternate-screen cycle ${cycle} final row on the client screen`, deadlineMs: 20_000 }
+    ).then(() => true, () => false);
+    const finalScreen = await callTerminalControl(page, "readScreen");
+    const pollSummaries = [{ client_shows_final_row: clientShowsFinalRow, ...summarizeReadScreenBody(finalScreen, finalRowPrefix, rowPrefix, liveMarker) }];
     if (!finalScreen?.text?.includes(finalRowPrefix)) {
       const differential = await collectAlternateScreenDifferential({
         page,
@@ -8614,8 +8422,7 @@ async function proveDirectBinaryTerminalLane(page, sessionId) {
     for (const frame of encodedFrames) await stream.sendFrame(Uint8Array.from(frame));
   }, { frames });
 
-  const transfer = await page.waitForFunction(
-    ({ expectedSessionId, expectedSubscriptionId, expectedPasteBytes, expectedOperationId }) => {
+  const transfer = await waitForHarnessEvent(page, ({ expectedSessionId, expectedSubscriptionId, expectedPasteBytes, expectedOperationId }) => {
       const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__;
       const events = harness?.directTerminalEvents ?? [];
       const outputText = events
@@ -8655,21 +8462,28 @@ async function proveDirectBinaryTerminalLane(page, sessionId) {
         paste_operation_id: Number(pasteResult.result.operation_id),
         outbound_large_delivery: largeDelivery
       };
-    },
-    {
+    }, {
       expectedSessionId: sessionId,
       expectedSubscriptionId: subscriptionId,
       expectedPasteBytes: paste.length,
       expectedOperationId: operationId
-    },
-    { timeout: 30_000 }
-  ).then((handle) => handle.jsonValue());
+    }, { label: "proveDirectBinaryTerminalLane condition 1", deadlineMs: 30_000 });
 
   await page.evaluate(() => {
     globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.directTerminalStream?.unsubscribe();
   });
   await waitForDirectTerminalChannelClosed(page, first.label, subscriptionId);
-  await new Promise((resolve) => setTimeout(resolve, 250));
+  // The same subscription id is reused below: wait until the Hub reports it released.
+  await waitForHarnessEvent(
+    page,
+    (expected) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) =>
+      entry.kind === "daemon_event" &&
+      entry.payload?.type === "terminal_subscription_closed" &&
+      entry.payload?.subscription_id === expected
+    ),
+    subscriptionId,
+    { label: `Hub release of ${subscriptionId}`, deadlineMs: 10_000 }
+  );
 
   const second = await openDirectTerminalStream(page, sessionId, subscriptionId, "second");
   if (second.label === first.label || second.generation <= first.generation) {
@@ -8689,8 +8503,7 @@ async function proveDirectBinaryTerminalLane(page, sessionId) {
     if (!stream) throw new Error("reconnected direct terminal stream is unavailable");
     await stream.sendFrame(Uint8Array.from(frame));
   }, { frame: closeFrame });
-  await page.waitForFunction(
-    ({ shouldExit }) => {
+  await waitForHarnessEvent(page, ({ shouldExit }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.directTerminalEvents ?? [];
       const outputIncludes = (marker) => events.some((event) =>
         event?.kind === "output" && new TextDecoder("latin1").decode(event.payload).includes(marker)
@@ -8698,10 +8511,7 @@ async function proveDirectBinaryTerminalLane(page, sessionId) {
       return shouldExit
         ? events.some((event) => event?.kind === "process_exit") || outputIncludes("botster-web-production-exiting")
         : outputIncludes("botster-web-production-echo:direct-reconnect");
-    },
-    { shouldExit: !sharedSessionMode || sharedSessionProveExit },
-    { timeout: 20_000 }
-  );
+    }, { shouldExit: !sharedSessionMode || sharedSessionProveExit }, { label: "proveDirectBinaryTerminalLane condition 2", deadlineMs: 20_000 });
   await page.evaluate(() => {
     globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.directTerminalStream?.unsubscribe();
   });
@@ -8765,9 +8575,8 @@ async function proveAlternateScreenExit(page, sessionId) {
   const finalRowMarker = finalRowMatch[1];
 
   await callTerminalControl(page, "writeInput", "\nbotster-web-production-alt-exit\n");
-  const altExitDeadline = Date.now() + 45_000;
-  let altExitClassification = "pending";
-  while (Date.now() < altExitDeadline) {
+  // Re-classified on each recorded renderer write, never on a timer.
+  const readAltExitClassification = async () => {
     const decodedWrites = await page.evaluate(() =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).flatMap((entry) => {
         if (entry.kind !== "renderer_write") return [];
@@ -8782,14 +8591,17 @@ async function proveAlternateScreenExit(page, sessionId) {
         }
       })
     );
-    altExitClassification = classifyAltExitRendererWrites(decodedWrites);
-    if (altExitClassification === "exited") break;
-    if (altExitClassification === "producer_lacks_alt_exit") {
-      throw new Error(
-        "alternate-screen exit producer contract mismatch: the supplied session producer answered botster-web-production-alt-exit with the fallthrough echo and did not leave the alternate screen; caller-owned producers must implement the README producer command contract"
-      );
-    }
-    await page.waitForTimeout(100);
+    const classification = classifyAltExitRendererWrites(decodedWrites);
+    return classification === "pending" ? false : classification;
+  };
+  const altExitClassification = await waitForDom(page, readAltExitClassification, {
+    label: "alternate-screen exit renderer writes",
+    deadlineMs: 45_000
+  }).catch(() => "pending");
+  if (altExitClassification === "producer_lacks_alt_exit") {
+    throw new Error(
+      "alternate-screen exit producer contract mismatch: the supplied session producer answered botster-web-production-alt-exit with the fallthrough echo and did not leave the alternate screen; caller-owned producers must implement the README producer command contract"
+    );
   }
   if (altExitClassification !== "exited") {
     throw new Error("timed out waiting for mounted terminal renderer write botster-web-production-alt-exited");
@@ -8802,16 +8614,16 @@ async function proveAlternateScreenExit(page, sessionId) {
     );
   }
 
-  const screenDeadline = Date.now() + 15_000;
-  let afterScreen = beforeScreen;
-  while (Date.now() < screenDeadline) {
-    afterScreen = await callTerminalControl(page, "readScreen");
-    const text = typeof afterScreen?.text === "string" ? afterScreen.text : "";
-    if (!text.includes(finalRowMarker) && text.includes("botster-web-production-alt-exited")) {
-      break;
-    }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  }
+  // The client screen changes first (re-checked on each render); then the Hub screen is read once.
+  await waitForDom(
+    page,
+    () => page.evaluate((marker) => {
+      const text = globalThis.__BOTSTER_RESTTY_DEBUG__?.getScreenText?.() ?? "";
+      return !text.includes(marker) && text.includes("botster-web-production-alt-exited");
+    }, finalRowMarker),
+    { label: "primary screen after the alternate-screen exit", deadlineMs: 15_000 }
+  ).catch(() => undefined);
+  const afterScreen = await callTerminalControl(page, "readScreen");
   const afterText = typeof afterScreen?.text === "string" ? afterScreen.text : "";
   if (afterText.includes(finalRowMarker)) {
     throw new Error(
@@ -8883,20 +8695,16 @@ async function collectHeldCancelChronology(page, { subscriptionId, fromIndex }) 
 async function proveInFlightAttachCancellation(page, sessionId) {
   if (await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).count() > 0) {
     await openHomeView(page);
-    await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor({ state: "detached" });
-    await page.waitForFunction(
-      ({ expectedSessionId, containerClass, sessionIdAttr }) => {
+    await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.terminalSessionViewTestId), state: "detached" }, { label: "page.getByTestId(HOST_CHROME.terminalSessionViewTestId)" });
+    await waitForDom(page, () => page.evaluate(({ expectedSessionId, containerClass, sessionIdAttr }) => {
         const ids = [...globalThis.document.querySelectorAll(`.${containerClass}`)]
           .map((node) => node.getAttribute(sessionIdAttr));
         return !ids.includes(expectedSessionId);
-      },
-      {
+      }, {
         expectedSessionId: sessionId,
         containerClass: HOST_CHROME.terminalContainerClass,
         sessionIdAttr: HOST_CHROME.terminalSessionIdAttr
-      },
-      { timeout: 15_000 }
-    ).catch((error) => {
+      }), { label: "proveInFlightAttachCancellation condition 1", deadlineMs: 15_000 }).catch((error) => {
       throw new Error(`cancel helper Home unmount did not release session ${sessionId}: ${error.message}`);
     });
   }
@@ -8908,8 +8716,7 @@ async function proveInFlightAttachCancellation(page, sessionId) {
   });
 
   await openSessionTerminal(page, sessionId);
-  const held = await page.waitForFunction(
-    ({ baselineSubscriptionId, attachesBefore }) => {
+  const held = await waitForHarnessEvent(page, ({ baselineSubscriptionId, attachesBefore }) => {
       const attaches = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
         (entry) => entry.kind === "attach" && entry.payload?.subscription_id
       );
@@ -8917,10 +8724,7 @@ async function proveInFlightAttachCancellation(page, sessionId) {
       const latest = attaches.at(-1)?.payload ?? {};
       if (baselineSubscriptionId && latest.subscription_id === baselineSubscriptionId) return null;
       return latest;
-    },
-    { baselineSubscriptionId: baseline.subscription_id, attachesBefore: baseline.attach_count },
-    { timeout: 30_000 }
-  ).then((handle) => handle.jsonValue()).catch((error) => {
+    }, { baselineSubscriptionId: baseline.subscription_id, attachesBefore: baseline.attach_count }, { label: "proveInFlightAttachCancellation condition 2", deadlineMs: 30_000 }).catch((error) => {
     throw new Error(`timed out waiting for a new attach after remount: ${error.message}`);
   });
   const detachBefore = await page.evaluate(({ subscriptionId }) =>
@@ -8936,18 +8740,15 @@ async function proveInFlightAttachCancellation(page, sessionId) {
 
   // Cancel now: navigating Home unmounts the view and detaches the plane.
   await openHomeView(page);
-  await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor({ state: "detached" });
-  await page.waitForFunction(
-    ({ subscriptionId, before }) =>
+  await waitForDom(page, { locator: page.getByTestId(HOST_CHROME.terminalSessionViewTestId), state: "detached" }, { label: "page.getByTestId(HOST_CHROME.terminalSessionViewTestId)" });
+  await waitForHarnessEvent(page, ({ subscriptionId, before }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) =>
         entry.kind === "daemon_request" &&
         entry.payload?.type === "detach" &&
         entry.payload?.subscription_id === subscriptionId
-      ).length > before,
-    { subscriptionId: held.subscription_id, before: detachBefore },
-    { timeout: 15_000 }
-  ).catch(() => undefined);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+      ).length > before, { subscriptionId: held.subscription_id, before: detachBefore }, { label: "proveInFlightAttachCancellation condition 3", deadlineMs: 15_000 }).catch(() => undefined);
+  // detach() marks the plane detached and clears its listeners synchronously, so no recovery can
+  // follow. A late second detach is checked again after the remount below, not after a sleep.
 
   const detachEvidence = await page.evaluate(({ subscriptionId, expectedSessionId, before }) => {
     const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
@@ -9003,6 +8804,16 @@ async function proveInFlightAttachCancellation(page, sessionId) {
   if (!newSubscriptionId || newSubscriptionId === held.subscription_id) {
     throw new Error(`cancel remount reused subscription ${newSubscriptionId}`);
   }
+  const detachCountAfterRemount = await page.evaluate(({ subscriptionId, before }) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) =>
+      entry.kind === "daemon_request" &&
+      entry.payload?.type === "detach" &&
+      entry.payload?.subscription_id === subscriptionId
+    ).length - before,
+  { subscriptionId: held.subscription_id, before: detachBefore });
+  if (detachCountAfterRemount !== 1) {
+    throw new Error(`the cancelled subscription ${held.subscription_id} was detached ${detachCountAfterRemount} times by the remount`);
+  }
 
   // A trial that reached attached before the cancel verifies the detach, no-shutdown, and
   // fresh-subscription invariants only. It is not evidence for pending-attach cancellation.
@@ -9028,8 +8839,7 @@ async function proveSharedSessionExit(page, sessionId) {
   await waitForAutomaticTerminalRestore(page);
   await waitForTerminalAttachState(page, ["attached"]);
   await callTerminalControl(page, "writeInput", "botster-web-production-exit\n");
-  const exitEvidence = await page.waitForFunction(
-    ({ expectedSessionId }) => {
+  const exitEvidence = await waitForDom(page, () => page.evaluate(({ expectedSessionId }) => {
       const harness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ ?? {};
       const processExit = (harness.events ?? []).some((entry) =>
         entry.kind === "terminal_route_frame" && entry.payload?.frame?.kind === "process_exit"
@@ -9058,10 +8868,7 @@ async function proveSharedSessionExit(page, sessionId) {
         entity_lifecycle: row?.lifecycle ?? null,
         producer_exiting: producerExiting
       };
-    },
-    { expectedSessionId: sessionId },
-    { timeout: 30_000 }
-  ).then((handle) => handle.jsonValue()).catch((error) => {
+    }, { expectedSessionId: sessionId }), { label: "proveSharedSessionExit condition 1", deadlineMs: 30_000 }).catch((error) => {
     throw new Error(
       `opt-in exit pass did not observe ProcessExited or session-entity exit for ${sessionId}: ${error.message}`
     );
@@ -9183,56 +8990,36 @@ async function proveInPageTerminalDataChannelReconnect(page, sessionId) {
   if (!closed) {
     throw new Error("in-page terminal reconnect could not close the WebRTC data channel");
   }
-  await page.waitForFunction(
-    () =>
+  await waitForHarnessEvent(page, () =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some(
         (entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "closed"
-      ),
-    undefined,
-    { timeout: 15_000 }
-  ).catch((error) => {
+      ), undefined, { label: "proveInPageTerminalDataChannelReconnect condition 1", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`in-page terminal reconnect never observed a data-channel close: ${error.message}`);
   });
-  await page.waitForFunction(
-    ({ before }) =>
+  await waitForHarnessEvent(page, ({ before }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
         (entry) => entry.kind === "webrtc_data_channel" && entry.payload?.state === "open"
-      ).length > before,
-    { before: openEventsBefore },
-    { timeout: 30_000 }
-  ).catch((error) => {
+      ).length > before, { before: openEventsBefore }, { label: "proveInPageTerminalDataChannelReconnect condition 2", deadlineMs: 30_000 }).catch((error) => {
     throw new Error(`in-page terminal reconnect never reopened the data channel: ${error.message}`);
   });
 
   // Fresh terminal attach after transport recovery (new subscription + H0-H5).
-  await page.waitForFunction(
-    ({ before }) =>
+  await waitForHarnessEvent(page, ({ before }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter((entry) => entry.kind === "attach")
-        .length > before,
-    { before: attachTelemetryBefore },
-    { timeout: 30_000 }
-  ).catch((error) => {
+        .length > before, { before: attachTelemetryBefore }, { label: "proveInPageTerminalDataChannelReconnect condition 3", deadlineMs: 30_000 }).catch((error) => {
     throw new Error(`in-page terminal reconnect never reattached the terminal stream: ${error.message}`);
   });
-  await page.waitForFunction(
-    ({ before }) =>
+  await waitForHarnessEvent(page, ({ before }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
         (entry) => entry.kind === "ghostsnp_install" || entry.kind === "restty_load_binary_snapshot"
-      ).length > before,
-    { before: ghostsnpBefore },
-    { timeout: 30_000 }
-  ).catch((error) => {
+      ).length > before, { before: ghostsnpBefore }, { label: "proveInPageTerminalDataChannelReconnect condition 4", deadlineMs: 30_000 }).catch((error) => {
     throw new Error(`in-page terminal reconnect never reinstalled GHOSTSNP: ${error.message}`);
   });
 
-  await page.waitForFunction(
-    ({ before }) =>
+  await waitForHarnessEvent(page, ({ before }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
         (entry) => entry.kind === "daemon_hello"
-      ).length > before,
-    { before: helloBefore },
-    { timeout: 30_000 }
-  ).catch((error) => {
+      ).length > before, { before: helloBefore }, { label: "proveInPageTerminalDataChannelReconnect condition 5", deadlineMs: 30_000 }).catch((error) => {
     throw new Error(`in-page terminal reconnect never sent a new DataChannel Hello: ${error.message}`);
   });
 
@@ -9327,8 +9114,7 @@ async function waitForAutomaticTerminalRestore(page) {
       terminal_kinds: terminal.map((entry) => entry.kind).slice(-20)
     };
   });
-  const restoration = await page.waitForFunction(
-    () => {
+  const restoration = await waitForHarnessEvent(page, () => {
       const terminal = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
       const install = terminal.findLast((entry) => entry.kind === "ghostsnp_install" || entry.kind === "restty_load_binary_snapshot");
       const modeFlags = terminal.findLast((entry) => entry.kind === "modes");
@@ -9347,10 +9133,7 @@ async function waitForAutomaticTerminalRestore(page) {
         cols: modeFlags.payload?.cols ?? null,
         message: status.payload.message
       };
-    },
-    undefined,
-    { timeout: 20_000 }
-  ).then((handle) => handle.jsonValue()).catch(async (error) => {
+    }, undefined, { label: "hydrateDebug condition 1", deadlineMs: 20_000 }).catch(async (error) => {
     throw new Error(
       `timed out waiting for automatic snapshot restoration: ${error.message}; hydrate_debug=${JSON.stringify(await hydrateDebug())}`,
       { cause: error }
@@ -9407,8 +9190,7 @@ async function waitForAutomaticTerminalRestore(page) {
 async function assertTerminalAttachChronology(page, sessionId, requiredSubscriptionId) {
   // Route order: ATTACH_STATE attached, MODES, SNAPSHOT_READY, live OUTPUT interleaved with
   // SNAPSHOT_HISTORY, SNAPSHOT_FINISH, then OUTPUT. The route id is the subscription id.
-  const chronology = await page.waitForFunction(
-    ({ requiredSubscriptionId: requiredSub }) => {
+  const chronology = await waitForHarnessEvent(page, ({ requiredSubscriptionId: requiredSub }) => {
       const frames = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
         .filter((entry) => entry.kind === "terminal_route_frame")
         .map((entry) => entry.payload)
@@ -9464,10 +9246,7 @@ async function assertTerminalAttachChronology(page, sessionId, requiredSubscript
         };
       }
       return null;
-    },
-    { requiredSubscriptionId: requiredSubscriptionId ?? null },
-    { timeout: 45_000 }
-  ).then((handle) => handle.jsonValue()).catch((error) => {
+    }, { requiredSubscriptionId: requiredSubscriptionId ?? null }, { label: "assertTerminalAttachChronology condition 1", deadlineMs: 45_000 }).catch((error) => {
     throw new Error(
       `timed out waiting for subscription-scoped attach chronology${
         requiredSubscriptionId ? ` for ${requiredSubscriptionId}` : ""
@@ -9485,11 +9264,10 @@ async function waitForResizeProof(page, requestedResize) {
   const expectedSize = `${requestedResize.rows}x${requestedResize.cols}`;
   // Core pushes MODES with the new rows and cols once the PTY is resized: wait for that event,
   // then prove it on the PTY with one size probe.
-  await page.waitForFunction(({ rows, cols }) =>
+  await waitForHarnessEvent(page, ({ rows, cols }) =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
       (entry) => entry.kind === "modes" && entry.payload?.rows === rows && entry.payload?.cols === cols
-    ),
-  { rows: requestedResize.rows, cols: requestedResize.cols }, { timeout: 20_000 }).catch((error) => {
+    ), { rows: requestedResize.rows, cols: requestedResize.cols }, { label: "waitForResizeProof condition 1", deadlineMs: 20_000 }).catch((error) => {
     throw new Error(`timed out waiting for pushed MODES ${expectedSize}: ${error.message}`);
   });
   const outputCount = await terminalOutputCount(page);
@@ -9501,29 +9279,21 @@ async function waitForResizeProof(page, requestedResize) {
 }
 
 async function waitForSessionStatus(page, lifecycle) {
-  await waitForHarnessEvent(
-    page,
-    {
+  await waitForHarnessEvent(page, {
       kind: "hub_frame",
       family: "session",
       id: productionSessionId,
       lifecycle
-    },
-    `session entity lifecycle ${lifecycle}`
-  );
+    }, undefined, { label: `session entity lifecycle ${lifecycle}`, deadlineMs: 45_000 });
 }
 
 async function waitForRunningSessionFrame(page) {
-  await waitForHarnessEvent(
-    page,
-    {
+  await waitForHarnessEvent(page, {
       kind: "hub_frame",
       family: "session",
       id: productionSessionId,
       lifecycle: "running"
-    },
-    "restored running session used by the terminal attachment path"
-  );
+    }, undefined, { label: "restored running session used by the terminal attachment path", deadlineMs: 45_000 });
 }
 
 /**
@@ -9536,13 +9306,13 @@ async function waitForTerminalDetached(page, sessionId, { timeoutMs = 15_000 } =
     throw new Error("waitForTerminalDetached requires an explicit sessionId");
   }
 
-  const deadline = Date.now() + timeoutMs;
   let exitedObserved = false;
   let lastObservedAttachState = null;
   let lastSessionContainerIds = [];
   let lastDashboardPresent = false;
 
-  while (Date.now() < deadline) {
+  // Re-checked on each DOM mutation, so a short "exited" state is not missed.
+  const detached = await waitForDom(page, async () => {
     const snapshot = await page.evaluate((chrome) => {
       const containers = [
         ...globalThis.document.querySelectorAll(`.${chrome.terminalContainerClass}`)
@@ -9582,9 +9352,9 @@ async function waitForTerminalDetached(page, sessionId, { timeoutMs = 15_000 } =
         lastDashboardPresent
       };
     }
-
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+    return false;
+  }, { label: `terminal host for ${sessionId} released`, deadlineMs: timeoutMs }).catch(() => null);
+  if (detached) return detached;
 
   const sessionContainerPresent = lastSessionContainerIds.includes(sessionId);
   const entityEvidence = await page.evaluate(({ expectedSessionId }) => {
@@ -9694,14 +9464,10 @@ async function provePostDetachPeerAndSiblingFamily(page, sessionId) {
   if (status?.kind !== "status") {
     throw new Error(`post-detach peer status request failed: ${JSON.stringify(status)}`);
   }
-  await page.waitForFunction(
-    ({ before }) =>
+  await waitForHarnessEvent(page, ({ before }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) =>
         entry.kind === "daemon_request" && entry.payload?.type === "status"
-      ).length > before,
-    { before: statusRequestsBefore },
-    { timeout: 10_000 }
-  ).catch((error) => {
+      ).length > before, { before: statusRequestsBefore }, { label: "provePostDetachPeerAndSiblingFamily condition 1", deadlineMs: 10_000 }).catch((error) => {
     throw new Error(`post-detach peer never recorded a new status request: ${error.message}`);
   });
   const families = await page.evaluate(({ expectedSessionId }) => {
@@ -9779,38 +9545,29 @@ async function inputOperationCount(page, kind) {
 }
 
 async function waitForInputOperation(page, kind, minimumCount, label) {
-  await page.waitForFunction(
-    ({ expectedKind, expected }) =>
+  await waitForHarnessEvent(page, ({ expectedKind, expected }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).filter(
         (entry) => entry.kind === "input_sent" && entry.payload?.kind === expectedKind
-      ).length > expected,
-    { expectedKind: kind, expected: minimumCount },
-    { timeout: 45_000 }
-  ).catch((error) => {
+      ).length > expected, { expectedKind: kind, expected: minimumCount }, { label: "waitForInputOperation condition 1", deadlineMs: 45_000 }).catch((error) => {
     throw new Error(`timed out waiting for ${label}: ${error.message}`);
   });
 }
 
 async function waitForDaemonRequestCount(page, criteria, expectedCount, label) {
-  await page.waitForFunction(
-    ({ expectedCriteria, nextExpectedCount }) =>
+  await waitForHarnessEvent(page, ({ expectedCriteria, nextExpectedCount }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter((entry) => {
         if (entry.kind !== "daemon_request") return false;
         const payload = entry.payload ?? {};
         if (expectedCriteria.type && payload.type !== expectedCriteria.type) return false;
         if (expectedCriteria.data && payload.data !== expectedCriteria.data) return false;
         return true;
-      }).length === nextExpectedCount,
-    { expectedCriteria: criteria, nextExpectedCount: expectedCount },
-    { timeout: 45_000 }
-  ).catch((error) => {
+      }).length === nextExpectedCount, { expectedCriteria: criteria, nextExpectedCount: expectedCount }, { label: "waitForDaemonRequestCount condition 1", deadlineMs: 45_000 }).catch((error) => {
     throw new Error(`timed out waiting for ${label}: ${error.message}`);
   });
 }
 
 async function waitForNextSizeProbe(page, outputCount) {
-  return page.waitForFunction(
-    ({ previousOutputCount }) => {
+  return waitForHarnessEvent(page, ({ previousOutputCount }) => {
       const outputs = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [])
         .filter((entry) => entry.kind === "output")
         .slice(previousOutputCount);
@@ -9828,18 +9585,11 @@ async function waitForNextSizeProbe(page, outputCount) {
           }
         })
         .find((size) => typeof size === "string") ?? null;
-    },
-    { previousOutputCount: outputCount },
-    { timeout: 5_000 }
-  ).then((handle) => handle.jsonValue());
+    }, { previousOutputCount: outputCount }, { label: "waitForNextSizeProbe condition 1", deadlineMs: 5_000 });
 }
 
 async function latestTerminalResize(page) {
-  await page.waitForFunction(
-    () => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) => entry.kind === "resize"),
-    undefined,
-    { timeout: 15_000 }
-  );
+  await waitForHarnessEvent(page, () => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some((entry) => entry.kind === "resize"), undefined, { label: "latestTerminalResize condition 1", deadlineMs: 15_000 });
 
   const resize = await page.evaluate(() => {
     const terminalEvents = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? [];
@@ -10085,33 +9835,24 @@ async function seedDurableExitedSessions() {
     }
   }
 
-  const deadline = Date.now() + 15_000;
-  let lastSessions = [];
-  while (Date.now() < deadline) {
-    const response = await sendDaemonRequest(socketPath, { type: "list_sessions" });
-    lastSessions = response.sessions ?? [];
-    const exitedIds = new Set(
-      lastSessions
-        .filter((session) => session.lifecycle === "exited")
-        .map((session) => session.session_id)
-    );
-    if (durableSeedSessionIds.every((sessionId) => exitedIds.has(sessionId))) return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(
-    `durable sessions did not all exit: ${durableSeedSessionIds.join(", ")}; observed=${JSON.stringify(lastSessions)}`
+  await waitForDaemonSessions(
+    socketPath,
+    (sessions) => durableSeedSessionIds.every((sessionId) => sessions.get(sessionId)?.lifecycle === "exited"),
+    { label: `durable sessions exited: ${durableSeedSessionIds.join(", ")}` }
   );
 }
 
 async function restartHubWithDurableState() {
   await runHubCommand(["shutdown", "--data-dir", webrtcDataDir]);
   if (hubProcess?.exitCode === null) {
+    let exitTimer;
     await Promise.race([
       once(hubProcess, "exit"),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("hub did not exit for durable-state restart")), 5_000)
-      )
-    ]);
+      new Promise((_, reject) => {
+        // timer: deadline — bounds the Hub's exit after shutdown; expiry fails the run.
+        exitTimer = setTimeout(() => reject(new Error("hub did not exit for durable-state restart")), 5_000);
+      })
+    ]).finally(() => clearTimeout(exitTimer));
   }
 
   hubProcess = spawnHubProcess(webrtcDataDir);

@@ -3,6 +3,14 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { createServer } from "vite";
 import { verifyMountedRendererTelemetry } from "./mounted-renderer-telemetry.mjs";
+import { harnessWaitSupportScript, waitForDom } from "./harness-waits.mjs";
+
+/** Restty is ready when its wasm terminal exists (the fixture reports ResttyWasm.create). */
+const waitForMountedReady = (pageRef, label) => waitForDom(
+  pageRef,
+  () => pageRef.evaluate(() => globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__?.viewportMeta?.().hasRuntime === true),
+  { label, deadlineMs: 15_000 }
+);
 
 const host = "127.0.0.1";
 const probe = "botster-web-mounted-keyboard-input";
@@ -36,34 +44,23 @@ try {
   browser = await chromium.launch();
   await verifyMountedRendererTelemetry(browser, `http://${host}:${address.port}`);
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  await page.addInitScript({ content: harnessWaitSupportScript });
   await page.goto(`http://${host}:${address.port}/mounted-terminal-keyboard-smoke.html`, {
     waitUntil: "domcontentloaded"
   });
 
-  await page.waitForFunction(
-    () => {
+  await waitForDom(page, () => page.evaluate(() => {
       const canvas = globalThis.document.querySelector(".terminal-view-container canvas");
       if (canvas?.tagName !== "CANVAS") return false;
       const bounds = canvas.getBoundingClientRect();
       return bounds.width > 0 && bounds.height > 0;
-    },
-    undefined,
-    { timeout: 15_000 }
-  );
-  await page.waitForFunction(
-    () => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl?.focus),
-    undefined,
-    { timeout: 15_000 }
-  );
-  await page.waitForFunction(
-    () =>
+    }, undefined), { label: "waitForMountedReady condition 1", deadlineMs: 15_000 });
+  await waitForDom(page, () => page.evaluate(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl?.focus), undefined), { label: "waitForMountedReady condition 2", deadlineMs: 15_000 });
+  await waitForDom(page, () => page.evaluate(() =>
       (globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__?.terminal ?? []).some(
         (entry) => entry.kind === "pty_connected"
-      ),
-    undefined,
-    { timeout: 15_000 }
-  );
-  await page.waitForTimeout(1_000);
+      ), undefined), { label: "waitForMountedReady condition 3", deadlineMs: 15_000 });
+  await waitForMountedReady(page, "mounted terminal ready line");
 
   if (clipboardPasteLane) {
     await proveMountedClipboardPaste(page, browser, `http://${host}:${address.port}`);
@@ -75,14 +72,10 @@ try {
       globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__.emitOutput(output);
     }, history);
     try {
-      await page.waitForFunction(
-        ({ expectedLine, lineBytes }) => {
+      await waitForDom(page, () => page.evaluate(({ expectedLine, lineBytes }) => {
           const numbered = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__?.readNumberedHistory?.() ?? [];
           return numbered.some((row) => Number(row) === expectedLine && row.length === lineBytes);
-        },
-        { expectedLine: HISTORY_LAST_LINE, lineBytes: HISTORY_LINE_BYTES },
-        { timeout: 15_000 }
-      );
+        }, { expectedLine: HISTORY_LAST_LINE, lineBytes: HISTORY_LINE_BYTES }), { label: "waitForMountedReady condition 4", deadlineMs: 15_000 });
     } catch (error) {
       const state = await page.evaluate(() => {
         const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
@@ -101,14 +94,10 @@ try {
       harness.scrollViewportToBottom();
     });
     try {
-      await page.waitForFunction(
-        ({ expectedLine, lineBytes }) => {
+      await waitForDom(page, () => page.evaluate(({ expectedLine, lineBytes }) => {
           const rows = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__?.readViewportRows?.() ?? [];
           return rows.at(-1) === String(expectedLine).padStart(lineBytes, "0");
-        },
-        { expectedLine: HISTORY_LAST_LINE, lineBytes: HISTORY_LINE_BYTES },
-        { timeout: 15_000 }
-      );
+        }, { expectedLine: HISTORY_LAST_LINE, lineBytes: HISTORY_LINE_BYTES }), { label: "waitForMountedReady condition 5", deadlineMs: 15_000 });
     } catch (error) {
       const state = await page.evaluate(() => {
         const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
@@ -162,14 +151,10 @@ try {
       }
     }, WHEEL_LINE_EVENTS);
     try {
-      await page.waitForFunction(
-        ({ lastLine, lineBytes }) => {
+      await waitForDom(page, () => page.evaluate(({ lastLine, lineBytes }) => {
           const rows = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__?.readViewportRows?.() ?? [];
           return rows.at(-1) === String(lastLine).padStart(lineBytes, "0");
-        },
-        { lastLine: expectedLine, lineBytes: HISTORY_LINE_BYTES },
-        { timeout: 15_000 }
-      );
+        }, { lastLine: expectedLine, lineBytes: HISTORY_LINE_BYTES }), { label: "waitForMountedReady condition 6", deadlineMs: 15_000 });
     } catch (error) {
       const state = await page.evaluate(() => {
         const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
@@ -212,6 +197,7 @@ try {
   } else {
 
   await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl.focus());
+  await waitForDom(page, { locator: page.locator(".terminal-view-container canvas").first(), state: "actionable" }, { label: "page.locator('.terminal-view-container canvas').first() before click" });
   await page.locator(".terminal-view-container canvas").first().click({ position: { x: 10, y: 10 } });
   // A browser fires beforeinput before input for committed text. The container capture
   // consumes beforeinput; Restty's own input handler then encodes render-only bytes.
@@ -238,8 +224,7 @@ try {
     );
   }, fullLine);
 
-  await page.waitForFunction(
-    ({ expectedProbe, expectedEcho }) => {
+  await waitForDom(page, () => page.evaluate(({ expectedProbe, expectedEcho }) => {
       const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
       const writes = harness?.terminal ?? [];
       return (
@@ -258,10 +243,7 @@ try {
           }
         })
       );
-    },
-    { expectedProbe: fullLine, expectedEcho: echo },
-    { timeout: 15_000 }
-  ).catch(async (error) => {
+    }, { expectedProbe: fullLine, expectedEcho: echo }), { label: "waitForMountedReady condition 7", deadlineMs: 15_000 }).catch(async (error) => {
     const state = await page.evaluate(() => {
       const activeElement = globalThis.document.activeElement;
       return {
@@ -302,8 +284,7 @@ try {
     harness.emitStatus({ state: "exited", message: "Synthetic process exit" });
     harness.emitStatus({ state: "exited", message: "Duplicate synthetic process exit" });
   }, finalOutput);
-  await page.waitForFunction(
-    ({ output, sessionId }) => {
+  await waitForDom(page, () => page.evaluate(({ output, sessionId }) => {
       const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
       return (
         harness.exitSessions.length === 1 &&
@@ -311,10 +292,7 @@ try {
         harness.callbackOrder.indexOf(`output:${output}`) <
           harness.callbackOrder.indexOf(`exit:${sessionId}`)
       );
-    },
-    { output: finalOutput, sessionId: "mounted_keyboard_smoke_session" },
-    { timeout: 15_000 }
-  );
+    }, { output: finalOutput, sessionId: "mounted_keyboard_smoke_session" }), { label: "waitForMountedReady condition 8", deadlineMs: 15_000 });
 
   console.log("mounted terminal keyboard and exit-order smoke passed");
   }
@@ -337,12 +315,9 @@ async function proveMountedClipboardPaste(page, browser, origin) {
 
   const focusTerminal = async () => {
     await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl.focus());
+    await waitForDom(page, { locator: page.locator(".terminal-view-container canvas").first(), state: "actionable" }, { label: "page.locator('.terminal-view-container canvas').first() before click" });
     await page.locator(".terminal-view-container canvas").first().click({ position: { x: 10, y: 10 } });
-    await page.waitForFunction(
-      () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
-      undefined,
-      { timeout: 5_000 }
-    );
+    await waitForDom(page, () => page.evaluate(() => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement, undefined), { label: "focusTerminal condition 1", deadlineMs: 5_000 });
   };
   const dispatchPaste = (text) =>
     page.evaluate((data) => {
@@ -384,15 +359,11 @@ async function proveMountedClipboardPaste(page, browser, origin) {
   // 1. 70,000-byte clipboard paste reaches the paste owner byte-identical, never the key path.
   const large = await dispatchPaste(largeText);
   if (!large.defaultPrevented) throw new Error("large paste was not consumed by the Botster capture handler");
-  await page.waitForFunction(
-    ({ expected }) => {
+  await waitForDom(page, () => page.evaluate(({ expected }) => {
       const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
       return harness.pastes.length === 1 && harness.pastes[0] === expected &&
         harness.pasteOutcomes.some((entry) => entry.outcome === "written" && entry.requestedBytes === expected.length && entry.writtenPtyBytes === expected.length);
-    },
-    { expected: largeText },
-    { timeout: 15_000 }
-  ).catch((error) => failWith("large paste", error));
+    }, { expected: largeText }), { label: "failWith condition 1", deadlineMs: 15_000 }).catch((error) => failWith("large paste", error));
   let state = await readState();
   if (state.inputs.length !== 0 || state.ptySendInputs.length !== 0) {
     throw new Error(`large paste leaked into the key path: inputs=${state.inputs.length} pty_send_input=${state.ptySendInputs.length}`);
@@ -404,32 +375,24 @@ async function proveMountedClipboardPaste(page, browser, origin) {
 
   // 2. Unicode paste: UTF-8 byte count exceeds UTF-16 length and text arrives byte-identical.
   await dispatchPaste(unicodeText);
-  await page.waitForFunction(
-    ({ expected, expectedBytes }) => {
+  await waitForDom(page, () => page.evaluate(({ expected, expectedBytes }) => {
       const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
       return harness.pastes.length === 2 && harness.pastes[1] === expected &&
         harness.pasteOutcomes.filter((entry) => entry.outcome === "written" && entry.requestedBytes === expectedBytes && entry.writtenPtyBytes === expectedBytes).length === 1;
-    },
-    { expected: unicodeText, expectedBytes: unicodeBytes },
-    { timeout: 15_000 }
-  ).catch((error) => failWith("unicode paste", error));
+    }, { expected: unicodeText, expectedBytes: unicodeBytes }), { label: "failWith condition 2", deadlineMs: 15_000 }).catch((error) => failWith("unicode paste", error));
 
   // 3. Ordinary keys before and after a paste stay on the key path, in order.
   await page.keyboard.type("a", { delay: 10 });
   await dispatchPaste("P\n");
   await page.keyboard.type("b", { delay: 10 });
-  await page.waitForFunction(
-    () => {
+  await waitForDom(page, () => page.evaluate(() => {
       const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
       const order = harness.callbackOrder;
       const a = order.indexOf("input:a");
       const paste = order.indexOf("paste:2");
       const b = order.indexOf("input:b");
       return a >= 0 && paste > a && b > paste && harness.pastes.length === 3;
-    },
-    undefined,
-    { timeout: 15_000 }
-  ).catch((error) => failWith("ordered keys around paste", error));
+    }, undefined), { label: "failWith condition 3", deadlineMs: 15_000 }).catch((error) => failWith("ordered keys around paste", error));
   state = await readState();
   if (state.inputs.some((data) => data.includes("P\n"))) throw new Error("paste text reached the key path during the ordering case");
 
@@ -448,23 +411,21 @@ async function proveMountedClipboardPaste(page, browser, origin) {
       value: { readText: async () => text, writeText: async () => undefined }
     });
   }, menuText);
+  await waitForDom(page, { locator: page.locator(".terminal-view-container canvas").first(), state: "actionable" }, { label: "page.locator('.terminal-view-container canvas').first() before click" });
   await page.locator(".terminal-view-container canvas").first().click({ button: "right", position: { x: 20, y: 20 } });
   const menu = page.locator(".pane-context-menu");
-  await menu.waitFor({ state: "visible", timeout: 5_000 });
+  await waitForDom(page, { locator: menu, state: "visible" }, { label: "menu", deadlineMs: 5_000 });
   const menuLabels = await menu.locator(".pane-context-menu-item").allInnerTexts();
   if (!menuLabels.some((label) => label.startsWith("Copy")) || !menuLabels.some((label) => label.startsWith("Paste"))) {
     throw new Error(`context menu lost its default items: ${JSON.stringify(menuLabels)}`);
   }
+  await waitForDom(page, { locator: menu.locator(".pane-context-menu-item").filter({ hasText: "Paste" }).first(), state: "actionable" }, { label: "menu.locator('.pane-context-menu-item').filter({ hasText: 'Paste' }... before click" });
   await menu.locator(".pane-context-menu-item").filter({ hasText: "Paste" }).first().click();
-  await page.waitForFunction(
-    ({ expected }) => {
+  await waitForDom(page, () => page.evaluate(({ expected }) => {
       const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
       return harness.pastes.length === 4 && harness.pastes[3] === expected &&
         (harness.terminal ?? []).some((entry) => entry.kind === "clipboard_paste" && entry.payload?.source === "context_menu");
-    },
-    { expected: menuText },
-    { timeout: 15_000 }
-  ).catch((error) => failWith("context-menu paste", error));
+    }, { expected: menuText }), { label: "failWith condition 4", deadlineMs: 15_000 }).catch((error) => failWith("context-menu paste", error));
   state = await readState();
   if (state.inputs.some((data) => data.includes("context-menu"))) throw new Error("context-menu paste reached the key path");
 
@@ -478,16 +439,14 @@ async function proveMountedClipboardPaste(page, browser, origin) {
 
   // 6. Attachment without a paste owner: explicit unsupported rejection, visible and dismissible.
   const unsupportedPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  await unsupportedPage.addInitScript({ content: harnessWaitSupportScript });
   try {
     await unsupportedPage.goto(`${origin}/mounted-terminal-keyboard-smoke.html?pasteOwner=off`, { waitUntil: "domcontentloaded" });
-    await unsupportedPage.waitForFunction(
-      () => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl?.focus) &&
-        (globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__?.terminal ?? []).some((entry) => entry.kind === "pty_connected"),
-      undefined,
-      { timeout: 15_000 }
-    );
-    await unsupportedPage.waitForTimeout(1_000);
+    await waitForDom(unsupportedPage, () => unsupportedPage.evaluate(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl?.focus) &&
+        (globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__?.terminal ?? []).some((entry) => entry.kind === "pty_connected"), undefined), { label: "failWith condition 5", deadlineMs: 15_000 });
+    await waitForMountedReady(unsupportedPage, "unsupported-paste page ready line");
     await unsupportedPage.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl.focus());
+    await waitForDom(unsupportedPage, { locator: unsupportedPage.locator(".terminal-view-container canvas").first(), state: "actionable" }, { label: "unsupportedPage.locator('.terminal-view-container canvas').first() before click" });
     await unsupportedPage.locator(".terminal-view-container canvas").first().click({ position: { x: 10, y: 10 } });
     const unsupported = await unsupportedPage.evaluate((data) => {
       const target = globalThis.document.activeElement;
@@ -498,24 +457,17 @@ async function proveMountedClipboardPaste(page, browser, origin) {
       return { defaultPrevented: event.defaultPrevented };
     }, "unsupported-paste\n");
     if (!unsupported.defaultPrevented) throw new Error("unsupported-attachment paste was not consumed as a paste");
-    await unsupportedPage.waitForFunction(
-      () => {
+    await waitForDom(unsupportedPage, () => unsupportedPage.evaluate(() => {
         const harness = globalThis.__BOTSTER_MOUNTED_KEYBOARD_SMOKE__;
         const message = globalThis.document.querySelector(".terminal-input-message");
         return harness.pasteOutcomes.length === 1 && harness.pasteOutcomes[0].outcome === "rejected_locally" &&
           harness.pasteOutcomes[0].reason === "unsupported" && harness.pastes.length === 0 && harness.inputs.length === 0 &&
           message?.getAttribute("data-terminal-input-outcome") === "rejected_locally" &&
           (message?.textContent ?? "").includes("has no paste owner");
-      },
-      undefined,
-      { timeout: 15_000 }
-    );
+      }, undefined), { label: "failWith condition 6", deadlineMs: 15_000 });
+    await waitForDom(unsupportedPage, { locator: unsupportedPage.locator(".terminal-input-message button"), state: "actionable" }, { label: "unsupportedPage.locator('.terminal-input-message button') before click" });
     await unsupportedPage.locator(".terminal-input-message button").click();
-    await unsupportedPage.waitForFunction(
-      () => globalThis.document.querySelector(".terminal-input-message") === null,
-      undefined,
-      { timeout: 5_000 }
-    );
+    await waitForDom(unsupportedPage, () => unsupportedPage.evaluate(() => globalThis.document.querySelector(".terminal-input-message") === null, undefined), { label: "failWith condition 7", deadlineMs: 5_000 });
     console.log("mounted terminal unsupported paste owner smoke passed");
   } finally {
     await unsupportedPage.close();

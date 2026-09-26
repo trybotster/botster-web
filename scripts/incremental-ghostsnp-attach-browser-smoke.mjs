@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { chromium } from "playwright";
 import { createServer } from "vite";
+import { harnessWaitSupportScript, waitForDom, waitForHarnessEvent } from "./harness-waits.mjs";
 
 /**
  * Browser proof of the scheme 2 incremental attach on one real data plane and one real
@@ -56,16 +57,16 @@ const smoke = (page) => ({
 
 async function openSmokePage(browser, address) {
   const page = await browser.newPage();
+  await page.addInitScript({ content: harnessWaitSupportScript });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`http://${host}:${address.port}/incremental-ghostsnp-attach-smoke.html`, {
     waitUntil: "domcontentloaded"
   });
-  await page.waitForFunction(
-    () => Boolean(globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__),
-    undefined,
-    { timeout: 15_000 }
-  );
+  await waitForDom(page, () => page.evaluate(() => Boolean(globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__)), {
+    label: "incremental attach smoke fixture",
+    deadlineMs: 15_000
+  });
   return { page, errors, api: smoke(page) };
 }
 
@@ -119,7 +120,10 @@ try {
   });
   assertNoInputFrames((await api.state()).frames, "before ATTACH_STATE attached");
   await api.call("deliverAttached");
-  await page.waitForFunction(() => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames().length >= 2);
+  await waitForHarnessEvent(page, () => globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames().length >= 2, undefined, {
+    label: "queued input released at ATTACH_STATE attached",
+    deadlineMs: 15_000
+  });
   const releasedAtAttached = (await api.state()).frames;
   assertNoResizeFrames(releasedAtAttached, "before SNAPSHOT_FINISH");
   if (releasedAtAttached.map(rawTextOf).join("|") !== "queued-input-one|queued-input-two") {
@@ -157,10 +161,10 @@ try {
 
   await api.call("deliverSnapshotFinish");
   await api.call("attached");
-  await page.waitForFunction(() =>
+  await waitForHarnessEvent(page, () =>
     globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.getSentFrames().length >= 3 &&
-    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows().some((row) => row.includes("LIVE-AFTER-BARRIER"))
-  );
+    globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__.readViewportRows().some((row) => row.includes("LIVE-AFTER-BARRIER")),
+  undefined, { label: "RESIZE and live output after SNAPSHOT_FINISH", deadlineMs: 15_000 });
 
   const finalState = await api.state();
   const inputs = finalState.frames.filter((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RAW_BYTES);
@@ -206,10 +210,10 @@ try {
   }
   await degraded.api.call("deliverSnapshotFinish");
   await degraded.api.call("attached");
-  await degraded.page.waitForFunction(() => {
+  await waitForHarnessEvent(degraded.page, () => {
     const harness = globalThis.__BOTSTER_INCREMENTAL_ATTACH_SMOKE__;
     return harness.getSentFrames().length >= 2 && harness.readViewportRows().some((row) => row.includes("DEGRADED-LIVE"));
-  });
+  }, undefined, { label: "degraded RESIZE and live output after SNAPSHOT_FINISH", deadlineMs: 15_000 });
   const degradedFinal = await degraded.api.state();
   assertOneLatestResize(degradedFinal.frames, degradedBeforeFinish.frames.length, degradedFinal.grid, "degraded attach");
   if (!degradedFinal.frames.some((frame) => inputKind(frame) === TERMINAL_INPUT_KIND_RAW_BYTES && rawTextOf(frame) === "degraded-input")) {

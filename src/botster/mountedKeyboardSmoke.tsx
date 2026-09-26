@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 
 import { ResttyWasm } from "../vendor/restty/internal.js";
 import { TerminalViewHost } from "./TerminalViewHost";
+import { notifyWaits, observeLog, signalResttyChanges } from "./smokeWaitSignals";
 import type {
   TerminalAttachmentStatus,
   TerminalDataPlaneAttachment,
@@ -10,6 +11,8 @@ import type {
   TerminalViewDescriptor
 } from "./terminal";
 import type { TerminalSemanticInput } from "./terminalInputEvents";
+
+signalResttyChanges();
 
 let runtime: ResttyWasm | undefined;
 let activeHandle = 0;
@@ -162,7 +165,7 @@ type MountedKeyboardHarness = {
 };
 
 const harness: MountedKeyboardHarness = {
-  callbackOrder: [],
+  callbackOrder: observeLog([]),
   emitOutput(data) {
     const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
     for (const listener of outputListeners) {
@@ -175,13 +178,13 @@ const harness: MountedKeyboardHarness = {
       listener(status);
     }
   },
-  exitSessions: [],
-  inputs: [],
-  semanticInputs: [],
-  pastes: [],
-  pasteOutcomes: [],
-  statuses: [],
-  terminal: [],
+  exitSessions: observeLog([]),
+  inputs: observeLog([]),
+  semanticInputs: observeLog([]),
+  pastes: observeLog([]),
+  pasteOutcomes: observeLog([]),
+  statuses: observeLog([]),
+  terminal: observeLog([]),
   outputSubscribers: 0,
   readViewportRows,
   readNumberedHistory,
@@ -280,16 +283,20 @@ const dataPlane: TerminalDataPlaneAttachment = {
   subscribeOutput(listener) {
     outputListeners.add(listener);
     harness.outputSubscribers = outputListeners.size;
-    window.setTimeout(() => {
+    notifyWaits();
+    // The ready output follows the subscription, after subscribeOutput returns: a microtask
+    // orders it, no timer.
+    queueMicrotask(() => {
       if (outputListeners.has(listener)) {
         listener(new TextEncoder().encode(readyOutput));
       }
-    }, 0);
+    });
 
     return {
       unsubscribe() {
         outputListeners.delete(listener);
         harness.outputSubscribers = outputListeners.size;
+        notifyWaits();
       }
     };
   },

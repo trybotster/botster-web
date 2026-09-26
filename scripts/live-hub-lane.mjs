@@ -13,11 +13,11 @@ import { createHash } from "node:crypto";
 import {
   candidateBinaryProvenance,
   candidateTargetDirectoryFromHubRealPath,
-  harnessEventMatches,
   HOST_CHROME,
   packageEnsureDecision
 } from "./live-packaged-protocol-helpers.mjs";
-import { sendDaemonUnixRequest } from "./daemon-unix-client.mjs";
+import { sendDaemonUnixRequest, waitForDaemonUnixEntities } from "./daemon-unix-client.mjs";
+import { harnessWaitSupportScript, waitForDom, waitForHarnessEvent } from "./harness-waits.mjs";
 import {
   daemonProtocol,
   daemonUnixFraming,
@@ -95,6 +95,23 @@ export async function sendDaemonRequest(socketPath, request) {
   return sendDaemonUnixRequest({
     socketPath,
     request,
+    protocol: daemonProtocol,
+    compatibilityRequirement: firstPartyClientCompatibilityRequirement("botster-web-live-harness"),
+    framing: daemonUnixFraming
+  });
+}
+
+/**
+ * Waits on the Hub's session entity subscription until `until(sessions)` holds; `sessions` maps
+ * each session id to its current record. It re-checks only when a session frame arrives.
+ */
+export async function waitForDaemonSessions(socketPath, until, { label, deadlineMs = 15_000 } = {}) {
+  return waitForDaemonUnixEntities({
+    socketPath,
+    entityType: "session",
+    until,
+    label,
+    deadlineMs,
     protocol: daemonProtocol,
     compatibilityRequirement: firstPartyClientCompatibilityRequirement("botster-web-live-harness"),
     framing: daemonUnixFraming
@@ -403,11 +420,9 @@ function gitHeadForCargoRoot(repoRoot) {
 }
 
 export async function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserver = false } = {}) {
-  // The pure harness event matcher runs in the page, so waits are page-condition waits
-  // (Playwright waitForFunction) instead of a Node-side poll over copied event arrays.
-  await targetPage.addInitScript({
-    content: `globalThis.__botsterHarnessEventMatches = ${harnessEventMatches.toString()};`
-  });
+  // The harness logs notify the page's own listeners on every push, so harness waits are
+  // event-driven (scripts/harness-waits.mjs).
+  await targetPage.addInitScript({ content: harnessWaitSupportScript });
   return targetPage.addInitScript(({ bounded }) => {
     const createBoundedObserver = () => {
       const outstanding = new Map();
@@ -690,9 +705,10 @@ export async function installLiveHarnessPageHooks(targetPage, { boundedTerminalO
     };
 
     const boundedObserver = bounded ? createBoundedObserver() : null;
+    const observe = globalThis.__botsterWaits.observe;
     globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {
-      events: boundedObserver?.events ?? [],
-      terminal: boundedObserver?.terminal ?? [],
+      events: observe(boundedObserver?.events ?? []),
+      terminal: observe(boundedObserver?.terminal ?? []),
       ...(boundedObserver ? { boundedTerminalObserver: boundedObserver.api } : {})
     };
     globalThis.window.addEventListener("botster:webrtc-daemon-lifecycle", (event) => {
@@ -711,7 +727,7 @@ export async function openDirectTerminalStream(page, sessionId, subscriptionId, 
     if (!harness || !control?.streamTerminal) {
       throw new Error("live harness transport control does not expose terminal streaming");
     }
-    harness.directTerminalEvents = [];
+    harness.directTerminalEvents = globalThis.__botsterWaits.observe([]);
     const decode = harness.decodeTerminalBody;
     if (typeof decode !== "function") throw new Error("live harness decodeTerminalBody is unavailable");
     const stream = control.streamTerminal(expectedSessionId, expectedSubscriptionId, (event) => {
@@ -723,21 +739,31 @@ export async function openDirectTerminalStream(page, sessionId, subscriptionId, 
     });
     harness.directTerminalStream = stream;
     await stream.ready;
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-      if (harness.directTerminalEvents.some((event) =>
-        event?.kind === "attach_state" && event.state === "attached"
-      )) {
-        return {
-          cycle: cycleName,
-          label: stream.label,
-          generation: stream.generation,
-          peer_generation: stream.peerGeneration
-        };
-      }
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    throw new Error(`direct terminal ${cycleName} attach did not reach attached state`);
+    // Re-checked on each pushed direct terminal event, never on a timer.
+    const attached = await new Promise((resolve) => {
+      let timer;
+      let stop = () => undefined;
+      const evaluate = () => {
+        if (!harness.directTerminalEvents.some((event) => event?.kind === "attach_state" && event.state === "attached")) return;
+        stop();
+        clearTimeout(timer);
+        resolve(true);
+      };
+      stop = globalThis.__botsterWaits.onChange(evaluate);
+      // timer: deadline — bounds the direct attach; expiry fails it.
+      timer = setTimeout(() => {
+        stop();
+        resolve(false);
+      }, 15_000);
+      evaluate();
+    });
+    if (!attached) throw new Error(`direct terminal ${cycleName} attach did not reach attached state`);
+    return {
+      cycle: cycleName,
+      label: stream.label,
+      generation: stream.generation,
+      peer_generation: stream.peerGeneration
+    };
   }, {
     expectedSessionId: sessionId,
     expectedSubscriptionId: subscriptionId,
@@ -763,8 +789,7 @@ export async function readDirectTerminalModeFlags(page, sessionId) {
 }
 
 export async function waitForDirectTerminalChannelClosed(page, label, subscriptionId) {
-  await page.waitForFunction(
-    ({ expectedLabel, expectedSubscriptionId }) => {
+  await waitForHarnessEvent(page, ({ expectedLabel, expectedSubscriptionId }) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       const localClose = events.some((entry) =>
         entry.kind === "terminal_data_channel" &&
@@ -782,14 +807,11 @@ export async function waitForDirectTerminalChannelClosed(page, label, subscripti
         entry.payload?.subscription_id === expectedSubscriptionId
       );
       return localClose || (detachSent && adapterClosed);
-    },
-    { expectedLabel: label, expectedSubscriptionId: subscriptionId },
-    { timeout: 10_000 }
-  );
+    }, { expectedLabel: label, expectedSubscriptionId: subscriptionId }, { label: "waitForDirectTerminalChannelClosed condition 1", deadlineMs: 10_000 });
 }
 
 export async function callTerminalControl(page, method, ...args) {
-  await page.waitForFunction(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl));
+  await waitForDom(page, () => page.evaluate(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminalControl), undefined), { label: "callTerminalControl condition 1", deadlineMs: 30_000 });
   return page.evaluate(
     async ({ method: nextMethod, args: nextArgs }) =>
       globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.terminalControl[nextMethod](...nextArgs),
@@ -798,16 +820,12 @@ export async function callTerminalControl(page, method, ...args) {
 }
 
 export async function waitForTerminalCanvas(page) {
-  await page.waitForFunction(
-    ({ containerClass }) => {
+  await waitForDom(page, () => page.evaluate(({ containerClass }) => {
       const canvas = globalThis.document.querySelector(`.${containerClass} canvas`);
       if (canvas?.tagName !== "CANVAS") return false;
       const bounds = canvas.getBoundingClientRect();
       return bounds.width > 0 && bounds.height > 0;
-    },
-    { containerClass: HOST_CHROME.terminalContainerClass },
-    { timeout: 15_000 }
-  ).catch((error) => {
+    }, { containerClass: HOST_CHROME.terminalContainerClass }), { label: "waitForTerminalCanvas condition 1", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`timed out waiting for mounted Restty canvas: ${error.message}`);
   });
 }
@@ -815,12 +833,9 @@ export async function waitForTerminalCanvas(page) {
 export async function focusMountedTerminal(page) {
   await waitForTerminalCanvas(page);
   await callTerminalControl(page, "focus");
+  await waitForDom(page, { locator: page.locator(`.${HOST_CHROME.terminalContainerClass} canvas`).first(), state: "actionable" }, { label: "page.locator(`.${HOST_CHROME.terminalContainerClass} canvas`).first() before click" });
   await page.locator(`.${HOST_CHROME.terminalContainerClass} canvas`).first().click();
-  await page.waitForFunction(
-    () => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement,
-    undefined,
-    { timeout: 5_000 }
-  ).catch((error) => {
+  await waitForDom(page, () => page.evaluate(() => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement, undefined), { label: "focusMountedTerminal condition 1", deadlineMs: 5_000 }).catch((error) => {
     throw new Error(`mounted terminal did not focus the Restty textarea: ${error.message}`);
   });
 }
@@ -850,50 +865,44 @@ export async function dispatchMountedPaste(page, text) {
 }
 
 export async function openHomeView(page) {
-  await page
-    .getByLabel(HOST_CHROME.workbenchNavLabel)
-    .getByRole("button", { name: HOST_CHROME.homeNavButtonName, exact: true })
-    .click();
-  await page.getByTestId(HOST_CHROME.dashboardTestId).waitFor();
+  {
+    const target = page.getByLabel(HOST_CHROME.workbenchNavLabel).getByRole("button", { name: HOST_CHROME.homeNavButtonName, exact: true });
+    await waitForDom(page, { locator: target, state: "actionable" }, { label: "page.getByLabel(HOST_CHROME.workbenchNavLabel).getByRole('button', { n before click" });
+    await target.click();
+  }
+  await waitForDom(page, page.getByTestId(HOST_CHROME.dashboardTestId), { label: "page.getByTestId(HOST_CHROME.dashboardTestId)" });
 }
 
 export async function openSessionTerminal(page, sessionId) {
   const sessionRow = page.getByTestId(HOST_CHROME.dashboardTestId).locator("ion-item").filter({
     has: page.getByText(sessionId, { exact: true })
   });
+  await waitForDom(page, { locator: sessionRow, state: "actionable" }, { label: "sessionRow before click" });
   await sessionRow.click();
-  await page.getByTestId(HOST_CHROME.terminalSessionViewTestId).waitFor();
+  await waitForDom(page, page.getByTestId(HOST_CHROME.terminalSessionViewTestId), { label: "page.getByTestId(HOST_CHROME.terminalSessionViewTestId)" });
 }
 
 export async function waitForTerminalAttachState(page, states) {
   const expectedStates = Array.isArray(states) ? states : [states];
-  await page.waitForFunction(
-    ({ nextStates, statusClass, attachStateAttr }) => {
+  await waitForDom(page, () => page.evaluate(({ nextStates, statusClass, attachStateAttr }) => {
       const status = globalThis.document.querySelector(`.${statusClass}`)?.getAttribute(attachStateAttr);
       return nextStates.includes(status);
-    },
-    {
+    }, {
       nextStates: expectedStates,
       statusClass: HOST_CHROME.terminalStatusClass,
       attachStateAttr: HOST_CHROME.terminalAttachStateAttr
-    },
-    { timeout: 15_000 }
-  ).catch((error) => {
+    }), { label: "waitForTerminalAttachState condition 1", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`timed out waiting for terminal attach state ${expectedStates.join(" or ")}: ${error.message}`);
   });
 }
 
 export async function waitForTerminalSession(page, sessionId) {
-  await page.waitForFunction(
-    ({ expectedSessionId, containerClass, sessionIdAttr }) =>
-      globalThis.document.querySelector(`.${containerClass}`)?.getAttribute(sessionIdAttr) === expectedSessionId,
-    {
+  await waitForDom(page, () => page.evaluate(({ expectedSessionId, containerClass, sessionIdAttr }) =>
+      globalThis.document.querySelector(`.${containerClass}`)?.getAttribute(sessionIdAttr) === expectedSessionId, {
       expectedSessionId: sessionId,
       containerClass: HOST_CHROME.terminalContainerClass,
       sessionIdAttr: HOST_CHROME.terminalSessionIdAttr
-    },
-    { timeout: 15_000 }
-  ).catch((error) => {
+    }), { label: "waitForTerminalSession condition 1", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`timed out waiting for terminal session ${sessionId}: ${error.message}`);
   });
 }
@@ -910,8 +919,7 @@ export async function waitForRenderedTerminalText(page, text, timeout = 30_000) 
   if (probeState === "vendored-capability-missing") {
     throw new Error("screen-text probe is unavailable in the vendored renderer");
   }
-  await page.waitForFunction(
-    ({ containerClass, expectedText }) => {
+  await waitForDom(page, () => page.evaluate(({ containerClass, expectedText }) => {
       const root = globalThis.document.querySelector(`.${containerClass}`);
       const getScreenText = globalThis.__BOTSTER_RESTTY_DEBUG__?.active?.getScreenText;
       const screenText = getScreenText?.();
@@ -920,10 +928,7 @@ export async function waitForRenderedTerminalText(page, text, timeout = 30_000) 
         typeof screenText === "string" &&
         screenText.split("\n").some((row) => row.startsWith(expectedText))
       );
-    },
-    { containerClass: HOST_CHROME.terminalContainerClass, expectedText: text },
-    { timeout }
-  ).catch((error) => {
+    }, { containerClass: HOST_CHROME.terminalContainerClass, expectedText: text }), { label: "waitForRenderedTerminalText condition 1", deadlineMs: timeout }).catch((error) => {
     throw new Error(`rendered terminal cells omitted ${JSON.stringify(text)}: ${error.message}`);
   });
 }
@@ -970,12 +975,8 @@ export async function registerTerminalMarker(page, id, text, source = "output") 
 
 export async function waitForTerminalMarker(page, id, timeout = 30_000) {
   try {
-    await page.waitForFunction(
-      ({ markerId }) =>
-        globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.boundedTerminalObserver?.markerMatched?.(markerId) === true,
-      { markerId: id },
-      { timeout }
-    );
+    await waitForDom(page, () => page.evaluate(({ markerId }) =>
+        globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.boundedTerminalObserver?.markerMatched?.(markerId) === true, { markerId: id }), { label: "waitForTerminalMarker condition 1", deadlineMs: timeout });
   } catch (error) {
     const outputTail = await readBoundedTerminalOutputTail(page).catch(() => null);
     throw new Error(

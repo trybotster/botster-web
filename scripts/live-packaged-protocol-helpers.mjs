@@ -613,7 +613,9 @@ export function productionSessionScriptSource({ receiverWatchdogSeconds = 30 } =
     "  if ! stty raw -echo min 0 time 100 2>/dev/null; then receiver_cleanup; echo botster-web-production-receive-error:stty-raw; return; fi",
     "  dd bs=1 count=\"$n\" < /dev/tty > \"$receive_file\" 2>/dev/null &",
     "  reader_pid=$!",
-    `  ( trap 'kill $sleep_pid 2>/dev/null; wait $sleep_pid 2>/dev/null; exit 0' TERM; sleep ${receiverWatchdogSeconds} & sleep_pid=$!; wait $sleep_pid; kill $reader_pid 2>/dev/null ) &`,
+    // The watchdog reports its sleep child once it exists, so a proof can snapshot every armed
+    // process on an output line instead of after a fixed delay.
+    `  ( trap 'kill $sleep_pid 2>/dev/null; wait $sleep_pid 2>/dev/null; exit 0' TERM; sleep ${receiverWatchdogSeconds} & sleep_pid=$!; echo botster-web-production-receive-watchdog-armed:$sleep_pid; wait $sleep_pid; kill $reader_pid 2>/dev/null ) &`,
     "  watchdog_pid=$!",
     "  echo botster-web-production-receive-ready:$n",
     "  wait $reader_pid 2>/dev/null",

@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { chromium } from "playwright";
 import { HOST_CHROME, productionSessionScriptSource } from "./live-packaged-protocol-helpers.mjs";
+import { waitForDom, waitForHarnessEvent } from "./harness-waits.mjs";
 import {
   dispatchMountedPaste, ensurePackageEnabled, formatLaneFailure, installLiveHarnessPageHooks,
   openHomeView, openSessionTerminal, readBoundedTerminalObserver, readBoundedTerminalOutputTail,
@@ -47,6 +48,7 @@ async function step(name, context, body, deadlineMs = STEP_MS) {
     return await Promise.race([
       body(),
       new Promise((_, reject) => {
+        // timer: deadline — bounds one lane step; expiry fails the lane.
         timer = setTimeout(() => reject(new Error(`deadline ${deadlineMs} ms exceeded`)), deadlineMs);
       })
     ]);
@@ -85,6 +87,7 @@ async function bounded(name, body, deadlineMs = 10_000) {
     return await Promise.race([
       body(),
       new Promise((_, reject) => {
+        // timer: deadline — bounds one lane step; expiry fails the lane.
         timer = setTimeout(() => reject(new Error(`${name} exceeded ${deadlineMs} ms`)), deadlineMs);
       })
     ]);
@@ -93,29 +96,26 @@ async function bounded(name, body, deadlineMs = 10_000) {
   }
 }
 
+/** Re-checks the bounded observer on each recorded terminal or harness entry, never on a timer. */
 async function waitForObserver(page, predicate, timeout = STEP_MS) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const observed = await readBoundedTerminalObserver(page);
-    const value = predicate(observed);
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`bounded terminal observer condition exceeded ${timeout} ms`);
+  return waitForDom(page, async () => predicate(await readBoundedTerminalObserver(page)), {
+    label: "bounded terminal observer condition",
+    deadlineMs: timeout
+  });
 }
 
+/** Settled when a pushed MODES frame reports the size of the latest mounted RESIZE. */
 async function waitForMountedResizeSettlement(page, beforeCount) {
-  const deadline = Date.now() + STEP_MS;
-  while (Date.now() < deadline) {
-    const observed = await readBoundedTerminalObserver(page);
-    const resize = observed.latest_resize;
-    if ((observed.counts.resize ?? 0) > beforeCount && resize?.rows > 0 && resize?.cols > 0) {
-      const modes = await readDirectTerminalModeFlags(page, sessionId);
-      if (modes.rows === resize.rows && modes.cols === resize.cols) return { resize, modes };
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`mounted resize did not settle within ${STEP_MS} ms`);
+  const resize = await waitForObserver(page, (observed) => {
+    const latest = observed.latest_resize;
+    return (observed.counts.resize ?? 0) > beforeCount &&
+      latest?.rows > 0 && latest?.cols > 0 &&
+      observed.modes?.rows === latest.rows && observed.modes?.cols === latest.cols
+      ? latest
+      : null;
+  });
+  const modes = await readDirectTerminalModeFlags(page, sessionId);
+  return { resize, modes };
 }
 
 async function mountedAttachment(page) {
@@ -129,13 +129,14 @@ async function mountedAttachment(page) {
 }
 
 async function waitForPeerReadiness(page, name) {
-  await page.waitForFunction(
+  await waitForHarnessEvent(
+    page,
     () => {
       const readiness = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.boundedTerminalObserver?.snapshot?.().peer_readiness;
       return readiness?.hello_ack_seen && readiness.session_subscription_requested && readiness.session_snapshot_seen;
     },
     undefined,
-    { timeout: STEP_MS - 1_000 }
+    { label: `${name} peer readiness`, deadlineMs: STEP_MS - 1_000 }
   ).catch(async (error) => {
     const observed = await readBoundedTerminalObserver(page).catch(() => null);
     throw new Error(`${name} connection or session hydration incomplete: peer_readiness=${JSON.stringify(observed?.peer_readiness ?? null)}; ${error.message}`);
@@ -145,7 +146,7 @@ async function waitForPeerReadiness(page, name) {
 async function waitForDashboardSessionRow(page, name) {
   const sessionRows = page.getByTestId(HOST_CHROME.dashboardTestId).locator("ion-item");
   const matchingRow = sessionRows.filter({ has: page.getByText(sessionId, { exact: true }) });
-  await matchingRow.waitFor({ state: "visible", timeout: STEP_MS - 1_000 }).catch(async (error) => {
+  await waitForDom(page, { locator: matchingRow, state: "visible" }, { label: "dashboard session row", deadlineMs: STEP_MS - 1_000 }).catch(async (error) => {
     const rows = await sessionRows.evaluateAll((items) => items.slice(0, 16).map((item) => item.textContent?.trim() ?? ""));
     const observed = await readBoundedTerminalObserver(page).catch(() => null);
     throw new Error(`${name} dashboard session row is missing: row_count=${rows.length}; rows=${JSON.stringify(rows)}; peer_readiness=${JSON.stringify(observed?.peer_readiness ?? null)}; ${error.message}`);
@@ -234,10 +235,7 @@ try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     await installLiveHarnessPageHooks(page, { boundedTerminalObserver: true });
     await page.goto(appUrl, { waitUntil: "domcontentloaded" });
-    await step(`${name}-transport`, { page }, () => page.waitForFunction(
-      () => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl),
-      undefined, { timeout: STEP_MS }
-    ));
+    await step(`${name}-transport`, { page }, () => waitForDom(page, () => page.evaluate(() => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl), undefined), { label: "openPeer condition 1", deadlineMs: STEP_MS }));
     await step(`${name}-connection`, { page }, () => waitForPeerReadiness(page, name));
     await step(`${name}-dashboard-session`, { page }, () => waitForDashboardSessionRow(page, name));
     await step(`${name}-open-session`, { page }, async () => {
@@ -353,7 +351,7 @@ try {
       throw new Error(`unconfirmed multiline zero-write proof is invalid: outcome=${JSON.stringify(rejectedOutcome)} result=${JSON.stringify(rejectedResult)}`);
     }
     const confirm = peerA.locator('[data-terminal-paste-action="confirm"]');
-    await confirm.waitFor({ state: "visible", timeout: PASTE_MS });
+    await waitForDom(peerA, { locator: confirm, state: "visible" }, { label: "paste confirm action", deadlineMs: PASTE_MS });
     await confirm.click();
     await waitForObserver(peerA, (observed) => observed.paste_outcome_count === 1 && observed.result_count === 1, PASTE_MS);
     const confirmedOutcome = oneRow(await takePasteOutcomes(peerA), "confirmed multiline paste", "paste outcome");
@@ -407,7 +405,7 @@ try {
       throw new Error(`cancelled multiline zero-write proof is invalid: outcome=${JSON.stringify(rejectedOutcome)} result=${JSON.stringify(rejectedResult)}`);
     }
     const cancel = peerA.locator('[data-terminal-paste-action="cancel"]');
-    await cancel.waitFor({ state: "visible", timeout: PASTE_MS });
+    await waitForDom(peerA, { locator: cancel, state: "visible" }, { label: "paste cancel action", deadlineMs: PASTE_MS });
     const beforeCancel = await readBoundedTerminalObserver(peerA);
     await cancel.click();
     const afterCancel = await readBoundedTerminalObserver(peerA);
@@ -520,11 +518,7 @@ try {
     }
   } else {
     await step("ws5-close-data-channel", contextA(), async () => {
-      await peerA.waitForFunction(
-        () => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function",
-        undefined,
-        { timeout: STEP_MS }
-      );
+      await waitForDom(peerA, () => peerA.evaluate(() => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function", undefined), { label: "waitForFreshAttachment condition 1", deadlineMs: STEP_MS });
       const closed = await peerA.evaluate(() =>
         globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.closeDataChannel()
       );
