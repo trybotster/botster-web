@@ -404,6 +404,13 @@ The package server binds an ephemeral loopback port by default. Set `BOTSTER_WEB
   entity lands, one follow-up commit switches these sites to it and removes the
   exception.
 
+- **Live ROUTE_RESYNC is not reproducible with a healthy reader (closed by orchestrator
+  ruling 2026-09-26).** Web resync handling is unit-proven: the resync-during-snapshot and
+  repeated-resync tests in `src/App.test.mjs`, and the epoch rule in
+  `normalReaderRecovery`. A healthy browser drains the route fast enough that Core never
+  overflows its queue, so the live normal-reader flood proof records 0 resyncs. Core unit
+  tests and the TUI flood test prove resync correctness.
+
 The timer guard (`npm test` runs `scripts/check-timer-markers.mjs`) fails on any
 timer call without a `// timer: <deadline|backoff|rate-limit|ui-lifetime|measurement-window|os-no-event> — <reason>`
 marker on the same or the previous line, and on any polling library wait
