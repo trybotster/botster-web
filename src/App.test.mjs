@@ -7969,7 +7969,6 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     decryptTestEnvelope,
     decryptTestEnvelopeBytes,
     emitChunkedTestResponse,
-    waitForTestCondition,
     flushMicrotasks,
     localWebrtcBootstrapFixture,
     createWebrtcDaemonClient,
