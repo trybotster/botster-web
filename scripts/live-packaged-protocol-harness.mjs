@@ -8291,6 +8291,14 @@ async function collectLiveOutputLossEvidence(page, sessionId, attachment, liveMa
       }, {}),
       route_output_contains_marker: decodedOutput.includes(marker),
       discarded: events.filter((entry) => entry.kind === "webrtc_terminal_frame_discarded").slice(-10).map((entry) => entry.payload),
+      closes_for_route: events
+        .filter((entry) => entry.kind === "daemon_event" && entry.payload?.type === "terminal_subscription_closed" && entry.payload?.subscription_id === subscriptionId)
+        .map((entry) => entry.payload),
+      channel_rejects: events
+        .filter((entry) => entry.kind === "daemon_event" && entry.payload?.type === "runtime_observation" && String(entry.payload?.kind ?? "").startsWith("subscription_channel_rejected:"))
+        .slice(-6)
+        .map((entry) => entry.payload.kind),
+      route_errors: events.filter((entry) => entry.kind === "terminal_stream_error").slice(-6).map((entry) => entry.payload),
       data_channels: events.filter((entry) => entry.kind === "terminal_data_channel").slice(-8).map((entry) => entry.payload),
       lifecycle: events.filter((entry) => entry.kind === "webrtc_lifecycle").slice(-6).map((entry) => entry.payload),
       terminal_after_attach: terminal.slice(attachIndex).map((entry) => entry.kind).slice(-40),
@@ -8411,7 +8419,12 @@ async function proveRapidAlternateScreenReattach(page, sessionId) {
         }
       );
       if (!recovered.timedOut || !recovered.restarted || !recovered.attached) {
-        throw new Error(`alternate-screen hydration recovery was incomplete: ${JSON.stringify(recovered)}`);
+        // Record why the first route was replaced (for example a remote channel close).
+        const evidence = await collectLiveOutputLossEvidence(page, sessionId, initialAttachment, `${marker}-live`);
+        recordProofNote("rapid_alternate_screen_unexpected_reattach", { recovered, evidence });
+        throw new Error(
+          `alternate-screen hydration recovery was incomplete: ${JSON.stringify(recovered)}; evidence=${JSON.stringify(evidence)}`
+        );
       }
     }
 
