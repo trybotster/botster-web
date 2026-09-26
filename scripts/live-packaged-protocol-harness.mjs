@@ -55,7 +55,7 @@ import {
   waitForHtmlShell,
   waitForHttpOk,
   waitForPackageAppUrl,
-  waitForSocket,
+  waitForHubReady,
   waitForTerminalAttachState,
   waitForTerminalCanvas,
   waitForTerminalSession
@@ -9885,7 +9885,7 @@ async function startWebrtcPackageRuntime() {
       );
     }
     const socketPath = join(webrtcDataDir, "botster-hub.sock");
-    await waitForSocket(socketPath);
+    // A caller-owned Hub is already running by contract: one request, and a refusal is an error.
     const status = await sendDaemonRequest(socketPath, { type: "status" });
     if (status.error) {
       throw new Error(
@@ -9909,9 +9909,8 @@ async function startWebrtcPackageRuntime() {
   }
 
   hubProcess = spawnHubProcess(webrtcDataDir);
-  await waitForSocket(join(webrtcDataDir, "botster-hub.sock"), () =>
-    hubProcess?.exitCode !== null ? `hub exited before socket readiness (code=${hubProcess.exitCode})` : undefined
-  );
+  const hubReady = await waitForHubReady(hubProcess);
+  console.log(`hub ready protocol_version=${hubReady.protocolVersion} build_revision=${hubReady.buildRevision}`);
 
   await ensurePackageEnabled("botster-web", packageRoot);
   if (workspacesPackagePath) {
@@ -10116,11 +10115,8 @@ async function restartHubWithDurableState() {
   }
 
   hubProcess = spawnHubProcess(webrtcDataDir);
-  await waitForSocket(join(webrtcDataDir, "botster-hub.sock"), () =>
-    hubProcess?.exitCode !== null
-      ? `hub exited before durable-state restart readiness (code=${hubProcess.exitCode})`
-      : undefined
-  );
+  const hubReady = await waitForHubReady(hubProcess);
+  console.log(`hub ready protocol_version=${hubReady.protocolVersion} build_revision=${hubReady.buildRevision}`);
 
   const { initialDecision } = await ensurePackageEnabled("botster-web", packageRoot);
   assertPackageReused(initialDecision, "botster-web");

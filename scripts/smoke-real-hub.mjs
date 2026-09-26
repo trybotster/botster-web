@@ -17,7 +17,7 @@ import {
   registerTerminalMarker, requestDaemonShutdown, sendDaemonRequest, spawnHubProcess,
   takePasteOutcomes, takeTerminalResults, typeThroughMountedTerminal, verifyCandidateManifest,
   waitForHtmlShell, waitForHttpOk, waitForPackageAppUrl, waitForRenderedTerminalText,
-  waitForSocket, waitForTerminalAttachState, waitForTerminalCanvas, waitForTerminalMarker,
+  waitForHubReady, waitForTerminalAttachState, waitForTerminalCanvas, waitForTerminalMarker,
   waitForTerminalSession
 } from "./live-hub-lane.mjs";
 
@@ -210,9 +210,7 @@ try {
     onStderr: (chunk) => { hubOutput.stderr += chunk; }
   });
   const socketPath = join(dataDir, "botster-hub.sock");
-  await step("hub-socket", {}, () => waitForSocket(socketPath, () =>
-    hubProcess?.exitCode !== null ? `hub exited before socket readiness (code=${hubProcess.exitCode})` : undefined
-  ));
+  await step("hub-socket", {}, () => waitForHubReady(hubProcess));
   await step("web-package", {}, () => ensurePackageEnabled("botster-web", packageRoot, { ...laneContext, dataDir }));
   const started = await step("web-entrypoint", {}, () => sendDaemonRequest(socketPath, {
     type: "start_package_entrypoint", package_name: "botster-web", entrypoint_id: "web-client"

@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -10,6 +9,7 @@ import {
   productionSessionScriptSource
 } from "./live-packaged-protocol-helpers.mjs";
 import { sendDaemonUnixRequest } from "./daemon-unix-client.mjs";
+import { waitForHubReady } from "./live-hub-lane.mjs";
 import {
   daemonCompatibilityRequirement,
   daemonProtocol,
@@ -35,11 +35,11 @@ try {
     "--data-dir",
     dataDir,
     "--session-worker-bin",
-    sessionWorkerBinary
-  ], { cwd: packageRoot, stdio: ["ignore", "pipe", "pipe"] });
+    sessionWorkerBinary, "--ready-fd", "3"
+  ], { cwd: packageRoot, stdio: ["ignore", "pipe", "pipe", "pipe"] });
   hub.stdout.pipe(process.stdout);
   hub.stderr.pipe(process.stderr);
-  await waitForSocket(socketPath, hub);
+  await waitForHubReady(hub);
 
   await runHub(["packages", "install", "--data-dir", dataDir, "--path", packageRoot]);
   await runHub(["packages", "enable", "--data-dir", dataDir, "botster-web"]);
@@ -222,7 +222,7 @@ async function waitForSessionLifecycle(expectedSessionId, expected) {
 }
 
 async function runHub(args) {
-  const child = spawn(hubBinary, args, { cwd: packageRoot, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(hubBinary, args, { cwd: packageRoot, stdio: ["ignore", "pipe", "pipe", "pipe"] });
   let output = "";
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
@@ -241,25 +241,6 @@ async function runHub(args) {
   return output;
 }
 
-async function waitForSocket(path, processHandle) {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (processHandle.exitCode !== null) {
-      throw new Error(`Hub exited before socket readiness (code=${processHandle.exitCode})`);
-    }
-    const socket = connect(path);
-    const connected = await new Promise((resolveConnected) => {
-      socket.once("connect", () => {
-        socket.end();
-        resolveConnected(true);
-      });
-      socket.once("error", () => resolveConnected(false));
-    });
-    if (connected) return;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  }
-  throw new Error(`timed out waiting for shared-session Hub socket ${path}`);
-}
 
 async function sendDaemonRequest(path, request) {
   return sendDaemonUnixRequest({

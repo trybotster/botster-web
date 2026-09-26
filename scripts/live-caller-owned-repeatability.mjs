@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
-import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sendDaemonUnixRequest } from "./daemon-unix-client.mjs";
+import { waitForHubReady } from "./live-hub-lane.mjs";
 import {
   daemonCompatibilityRequirement,
   daemonProtocol,
@@ -136,14 +136,14 @@ async function withHub(dataDir, callback) {
       "--data-dir",
       dataDir,
       "--session-worker-bin",
-      process.env.BOTSTER_SESSION_WORKER_BIN
+      process.env.BOTSTER_SESSION_WORKER_BIN, "--ready-fd", "3"
     ],
-    { stdio: ["ignore", "pipe", "pipe"] }
+    { stdio: ["ignore", "pipe", "pipe", "pipe"] }
   );
   hub.stdout.pipe(process.stdout);
   hub.stderr.pipe(process.stderr);
   try {
-    await waitForSocket(socketPath, hub);
+    await waitForHubReady(hub);
     return await callback(socketPath);
   } finally {
     const shutdown = spawn(
@@ -158,25 +158,6 @@ async function withHub(dataDir, callback) {
   }
 }
 
-async function waitForSocket(socketPath, hub) {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (hub.exitCode !== null) {
-      throw new Error(`Hub exited before caller-owned setup (code=${hub.exitCode})`);
-    }
-    const socket = connect(socketPath);
-    const connected = await new Promise((resolve) => {
-      socket.once("connect", () => {
-        socket.end();
-        resolve(true);
-      });
-      socket.once("error", () => resolve(false));
-    });
-    if (connected) return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`timed out waiting for caller-owned Hub socket ${socketPath}`);
-}
 
 async function sendDaemonRequest(socketPath, request) {
   return sendDaemonUnixRequest({

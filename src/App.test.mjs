@@ -2475,6 +2475,10 @@ assert.match(liveProtocolHarnessScript, /waitForTerminalSession/);
 assert.doesNotMatch(liveProtocolHarnessScript, /type: "send_input"/);
 assert.match(liveProtocolHarnessScript, /typeThroughMountedTerminal\(page, `\$\{echoProbe\}\\n`\)/);
 assert.match(liveProtocolHarnessScript, /callTerminalControl\(page, "focus"\)/);
+// Hub readiness is the --ready-fd line, never a socket connect-retry loop.
+assert.match(liveHubLaneScript, /args\.push\("--ready-fd", "3"\)/);
+assert.match(liveHubLaneScript, /export function waitForHubReady\(child/);
+assert.doesNotMatch(liveHubLaneScript, /export async function waitForSocket/);
 // Harness event waits are page-condition waits with the matcher installed in the page.
 assert.match(liveHubLaneScript, /__botsterHarnessEventMatches = \$\{harnessEventMatches\.toString\(\)\}/);
 assert.match(liveProtocolHarnessScript, /globalThis\.__botsterHarnessEventMatches\(entry, matchCriteria\)/);

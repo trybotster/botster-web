@@ -8,7 +8,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { connect } from "node:net";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import {
@@ -102,30 +101,49 @@ export async function sendDaemonRequest(socketPath, request) {
   });
 }
 
-export async function waitForSocket(socketPath, exitMessage) {
-  const deadline = Date.now() + 15_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    const earlyExit = exitMessage?.();
-    if (earlyExit) {
-      throw new Error(earlyExit);
-    }
+const HUB_READY_LINE = /^ready (\d+) (\S+)$/;
+const HUB_READY_DEADLINE_MS = 30_000;
 
-    const connected = await new Promise((resolve) => {
-      const socket = connect(socketPath);
-      socket.once("connect", () => {
-        socket.end();
-        resolve(true);
-      });
-      socket.once("error", (error) => {
-        lastError = error;
-        resolve(false);
-      });
+/**
+ * Reads the Hub's one readiness line from its fd-3 pipe: `ready <protocol_version> <build_revision>`.
+ * EOF without a complete line, a malformed line, or the child's exit is a start failure.
+ */
+export function waitForHubReady(child, { deadlineMs = HUB_READY_DEADLINE_MS } = {}) {
+  const pipe = child.stdio?.[3];
+  if (!pipe) return Promise.reject(new Error("hub was not started with a readiness pipe (fd 3)"));
+  return new Promise((resolve, reject) => {
+    let buffered = "";
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      pipe.removeAllListeners("data");
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const failure = (reason) => new Error(
+      `hub start failed: ${reason}; exit=${child.exitCode ?? "running"} stderr=${JSON.stringify(child.stderrTail?.() ?? "")}`
+    );
+    // timer: deadline — Hub readiness; expiry is a start failure and the caller kills the Hub.
+    const timer = setTimeout(() => finish(failure(`no ready line within ${deadlineMs} ms`)), deadlineMs);
+    pipe.setEncoding("utf8");
+    pipe.on("data", (chunk) => {
+      buffered += chunk;
+      const newline = buffered.indexOf("\n");
+      if (newline < 0) return;
+      const line = buffered.slice(0, newline);
+      const match = HUB_READY_LINE.exec(line);
+      if (!match) {
+        finish(failure(`malformed ready line ${JSON.stringify(line)}`));
+        return;
+      }
+      finish(undefined, { protocolVersion: Number(match[1]), buildRevision: match[2] });
     });
-    if (connected) return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw lastError ?? new Error(`timed out waiting for hub socket ${socketPath}`);
+    pipe.once("end", () => finish(failure("readiness pipe closed without a ready line")));
+    child.once("exit", (code, signal) => finish(failure(`exited (code=${code} signal=${signal})`)));
+    child.once("error", (error) => finish(failure(error.message)));
+  });
 }
 
 export async function waitForHttpOk(url, exitMessage) {
@@ -200,18 +218,29 @@ export async function listPackages(socketPath) {
  * Spawns one isolated Hub on `dataDir`. Every input is explicit: the binaries, the working
  * directory, the environment, and where stdout and stderr go besides this process's streams.
  */
+/**
+ * Starts `botster-hub start` with a readiness pipe at fd 3 (`--ready-fd 3`). Await
+ * waitForHubReady(child) before the first request: the Hub writes its ready line only after the
+ * socket is bound and the owner loop accepts requests.
+ */
 export function spawnHubProcess(dataDir, { hubBin, workerBin, cwd, env = process.env, onStdout, onStderr }) {
   if (!hubBin) throw new Error("spawnHubProcess requires hubBin");
   const args = ["start", "--data-dir", dataDir];
   if (workerBin) {
     args.push("--session-worker-bin", workerBin);
   }
+  args.push("--ready-fd", "3");
 
   const child = spawn(hubBin, args, {
     cwd,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "pipe"],
     env
   });
+  let stderrTail = "";
+  child.stderr.on("data", (chunk) => {
+    stderrTail = `${stderrTail}${chunk}`.slice(-4_000);
+  });
+  child.stderrTail = () => stderrTail;
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
