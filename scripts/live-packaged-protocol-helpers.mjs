@@ -683,6 +683,10 @@ export function convergeEntityFamily(events, family) {
   return { records: [...records.values()], chronology };
 }
 
+function isWorkspacesRowTemplate(template) {
+  return template?.type === "list_item";
+}
+
 export function classifyWorkspacesReference({
   uiTree,
   referenceId,
@@ -730,9 +734,13 @@ export function classifyWorkspacesReference({
       collisionIds: duplicateValues(resolvedBoundIds)
     };
   });
+  // Only row templates realize a reference. A non-row item template, such as the empty
+  // "present" stack Workspaces renders so an absence binding is non-empty while its session
+  // exists, is a structural marker and never counts as a materialized reference.
   const referenceCandidates = realizedBindings.flatMap(({ binding, candidates, collisionIds }) =>
     candidates
       .filter((candidate) => candidate.recordId === referenceId)
+      .filter((candidate) => candidate.branch !== "item" || isWorkspacesRowTemplate(binding.item_template))
       .map((candidate) => ({ ...candidate, binding, collisionIds }))
   );
   const materialized = referenceCandidates.find((candidate) =>
@@ -779,11 +787,19 @@ export function workspacesLifecycleRegion(ancestors, lifecycleClass) {
   return null;
 }
 
+/**
+ * Workspaces groups each stored reference as Current or Unavailable. A confirmed ended
+ * session releases its reference and membership, so a released reference must render in
+ * neither group; it has absence expectations only. There is no Ended group.
+ */
 export function workspacesLifecyclePartitionExpectations(partition) {
-  const lifecycleClasses = ["current", "ended", "unavailable"];
+  if (Object.hasOwn(partition, "ended")) {
+    throw new Error("Workspaces lifecycle has no Ended group; a confirmed ended session is released");
+  }
+  const lifecycleClasses = ["current", "unavailable"];
   const assignments = new Map();
   const expectations = [];
-  for (const lifecycleClass of lifecycleClasses) {
+  for (const lifecycleClass of [...lifecycleClasses, "released"]) {
     for (const referenceId of partition[lifecycleClass] ?? []) {
       if (assignments.has(referenceId)) {
         throw new Error(
@@ -792,6 +808,7 @@ export function workspacesLifecyclePartitionExpectations(partition) {
         );
       }
       assignments.set(referenceId, lifecycleClass);
+      if (lifecycleClass === "released") continue;
       expectations.push({
         referenceId,
         lifecycleClass

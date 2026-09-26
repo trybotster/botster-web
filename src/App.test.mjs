@@ -547,6 +547,15 @@ assert.deepEqual(classifyWorkspacesReference({
   bindingSource: "/session",
   where: { session_uuid: "session-missing" }
 });
+// A present marker (non-row item template) for an existing ended session is not a row:
+// the reference is not materialized even though the marker node renders.
+assert.equal(classifyWorkspacesReference({
+  uiTree: literalLifecycleTree,
+  referenceId: "session-missing",
+  lifecycleClass: "unavailable",
+  canonicalRecord: { session_uuid: "session-missing", lifecycle_class: "ended" },
+  renderedNodeIds: ["workspace-session-missing-present"]
+}).outcome === "materialized", false);
 assert.equal(classifyWorkspacesReference({
   uiTree: { $kind: "bind_list", source: "/session", where: { session_uuid: "session-empty", lifecycle_class: "current" }, item_template: { id: { $bind: "@/missing_identity" }, type: "list_item" } },
   referenceId: "session-empty",
@@ -628,24 +637,32 @@ assert.equal(workspacesLifecycleRegion([
 ], "ended"), null);
 const lifecyclePartition = workspacesLifecyclePartitionExpectations({
   current: ["transition-1", "transition-2", "transition-3", "transition-4"],
-  ended: [
-    "stable-1", "stable-2", "stable-3", "stable-4",
-    "remove-1", "remove-2", "remove-3", "remove-4"
-  ],
   unavailable: ["missing-1", "missing-2", "missing-3", "missing-4"]
 });
-assert.equal(lifecyclePartition.expectations.length, 16);
-assert.equal(lifecyclePartition.absentExpectations.length, 32);
+assert.equal(lifecyclePartition.expectations.length, 8);
+assert.equal(lifecyclePartition.absentExpectations.length, 8);
 assert.equal(Object.hasOwn(lifecyclePartition.expectations[0], "oracle"), false);
 assert.equal(Object.hasOwn(lifecyclePartition.absentExpectations[0], "oracle"), false);
 assert.deepEqual(
   lifecyclePartition.expectations.filter((entry) => entry.lifecycleClass === "current").map((entry) => entry.referenceId),
   ["transition-1", "transition-2", "transition-3", "transition-4"]
 );
+// A released reference (its session ended) has no group: it must be absent from both.
+const releasedPartition = workspacesLifecyclePartitionExpectations({
+  released: ["transition-1"],
+  unavailable: ["missing-1"]
+});
+assert.deepEqual(releasedPartition.expectations, [{ referenceId: "missing-1", lifecycleClass: "unavailable" }]);
+assert.deepEqual(releasedPartition.absentExpectations, [
+  { referenceId: "missing-1", lifecycleClass: "current" },
+  { referenceId: "transition-1", lifecycleClass: "current" },
+  { referenceId: "transition-1", lifecycleClass: "unavailable" }
+]);
 assert.throws(() => workspacesLifecyclePartitionExpectations({
   current: ["duplicate"],
-  ended: ["duplicate"]
-}), /belongs to both current and ended/);
+  released: ["duplicate"]
+}), /belongs to both current and released/);
+assert.throws(() => workspacesLifecyclePartitionExpectations({ ended: ["stable-1"] }), /has no Ended group/);
 const endedWithUnavailablePresentStack = {
   children: [
     {
@@ -2882,24 +2899,12 @@ assert.equal(
 );
 assert.match(liveProtocolHarnessScript, /exerciseWorkspacesLifecycle/);
 assert.match(liveProtocolHarnessScript, /transitions: Array\.from\(\{ length: 4 \}/);
-assert.match(liveProtocolHarnessScript, /stableEnded: Array\.from\(\{ length: 4 \}/);
-assert.match(liveProtocolHarnessScript, /removals: Array\.from\(\{ length: 4 \}/);
 assert.match(liveProtocolHarnessScript, /neverExisting: Array\.from\(\{ length: 4 \}/);
-assert.match(liveProtocolHarnessScript, /stageExpectations\(removedPartition\)/);
+assert.doesNotMatch(liveProtocolHarnessScript, /stableEnded: Array\.from/);
+assert.match(liveProtocolHarnessScript, /stageExpectations\(releasedPartition\)/);
 assert.match(liveProtocolHarnessScript, /observedWorkspacesLifecyclePartition\(reconnected\.classifications\)/);
-assert.match(liveProtocolHarnessScript, /priorEvidence: \[initial, removed\]/);
-assert.match(
-  liveProtocolHarnessScript,
-  /assertStableLifecycleIdentity\(transitioned, reconnected, sessionId, "ended"\)/
-);
-assert.match(
-  liveProtocolHarnessScript,
-  /assertStableLifecycleIdentity\(initial, reconnected, sessionId, "ended"\)/
-);
-assert.match(
-  liveProtocolHarnessScript,
-  /assertStableLifecycleIdentity\(removed, reconnected, sessionId, "unavailable"\)/
-);
+assert.match(liveProtocolHarnessScript, /priorEvidence: \[initial, released\]/);
+assert.match(liveProtocolHarnessScript, /"ended-release"/);
 assert.match(
   liveProtocolHarnessScript,
   /assertStableLifecycleIdentity\(initial, reconnected, sessionId, "unavailable"\)/

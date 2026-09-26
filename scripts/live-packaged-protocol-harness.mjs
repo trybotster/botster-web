@@ -222,6 +222,8 @@ let hubStderr = "";
 // the Hub. Best effort and bounded; the normal success path shuts it down explicitly.
 let productionSessionStarted = false;
 let productionSessionShutDown = false;
+// Sessions the Workspaces lifecycle stage spawned; failure cleanup shuts them down too.
+const lifecycleSeedSessionIds = new Set();
 const ownsWebrtcDataDir = suppliedDataDir === undefined;
 let harnessFailed = false;
 const webrtcDataDir =
@@ -3450,10 +3452,11 @@ async function exerciseWorkspacesLifecycle(page) {
     throw new Error("Workspaces lifecycle mode requires the production create/route proof first");
   }
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  // Workspaces main groups references as Current or Unavailable. A confirmed ended session
+  // releases its reference and membership (botster-workspaces e267871), so the scenario has
+  // two cohorts: current sessions that end during the stage, and ids that never existed.
   const scenario = {
     transitions: Array.from({ length: 4 }, () => randomUUID()),
-    stableEnded: Array.from({ length: 4 }, () => randomUUID()),
-    removals: Array.from({ length: 4 }, () => randomUUID()),
     neverExisting: Array.from({ length: 4 }, () => randomUUID())
   };
   const allReferences = Object.values(scenario).flat();
@@ -3475,21 +3478,14 @@ async function exerciseWorkspacesLifecycle(page) {
   };
   const initialPartition = {
     current: scenario.transitions,
-    ended: [...scenario.stableEnded, ...scenario.removals],
     unavailable: scenario.neverExisting
   };
-  const transitionedPartition = {
-    current: [],
-    ended: [...scenario.transitions, ...scenario.stableEnded, ...scenario.removals],
+  const releasedPartition = {
+    released: scenario.transitions,
     unavailable: scenario.neverExisting
-  };
-  const removedPartition = {
-    current: [],
-    ended: [...scenario.transitions, ...scenario.stableEnded],
-    unavailable: [...scenario.removals, ...scenario.neverExisting]
   };
 
-  for (const sessionId of [...scenario.transitions, ...scenario.stableEnded, ...scenario.removals]) {
+  for (const sessionId of scenario.transitions) {
     const response = await sendDaemonRequest(socketPath, {
       type: "spawn",
       session_id: sessionId,
@@ -3498,27 +3494,13 @@ async function exerciseWorkspacesLifecycle(page) {
     if (response.error) {
       throw new Error(`Workspaces lifecycle seed spawn failed for ${sessionId}: ${JSON.stringify(response.error)}`);
     }
+    lifecycleSeedSessionIds.add(sessionId);
     await waitForHarnessEvent(page, {
       kind: "hub_frame",
       family: "session",
       id: sessionId,
       lifecycle_class: "current"
     }, `Workspaces lifecycle current seed ${sessionId}`);
-  }
-  for (const sessionId of [...scenario.stableEnded, ...scenario.removals]) {
-    const response = await sendDaemonRequest(socketPath, {
-      type: "shutdown_session",
-      session_id: sessionId
-    });
-    if (response.error) {
-      throw new Error(`Workspaces lifecycle seed shutdown failed for ${sessionId}: ${JSON.stringify(response.error)}`);
-    }
-    await waitForHarnessEvent(page, {
-      kind: "hub_frame",
-      family: "session",
-      id: sessionId,
-      lifecycle_class: "ended"
-    }, `Workspaces lifecycle ended seed ${sessionId}`);
   }
 
   await selectWorkspacesLifecycleWorkspace(page, workspacesCompatibilityState);
@@ -3539,8 +3521,8 @@ async function exerciseWorkspacesLifecycle(page) {
     stage: "initial-owner-surface",
     ...stageExpectations(initialPartition)
   });
-  const renderCountBeforeTransition = initial.requestCounts.plugin_surface_render;
-  const listCountBeforeTransition = initial.requestCounts.list_sessions;
+  const renderCountBeforeRelease = initial.requestCounts.plugin_surface_render;
+  const listCountBeforeRelease = initial.requestCounts.list_sessions;
 
   for (const sessionId of scenario.transitions) {
     const transitionResponse = await sendDaemonRequest(socketPath, {
@@ -3559,45 +3541,18 @@ async function exerciseWorkspacesLifecycle(page) {
       lifecycle_class: "ended"
     }, `Workspaces lifecycle current-to-ended entity transition ${sessionId}`);
   }
-  const transitioned = await assertWorkspacesLifecycleOracles(page, {
-    stage: "current-to-ended-without-refresh",
-    ...stageExpectations(transitionedPartition),
+  // The ended patch alone must move each reference out of Current without it landing in
+  // Unavailable, with no surface pull and no session list: the removal is event-driven.
+  const released = await assertWorkspacesLifecycleOracles(page, {
+    stage: "ended-releases-reference-without-refresh",
+    ...stageExpectations(releasedPartition),
     priorEvidence: initial
   });
   assertLifecycleRequestCountsUnchanged(
-    transitioned.requestCounts,
-    renderCountBeforeTransition,
-    listCountBeforeTransition,
-    "current-to-ended"
-  );
-
-  for (const sessionId of scenario.removals) {
-    const removeResponse = await sendDaemonRequest(socketPath, {
-      type: "remove_session",
-      session_id: sessionId
-    });
-    if (removeResponse.error) {
-      throw new Error(
-        `Workspaces lifecycle canonical remove failed for ${sessionId}: ${JSON.stringify(removeResponse.error)}`
-      );
-    }
-    await waitForHarnessEvent(page, {
-      kind: "hub_frame",
-      frameKind: "entity_remove",
-      family: "session",
-      id: sessionId
-    }, `Workspaces lifecycle canonical entity removal ${sessionId}`);
-  }
-  const removed = await assertWorkspacesLifecycleOracles(page, {
-    stage: "removed-reference",
-    ...stageExpectations(removedPartition),
-    priorEvidence: transitioned
-  });
-  assertLifecycleRequestCountsUnchanged(
-    removed.requestCounts,
-    renderCountBeforeTransition,
-    listCountBeforeTransition,
-    "entity-remove"
+    released.requestCounts,
+    renderCountBeforeRelease,
+    listCountBeforeRelease,
+    "ended-release"
   );
 
   const previousGrantId = await latestLocalWebrtcGrantId(page);
@@ -3625,15 +3580,16 @@ async function exerciseWorkspacesLifecycle(page) {
   await page.getByTestId(HOST_CHROME.selectedAppSurfaceTestId).waitFor({ timeout: 15_000 });
   await assertWorkspacesNodeIds(page, [
     "botster-workspaces-app",
-    "botster-workspaces-toolbar",
     "botster-workspaces-list"
   ], "lifecycle reconnect");
   await assertNoUnsupportedWorkspacesNodes(page);
+  // The fresh plugin render counts stored references: only the never-existing ids remain,
+  // which proves the plugin released the ended sessions' membership, not just their rows.
   await assertWorkspacesCompatibilityRow(
     page,
     workspacesCompatibilityState,
     "lifecycle reconnect",
-    allReferences.length
+    scenario.neverExisting.length
   );
   const reconnectedRenderCount = await daemonRequestCount(page, renderCriteria);
   if (reconnectedRenderCount !== 1) {
@@ -3644,9 +3600,9 @@ async function exerciseWorkspacesLifecycle(page) {
   }
   await selectWorkspacesLifecycleWorkspace(page, workspacesCompatibilityState);
   const reconnected = await assertWorkspacesLifecycleOracles(page, {
-    stage: "reconnect-authoritative-history",
-    ...stageExpectations(removedPartition),
-    priorEvidence: [initial, removed]
+    stage: "reconnect-authoritative-membership",
+    ...stageExpectations(releasedPartition),
+    priorEvidence: [initial, released]
   });
   const reconnectEvidence = reconnectGenerationEvidence(reconnected.events, previousSubscriptionId);
   if (!reconnectEvidence.fresh || !reconnectEvidence.authoritativeSnapshot) {
@@ -3658,24 +3614,18 @@ async function exerciseWorkspacesLifecycle(page) {
       requestCounts: { ...reconnected.requestCounts, reconnect: reconnectEvidence }
     }));
   }
-  for (const sessionId of scenario.transitions) {
-    assertStableLifecycleIdentity(transitioned, reconnected, sessionId, "ended");
-  }
-  for (const sessionId of scenario.stableEnded) {
-    assertStableLifecycleIdentity(initial, reconnected, sessionId, "ended");
-  }
-  for (const sessionId of scenario.removals) {
-    assertStableLifecycleIdentity(removed, reconnected, sessionId, "unavailable");
-  }
   for (const sessionId of scenario.neverExisting) {
     assertStableLifecycleIdentity(initial, reconnected, sessionId, "unavailable");
+  }
+  for (const sessionId of scenario.transitions) {
+    const response = await sendDaemonRequest(socketPath, { type: "remove_session", session_id: sessionId });
+    if (!response.error) lifecycleSeedSessionIds.delete(sessionId);
   }
   console.log(`Workspaces lifecycle acceptance passed ${JSON.stringify({
     scenario,
     partitions: {
       initial: observedWorkspacesLifecyclePartition(initial.classifications),
-      transitioned: observedWorkspacesLifecyclePartition(transitioned.classifications),
-      removed: observedWorkspacesLifecyclePartition(removed.classifications),
+      released: observedWorkspacesLifecyclePartition(released.classifications),
       reconnected: observedWorkspacesLifecyclePartition(reconnected.classifications)
     },
     reconnect,
@@ -5007,7 +4957,7 @@ function assertStableLifecycleIdentity(before, after, referenceId, lifecycleClas
 }
 
 function observedWorkspacesLifecyclePartition(classifications) {
-  return Object.fromEntries(["current", "ended", "unavailable"].map((lifecycleClass) => [
+  return Object.fromEntries(["current", "unavailable"].map((lifecycleClass) => [
     lifecycleClass,
     classifications
       .filter((entry) => entry.lifecycleClass === lifecycleClass)
@@ -6288,8 +6238,17 @@ async function shutdownProductionSession() {
  * is still running. Errors are logged, never thrown, so the original failure is preserved.
  */
 async function cleanupProductionSessionBestEffort() {
-  if (!productionSessionStarted || productionSessionShutDown || !webrtcDataDir || hubProcess?.exitCode !== null) return;
+  if (!webrtcDataDir || hubProcess?.exitCode !== null) return;
   const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  for (const sessionId of lifecycleSeedSessionIds) {
+    const bound = new Promise((resolve) => setTimeout(() => resolve({ error: { kind: "cleanup_bound" } }), 3_000));
+    const response = await Promise.race([
+      sendDaemonRequest(socketPath, { type: "shutdown_session", session_id: sessionId }).catch((error) => ({ error: { message: error.message } })),
+      bound
+    ]);
+    console.error(`[failure cleanup] shutdown_session ${sessionId}: ${response?.error ? JSON.stringify(response.error) : "ok"}`);
+  }
+  if (!productionSessionStarted || productionSessionShutDown) return;
   for (const type of ["shutdown_session", "remove_session"]) {
     const bound = new Promise((resolve) => setTimeout(() => resolve({ error: { kind: "cleanup_bound" } }), 3_000));
     const response = await Promise.race([
