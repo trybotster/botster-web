@@ -701,15 +701,27 @@ try {
         (entry.kind === "terminal_data_channel" && entry.payload?.state === "closed") ||
         (entry.kind === "daemon_event" && (
           entry.payload?.type === "terminal_subscription_closed" ||
-          String(entry.payload?.kind ?? "").startsWith("subscription_channel_rejected:")
+          String(entry.payload?.kind ?? "").startsWith("subscription_channel_rejected:") ||
+          // Hub's terminal channel driver exit: terminal_channel_closed:<subscription>:<generation>:<exit>
+          String(entry.payload?.kind ?? "").startsWith("terminal_channel_closed:")
         )) ||
         (entry.kind === "webrtc_lifecycle" && entry.payload?.type === "terminal-data-channel-closed")
       )
       .slice(-40)
       .map(({ index, entry }) => ({ index, kind: entry.kind, payload: entry.payload }));
-    const transportLost = (harnessState.terminal ?? []).filter((entry) => entry.kind === "transport_lost" || entry.kind === "transport_recovered");
+    const terminalTelemetry = harnessState.terminal ?? [];
+    const transportLost = terminalTelemetry.filter((entry) => entry.kind === "transport_lost" || entry.kind === "transport_recovered");
+    const lastInputSent = terminalTelemetry.filter((entry) => entry.kind === "input_sent").at(-1)?.payload ?? null;
+    const lastInput = lastInputSent
+      ? {
+          ...lastInputSent,
+          result_arrived: terminalTelemetry.some(
+            (entry) => entry.kind === "input_result" && entry.payload?.operation_id === lastInputSent.operation_id
+          )
+        }
+      : null;
     if (routeLossEvents.length > 0 || transportLost.length > 0) {
-      diagnosticMessage += `\nroute loss evidence:\n${JSON.stringify({ routeLossEvents, transportLost }, null, 2)}`;
+      diagnosticMessage += `\nroute loss evidence:\n${JSON.stringify({ routeLossEvents, transportLost, lastInput }, null, 2)}`;
     }
     const terminalStreamEvents = harnessState.events?.filter((entry) => entry.kind.startsWith("terminal_stream_")) ?? [];
     if (terminalStreamEvents.length > 0) {
