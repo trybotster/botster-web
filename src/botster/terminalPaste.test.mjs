@@ -28,7 +28,7 @@ export async function runTerminalPasteTests(helpers) {
     createHubTerminalDataPlane,
     bindGhostsnpInstaller,
     emitTestTerminalBody,
-    sentTestInputFrames,
+    createTestInputFrameReader,
     standardAttachFrames,
     inputResultBody,
     inputFrameHeader,
@@ -206,14 +206,16 @@ export async function runTerminalPasteTests(helpers) {
       const sentBefore = terminal.sent.length;
       const result = (operationId, outcome, options) =>
         emitTestTerminalBody(terminal, secret, { generation, streamEpoch: 0 }, inputResultBody(operationId, outcome, { modeBits, ...options }));
+      // Each sent message is decrypted once; waits re-read the decoded frames.
+      const frameReader = createTestInputFrameReader(terminal, secret, sentBefore);
       const framesSince = async () => {
-        // Polled while sends are in progress: only complete messages count as frames.
-        const frames = await sentTestInputFrames({ sent: terminal.sent.slice(sentBefore) }, secret, { allowTrailingPartial: true });
+        // Read while sends are in progress: only complete messages count as frames.
+        const frames = await frameReader.read({ allowTrailingPartial: true });
         return frames.map(decodeFrame);
       };
       // Strict reassembly at a scenario's completion point: every message complete.
       const assertComplete = async () => {
-        await sentTestInputFrames({ sent: terminal.sent.slice(sentBefore) }, secret);
+        await frameReader.read();
       };
       return { terminal, subscriptionId, result, framesSince, assertComplete };
     };

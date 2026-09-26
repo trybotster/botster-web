@@ -8144,6 +8144,7 @@ for (const failureKind of ["timeout", "closed", "send_throw"]) {
     bindGhostsnpInstaller,
     emitTestTerminalBody,
     sentTestInputFrames,
+    createTestInputFrameReader,
     standardAttachFrames,
     terminalBody,
     outputBody,
@@ -17115,6 +17116,47 @@ async function openTestTerminalChunk(secret, message) {
 }
 
 /** Reassembles every Web-to-Hub binary message on a terminal channel into complete input frames. */
+/**
+ * Decodes the terminal input frames a channel sent, incrementally: each message is decrypted
+ * once, however often a wait re-reads. Reads are serialized. read() returns every complete
+ * frame from `startIndex` on.
+ */
+function createTestInputFrameReader(channel, secret, startIndex = 0) {
+  let next = startIndex;
+  const frames = [];
+  const partial = new Map();
+  let reading = Promise.resolve();
+  const advance = async () => {
+    while (next < channel.sent.length) {
+      const sent = channel.sent[next];
+      next += 1;
+      if (typeof sent === "string") continue;
+      const { header, plaintext } = await openTestTerminalChunk(secret, sent);
+      const key = String(header.message_id);
+      const assembly = partial.get(key) ?? { header, body: new Uint8Array(header.total_bytes), received: 0, next: 0 };
+      assert.equal(header.chunk_index, assembly.next, "terminal chunks arrive in index order");
+      assembly.body.set(plaintext, assembly.received);
+      assembly.received += plaintext.byteLength;
+      assembly.next += 1;
+      partial.set(key, assembly);
+      if (assembly.next === header.chunk_count) {
+        assert.equal(assembly.received, header.total_bytes, "terminal chunk bytes match total_bytes");
+        frames.push({ header: assembly.header, frame: assembly.body });
+        partial.delete(key);
+      }
+    }
+  };
+  return {
+    async read({ allowTrailingPartial = false } = {}) {
+      reading = reading.then(advance);
+      await reading;
+      if (!allowTrailingPartial) assert.equal(partial.size, 0, "no partial terminal message remains");
+      else assert.ok(partial.size <= 1, "at most the message in flight is partial");
+      return frames.slice();
+    }
+  };
+}
+
 async function sentTestInputFrames(channel, secret, { allowTrailingPartial = false } = {}) {
   const frames = recorder();
   const partial = new Map();
