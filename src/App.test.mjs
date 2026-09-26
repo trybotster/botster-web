@@ -2499,7 +2499,9 @@ assert.match(liveProtocolHarnessScript, /botster-web-production-echo:/);
 assert.match(liveProtocolHarnessScript, /botster-web-production-size:/);
 assert.match(liveProtocolHarnessScript, /waitForResizeProof/);
 assert.match(liveProtocolHarnessScript, /assertNoUnknownSession/);
-assert.match(liveProtocolHarnessScript, /last observed/);
+// The resize proof waits for the pushed MODES size, then makes one PTY size probe.
+assert.match(liveProtocolHarnessScript, /timed out waiting for pushed MODES/);
+assert.match(liveProtocolHarnessScript, /PTY reports \$\{observedSize\} after pushed MODES/);
 assert.match(liveProtocolHarnessScript, /botster-web-production-exiting/);
 assert.match(liveProtocolHarnessScript, /BOTSTER_LIVE_DIRECT_TERMINAL/);
 assert.match(liveProtocolHarnessScript, /encodePaste\(operationId/);

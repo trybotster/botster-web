@@ -88,7 +88,27 @@ const terminalProtocol = await (async () => {
   }).outputText;
   return import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
 })();
-const { decodeModeFlags, encodePaste, encodeRawBytes, encodeResize, MAX_PASTE_BYTES } = terminalProtocol;
+const { decodeModeFlags, encodePaste, encodeRawBytes, encodeResize, MAX_PASTE_BYTES, ModeBits } = terminalProtocol;
+
+/**
+ * Waits for the route's latest pushed MODES frame to have `bit` set to `expected`. Core pushes
+ * MODES on every change after attach, so this is the mode change itself, not a poll of
+ * read_mode_flags. Returns the decoded flags with rows, cols, and mode_bits.
+ */
+async function waitForPushedModes(page, bit, expected, label, timeout = 15_000) {
+  const modes = await page.waitForFunction(({ modeBit, wanted }) => {
+    const latest = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).findLast((entry) => entry.kind === "modes");
+    const bits = latest?.payload?.modeBits;
+    if (typeof bits !== "number") return null;
+    return ((bits & modeBit) !== 0) === wanted ? latest.payload : null;
+  }, { modeBit: bit, wanted: expected }, { timeout }).then((handle) => handle.jsonValue()).catch(async (error) => {
+    const latest = await page.evaluate(() =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).findLast((entry) => entry.kind === "modes")?.payload ?? null
+    );
+    throw new Error(`${label}: pushed MODES never had bit ${bit} = ${expected}; latest=${JSON.stringify(latest)}: ${error.message}`);
+  });
+  return { ...decodeModeFlags(modes.modeBits), rows: modes.rows, cols: modes.cols, mode_bits: modes.modeBits };
+}
 
 
 const packageRoot = process.cwd();
@@ -7871,19 +7891,8 @@ async function proveLivePasteCases(page) {
   // bracketed_paste equals the case's target confirms Core has applied and settled the
   // deliberate mode change before the paste is dispatched. This is an observed condition, not
   // output delivery, and it changes no production logic.
-  const waitForBracketedMode = async (target, label) => {
-    const boundMs = 8_000;
-    const startedAt = Date.now();
-    let flags = await readDirectTerminalModeFlags(page, productionSessionId);
-    while (flags.bracketed_paste !== target) {
-      if (Date.now() - startedAt > boundMs) {
-        throw new Error(`${label}: authoritative bracketed_paste did not reach ${target} within ${boundMs} ms; last flags=${JSON.stringify(flags)}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      flags = await readDirectTerminalModeFlags(page, productionSessionId);
-    }
-    return flags;
-  };
+  const waitForBracketedMode = (target, label) =>
+    waitForPushedModes(page, ModeBits.BRACKETED_PASTE, target, `${label} bracketed_paste`, 8_000);
 
   // One case: announce the wire length, wait for the raw-mode ready marker, observe the
   // authoritative mode has settled to the target, dispatch the real paste gesture, then
@@ -8023,7 +8032,7 @@ async function proveLivePasteCases(page) {
       operation_id: outcome.operationId,
       unsafe_paste_consent: unsafePasteConsent,
       pre_paste_bracketed_paste: preFlags.bracketed_paste,
-      pre_paste_mouse_mode: preFlags.mouse_mode
+      pre_paste_mouse: { normal: preFlags.mouse_normal, any: preFlags.mouse_any, button: preFlags.mouse_button, sgr: preFlags.mouse_sgr }
     });
   };
 
@@ -8786,13 +8795,7 @@ async function proveAlternateScreenExit(page, sessionId) {
     throw new Error("timed out waiting for mounted terminal renderer write botster-web-production-alt-exited");
   }
 
-  const flagsDeadline = Date.now() + 15_000;
-  let afterFlags = beforeFlags;
-  while (Date.now() < flagsDeadline) {
-    afterFlags = await readDirectTerminalModeFlags(page, sessionId);
-    if (afterFlags.alt_screen === false) break;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  }
+  const afterFlags = await waitForPushedModes(page, ModeBits.ALT_SCREEN, false, "alternate-screen exit");
   if (afterFlags.alt_screen !== false) {
     throw new Error(
       `alternate-screen exit expected alt_screen false after exit: ${JSON.stringify(afterFlags)}`
@@ -9479,25 +9482,22 @@ async function assertTerminalAttachChronology(page, sessionId, requiredSubscript
 }
 
 async function waitForResizeProof(page, requestedResize) {
-  const deadline = Date.now() + 20_000;
-  let lastObservedSize = "none";
-
-  while (Date.now() < deadline) {
-    const outputCount = await terminalOutputCount(page);
-    await callTerminalControl(page, "writeInput", "botster-web-production-size\n");
-    const observedSize = await waitForNextSizeProbe(page, outputCount).catch(() => undefined);
-    lastObservedSize = observedSize ?? lastObservedSize;
-
-    if (observedSize === `${requestedResize.rows}x${requestedResize.cols}`) {
-      return;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 250));
+  const expectedSize = `${requestedResize.rows}x${requestedResize.cols}`;
+  // Core pushes MODES with the new rows and cols once the PTY is resized: wait for that event,
+  // then prove it on the PTY with one size probe.
+  await page.waitForFunction(({ rows, cols }) =>
+    (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.terminal ?? []).some(
+      (entry) => entry.kind === "modes" && entry.payload?.rows === rows && entry.payload?.cols === cols
+    ),
+  { rows: requestedResize.rows, cols: requestedResize.cols }, { timeout: 20_000 }).catch((error) => {
+    throw new Error(`timed out waiting for pushed MODES ${expectedSize}: ${error.message}`);
+  });
+  const outputCount = await terminalOutputCount(page);
+  await callTerminalControl(page, "writeInput", "botster-web-production-size\n");
+  const observedSize = await waitForNextSizeProbe(page, outputCount);
+  if (observedSize !== expectedSize) {
+    throw new Error(`PTY reports ${observedSize} after pushed MODES ${expectedSize}`);
   }
-
-  throw new Error(
-    `timed out waiting for PTY resize ${requestedResize.rows}x${requestedResize.cols}; last observed ${lastObservedSize}`
-  );
 }
 
 async function waitForSessionStatus(page, lifecycle) {
