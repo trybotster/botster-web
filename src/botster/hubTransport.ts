@@ -1,3 +1,4 @@
+import { quarantineOperationIdFromAction, quarantineTargetFromAction, resolveQuarantineActionId } from "./hubQuarantines";
 import type { ActionBinding, ActionRequestEnvelope } from "./actions";
 import type {
   PackageSurfaceDescriptor,
@@ -685,6 +686,7 @@ function statusRecord(
     sessions: status.session_count,
     packages: status.package_count,
     state_source: status.state_source,
+    quarantines: status.quarantines ?? [],
     diagnostics: [...(status.diagnostics ?? []), ...responseDiagnostics]
   };
 }
@@ -1429,6 +1431,46 @@ async function dispatchDaemonAction(
       hub_update: response.hub_update ?? null,
       diagnostics: responseDiagnostics(response)
     }));
+    return;
+  }
+
+  if (action.id === resolveQuarantineActionId) {
+    const target = quarantineTargetFromAction(action);
+    if (!target) {
+      emit(actionResultFrame(request, false, "Resolve quarantine action is missing a quarantine target"));
+      return;
+    }
+    const response = await bridge.request({ type: "resolve_quarantine", target });
+    emitResponse(response);
+    const resolved = response.kind === "quarantine_resolved" && !response.error;
+    // The action result reports the Hub's answer to the mutation only, at once: the action
+    // deadline must not also cover the status read that follows.
+    emit(actionResultFrame(request, resolved, response.error?.message ?? (resolved
+      ? undefined
+      : `Resolve quarantine protocol error: expected quarantine_resolved, received ${response.kind}.`), {
+      request_type: "resolve_quarantine",
+      kind: response.kind,
+      target,
+      ...(resolved ? { status_refresh: { state: "pending" } } : {}),
+      error_kind: response.error?.code,
+      diagnostics: responseDiagnostics(response)
+    }));
+    if (!resolved) return;
+    // The quarantine list lives in Hub status. Read it again with its own request; the status
+    // frames come first, then one status_refresh frame says whether the list is current.
+    let refresh: { ok: true } | { ok: false; error: string };
+    try {
+      const status = await bridge.request({ type: "status" });
+      emitResponse(status);
+      refresh = status.error ? { ok: false, error: status.error.message } : { ok: true };
+    } catch (error: unknown) {
+      refresh = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    const operationId = quarantineOperationIdFromAction(action);
+    emit({
+      kind: "status_refresh",
+      payload: { cause: "resolve_quarantine", target, ...(operationId ? { operation_id: operationId } : {}), ...refresh }
+    });
     return;
   }
 

@@ -2,6 +2,8 @@
 
 import type { UiActionResult } from "@trybotster/ui-contract";
 
+import type { QuarantineResolveOutcome } from "../botster/hubQuarantines";
+import type { StatusRefreshPayload } from "../botster/protocol";
 import { actionLabelFromId, readDiagnosticMessage, readRecord, readString } from "./values";
 
 export type ActionToast = { message: string; color: string };
@@ -129,4 +131,42 @@ export function sessionTypeActionFeedback(result: { accepted: boolean; reason?: 
       : result.reason ?? `${actionLabelFromId(requestType)} failed`,
     color: result.accepted ? "success" : "danger"
   };
+}
+
+/**
+ * The row outcome of a resolve_quarantine action result: refreshing when the Hub confirmed it
+ * (a status_refresh frame follows), refused otherwise. undefined when the result is not a
+ * resolve_quarantine result.
+ */
+export function quarantineResolveOutcome(
+  result: { accepted: boolean; reason?: string; result?: unknown }
+): Extract<QuarantineResolveOutcome, { state: "refreshing" | "refused" }> | undefined {
+  const payload = readRecord(result.result);
+  if (readString(payload.request_type) !== "resolve_quarantine") return undefined;
+  return result.accepted
+    ? { state: "refreshing" }
+    : { state: "refused", message: result.reason ?? "Resolve quarantine failed" };
+}
+
+/**
+ * The row outcome of the status_refresh frame after a confirmed resolve: null when the status
+ * read succeeded (the row leaves with the refreshed status), resolved_stale when it failed.
+ */
+export function quarantineRefreshOutcome(
+  payload: StatusRefreshPayload
+): Extract<QuarantineResolveOutcome, { state: "resolved_stale" }> | null {
+  if (payload.ok) return null;
+  return {
+    state: "resolved_stale",
+    message: `Quarantine resolved, but the Hub status could not be read again (${payload.error ?? "unknown error"}). The list may be out of date.`
+  };
+}
+
+/** Toast for a resolve_quarantine action result: the Hub's answer to the mutation. */
+export function quarantineActionFeedback(result: { accepted: boolean; reason?: string; result?: unknown }): { message: string; color: string } | undefined {
+  const outcome = quarantineResolveOutcome(result);
+  if (!outcome) return undefined;
+  return outcome.state === "refused"
+    ? { message: outcome.message, color: "danger" }
+    : { message: "Quarantine resolved", color: "success" };
 }

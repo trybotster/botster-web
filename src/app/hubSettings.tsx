@@ -1,5 +1,13 @@
 /** Hub settings sections, software identity, and diagnostics support. */
 
+import type { DaemonQuarantine } from "../botster/generated/daemon-protocol";
+import {
+  hubQuarantines,
+  quarantineKey,
+  quarantineRowOutcome,
+  type QuarantineResolveOutcome,
+  type QuarantineRowOutcomes
+} from "../botster/hubQuarantines";
 import {
   IonBadge,
   IonButton,
@@ -85,15 +93,99 @@ export function DiagnosticsView({
   );
 }
 
+function quarantineTime(quarantinedAtMs: number): string {
+  return quarantinedAtMs > 0 ? new Date(quarantinedAtMs).toLocaleString() : "No failure record";
+}
+
+/** One quarantine the operator must resolve, with what Resolve does (Hub DaemonQuarantineTarget). */
+function HubQuarantineRow({
+  quarantine,
+  outcome,
+  onResolve
+}: {
+  quarantine: DaemonQuarantine;
+  outcome: QuarantineResolveOutcome | undefined;
+  onResolve: () => void;
+}) {
+  const isPackage = quarantine.kind === "package";
+  const pending = outcome?.state === "pending";
+  // The Hub confirmed the resolve (the list is being read again, or could not be): do not
+  // invite a second Resolve.
+  const resolved = outcome?.state === "refreshing" || outcome?.state === "resolved_stale";
+  return (
+    <li
+      className="hub-software-update hub-quarantine"
+      data-testid="hub-quarantine"
+      data-quarantine-kind={quarantine.kind}
+      data-quarantine-key={quarantineKey(quarantine)}
+      {...(outcome ? { "data-quarantine-outcome": outcome.state } : {})}
+    >
+      <div>
+        <h4>{isPackage ? `Package ${quarantine.package_name}` : `Session types in ${quarantine.root}`}</h4>
+        <dl className="hub-metadata-list">
+          {isPackage ? (
+            <>
+              <div><dt>Failure</dt><dd>{quarantine.original || "Not recorded"}</dd></div>
+              <div><dt>Compensation</dt><dd>{quarantine.compensation || "Not recorded"}</dd></div>
+              <div><dt>Recorded</dt><dd>{quarantine.durable ? "Kept across restarts" : "Only until the Hub restarts"}</dd></div>
+              {quarantine.loaded ? <div><dt>Runtime</dt><dd>Loaded and inert until resolved</dd></div> : null}
+            </>
+          ) : (
+            <>
+              <div><dt>Cause</dt><dd>{quarantine.cause}</dd></div>
+              <div><dt>Detail</dt><dd>{quarantine.detail}</dd></div>
+            </>
+          )}
+          <div><dt>Since</dt><dd>{quarantineTime(quarantine.quarantined_at_ms)}</dd></div>
+        </dl>
+        <p className="page-description">
+          {isPackage
+            ? "Resolve sets the package to Disabled. Enable it again when it is fixed."
+            : "Resolve clears this root; its session types are read from disk again."}
+        </p>
+        {outcome?.state === "refreshing" ? (
+          <p className="hub-quarantine-outcome" role="status" data-testid="hub-quarantine-outcome">
+            Resolved. Reading the Hub status again…
+          </p>
+        ) : outcome?.state === "resolved_stale" ? (
+          <p className="hub-quarantine-outcome" role="status" data-testid="hub-quarantine-outcome">
+            {outcome.message}
+          </p>
+        ) : outcome?.state === "refused" || outcome?.state === "failed" ? (
+          <p className="hub-quarantine-outcome" role="alert" data-testid="hub-quarantine-outcome">
+            Resolve failed: {outcome.message}
+          </p>
+        ) : null}
+      </div>
+      {resolved ? null : (
+        <IonButton
+          fill="outline"
+          size="small"
+          disabled={pending}
+          onClick={onResolve}
+          data-testid="hub-quarantine-resolve"
+        >
+          {pending ? "Resolving…" : "Resolve"}
+        </IonButton>
+      )}
+    </li>
+  );
+}
+
 export function HubGeneralSection({
   hubStatus,
   hubUpdate,
-  onCheckForUpdates
+  onCheckForUpdates,
+  onResolveQuarantine,
+  quarantineOutcomes
 }: {
   hubStatus: Record<string, unknown> | undefined;
   hubUpdate: HubUpdateOutcome | undefined;
   onCheckForUpdates: () => void;
+  onResolveQuarantine: (quarantine: DaemonQuarantine) => void;
+  quarantineOutcomes?: QuarantineRowOutcomes;
 }) {
+  const quarantines = hubQuarantines(hubStatus);
   const software = readRecord(hubStatus?.software);
   const installation = readRecord(hubStatus?.installation);
   const compatibility = readRecord(hubStatus?.compatibility);
@@ -135,6 +227,22 @@ export function HubGeneralSection({
           Check for updates
         </IonButton>
       </div>
+      {quarantines.length > 0 ? (
+        <div className="hub-quarantines" data-testid="hub-quarantines" aria-labelledby="hub-quarantines-heading">
+          <h3 id="hub-quarantines-heading">Quarantined</h3>
+          <p className="page-description">The Hub stopped these after a failure it could not undo. Resolve each one to continue.</p>
+          <ul className="hub-quarantine-list">
+            {quarantines.map((quarantine) => (
+              <HubQuarantineRow
+                key={quarantineKey(quarantine)}
+                quarantine={quarantine}
+                outcome={quarantineRowOutcome(quarantine, quarantineOutcomes)}
+                onResolve={() => onResolveQuarantine(quarantine)}
+              />
+            ))}
+          </ul>
+        </div>
+      ) : null}
       <dl className="hub-metadata-list" data-testid="hub-host-identity">
         <div><dt>Name</dt><dd>{stringValue(hubStatus?.title, "Local Hub")}</dd></div>
         <div><dt>Host ID</dt><dd>{stringValue(hubStatus?.host_id, "Not reported")}</dd></div>

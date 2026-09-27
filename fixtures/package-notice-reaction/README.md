@@ -10,7 +10,7 @@ Mismatching emits use a different subject. `emit_match` accepts an optional
 session subject and must not fall back to an empty subject set.
 
 Durable rows live on `package-notice-reaction.item` and are committed before
-`events.emit`. They are not the notice targeting mechanism.
+`botster.events.emit`. They are not the notice targeting mechanism.
 
 This fixture enters the client through encoded Hub frames. Tests must not
 inject a decoded `package_event` payload after protocol decoding.

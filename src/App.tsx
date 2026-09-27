@@ -416,6 +416,7 @@ export default function App() {
           diagnostics={diagnostics}
           blockingDiagnostics={blockingDiagnostics}
           hubUpdate={actions.hubUpdate}
+          quarantineOutcomes={actions.quarantineOutcomes}
           hubRuntime={hubRuntime}
           runtimeClient={runtimeClient}
           entityLoadStatus={entityLoadStatus}

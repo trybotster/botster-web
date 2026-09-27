@@ -348,6 +348,7 @@ try {
     process.exit(0);
   }
   const liveHubUpdate = await assertHubUpdateCheck(page);
+  const quarantineWire = await proveQuarantineWire(page);
   await openDiagnosticsView(page);
   const hubUpdateSupportDiagnostics = await assertHubUpdateSupportDiagnostics(page);
   // Proven before any reload cycle, on the document that is already mounted.
@@ -357,6 +358,7 @@ try {
   console.log(`live-hub-identity-evidence ${JSON.stringify({
     identity: initialHubIdentity,
     update: liveHubUpdate,
+    quarantine_wire: quarantineWire,
     support_diagnostics: hubUpdateSupportDiagnostics,
     in_page_reconnect: inPageReconnect
   })}`);
@@ -3529,6 +3531,17 @@ async function exerciseWorkspacesLifecycle(page) {
       lifecycle_class: "ended"
     }, undefined, { label: `Workspaces lifecycle current-to-ended entity transition ${sessionId}`, deadlineMs: 45_000 });
   }
+  // The plugin receives the same Hub session_family upsert as Web and prunes in its own turn
+  // (botster-workspaces 742891f). Its membership entity_remove is the plugin's release event;
+  // the reconnect render below counts stored references, so it must follow every release.
+  for (const sessionId of scenario.transitions) {
+    await waitForHarnessEvent(page, {
+      kind: "hub_frame",
+      frameKind: "entity_remove",
+      family: "botster-workspaces.membership",
+      id: sessionId
+    }, undefined, { label: `Workspaces lifecycle plugin membership release ${sessionId}`, deadlineMs: 45_000 });
+  }
   // The ended patch alone must move each reference out of Current without it landing in
   // Unavailable, with no surface pull and no session list: the removal is event-driven.
   const released = await assertWorkspacesLifecycleOracles(page, {
@@ -6641,6 +6654,38 @@ async function assertAuthoritativeHubIdentity(page, status, label) {
  * outcome against the Hub's own state/reason/action. Nothing is invented client-side, so
  * whatever a development checkout actually returns is what must appear.
  */
+/**
+ * Protocol 11 quarantines over the real WebRTC control path: a fresh Hub reports no quarantine
+ * (Status.quarantines absent or empty), and resolve_quarantine for a package that is not
+ * quarantined returns the typed quarantine_not_found error.
+ */
+async function proveQuarantineWire(page) {
+  const proof = await page.evaluate(async () => {
+    const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
+    if (!control?.request) throw new Error("live harness transport control is unavailable");
+    const status = await control.request({ type: "status" });
+    const refused = await control.request({
+      type: "resolve_quarantine",
+      target: { kind: "package", package_name: "web-live-not-quarantined" }
+    });
+    return {
+      status_quarantines: status.status?.quarantines ?? null,
+      refused_kind: refused.kind,
+      error_code: refused.error?.code ?? null,
+      error_operation: refused.error?.operation ?? null
+    };
+  });
+  const quarantines = proof.status_quarantines;
+  if (quarantines !== null && !(Array.isArray(quarantines) && quarantines.length === 0)) {
+    throw new Error(`a fresh Hub reported quarantines: ${JSON.stringify(proof)}`);
+  }
+  if (proof.error_code !== "quarantine_not_found") {
+    throw new Error(`resolve_quarantine for an unquarantined package did not return quarantine_not_found: ${JSON.stringify(proof)}`);
+  }
+  recordProofNote("quarantine_wire", proof);
+  return proof;
+}
+
 async function assertHubUpdateCheck(page) {
   const general = await openHubGeneralView(page);
   {

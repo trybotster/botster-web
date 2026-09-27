@@ -21,7 +21,21 @@ export type HubControlFrameKind =
   | "action_request"
   | "action_result"
   | "operator_error"
-  | "connection_diagnostic";
+  | "connection_diagnostic"
+  | "status_refresh";
+
+/**
+ * A client-side Hub status read that follows a confirmed mutation (today: resolve_quarantine).
+ * The status frames come first; this frame says whether that read succeeded.
+ */
+export interface StatusRefreshPayload {
+  cause: "resolve_quarantine";
+  target: unknown;
+  /** The operation_id of the Resolve action that caused this read, when it carried one. */
+  operation_id?: string;
+  ok: boolean;
+  error?: string;
+}
 
 export interface HubControlFrame {
   kind: HubControlFrameKind;

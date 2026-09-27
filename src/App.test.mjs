@@ -1140,6 +1140,12 @@ assert.match(appShell, /from "\.\/app\/useAppNavigation"/);
 assert.match(appFeatureSources.join("\n"), /export function appRouteFromPathname/);
 assert.match(appShell, /from "\.\/app\/hubLifecycle"/);
 assert.match(appFeatureSources.join("\n"), /HubGeneralSection/);
+// The Resolve button dispatches the typed resolve action for exactly the rendered quarantine.
+assert.match(appFeatureSources.join("\n"), /onResolveQuarantine=\{\(quarantine\) => dispatchAction\(resolveQuarantineAction\(quarantine\)\)\}/);
+// Resolve row feedback flows from useHubActions to General; the smoke:hub-quarantine browser
+// smoke exercises it through real clicks.
+assert.match(appShellSource, /quarantineOutcomes=\{actions\.quarantineOutcomes\}/);
+assert.match(appFeatureSources.join("\n"), /quarantineOutcomes=\{quarantineOutcomes\}/);
 assert.match(appFeatureSources.join("\n"), /from "\.\/workbench"/);
 assert.match(appFeatureSources.join("\n"), /PluginNavigationShortcuts/);
 assert.match(appFeatureSources.join("\n"), /PluginSurfaceRoutePage/);
@@ -1221,8 +1227,68 @@ assert.match(appFeatureSources.join("\n"), /hubUpdateOutcomeFromResult\(result\)
     const {
       packageActionFeedback,
       pluginActionResultFeedback,
-      pluginSurfaceActionFeedback
+      pluginSurfaceActionFeedback,
+      quarantineActionFeedback,
+      quarantineRefreshOutcome,
+      quarantineResolveOutcome
     } = await pureVite.ssrLoadModule("/src/app/actionFeedback.ts");
+    // The action result carries the Hub's answer only: refreshing when confirmed, refused
+    // otherwise. The status_refresh frame then clears the row or makes it resolved_stale.
+    assert.equal(quarantineActionFeedback({ accepted: true, result: { request_type: "check_hub_update" } }), undefined);
+    assert.deepEqual(quarantineActionFeedback({ accepted: true, result: { request_type: "resolve_quarantine", status_refresh: { state: "pending" } } }), { message: "Quarantine resolved", color: "success" });
+    assert.deepEqual(quarantineActionFeedback({ accepted: false, reason: "no such quarantine", result: { request_type: "resolve_quarantine" } }), { message: "no such quarantine", color: "danger" });
+    assert.equal(quarantineResolveOutcome({ accepted: true, result: { request_type: "check_hub_update" } }), undefined);
+    assert.equal(quarantineResolveOutcome({ accepted: false, reason: "action_result timeout" }), undefined, "a timeout has no Hub answer");
+    assert.deepEqual(quarantineResolveOutcome({ accepted: true, result: { request_type: "resolve_quarantine", status_refresh: { state: "pending" } } }), { state: "refreshing" });
+    assert.deepEqual(quarantineResolveOutcome({ accepted: false, reason: "no such quarantine", result: { request_type: "resolve_quarantine" } }), { state: "refused", message: "no such quarantine" });
+    assert.equal(quarantineRefreshOutcome({ cause: "resolve_quarantine", target: {}, ok: true }), null);
+    assert.deepEqual(quarantineRefreshOutcome({ cause: "resolve_quarantine", target: {}, ok: false, error: "status unavailable" }), {
+      state: "resolved_stale",
+      message: "Quarantine resolved, but the Hub status could not be read again (status unavailable). The list may be out of date."
+    });
+    const {
+      quarantineRowOutcome,
+      quarantinedAtMsFromAction,
+      quarantineOperationIdFromAction,
+      settleQuarantineRefresh,
+      settleQuarantineResult,
+      startQuarantineResolve
+    } = await pureVite.ssrLoadModule("/src/botster/hubQuarantines.ts");
+    // Overlapping Resolve operations on one target (reviewer 2's sequence): A@1 is confirmed and
+    // its status read is held; A is quarantined again at 2 and a second Resolve starts; the old
+    // refresh then fails. Only the owning operation may settle the row, so A@2 stays pending and
+    // its refusal is shown with Resolve offered again.
+    {
+      const key = "package:acme.a";
+      let rows = startQuarantineResolve({}, key, "resolve-1", 1);
+      rows = settleQuarantineResult(rows, key, "resolve-1", { state: "refreshing" });
+      assert.deepEqual(rows[key], { state: "refreshing", operationId: "resolve-1", quarantinedAtMs: 1 });
+      rows = startQuarantineResolve(rows, key, "resolve-2", 2);
+      const staleRefresh = { state: "resolved_stale", message: "m" };
+      assert.equal(settleQuarantineRefresh(rows, key, "resolve-1", staleRefresh), rows, "an old refresh does not settle a newer operation");
+      assert.equal(settleQuarantineRefresh(rows, key, "resolve-1", null), rows, "an old successful refresh does not clear a newer operation");
+      assert.equal(settleQuarantineResult(rows, key, "resolve-1", { state: "failed", message: "late" }), rows, "an old result does not settle a newer operation");
+      rows = settleQuarantineResult(rows, key, "resolve-2", { state: "refused", message: "still quarantined" });
+      assert.deepEqual(rows[key], { state: "refused", message: "still quarantined", operationId: "resolve-2", quarantinedAtMs: 2 });
+      assert.deepEqual(quarantineRowOutcome({ kind: "package", package_name: "acme.a", original: "", compensation: "", durable: true, loaded: false, quarantined_at_ms: 2 }, rows), rows[key]);
+      // Out-of-order completion of one operation: its refresh first, then its result.
+      let ordered = startQuarantineResolve({}, key, "resolve-3", 3);
+      ordered = settleQuarantineRefresh(ordered, key, "resolve-3", staleRefresh);
+      assert.equal(ordered[key].state, "resolved_stale");
+      assert.equal(settleQuarantineResult(ordered, key, "resolve-3", { state: "refreshing" }), ordered, "a late result keeps the refresh outcome");
+      const cleared = settleQuarantineRefresh(startQuarantineResolve({}, key, "resolve-4", 4), key, "resolve-4", null);
+      assert.equal(cleared[key], undefined);
+      assert.equal(settleQuarantineResult(cleared, key, "resolve-4", { state: "refreshing" }), cleared, "a late result does not revive a cleared row");
+      assert.equal(quarantineOperationIdFromAction({ id: "botster.hub.resolve_quarantine", params: { operation_id: "resolve-9" } }), "resolve-9");
+      assert.equal(quarantineOperationIdFromAction({ id: "botster.hub.resolve_quarantine", params: {} }), undefined);
+    }
+    const listed = { kind: "package", package_name: "acme.x", original: "", compensation: "", durable: true, loaded: false, quarantined_at_ms: 5 };
+    // An outcome applies only to the listing it was dispatched for; a re-quarantine starts clean.
+    assert.deepEqual(quarantineRowOutcome(listed, { "package:acme.x": { state: "resolved_stale", message: "m", operationId: "resolve-1", quarantinedAtMs: 5 } }), { state: "resolved_stale", message: "m", operationId: "resolve-1", quarantinedAtMs: 5 });
+    assert.equal(quarantineRowOutcome(listed, { "package:acme.x": { state: "resolved_stale", message: "m", operationId: "resolve-1", quarantinedAtMs: 4 } }), undefined);
+    assert.equal(quarantineRowOutcome(listed, undefined), undefined);
+    assert.equal(quarantinedAtMsFromAction({ id: "botster.hub.resolve_quarantine", params: { quarantined_at_ms: 5 } }), 5);
+    assert.equal(quarantinedAtMsFromAction({ id: "botster.hub.resolve_quarantine", params: {} }), undefined);
     const {
       clearPresentationValue
     } = await pureVite.ssrLoadModule("/src/botster/uiPresentation.ts");
@@ -1894,7 +1960,7 @@ assert.doesNotMatch(realHubDaemonDto, /export type DaemonEvent\s*=/);
 assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client Rust serde DTOs/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "read_mode_flags"; session_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "read_snapshot_page"; session_id: string; capture_id: string; page: number \}/);
-assert.match(generatedDaemonProtocol, /export const PROTOCOL_VERSION = 10;/);
+assert.match(generatedDaemonProtocol, /export const PROTOCOL_VERSION = 11;/);
 assert.match(generatedDaemonProtocol, /export type ClientFrame =/);
 assert.match(generatedDaemonProtocol, /export type ServerFrame =/);
 assert.match(generatedDaemonProtocol, /\{ frame: "entity"; entity: DaemonEntityFrame \}/);
@@ -2242,7 +2308,7 @@ assert.match(daemonUnixClientScript, /frame: "hello"/);
 assert.match(daemonUnixClientScript, /frame: "request", request_id: "1"/);
 assert.match(daemonUnixClientScript, /It discards valid event, entity, and terminal deliveries/);
 assert.match(generatedDaemonProtocol, /export const PROTOCOL = "botster-hub-daemon-v1";/);
-assert.match(generatedDaemonProtocol, /export const CONFORMANCE_FIXTURE_REVISION = 50;/);
+assert.match(generatedDaemonProtocol, /export const CONFORMANCE_FIXTURE_REVISION = 51;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_FRAME_LENGTH_PREFIX_BYTES = 4;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_CONTROL = 1;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_TERMINAL = 2;/);
@@ -2253,8 +2319,16 @@ assert.match(localPackageServerScript, /controlContainer: 1/);
 assert.match(localPackageServerScript, /terminalContainer: 2/);
 assert.match(localPackageServerScript, /maxTerminalRouteBytes: 1_024/);
 assert.match(localPackageServerScript, /maxFrameBytes: 4_195_343/);
-assert.match(localPackageServerScript, /protocol_version: 10/);
-assert.match(localPackageServerScript, /minimum_conformance_fixture_revision: 50/);
+// The shipped package server requires exactly the generated host protocol and revision, so a
+// repin that leaves the server behind fails here instead of at the live Hub's Hello.
+assert.equal(
+  Number(localPackageServerScript.match(/protocol_version: (\d+),/)?.[1]),
+  Number(generatedDaemonProtocol.match(/export const PROTOCOL_VERSION = (\d+);/)?.[1])
+);
+assert.equal(
+  Number(localPackageServerScript.match(/minimum_conformance_fixture_revision: (\d+),/)?.[1]),
+  Number(generatedDaemonProtocol.match(/export const CONFORMANCE_FIXTURE_REVISION = (\d+);/)?.[1])
+);
 assert.match(localPackageServerScript, /required_features: \["webrtc_terminal_adapter"\]/);
 assert.match(browserRuntimeSmokeScript, /proveMissingBootstrapDiagnostic/);
 assert.match(browserRuntimeSmokeScript, /Local WebRTC bootstrap failed/);
@@ -2756,17 +2830,17 @@ assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 assert.equal(
   hubTestSupportMetadata.daemon_protocol.sha256,
-  "094727a1d913e1d4882a6b0619aa67601a8d3872003a6ef0c521c77fe6230a10"
+  "dc14465512f954bde5c70dc51cf66744b04c262dcc4cfc8126139f29734d12f3"
 );
 assert.equal(hubTestSupportMetadata.ui_contract.package_version, "0.3.3");
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.46");
-// Web consumes the verbatim 0.1.46 package from committed Hub e3dacd99
+assert.equal(hubTestSupportMetadata.package_version, "0.1.48");
+// Web consumes the verbatim 0.1.48 package from committed Hub 1ec61b94
 // from the tracked test-support directory through a file: dependency.
 assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "file:test-support/hub-test-support");
-assert.equal(hubTestSupportProvenance.revision, "e3dacd99924a960856dec16e7b320bb57179b609");
+assert.equal(hubTestSupportProvenance.revision, "1ec61b94c76f62b0b2942c21c7c03630da709221");
 assert.equal(hubTestSupportProvenance.package_version, hubTestSupportMetadata.package_version);
 assert.equal(hubTestSupportProvenance.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(vendoredHubTestSupportPackageJson.version, hubTestSupportMetadata.package_version);
@@ -2774,8 +2848,8 @@ assert.equal(vendoredHubTestSupportPackageJson.name, hubTestSupportMetadata.pack
 // Core terminal codecs come only from the vendored generated artifact; no npm terminal-protocol pin.
 assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], undefined);
 assert.equal(packageJson.devDependencies["@trybotster/terminal-protocol"], undefined);
-assert.equal(hubTestSupportMetadata.protocol_version, 10);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 50);
+assert.equal(hubTestSupportMetadata.protocol_version, 11);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 51);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${hubTestSupportMetadata.package_version}`,
@@ -2803,7 +2877,7 @@ assert.deepEqual(
     { kind: "surface", surface_id: "contract.settings" }
   ]
 );
-// The vendored daemon-protocol.ts is the Hub e3dacd99 artifact recorded in PROVENANCE.json;
+// The vendored daemon-protocol.ts is the Hub 1ec61b94 artifact recorded in PROVENANCE.json;
 // the vendored hub-test-support package from that Hub revision ships the same artifact.
 assert.match(generatedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
 assert.match(generatedDaemonProtocol, /interface DaemonPluginResourceCounters/);
@@ -3411,6 +3485,7 @@ await Promise.all([
   compileTsModule("botster/connectionDiagnostics.ts", join(compiledRoot, "botster/connectionDiagnostics.js")),
   compileTsModule("botster/hubRuntime.ts", join(compiledRoot, "botster/hubRuntime.js")),
   compileTsModule("botster/entities.ts", join(compiledRoot, "botster/entities.js")),
+  compileTsModule("botster/hubQuarantines.ts", join(compiledRoot, "botster/hubQuarantines.js")),
   compileTsModule("botster/protocol.ts", join(compiledRoot, "botster/protocol.js")),
   compileTsModule("botster/realHubDaemonDto.ts", join(compiledRoot, "botster/realHubDaemonDto.js")),
   compileTsModule("botster/hubTransport.ts", join(compiledRoot, "botster/hubTransport.js")),
@@ -3463,6 +3538,7 @@ const {
   viewedSessionIdFromRoute
 } = requireRuntime("./app/packageEventNotices.js");
 const { createInMemoryEntityFrameStore } = requireRuntime("./botster/entities.js");
+const { hubQuarantines, quarantineKey, resolveQuarantineAction, resolveQuarantineActionId } = requireRuntime("./botster/hubQuarantines.js");
 const { createHubRuntimeConfig, terminalDataPlaneLabel } = requireRuntime("./botster/hubRuntime.js");
 const { hostCompatibilityRequirement } = requireRuntime("./botster/protocolPlanes.js");
 const {
@@ -4560,15 +4636,35 @@ const authoritativeSessionTypeItems = [
     available: true
   }
 ];
+let fakeStatusFailure;
+let fakeQuarantines = [
+  { kind: "package", package_name: "acme.stranded", original: "enable failed: handler crashed", compensation: "disable failed: state write", durable: false, loaded: true, quarantined_at_ms: 1_790_000_000_000 },
+  { kind: "repository_session_types", root: "/work/acme", cause: "write_unknown", detail: "session-types.toml write outcome unknown", quarantined_at_ms: 1_790_000_100_000 }
+];
 const bridge = {
   async request(request) {
     bridgeRequests.push(request);
+    if (request.type === "resolve_quarantine") {
+      const matches = (entry) => entry.kind === request.target.kind &&
+        (entry.kind === "package" ? entry.package_name === request.target.package_name : entry.root === request.target.root);
+      if (!fakeQuarantines.some(matches)) {
+        return { kind: "error", error: { code: "quarantine_not_found", request_id: "fake", operation: "resolve_quarantine", message: "no such quarantine" } };
+      }
+      fakeQuarantines = fakeQuarantines.filter((entry) => !matches(entry));
+      return { kind: "quarantine_resolved", error: null };
+    }
     if (request.type === "check_hub_update") {
       return {
         kind: "hub_update",
         hub_update: authoritativeHubUpdate,
         diagnostics: [{ kind: "connected", operation: "check_hub_update", message: "Hub update check completed" }]
       };
+    }
+    if (request.type === "status" && fakeStatusFailure) {
+      const failure = fakeStatusFailure;
+      fakeStatusFailure = undefined;
+      if (failure === "throw") throw new Error("control channel closed");
+      return { kind: "error", error: { code: "status_unavailable", request_id: "fake", operation: "status", message: "status unavailable" } };
     }
     if (request.type === "status") {
       return {
@@ -4611,6 +4707,7 @@ const bridge = {
           session_count: 1,
           recovered_sessions: [],
           stale_sessions: [],
+          quarantines: fakeQuarantines,
           diagnostics: [
             {
               kind: "connected",
@@ -8862,6 +8959,124 @@ assert.deepEqual(hubUpdateCurrentResult.result.diagnostics, [
   { kind: "connected", operation: "check_hub_update", message: "Hub update check completed" }
 ]);
 
+// Protocol 11 quarantines: the status projection carries them; Resolve sends the typed target.
+// The action result reports the Hub's answer at once; one status read follows, and its outcome
+// arrives in a status_refresh frame after the status frames. A refused or malformed resolve is
+// not accepted and reads no status.
+{
+  const nextStatusRefresh = (runtime) => new Promise((resolve) => {
+    const unsubscribe = runtime.hub.onFrame((frame) => {
+      if (frame.kind !== "status_refresh") return;
+      unsubscribe();
+      resolve(frame.payload);
+    });
+  });
+  const quarantinesInStatus = () => realRuntime.entities.get("botster-web.hub_status", "local-hub").quarantines;
+  assert.deepEqual(hubQuarantines({ quarantines: quarantinesInStatus() }).map(quarantineKey), ["package:acme.stranded", "repository_session_types:/work/acme"]);
+  const statusReadsBefore = bridgeRequests.filter((request) => request.type === "status").length;
+  const refreshed = nextStatusRefresh(realRuntime);
+  const resolved = await realRuntime.actions.dispatch({ origin: "ui_node", action: resolveQuarantineAction(quarantinesInStatus()[0]) });
+  assert.equal(resolved.accepted, true);
+  assert.deepEqual(resolved.result.status_refresh, { state: "pending" });
+  assert.deepEqual(bridgeRequests.filter((request) => request.type === "resolve_quarantine").at(-1), {
+    type: "resolve_quarantine",
+    target: { kind: "package", package_name: "acme.stranded" }
+  });
+  assert.deepEqual(await refreshed, { cause: "resolve_quarantine", target: { kind: "package", package_name: "acme.stranded" }, ok: true });
+  assert.equal(bridgeRequests.filter((request) => request.type === "status").length, statusReadsBefore + 1, "one status read after the answer");
+  // The status frames come before status_refresh, so the list is current when it arrives.
+  assert.deepEqual(hubQuarantines({ quarantines: quarantinesInStatus() }).map(quarantineKey), ["repository_session_types:/work/acme"]);
+
+  const refused = await realRuntime.actions.dispatch({
+    origin: "ui_node",
+    action: resolveQuarantineAction({ kind: "package", package_name: "acme.unknown", original: "", compensation: "", durable: true, loaded: false, quarantined_at_ms: 0 })
+  });
+  assert.equal(refused.accepted, false);
+  assert.equal(refused.reason, "no such quarantine");
+  assert.equal(refused.result.status_refresh, undefined);
+  assert.equal(bridgeRequests.filter((request) => request.type === "status").length, statusReadsBefore + 1, "a refused resolve reads no status");
+
+  const resolveRequestsBefore = bridgeRequests.filter((request) => request.type === "resolve_quarantine").length;
+  const malformed = await realRuntime.actions.dispatch({
+    origin: "ui_node",
+    action: { id: resolveQuarantineActionId, label: "Resolve", params: { target: { kind: "package" } } }
+  });
+  assert.equal(malformed.accepted, false);
+  assert.equal(bridgeRequests.filter((request) => request.type === "resolve_quarantine").length, resolveRequestsBefore, "a malformed target sends nothing");
+  assert.deepEqual(hubQuarantines({ quarantines: [{ kind: "future_kind" }, { kind: "package" }, null] }), [], "unaddressable entries are left out");
+
+  // The resolve succeeds but the status re-read fails (a Hub error, then a thrown transport
+  // error): the action is accepted, and the status_refresh frame carries the failure.
+  for (const failure of ["error", "throw"]) {
+    const root = `/work/refresh-${failure}`;
+    fakeQuarantines = [...fakeQuarantines, { kind: "repository_session_types", root, cause: "c", detail: "d", quarantined_at_ms: 1 }];
+    fakeStatusFailure = failure;
+    const staleRefresh = nextStatusRefresh(realRuntime);
+    const staleResolve = await realRuntime.actions.dispatch({
+      origin: "ui_node",
+      action: resolveQuarantineAction({ kind: "repository_session_types", root, cause: "c", detail: "d", quarantined_at_ms: 1 })
+    });
+    assert.equal(staleResolve.accepted, true, `${failure}: the resolve itself succeeded`);
+    assert.deepEqual(await staleRefresh, {
+      cause: "resolve_quarantine",
+      target: { kind: "repository_session_types", root },
+      ok: false,
+      error: failure === "throw" ? "control channel closed" : "status unavailable"
+    });
+  }
+
+  // The status read after a confirmed resolve does not spend the action deadline. The bridge
+  // holds that status read; a sentinel resolve that the bridge never answers expires first, which
+  // proves the action deadline passed while status was still held. The confirmed resolve is
+  // accepted all the same. (A short deadline in this test client only; production keeps 10 s.)
+  {
+    let holdStatus = false;
+    const heldStatus = [];
+    const deadlineRequests = [];
+    const deadlineBridge = {
+      async request(request) {
+        deadlineRequests.push(request);
+        if (request.type === "resolve_quarantine") {
+          if (request.target.package_name === "acme.sentinel") return new Promise(() => {});
+          return { kind: "quarantine_resolved", error: null };
+        }
+        if (request.type === "status" && holdStatus) {
+          return new Promise((resolve, reject) => heldStatus.push({ resolve, reject }));
+        }
+        return bridge.request(request);
+      }
+    };
+    const deadlineRuntime = createBotsterWebClient({ transport: createHubTransport({ bridge: deadlineBridge }), actionTimeoutMs: 50 });
+    await deadlineRuntime.hub.connect({});
+    holdStatus = true;
+    const packageQuarantine = (name) => ({ kind: "package", package_name: name, original: "", compensation: "", durable: true, loaded: false, quarantined_at_ms: 1 });
+    const slowAction = resolveQuarantineAction(packageQuarantine("acme.slow-status"));
+    // The dispatching hook adds operation_id; the transport echoes it in status_refresh only.
+    const confirmed = deadlineRuntime.actions.dispatch({ origin: "ui_node", action: { ...slowAction, params: { ...slowAction.params, operation_id: "resolve-7" } } });
+    const sentinel = await deadlineRuntime.actions.dispatch({ origin: "ui_node", action: resolveQuarantineAction(packageQuarantine("acme.sentinel")) });
+    assert.equal(sentinel.accepted, false);
+    assert.equal(sentinel.reason, "action_result timeout", "the action deadline passed");
+    assert.equal(heldStatus.length, 1, "the status read is still unanswered");
+    assert.deepEqual(deadlineRequests.find((request) => request.type === "resolve_quarantine"), {
+      type: "resolve_quarantine",
+      target: { kind: "package", package_name: "acme.slow-status" }
+    }, "the Hub request carries only the target");
+    const confirmedResult = await confirmed;
+    assert.equal(confirmedResult.accepted, true, "a confirmed resolve is not lost to a slow status read");
+    assert.deepEqual(confirmedResult.result.status_refresh, { state: "pending" });
+    const slowRefresh = nextStatusRefresh(deadlineRuntime);
+    heldStatus[0].resolve({ kind: "error", error: { code: "status_unavailable", request_id: "fake", operation: "status", message: "status unavailable" } });
+    assert.deepEqual(await slowRefresh, {
+      cause: "resolve_quarantine",
+      target: { kind: "package", package_name: "acme.slow-status" },
+      operation_id: "resolve-7",
+      ok: false,
+      error: "status unavailable"
+    });
+    await deadlineRuntime.hub.disconnect();
+  }
+}
+
 authoritativeHubUpdate = {
   state: "available",
   current_version: "0.1.0",
@@ -11256,8 +11471,35 @@ try {
     }
   };
   const renderHubGeneralSection = (hubStatus, hubUpdate) => renderToStaticMarkup(
-    createElement(HubGeneralSection, { hubStatus, hubUpdate, onCheckForUpdates: () => {} })
+    createElement(HubGeneralSection, { hubStatus, hubUpdate, onCheckForUpdates: () => {}, onResolveQuarantine: () => {} })
   );
+
+  // Protocol 11 quarantines: each renders with its facts, what Resolve does, and a Resolve action.
+  // No quarantine: no panel. An unaddressable entry is not rendered.
+  assert.doesNotMatch(renderHubGeneralSection(developmentHubStatus, undefined), /data-testid="hub-quarantines"/);
+  const quarantineMarkup = renderHubGeneralSection({
+    ...developmentHubStatus,
+    quarantines: [
+      { kind: "package", package_name: "acme.stranded", original: "enable failed", compensation: "disable failed", durable: false, loaded: true, quarantined_at_ms: 0 },
+      { kind: "repository_session_types", root: "/work/acme", cause: "write_unknown", detail: "outcome unknown", quarantined_at_ms: 1_790_000_100_000 },
+      { kind: "future_kind" }
+    ]
+  }, undefined);
+  assert.match(quarantineMarkup, /data-testid="hub-quarantines"/);
+  assert.equal((quarantineMarkup.match(/data-testid="hub-quarantine"/g) ?? []).length, 2);
+  assert.equal((quarantineMarkup.match(/data-testid="hub-quarantine-resolve"/g) ?? []).length, 2);
+  assert.match(quarantineMarkup, /data-quarantine-key="package:acme\.stranded"/);
+  assert.match(quarantineMarkup, /<h4>Package acme\.stranded<\/h4>/);
+  assert.match(quarantineMarkup, /<dt>Failure<\/dt><dd>enable failed<\/dd>/);
+  assert.match(quarantineMarkup, /<dt>Compensation<\/dt><dd>disable failed<\/dd>/);
+  assert.match(quarantineMarkup, /<dt>Recorded<\/dt><dd>Only until the Hub restarts<\/dd>/);
+  assert.match(quarantineMarkup, /<dt>Runtime<\/dt><dd>Loaded and inert until resolved<\/dd>/);
+  assert.match(quarantineMarkup, /<dt>Since<\/dt><dd>No failure record<\/dd>/);
+  assert.match(quarantineMarkup, /Resolve sets the package to Disabled/);
+  assert.match(quarantineMarkup, /<h4>Session types in \/work\/acme<\/h4>/);
+  assert.match(quarantineMarkup, /<dt>Cause<\/dt><dd>write_unknown<\/dd>/);
+  assert.match(quarantineMarkup, /session types are read from disk again/);
+  assert.doesNotMatch(quarantineMarkup, /future_kind/);
 
   const developmentGeneralMarkup = renderHubGeneralSection(developmentHubStatus, undefined);
   assert.match(developmentGeneralMarkup, /data-testid="hub-settings-general"/);
@@ -16372,9 +16614,9 @@ async function startPackageServerRuntime({
               protocol: "botster-hub-daemon-v1",
               compatibility: {
                 protocol: "botster-hub-daemon-v1",
-                protocol_version: 10,
+                protocol_version: 11,
                 features: ["webrtc_terminal_adapter"],
-                conformance_fixture_revision: 50
+                conformance_fixture_revision: 51
               }
             }
           });
@@ -16720,13 +16962,13 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
   });
 }
 
-/** Host-control v10 Hello ack fixture: protocol 10, conformance 50, terminal scheme 2. */
+/** Host-control v11 Hello ack fixture: protocol 11, conformance 51, terminal scheme 2. */
 function testHelloAckFixture() {
   return {
     protocol: "botster-hub-daemon-v1",
     compatibility: {
       protocol: "botster-hub-daemon-v1",
-      protocol_version: 10,
+      protocol_version: 11,
       features: [
         "sessions",
         "terminal_readback",
@@ -17838,7 +18080,9 @@ function removeCssAtRules(source) {
   );
   assert.equal(fixtureManifest.name, "package-notice-reaction");
   assert.equal(fixtureManifest.events.notices[0].name, "sample.notice");
-  assert.match(fixtureLua, /events\.emit\("sample\.notice"/);
+  // Hub 1ec61b94+ plugin ABI: botster.events is the only event API; there is no events global.
+  assert.match(fixtureLua, /botster\.events\.emit\(\{ name = "sample\.notice"/);
+  assert.doesNotMatch(fixtureLua, /(^|[^.])events\.(emit|on)\(/m);
   assert.doesNotMatch(fixtureLua, /kind:\s*"package_event"|injectDecoded|decodedPayload/);
   assert.match(liveProtocolHarnessScript, /deliveryKind: "daemon_event"|type: "package_event"/);
   assert.match(

@@ -496,6 +496,48 @@ body {
   color: var(--app-text-muted-color);
 }
 
+.hub-quarantines {
+  padding-top: 16px;
+  border-top: 1px solid var(--app-border-color);
+}
+
+.hub-quarantines h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.hub-quarantine-list {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hub-quarantine {
+  align-items: flex-start;
+}
+
+.hub-quarantine h4 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.hub-quarantine-outcome {
+  margin: 8px 0 0;
+  color: var(--ion-color-danger);
+  overflow-wrap: anywhere;
+}
+
+.hub-quarantine[data-quarantine-outcome="refreshing"] .hub-quarantine-outcome {
+  color: var(--app-text-muted-color);
+}
+
+.hub-quarantine[data-quarantine-outcome="resolved_stale"] .hub-quarantine-outcome {
+  color: var(--ion-color-warning-shade);
+}
+
 .page-description {
   max-width: 560px;
   margin: 8px 0 0;

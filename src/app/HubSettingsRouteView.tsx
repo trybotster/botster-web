@@ -1,5 +1,6 @@
 /** Hub settings sections: general, session types, extensions, spawn points, support. */
 
+import { resolveQuarantineAction, type QuarantineRowOutcomes } from "../botster/hubQuarantines";
 import {
   IonBadge,
   IonButton,
@@ -62,6 +63,7 @@ export interface HubSettingsRouteViewProps {
   diagnostics: ConnectionDiagnostic[];
   blockingDiagnostics: ConnectionDiagnostic[];
   hubUpdate: HubUpdateOutcome | undefined;
+  quarantineOutcomes: QuarantineRowOutcomes;
   hubRuntime: HubRuntimeConfig;
   runtimeClient: RuntimeClient;
   entityLoadStatus: Record<HubEntityLoadKey, HubEntityLoadStatus>;
@@ -94,6 +96,7 @@ export function HubSettingsRouteView(props: HubSettingsRouteViewProps) {
     diagnostics,
     blockingDiagnostics,
     hubUpdate,
+    quarantineOutcomes,
     hubRuntime,
     runtimeClient,
     entityLoadStatus,
@@ -138,7 +141,9 @@ export function HubSettingsRouteView(props: HubSettingsRouteViewProps) {
                   <HubGeneralSection
                     hubStatus={hubStatus}
                     hubUpdate={hubUpdate}
+                    quarantineOutcomes={quarantineOutcomes}
                     onCheckForUpdates={() => dispatchAction(hubUpdateCheckAction())}
+                    onResolveQuarantine={(quarantine) => dispatchAction(resolveQuarantineAction(quarantine))}
                   />
                 ) : null}
 

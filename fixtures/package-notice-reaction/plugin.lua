@@ -74,9 +74,11 @@ local function emit_notice(subject, notice)
   if type(subject) == "string" and subject ~= "" then
     payload.subject = subject
   end
-  pcall(function()
-    events.emit("sample.notice", payload)
-  end)
+  -- A refused emit fails the action: the proof must never mistake a refusal for delivery.
+  local emitted = botster.events.emit({ name = "sample.notice", payload = payload })
+  if not emitted.ok then
+    error("sample.notice emit refused: " .. tostring(emitted.error and emitted.error.kind))
+  end
   return token
 end
 
@@ -117,14 +119,17 @@ local function handle_action(request)
     local count = payload.count
     if type(count) ~= "number" or count < 1 then count = 200 end
     local first_id = commit_item(MATCH_SUBJECT, "Burst session notice")
+    -- The burst overflows the event plane on purpose to force an event_gap, so refused
+    -- emits are expected here and are not errors.
     for _ = 1, count do
-      pcall(function()
-        events.emit("sample.notice", {
+      botster.events.emit({
+        name = "sample.notice",
+        payload = {
           notice = "Burst session notice",
           subject = MATCH_SUBJECT,
           token = first_id,
-        })
-      end)
+        },
+      })
     end
     return {
       request_id = request.request_id,

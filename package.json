@@ -32,6 +32,7 @@
     "smoke:ghostsnp-grid": "node scripts/ghostsnp-grid-browser-smoke.mjs",
     "smoke:incremental-ghostsnp-attach": "node scripts/incremental-ghostsnp-attach-browser-smoke.mjs",
     "smoke:harness-waits": "node scripts/harness-waits-browser-test.mjs",
+    "smoke:hub-quarantine": "node scripts/hub-quarantine-smoke.mjs",
     "observe:terminal-baseline:validate": "node scripts/terminal-baseline-validate.mjs",
     "test": "node scripts/check-daemon-protocol-drift.mjs && node scripts/check-timer-markers.test.mjs && node scripts/check-timer-markers.mjs && node scripts/renderer-telemetry-test.mjs && node src/App.test.mjs",
     "lint": "node ./node_modules/eslint/bin/eslint.js .",
