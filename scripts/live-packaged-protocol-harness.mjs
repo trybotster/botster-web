@@ -165,16 +165,9 @@ const entityOptionsPackagePath = entityOptionsMode
     )
   : undefined;
 const packageEventsMode = process.env.BOTSTER_LIVE_PACKAGE_EVENTS === "1";
-const packageEventsGapMode = process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX != null
-  && process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX !== "";
-if (packageEventsMode && packageEventsGapMode) {
-  const queueMax = Number.parseInt(process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX, 10);
-  if (!Number.isInteger(queueMax) || queueMax < 1) {
-    throw new Error(
-      `BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX must be a positive integer, got ${JSON.stringify(process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX)}`
-    );
-  }
-}
+// The forced-gap lane. The Hub removed its client-queue test knob in protocol 9, so this lane
+// has no Hub control over the client event queue; see the README (live event_gap).
+const packageEventsGapMode = process.env.BOTSTER_LIVE_PACKAGE_EVENTS_GAP === "1";
 const packageEventsPackageName = "package-notice-reaction";
 const packageEventsPackagePath = packageEventsMode
   ? resolveRequiredPackagePath(
@@ -823,13 +816,6 @@ async function runHubCommand(args) {
 
 function spawnHubProcess(dataDir) {
   const env = { ...process.env };
-  if (packageEventsMode && packageEventsGapMode) {
-    // Hub honors BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX only when BOTSTER_ENV=test.
-    env.BOTSTER_ENV = "test";
-    process.stdout.write(
-      `[package-events] gap lane: hub BOTSTER_ENV=test BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX=${process.env.BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX}\n`
-    );
-  }
   return spawnHubChild(dataDir, {
     ...hubLaneContext(),
     env,

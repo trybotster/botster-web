@@ -411,6 +411,19 @@ The package server binds an ephemeral loopback port by default. Set `BOTSTER_WEB
   overflows its queue, so the live normal-reader flood proof records 0 resyncs. Core unit
   tests and the TUI flood test prove resync correctness.
 
+- **Live event_gap over WebRTC is retired (explicit orchestrator acceptance, 2026-09-27).**
+  The Hub removed its client-queue test knob (`BOTSTER_HUB_TEST_CLIENT_EVENT_QUEUE_MAX`) in
+  protocol 9. The per-subscription mailbox bound (`package_event_plane.consumer_queue_max_events`,
+  128) is a Hub library option with no runtime surface: `botster-hub start` always uses the
+  default. A real overflow is not practical over WebRTC: the Hub drains the mailbox into the
+  data channel up to 2 MiB buffered, and a browser keeps reading SCTP however slowly the page
+  handles events. Web's handling is unit-proven: the WebRTC client delivers `event_gap` to its
+  own subscription (`package-event-gap` in `src/App.test.mjs`), transient notices ignore gap
+  frames by design, and durable state recovers through the entity family (the package-events
+  lane). The Hub proves `event_gap` end to end with a Unix client that stops reading. The
+  harness keeps the forced-gap branch (`BOTSTER_LIVE_PACKAGE_EVENTS=1
+  BOTSTER_LIVE_PACKAGE_EVENTS_GAP=1`); the `smoke:package-events:gap` script is retired.
+
 The timer guard (`npm test` runs `scripts/check-timer-markers.mjs`) fails on any
 timer call without a `// timer: <deadline|backoff|rate-limit|ui-lifetime|measurement-window|os-no-event> — <reason>`
 marker on the same or the previous line, and on any polling library wait
