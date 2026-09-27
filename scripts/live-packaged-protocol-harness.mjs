@@ -337,6 +337,13 @@ try {
     await openSessionTerminal(page, productionSessionId);
     await waitForTerminalSession(page, productionSessionId);
     await exercisePackageEvents(page, { forceGap: packageEventsGapMode });
+    const fixtureLogs = await readPluginLogsThroughAction(page, packageEventsPackageName);
+    const loadRecord = (fixtureLogs.result.result?.plugin_logs?.records ?? []).find((record) => record.message === "package-notice-reaction loaded");
+    const loadFields = loadRecord?.fields_json ? JSON.parse(loadRecord.fields_json) : null;
+    if (fixtureLogs.result.accepted !== true || loadRecord?.level !== "info" || !(loadRecord.generation >= 1) || loadFields?.fixture !== "package-notice-reaction") {
+      throw new Error(`fixture plugin log record not read back: ${JSON.stringify(fixtureLogs)}`);
+    }
+    console.log(`plugin-logs fixture record ${JSON.stringify({ record: loadRecord, attempts: fixtureLogs.attempts })}`);
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
     assertRequiredWorkspacesProof();
     await requestDaemonShutdown();
@@ -349,6 +356,7 @@ try {
   }
   const liveHubUpdate = await assertHubUpdateCheck(page);
   const quarantineWire = await proveQuarantineWire(page);
+  const pluginLogsWire = await provePluginLogsWire(page);
   await openDiagnosticsView(page);
   const hubUpdateSupportDiagnostics = await assertHubUpdateSupportDiagnostics(page);
   // Proven before any reload cycle, on the document that is already mounted.
@@ -359,6 +367,7 @@ try {
     identity: initialHubIdentity,
     update: liveHubUpdate,
     quarantine_wire: quarantineWire,
+    plugin_logs_wire: pluginLogsWire,
     support_diagnostics: hubUpdateSupportDiagnostics,
     in_page_reconnect: inPageReconnect
   })}`);
@@ -6659,6 +6668,46 @@ async function assertAuthoritativeHubIdentity(page, status, label) {
  * (Status.quarantines absent or empty), and resolve_quarantine for a package that is not
  * quarantined returns the typed quarantine_not_found error.
  */
+/**
+ * Protocol 12 read_plugin_logs through Web's production action (botster.package.read_plugin_logs):
+ * dispatch, then read its action_result. A retryable refusal (plugin_logs_busy/_capacity) is
+ * answered by reading again, at most 5 reads; each read waits for its own result, no timer.
+ */
+async function readPluginLogsThroughAction(page, packageName) {
+  const attempts = [];
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const since = await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.events.length);
+    await page.evaluate((name) => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.dispatchAction({
+      id: "botster.package.read_plugin_logs",
+      label: "Read plugin logs",
+      params: { package_name: name }
+    }), packageName);
+    const result = await waitForHarnessEvent(page, ({ name, from }) => {
+      const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(from).find((candidate) =>
+        candidate.kind === "hub_frame" && candidate.payload?.kind === "action_result" &&
+        candidate.payload?.payload?.result?.request_type === "read_plugin_logs" &&
+        candidate.payload?.payload?.result?.package_name === name
+      );
+      return entry ? entry.payload.payload : false;
+    }, { name: packageName, from: since }, { label: `read_plugin_logs result ${packageName}`, deadlineMs: 15_000 });
+    attempts.push({ accepted: result.accepted === true, error_kind: result.result?.error_kind ?? null, retryable: result.result?.retryable === true });
+    if (result.accepted === true || result.result?.retryable !== true) return { result, attempts };
+  }
+  throw new Error(`read_plugin_logs for ${packageName} stayed retryable: ${JSON.stringify(attempts)}`);
+}
+
+async function provePluginLogsWire(page) {
+  const unknownPackage = "web-live-no-such-package";
+  const { result, attempts } = await readPluginLogsThroughAction(page, unknownPackage);
+  const logs = result.result?.plugin_logs;
+  if (result.accepted !== true || result.result?.kind !== "plugin_logs" || logs?.package_name !== unknownPackage || !Array.isArray(logs.records) || logs.records.length !== 0) {
+    throw new Error(`read_plugin_logs for an unknown package is not an empty plugin_logs page: ${JSON.stringify(result)}`);
+  }
+  const proof = { package_name: unknownPackage, kind: result.result.kind, records: 0, next_seq: logs.next_seq, first_available_seq: logs.first_available_seq, attempts };
+  recordProofNote("plugin_logs_wire", proof);
+  return proof;
+}
+
 async function proveQuarantineWire(page) {
   const proof = await page.evaluate(async () => {
     const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;

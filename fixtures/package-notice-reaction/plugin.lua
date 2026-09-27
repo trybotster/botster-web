@@ -151,6 +151,9 @@ local function handle_action(request)
   }
 end
 
+-- Protocol 12 plugin logs: one structured record per load, read back by the Web live proof.
+botster.log.info({ message = "package-notice-reaction loaded", fields = { fixture = "package-notice-reaction" } })
+
 return botster.register({
   handlers = {
     {

@@ -5,10 +5,10 @@ import type { PackageNoticeReactionDescriptor, PackageSurfaceDescriptor, UiActio
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
-// Host-control protocol 11 constants. See botster-hub-client/src/lib.rs.
+// Host-control protocol 12 constants. See botster-hub-client/src/lib.rs.
 export const PROTOCOL = "botster-hub-daemon-v1";
-export const PROTOCOL_VERSION = 11;
-export const CONFORMANCE_FIXTURE_REVISION = 51;
+export const PROTOCOL_VERSION = 12;
+export const CONFORMANCE_FIXTURE_REVISION = 52;
 export const MAX_REQUEST_ID_BYTES = 20;
 export const MAX_OUTSTANDING_REQUESTS = 32;
 export const MAX_CONTROL_REQUEST_BYTES = 1048576;
@@ -212,6 +212,7 @@ export type DaemonRequest =
   | { type: "package_entrypoint_status"; package_name: string; entrypoint_id: string }
   | { type: "plugin_lifecycle_status" }
   | { type: "plugin_mcp_list_tools" }
+  | { type: "read_plugin_logs"; package_name: string; after_seq?: number }
   | { type: "plugin_mcp_call_tool"; name: string; arguments: JsonValue }
   | { type: "plugin_surface_render"; package_name: string; surface_id: string; payload: JsonValue }
   | { type: "plugin_surface_action"; package_name: string; request: UiActionRequest }
@@ -253,6 +254,7 @@ export interface DaemonResponse {
   plugin_tools: JsonValue[];
   plugin_tool_result: JsonValue;
   plugin_surface?: DaemonPluginSurface | null;
+  plugin_logs?: DaemonPluginLogs | null;
   plugin_action_result?: UiActionResult;
   local_webrtc_bootstrap?: DaemonLocalWebrtcBootstrap | null;
   local_webrtc_answer?: DaemonLocalWebrtcAnswer | null;
@@ -336,6 +338,23 @@ export interface DaemonSnapshotPage {
   bytes: number;
 }
 
+export interface DaemonPluginLogs {
+  package_name: string;
+  records: DaemonPluginLogRecord[];
+  next_seq: number;
+  first_available_seq: number;
+}
+
+export interface DaemonPluginLogRecord {
+  seq: number;
+  generation: number;
+  at_ms: number;
+  level: string;
+  message: string;
+  fields_json?: string;
+  dropped_before: number;
+}
+
 export interface DaemonPluginSurface {
   package_name: string;
   surface_id: string;
@@ -396,6 +415,7 @@ export type DaemonResponseKind =
   | "quarantine_resolved"
   | "plugin_lifecycle"
   | "plugin_mcp_tools"
+  | "plugin_logs"
   | "plugin_mcp_tool_result"
   | "plugin_surface"
   | "plugin_action_result"
@@ -1079,6 +1099,8 @@ export interface DaemonObservabilityCounters {
   event_stage_overlaps?: number;
   events_stranded?: number;
   package_quarantines_not_durable?: number;
+  retained_reservation_outstanding_staging_funding?: number;
+  retained_reservation_outstanding_entity_work?: number;
 }
 
 export interface DaemonLatencyHistogram {

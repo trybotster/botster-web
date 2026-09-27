@@ -1,4 +1,5 @@
 import { quarantineOperationIdFromAction, quarantineTargetFromAction, resolveQuarantineActionId } from "./hubQuarantines";
+import { readPluginLogsActionId, readPluginLogsRequestFromAction, retryablePluginLogErrorCodes } from "./pluginLogs";
 import type { ActionBinding, ActionRequestEnvelope } from "./actions";
 import type {
   PackageSurfaceDescriptor,
@@ -1429,6 +1430,31 @@ async function dispatchDaemonAction(
       request_type: "check_hub_update",
       kind: response.kind,
       hub_update: response.hub_update ?? null,
+      diagnostics: responseDiagnostics(response)
+    }));
+    return;
+  }
+
+  if (action.id === readPluginLogsActionId) {
+    const logRequest = readPluginLogsRequestFromAction(action);
+    if (!logRequest) {
+      emit(actionResultFrame(request, false, "Read plugin logs action is missing a package name or has a malformed after_seq"));
+      return;
+    }
+    const response = await bridge.request(logRequest);
+    emitResponse(response);
+    const read = response.kind === "plugin_logs" && !response.error && Boolean(response.plugin_logs);
+    const errorKind = response.error?.code;
+    emit(actionResultFrame(request, read, response.error?.message ?? (read
+      ? undefined
+      : `Read plugin logs protocol error: expected plugin_logs, received ${response.kind}.`), {
+      request_type: "read_plugin_logs",
+      kind: response.kind,
+      package_name: logRequest.package_name,
+      after_seq: logRequest.after_seq ?? null,
+      plugin_logs: response.plugin_logs ?? null,
+      error_kind: errorKind,
+      retryable: errorKind !== undefined && retryablePluginLogErrorCodes.has(errorKind),
       diagnostics: responseDiagnostics(response)
     }));
     return;

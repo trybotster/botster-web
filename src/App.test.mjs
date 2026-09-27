@@ -1960,7 +1960,7 @@ assert.doesNotMatch(realHubDaemonDto, /export type DaemonEvent\s*=/);
 assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client Rust serde DTOs/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "read_mode_flags"; session_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "read_snapshot_page"; session_id: string; capture_id: string; page: number \}/);
-assert.match(generatedDaemonProtocol, /export const PROTOCOL_VERSION = 11;/);
+assert.match(generatedDaemonProtocol, /export const PROTOCOL_VERSION = 12;/);
 assert.match(generatedDaemonProtocol, /export type ClientFrame =/);
 assert.match(generatedDaemonProtocol, /export type ServerFrame =/);
 assert.match(generatedDaemonProtocol, /\{ frame: "entity"; entity: DaemonEntityFrame \}/);
@@ -2308,7 +2308,7 @@ assert.match(daemonUnixClientScript, /frame: "hello"/);
 assert.match(daemonUnixClientScript, /frame: "request", request_id: "1"/);
 assert.match(daemonUnixClientScript, /It discards valid event, entity, and terminal deliveries/);
 assert.match(generatedDaemonProtocol, /export const PROTOCOL = "botster-hub-daemon-v1";/);
-assert.match(generatedDaemonProtocol, /export const CONFORMANCE_FIXTURE_REVISION = 51;/);
+assert.match(generatedDaemonProtocol, /export const CONFORMANCE_FIXTURE_REVISION = 52;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_FRAME_LENGTH_PREFIX_BYTES = 4;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_CONTROL = 1;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_TERMINAL = 2;/);
@@ -2830,17 +2830,17 @@ assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 assert.equal(
   hubTestSupportMetadata.daemon_protocol.sha256,
-  "dc14465512f954bde5c70dc51cf66744b04c262dcc4cfc8126139f29734d12f3"
+  "df105ffc7f8adc5a95f180e5834622207ea56b3f9c499ab5f8a1fe4485836936"
 );
 assert.equal(hubTestSupportMetadata.ui_contract.package_version, "0.3.3");
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.48");
-// Web consumes the verbatim 0.1.48 package from committed Hub 1ec61b94
+assert.equal(hubTestSupportMetadata.package_version, "0.1.49");
+// Web consumes the verbatim 0.1.49 package from committed Hub 6ca5a996
 // from the tracked test-support directory through a file: dependency.
 assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "file:test-support/hub-test-support");
-assert.equal(hubTestSupportProvenance.revision, "1ec61b94c76f62b0b2942c21c7c03630da709221");
+assert.equal(hubTestSupportProvenance.revision, "6ca5a9961518b2c9cdce80f0e90effbda86b4264");
 assert.equal(hubTestSupportProvenance.package_version, hubTestSupportMetadata.package_version);
 assert.equal(hubTestSupportProvenance.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(vendoredHubTestSupportPackageJson.version, hubTestSupportMetadata.package_version);
@@ -2848,8 +2848,8 @@ assert.equal(vendoredHubTestSupportPackageJson.name, hubTestSupportMetadata.pack
 // Core terminal codecs come only from the vendored generated artifact; no npm terminal-protocol pin.
 assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], undefined);
 assert.equal(packageJson.devDependencies["@trybotster/terminal-protocol"], undefined);
-assert.equal(hubTestSupportMetadata.protocol_version, 11);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 51);
+assert.equal(hubTestSupportMetadata.protocol_version, 12);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 52);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${hubTestSupportMetadata.package_version}`,
@@ -2877,7 +2877,7 @@ assert.deepEqual(
     { kind: "surface", surface_id: "contract.settings" }
   ]
 );
-// The vendored daemon-protocol.ts is the Hub 1ec61b94 artifact recorded in PROVENANCE.json;
+// The vendored daemon-protocol.ts is the Hub 6ca5a996 artifact recorded in PROVENANCE.json;
 // the vendored hub-test-support package from that Hub revision ships the same artifact.
 assert.match(generatedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
 assert.match(generatedDaemonProtocol, /interface DaemonPluginResourceCounters/);
@@ -3486,6 +3486,7 @@ await Promise.all([
   compileTsModule("botster/hubRuntime.ts", join(compiledRoot, "botster/hubRuntime.js")),
   compileTsModule("botster/entities.ts", join(compiledRoot, "botster/entities.js")),
   compileTsModule("botster/hubQuarantines.ts", join(compiledRoot, "botster/hubQuarantines.js")),
+  compileTsModule("botster/pluginLogs.ts", join(compiledRoot, "botster/pluginLogs.js")),
   compileTsModule("botster/protocol.ts", join(compiledRoot, "botster/protocol.js")),
   compileTsModule("botster/realHubDaemonDto.ts", join(compiledRoot, "botster/realHubDaemonDto.js")),
   compileTsModule("botster/hubTransport.ts", join(compiledRoot, "botster/hubTransport.js")),
@@ -3539,6 +3540,7 @@ const {
 } = requireRuntime("./app/packageEventNotices.js");
 const { createInMemoryEntityFrameStore } = requireRuntime("./botster/entities.js");
 const { hubQuarantines, quarantineKey, resolveQuarantineAction, resolveQuarantineActionId } = requireRuntime("./botster/hubQuarantines.js");
+const { pluginLogPage, readPluginLogsAction, readPluginLogsActionId, readPluginLogsRequestFromAction } = requireRuntime("./botster/pluginLogs.js");
 const { createHubRuntimeConfig, terminalDataPlaneLabel } = requireRuntime("./botster/hubRuntime.js");
 const { hostCompatibilityRequirement } = requireRuntime("./botster/protocolPlanes.js");
 const {
@@ -4652,6 +4654,25 @@ const bridge = {
       }
       fakeQuarantines = fakeQuarantines.filter((entry) => !matches(entry));
       return { kind: "quarantine_resolved", error: null };
+    }
+    if (request.type === "read_plugin_logs") {
+      if (request.package_name === "acme.busy") {
+        return { kind: "operator_error", error: { code: "plugin_logs_busy", request_id: "fake", operation: "read_plugin_logs", message: "plugin is writing a record" } };
+      }
+      return {
+        kind: "plugin_logs",
+        error: null,
+        diagnostics: [],
+        plugin_logs: {
+          package_name: request.package_name,
+          records: [
+            { seq: 7, generation: 2, at_ms: 1_790_000_000_000, level: "info", message: "loaded", fields_json: "{\"k\":1}", dropped_before: 0 },
+            { seq: 8, generation: 2, at_ms: 1_790_000_000_001, level: "warn", message: "after a burst", dropped_before: 3 }
+          ],
+          next_seq: 9,
+          first_available_seq: 7
+        }
+      };
     }
     if (request.type === "check_hub_update") {
       return {
@@ -9075,6 +9096,42 @@ assert.deepEqual(hubUpdateCurrentResult.result.diagnostics, [
     });
     await deadlineRuntime.hub.disconnect();
   }
+}
+
+// Protocol 12 read_plugin_logs: the action sends the typed request (after_seq only when given),
+// accepts only a plugin_logs answer, carries the page, and marks plugin_logs_busy retryable.
+// Web does not retry by itself.
+{
+  assert.deepEqual(readPluginLogsAction("acme.logs"), { id: readPluginLogsActionId, label: "Read plugin logs", params: { package_name: "acme.logs" } });
+  const firstPage = await realRuntime.actions.dispatch({ origin: "ui_node", action: readPluginLogsAction("acme.logs") });
+  assert.equal(firstPage.accepted, true);
+  assert.deepEqual(bridgeRequests.at(-1), { type: "read_plugin_logs", package_name: "acme.logs" });
+  assert.equal(firstPage.result.request_type, "read_plugin_logs");
+  assert.equal(firstPage.result.plugin_logs.next_seq, 9);
+  assert.equal(firstPage.result.retryable, false);
+  const nextPage = await realRuntime.actions.dispatch({ origin: "ui_node", action: readPluginLogsAction("acme.logs", 8) });
+  assert.equal(nextPage.accepted, true);
+  assert.deepEqual(bridgeRequests.at(-1), { type: "read_plugin_logs", package_name: "acme.logs", after_seq: 8 });
+  const busy = await realRuntime.actions.dispatch({ origin: "ui_node", action: readPluginLogsAction("acme.busy") });
+  assert.equal(busy.accepted, false);
+  assert.equal(busy.reason, "plugin is writing a record");
+  assert.equal(busy.result.error_kind, "plugin_logs_busy");
+  assert.equal(busy.result.retryable, true);
+  const requestsBefore = bridgeRequests.length;
+  for (const params of [{}, { package_name: "" }, { package_name: "acme.logs", after_seq: -1 }, { package_name: "acme.logs", after_seq: 1.5 }]) {
+    assert.equal(readPluginLogsRequestFromAction({ id: readPluginLogsActionId, params }), undefined);
+    const malformed = await realRuntime.actions.dispatch({ origin: "ui_node", action: { id: readPluginLogsActionId, params } });
+    assert.equal(malformed.accepted, false);
+  }
+  assert.equal(bridgeRequests.length, requestsBefore, "a malformed read sends nothing");
+  // The two gap kinds stay distinct: eviction (per page, first_available_seq) and the rate
+  // limit (per record, dropped_before).
+  const page = pluginLogPage(firstPage.result.plugin_logs, 3);
+  assert.deepEqual(page.evicted, { fromSeq: 4, toSeq: 6 });
+  assert.deepEqual(page.rateLimited, [{ beforeSeq: 8, count: 3 }]);
+  assert.equal(page.nextSeq, 9);
+  assert.equal(pluginLogPage(firstPage.result.plugin_logs, 6).evicted, undefined, "no gap when the reader read up to seq 6");
+  assert.equal(pluginLogPage({ ...firstPage.result.plugin_logs, first_available_seq: 1 }, undefined).evicted, undefined);
 }
 
 authoritativeHubUpdate = {
@@ -16614,9 +16671,9 @@ async function startPackageServerRuntime({
               protocol: "botster-hub-daemon-v1",
               compatibility: {
                 protocol: "botster-hub-daemon-v1",
-                protocol_version: 11,
+                protocol_version: 12,
                 features: ["webrtc_terminal_adapter"],
-                conformance_fixture_revision: 51
+                conformance_fixture_revision: 52
               }
             }
           });
@@ -16962,13 +17019,13 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
   });
 }
 
-/** Host-control v11 Hello ack fixture: protocol 11, conformance 51, terminal scheme 2. */
+/** Host-control v12 Hello ack fixture: protocol 12, conformance 52, terminal scheme 2. */
 function testHelloAckFixture() {
   return {
     protocol: "botster-hub-daemon-v1",
     compatibility: {
       protocol: "botster-hub-daemon-v1",
-      protocol_version: 11,
+      protocol_version: 12,
       features: [
         "sessions",
         "terminal_readback",
@@ -18082,6 +18139,8 @@ function removeCssAtRules(source) {
   assert.equal(fixtureManifest.events.notices[0].name, "sample.notice");
   // Hub 1ec61b94+ plugin ABI: botster.events is the only event API; there is no events global.
   assert.match(fixtureLua, /botster\.events\.emit\(\{ name = "sample\.notice"/);
+  // Protocol 12: the fixture writes one structured log record per load (the live lane reads it).
+  assert.match(fixtureLua, /botster\.log\.info\(\{ message = "package-notice-reaction loaded", fields = \{ fixture = "package-notice-reaction" \} \}\)/);
   assert.doesNotMatch(fixtureLua, /(^|[^.])events\.(emit|on)\(/m);
   assert.doesNotMatch(fixtureLua, /kind:\s*"package_event"|injectDecoded|decodedPayload/);
   assert.match(liveProtocolHarnessScript, /deliveryKind: "daemon_event"|type: "package_event"/);
