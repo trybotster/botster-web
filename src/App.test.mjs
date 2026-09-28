@@ -11266,12 +11266,12 @@ try {
   }
 
   {
+    const { SessionRouteDetachHarness } = await vite.ssrLoadModule("/src/app/__fixtures__/sessionRouteDetachHarness.tsx");
     const {
-      SessionRouteDetachHarness,
       createSessionDetachTestBridge,
       createSessionDetachTeardownLedger,
       sessionDetachTestDataPlane
-    } = await vite.ssrLoadModule("/src/app/__fixtures__/sessionRouteDetachHarness.tsx");
+    } = await vite.ssrLoadModule("/src/app/__fixtures__/sessionRouteDetachHarnessSupport.ts");
 
     if (!globalThis.document?.__botsterMinimalDom) {
       throw new Error("minimal DOM required for session detach route-state tests");
@@ -17987,10 +17987,11 @@ function removeCssAtRules(source) {
       // Focused proof: standard renderer keeps native disabled + form-invalid, and the shipped
       // source has no mutable browser-global form-validation bypass. A hostile harness flag
       // planted before render must not reopen the gate in markup.
-      const rendererSource = await readFile(
-        new URL("./botster/IonicUiNodeRenderer.tsx", import.meta.url),
-        "utf8"
-      );
+      // The form component lives in UiNodeForm.tsx; the renderer supplies its validation.
+      const rendererSource = [
+        await readFile(new URL("./botster/IonicUiNodeRenderer.tsx", import.meta.url), "utf8"),
+        await readFile(new URL("./botster/UiNodeForm.tsx", import.meta.url), "utf8")
+      ].join("\n");
       assert.doesNotMatch(
         rendererSource,
         /ablateEntitySelectInvalidation/,
@@ -18000,6 +18001,11 @@ function removeCssAtRules(source) {
         rendererSource,
         /disabled=\{submitGated\}|disabled=\{submitAction\.disabled \|\| hasInvalidControl\}/,
         "invalid entity-select submit must use native disabled from production gates"
+      );
+      assert.match(
+        rendererSource,
+        /hasInvalidControl=\{\(draft\) => formHasInvalidEntitySelects\(children, store, options, draft, row\)\}/,
+        "the form's gate is the production entity-select validation"
       );
       globalThis.window = globalThis.window ?? globalThis;
       globalThis.window.__BOTSTER_LIVE_PROTOCOL_HARNESS__ = {

@@ -27,11 +27,12 @@ import {
   realizeBindListDescendantId,
   type UiEntityOptionsSource
 } from "@trybotster/ui-contract";
-import { Fragment, useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 
 import { defaultUiCapabilitySet } from "./capabilities";
 import type { EntityFrameStore, EntityRecord } from "./entities";
 import { UiNodeDialog } from "./UiNodeDialog";
+import { UiNodeForm } from "./UiNodeForm";
 import type {
   JsonValue,
   JsonObject,
@@ -1116,97 +1117,61 @@ function renderCoreControl({
   );
 }
 
-function UiNodeForm({
-  node,
-  props,
-  store,
-  options,
-  row
-}: {
-  node: RealizedUiNode;
-  props: Record<string, unknown>;
-  store: EntityFrameStore;
-  options: UiNodeRenderOptions;
-  row?: RowContext;
-}) {
+/** Props for a UiNode form; the component (UiNodeForm.tsx) owns the draft. */
+function uiNodeForm(
+  node: RealizedUiNode,
+  props: Record<string, unknown>,
+  store: EntityFrameStore,
+  options: UiNodeRenderOptions,
+  row?: RowContext
+): ReactNode {
   const children = readChildren(node);
   const submitAction = actionFromProps(props);
   const latestActionResult = options.actionResult;
   const actionResult = latestActionResult && latestActionResult.node_id === node.id && latestActionResult.action_id === submitAction.id
     ? latestActionResult
     : undefined;
-  const initialDraft = useMemo(
-    () => collectFormControlDefaults(children, store, options, row),
-    [children, options, row, store]
-  );
-  const [draft, setDraft] = useState<Record<string, unknown>>(() => initialDraft);
-  const [appliedResultId, setAppliedResultId] = useState<string>();
-  if (actionResult && actionResult.request_id !== appliedResultId) {
-    setAppliedResultId(actionResult.request_id);
-    if (actionResult.normalized_values) {
-      setDraft((current) => ({ ...current, ...actionResult.normalized_values }));
-    }
-  }
-  // Re-project on every render so entity frame updates invalidate without a surface refresh.
-  const hasInvalidControl = formHasInvalidEntitySelects(children, store, options, draft, row);
-  const submitDispatch: UiNodeActionDispatch = {
-    action: submitAction,
-    node,
-    kind: "submit",
-    values: draft as UiNodeActionDispatch["values"]
-  };
-  options.collectAction?.(submitDispatch);
-  const submitGated = Boolean(submitAction.disabled || hasInvalidControl);
-
   return (
-    <form className="uinode-form" data-ui-node-id={node.id} data-form-invalid={hasInvalidControl ? "true" : "false"}>
-      {renderChildren(children, store, options, row, {
+    <UiNodeForm
+      key={node.id}
+      nodeId={node.id}
+      submitAction={submitAction}
+      submitLabel={readString(props.submit_label, "Submit")}
+      actionResult={actionResult}
+      initialDraft={() => collectFormControlDefaults(children, store, options, row)}
+      renderFields={(draft, setDraft, formActionResult) => renderChildren(children, store, options, row, {
         draft,
         setDraft,
-        actionResult,
+        actionResult: formActionResult,
         store,
         renderOptions: options,
         row
       })}
-      {actionResult?.form_errors?.map((error) => (
-        <IonNote color="danger" className="uinode-form-error" key={error}>{error}</IonNote>
-      ))}
-      <IonButton
-        data-action-id={submitAction.id}
-        disabled={submitGated}
-        type="button"
-        onClick={() => {
-          // Read-only harness telemetry only — never changes validation or dispatch.
-          const liveHarness = liveProtocolHarness();
-          const mark = (phase: NonNullable<LiveProtocolHarnessFormTelemetry["lastFormSubmitClick"]>["phase"]) => {
-            if (!liveHarness) return;
-            const seq = (liveHarness.formSubmitClickSeq ?? 0) + 1;
-            liveHarness.formSubmitClickSeq = seq;
-            liveHarness.lastFormSubmitClick = {
-              seq,
-              actionId: submitAction.id,
-              nodeId: node.id,
-              phase,
-              gated: submitGated,
-              settled: true
-            };
-          };
-          // Fail closed at click time too: entity frames may have landed after last paint.
-          if (submitAction.disabled) {
-            mark("blocked_disabled");
-            return;
-          }
-          if (formHasInvalidEntitySelects(children, store, options, draft, row)) {
-            mark("blocked_invalid");
-            return;
-          }
-          options.dispatchAction?.({ ...submitDispatch, values: draft as UiNodeActionDispatch["values"] });
-          mark("dispatched");
-        }}
-      >
-        {readString(props.submit_label, "Submit")}
-      </IonButton>
-    </form>
+      hasInvalidControl={(draft) => formHasInvalidEntitySelects(children, store, options, draft, row)}
+      submitDispatch={(draft) => ({
+        action: submitAction,
+        node,
+        kind: "submit",
+        values: draft as UiNodeActionDispatch["values"]
+      })}
+      collectAction={options.collectAction}
+      dispatchAction={options.dispatchAction}
+      markSubmitClick={(phase, gated) => {
+        // Read-only harness telemetry only — never changes validation or dispatch.
+        const liveHarness = liveProtocolHarness();
+        if (!liveHarness) return;
+        const seq = (liveHarness.formSubmitClickSeq ?? 0) + 1;
+        liveHarness.formSubmitClickSeq = seq;
+        liveHarness.lastFormSubmitClick = {
+          seq,
+          actionId: submitAction.id,
+          nodeId: node.id,
+          phase,
+          gated,
+          settled: true
+        };
+      }}
+    />
   );
 }
 
@@ -1599,7 +1564,7 @@ function renderNode(
       );
     }
     case "form": {
-      return <UiNodeForm node={node} props={props} store={store} options={options} row={row} key={node.id} />;
+      return uiNodeForm(node, props, store, options, row);
     }
     case "form_field": {
       const schema = readRecord(props.schema);
