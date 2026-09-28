@@ -7,7 +7,7 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import {
@@ -267,8 +267,17 @@ export function spawnHubProcess(dataDir, { hubBin, workerBin, cwd, env = process
     onStdout?.(chunk);
     process.stdout.write(`[botster-hub] ${chunk}`);
   });
+  // The Hub log is its stderr. BOTSTER_LIVE_HUB_STDERR_LOG keeps all of it, unprefixed, in one
+  // file per run (the diagnosis copy of a failed run).
+  const stderrLog = env.BOTSTER_LIVE_HUB_STDERR_LOG ?? process.env.BOTSTER_LIVE_HUB_STDERR_LOG;
+  if (stderrLog) {
+    // Created at spawn, so an empty file means the Hub wrote nothing to stderr, not "not captured".
+    appendFileSync(stderrLog, "");
+    console.log(`hub stderr capture armed: pid=${child.pid} path=${stderrLog}`);
+  }
   child.stderr.on("data", (chunk) => {
     onStderr?.(chunk);
+    if (stderrLog) appendFileSync(stderrLog, chunk);
     process.stderr.write(`[botster-hub] ${chunk}`);
   });
   return child;

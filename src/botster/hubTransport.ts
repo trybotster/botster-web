@@ -1350,6 +1350,31 @@ async function dispatchDaemonAction(
     return;
   }
 
+  if (action.id === "botster.session.remove") {
+    const targetSessionId = action.target ?? "";
+    if (!targetSessionId) {
+      emit(actionResultFrame(request, false, "Session remove action is missing a session target"));
+      return;
+    }
+
+    const response = await bridge.request({
+      type: "remove_session",
+      session_id: targetSessionId
+    });
+    emitResponse(response);
+    const removed = response.kind === "session_removed" && !response.error;
+    emit(actionResultFrame(request, removed, response.error?.message ?? (removed
+      ? undefined
+      : `Remove session protocol error: expected session_removed, received ${response.kind}.`), {
+      request_type: "remove_session",
+      kind: response.kind,
+      session_id: targetSessionId,
+      error_kind: response.error?.code,
+      diagnostics: responseDiagnostics(response)
+    }));
+    return;
+  }
+
   if (action.id === "botster.package.configure") {
     emit(
       actionResultFrame(request, true, undefined, {

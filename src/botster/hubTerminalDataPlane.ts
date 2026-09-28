@@ -1044,7 +1044,16 @@ export class HubTerminalDataPlane implements TerminalDataPlaneAttachment {
       if (event.reason === "core_adapter_closed") {
         this.emitStatus({ state: "failed", message: "Terminal subscription closed by Core write-budget." });
         this.closeStream();
+        return;
       }
+      // Every other reason, known or not, is a close (Hub client protocol). The Hub already
+      // ended this generation, so local delivery stops without a Detach and without a reattach.
+      this.emitStatus({
+        state: "failed",
+        message: terminalCloseMessage(event.reason),
+        closeReason: event.reason
+      });
+      this.closeStreamWithoutDetachRequest("Terminal closed by the Hub before the operation completed.");
       return;
     }
 
@@ -1671,4 +1680,10 @@ function bytesToBase64(bytes: Uint8Array): string {
   const buffer = (globalThis as { Buffer?: { from(data: Uint8Array): { toString(enc: string): string } } }).Buffer;
   if (buffer) return buffer.from(bytes).toString("base64");
   throw new Error("No base64 encoder is available in this runtime.");
+}
+
+/** Visible text for a Hub TerminalSubscriptionClosed reason other than core_adapter_closed. */
+export function terminalCloseMessage(reason: string): string {
+  if (reason === "worker_lost") return "The session crashed: its worker process was lost.";
+  return `The Hub closed the terminal (${reason || "no reason given"}).`;
 }

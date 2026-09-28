@@ -24,7 +24,7 @@ import { isMountedSessionRoute } from "./botster/terminalSession";
 
 import { AppsRouteView } from "./app/AppsRouteView";
 import { DashboardView } from "./app/dashboard";
-import { currentDashboardSessions, endedDashboardSessions } from "./app/dashboardSessions";
+import { attentionDashboardSessions, currentDashboardSessions, endedDashboardSessions } from "./app/dashboardSessions";
 import {
   type HubEntityLoadKey,
   replayHubStatusOnLifecycleEvent
@@ -33,7 +33,8 @@ import { HubSettingsRouteView } from "./app/HubSettingsRouteView";
 import type { SelectedPluginSurface } from "./app/pluginSurfaceState";
 import { SessionRouteView } from "./app/sessionRoute";
 import { compareSpawnTargetRows } from "./app/spawnTargets";
-import { terminalDescriptorForSessionId, terminalReleaseToast } from "./app/terminalChrome";
+import { useSessionEndNotice } from "./app/useSessionEndNotice";
+import { terminalDescriptorForSessionId } from "./app/terminalChrome";
 import { useAppNavigation } from "./app/useAppNavigation";
 import { useSessionEntityDetach } from "./app/useSessionEntityDetach";
 import { useHubActions } from "./app/useHubActions";
@@ -217,6 +218,7 @@ export default function App() {
   const sessionRecords = runtimeClient.entities.list("session");
   const sessions = currentDashboardSessions(sessionRecords);
   const endedSessions = endedDashboardSessions(sessionRecords);
+  const attentionSessions = attentionDashboardSessions(sessionRecords);
 
   const pluginRoutes = usePluginRouteState({
     runtimeClient,
@@ -272,14 +274,21 @@ export default function App() {
     navigateToRoute({ view: "session", sessionId });
   }, [navigateToRoute]);
 
+  // The notice of the last released session route; a later entity frame of that same session
+  // can upgrade it to a crash notice (the crash signals arrive in either order).
+  const { release: releaseSessionEndNotice } = useSessionEndNotice({
+    entities: runtimeClient.entities,
+    hub: runtimeClient.hub,
+    showToast: actions.setPackageActionToast
+  });
   const releaseTerminalSession = useCallback((
     sessionId: string,
     status?: TerminalAttachmentStatus
   ) => {
     if (!isMountedSessionRoute(activeRoute, sessionId)) return;
-    actions.setPackageActionToast(terminalReleaseToast(sessionId, status));
+    releaseSessionEndNotice(sessionId, status);
     navigateToView("dashboard");
-  }, [activeRoute, actions, navigateToView]);
+  }, [activeRoute, navigateToView, releaseSessionEndNotice]);
 
   const recordTerminalAttachmentStatus = useCallback((
     sessionId: string,
@@ -367,10 +376,13 @@ export default function App() {
         <DashboardView
           sessions={sessions}
           endedSessions={endedSessions}
+          attentionSessions={attentionSessions}
           sessionLoadStatus={entityLoadStatus.session}
           stoppingSessionIds={sessionControl.stoppingSessionIds}
           onOpenSession={openSession}
           onStopSession={sessionControl.stopSession}
+          removingSessionIds={sessionControl.removingSessionIds}
+          onRemoveSession={sessionControl.removeSession}
           onNavigateToApps={() => navigateToView("apps")}
           onNavigateToSpawnPoints={() => navigateToHubSettings("spawn-points")}
         />

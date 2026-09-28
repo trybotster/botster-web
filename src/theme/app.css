@@ -1701,3 +1701,13 @@ ion-modal.uinode-dialog .uinode-form > ion-button {
     padding-inline: 18px;
   }
 }
+
+.session-recovery {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.session-status-failed {
+  color: var(--ion-color-danger);
+}

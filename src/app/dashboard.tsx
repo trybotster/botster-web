@@ -7,26 +7,70 @@ import type { HubEntityLoadStatus } from "../botster/LocalHubFirstScreen";
 import {
   isAttachableSession,
   sessionDisplayStatus,
-  sessionDisplayTitle
+  sessionDisplayTitle,
+  sessionFailure
 } from "../botster/terminalSession";
 import { SessionActionsMenu } from "./SessionActionsMenu";
+
+/**
+ * Recovery for a session that is no longer current: forget it (the Hub refuses a session that
+ * is not terminal, and the refusal is shown), and for a failed one, start a new session.
+ */
+function SessionRecovery({
+  sessionTitle,
+  removing,
+  onRemove,
+  onNewSession
+}: {
+  sessionTitle: string;
+  removing: boolean;
+  onRemove: () => void;
+  onNewSession?: () => void;
+}) {
+  return (
+    <div className="session-recovery" slot="end" data-testid="session-recovery">
+      <IonButton
+        fill="outline"
+        size="small"
+        disabled={removing}
+        aria-label={`Remove session ${sessionTitle}`}
+        data-testid="session-remove"
+        onClick={onRemove}
+      >
+        {removing ? "Removing…" : "Remove"}
+      </IonButton>
+      {onNewSession ? (
+        <IonButton fill="clear" size="small" data-testid="session-new" onClick={onNewSession}>
+          New session
+        </IonButton>
+      ) : null}
+    </div>
+  );
+}
 
 export function SessionListItem({
   session,
   stopping,
   onOpen,
   onStop,
-  showActions = true
+  showActions = true,
+  removing = false,
+  onRemove,
+  onNewSession
 }: {
   session: Record<string, unknown>;
   stopping: boolean;
   onOpen: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
   showActions?: boolean;
+  removing?: boolean;
+  onRemove?: (sessionId: string) => void;
+  onNewSession?: () => void;
 }) {
   const sessionId = String(session.id);
   const attachable = isAttachableSession(session);
   const sessionTitle = sessionDisplayTitle(session);
+  const failure = sessionFailure(session);
   return (
     <IonItem
       button={attachable}
@@ -36,8 +80,27 @@ export function SessionListItem({
       <IonIcon icon={serverOutline} slot="start" aria-hidden="true" />
       <IonLabel>
         <h2>{sessionTitle}</h2>
-        <p>{sessionDisplayStatus(session)}</p>
+        {failure ? (
+          <p
+            className="session-status-failed"
+            data-testid="session-failure"
+            data-session-id={sessionId}
+            data-session-failure={failure.crashed ? "crashed" : "failed"}
+          >
+            {sessionDisplayStatus(session)}
+          </p>
+        ) : (
+          <p>{sessionDisplayStatus(session)}</p>
+        )}
       </IonLabel>
+      {onRemove ? (
+        <SessionRecovery
+          sessionTitle={sessionTitle}
+          removing={removing}
+          onRemove={() => onRemove(sessionId)}
+          onNewSession={failure ? onNewSession : undefined}
+        />
+      ) : null}
       {showActions ? (
         <SessionActionsMenu
           sessionId={sessionId}
@@ -58,19 +121,25 @@ export function SessionListItem({
 export function DashboardView({
   sessions,
   endedSessions = [],
+  attentionSessions = [],
   sessionLoadStatus,
   stoppingSessionIds,
+  removingSessionIds = new Set<string>(),
   onOpenSession,
   onStopSession,
+  onRemoveSession,
   onNavigateToApps,
   onNavigateToSpawnPoints
 }: {
   sessions: Record<string, unknown>[];
   endedSessions?: Record<string, unknown>[];
+  attentionSessions?: Record<string, unknown>[];
   sessionLoadStatus: HubEntityLoadStatus;
   stoppingSessionIds: ReadonlySet<string>;
+  removingSessionIds?: ReadonlySet<string>;
   onOpenSession: (sessionId: string) => void;
   onStopSession: (sessionId: string) => void;
+  onRemoveSession?: (sessionId: string) => void;
   onNavigateToApps: () => void;
   onNavigateToSpawnPoints: () => void;
 }) {
@@ -115,6 +184,36 @@ export function DashboardView({
           </div>
         )}
       </section>
+      {attentionSessions.length > 0 ? (
+        <section
+          className="workflow-section home-sessions"
+          aria-labelledby="attention-sessions-heading"
+          data-testid="dashboard-attention-sessions"
+        >
+          <div className="section-heading">
+            <div>
+              <h2 id="attention-sessions-heading">Needs attention</h2>
+              <p className="page-description">The Hub cannot confirm these sessions are running.</p>
+            </div>
+            <IonBadge color="warning">{attentionSessions.length}</IonBadge>
+          </div>
+          <IonList lines="full" aria-label="Sessions that need attention">
+            {attentionSessions.map((session) => (
+              <SessionListItem
+                key={String(session.id)}
+                session={session}
+                stopping={stoppingSessionIds.has(String(session.id))}
+                showActions={false}
+                removing={removingSessionIds.has(String(session.id))}
+                onOpen={onOpenSession}
+                onStop={onStopSession}
+                onRemove={onRemoveSession}
+                onNewSession={onNavigateToSpawnPoints}
+              />
+            ))}
+          </IonList>
+        </section>
+      ) : null}
       {endedSessions.length > 0 ? (
         <section
           className="workflow-section home-sessions"
@@ -134,8 +233,11 @@ export function DashboardView({
                 session={session}
                 stopping={stoppingSessionIds.has(String(session.id))}
                 showActions={false}
+                removing={removingSessionIds.has(String(session.id))}
                 onOpen={onOpenSession}
                 onStop={onStopSession}
+                onRemove={onRemoveSession}
+                onNewSession={onNavigateToSpawnPoints}
               />
             ))}
           </IonList>

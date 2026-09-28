@@ -26,6 +26,8 @@ export interface TerminalSubscription {
 export interface TerminalAttachmentStatus {
   state: "attaching" | "attached" | "exited" | "failed";
   message: string;
+  /** The Hub TerminalSubscriptionClosed reason when a Hub close ended the attachment. */
+  closeReason?: string;
 }
 
 /** Authoritative terminal modes and grid from the latest Core MODES frame. */

@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, watch } from "node:fs";
 import { chmod, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -165,6 +166,7 @@ const entityOptionsPackagePath = entityOptionsMode
     )
   : undefined;
 const packageEventsMode = process.env.BOTSTER_LIVE_PACKAGE_EVENTS === "1";
+const workerLostMode = process.env.BOTSTER_LIVE_WORKER_LOST === "1";
 // The forced-gap lane. The Hub removed its client-queue test knob in protocol 9, so this lane
 // has no Hub control over the client event queue; see the README (live event_gap).
 const packageEventsGapMode = process.env.BOTSTER_LIVE_PACKAGE_EVENTS_GAP === "1";
@@ -345,6 +347,13 @@ try {
         ? "package-events forced-gap live proof passed (webrtc)"
         : "package-events live proof passed (webrtc)"
     );
+    process.exit(0);
+  }
+  if (workerLostMode) {
+    const workerLostProof = await exerciseWorkerLost(page);
+    assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
+    await requestDaemonShutdown();
+    console.log(`worker-lost live proof passed (webrtc) ${JSON.stringify(workerLostProof)}`);
     process.exit(0);
   }
   const liveHubUpdate = await assertHubUpdateCheck(page);
@@ -777,6 +786,14 @@ try {
       () => console.error(`hub data directory copied for diagnosis: ${destination}`),
       (copyError) => console.error(`hub data directory copy failed: ${copyError.message}`)
     );
+    // The Hub log is its stderr; keep the full capture with the data directory.
+    const hubStderrLog = process.env.BOTSTER_LIVE_HUB_STDERR_LOG;
+    if (hubStderrLog && existsSync(hubStderrLog)) {
+      await cp(hubStderrLog, join(destination, "hub-stderr.log")).then(
+        () => console.error(`hub stderr log copied for diagnosis: ${join(destination, "hub-stderr.log")}`),
+        (copyError) => console.error(`hub stderr log copy failed: ${copyError.message}`)
+      );
+    }
   }
   if (ownsWebrtcDataDir && webrtcDataDir) {
     await rm(webrtcDataDir, { recursive: true, force: true });
@@ -3519,12 +3536,20 @@ async function exerciseWorkspacesLifecycle(page) {
         `Workspaces lifecycle transition shutdown failed for ${sessionId}: ${JSON.stringify(transitionResponse.error)}`
       );
     }
-    await waitForHarnessEvent(page, {
+    const endedFrame = await waitForHarnessEvent(page, {
       kind: "hub_frame",
       family: "session",
       id: sessionId,
       lifecycle_class: "ended"
     }, undefined, { label: `Workspaces lifecycle current-to-ended entity transition ${sessionId}`, deadlineMs: 45_000 });
+    const endedRecord = endedFrame?.payload?.payload?.record ?? endedFrame?.payload?.payload?.patch ?? {};
+    console.log(`workspaces-lifecycle transition ended ${JSON.stringify({
+      session_id: sessionId,
+      shutdown_response_kind: transitionResponse.kind,
+      frame_kind: endedFrame?.payload?.kind,
+      lifecycle: endedRecord.lifecycle ?? null,
+      lifecycle_class: endedRecord.lifecycle_class ?? null
+    })}`);
   }
   // The plugin receives the same Hub session_family upsert as Web and prunes in its own turn
   // (botster-workspaces 742891f). Its membership entity_remove is the plugin's release event;
@@ -6694,6 +6719,208 @@ async function provePluginLogsWire(page) {
   return proof;
 }
 
+/**
+ * Resolves with the trimmed content of `path` once a writer has created it with a full line.
+ * Wakes on directory change events from the kernel; the deadline bounds a writer that never runs.
+ */
+function waitForLineFile(path, { label, deadlineMs }) {
+  const directory = resolve(path, "..");
+  const read = () => {
+    if (!existsSync(path)) return undefined;
+    const text = readFileSync(path, "utf8");
+    return text.endsWith("\n") ? text.trim() : undefined;
+  };
+  return new Promise((resolvePromise, reject) => {
+    let settled = false;
+    const watcher = watch(directory);
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      watcher.close();
+      if (error) reject(error);
+      else resolvePromise(value);
+    };
+    // timer: deadline — the session command writes the file once; nothing else reports it.
+    const deadline = setTimeout(() => finish(new Error(`timed out after ${deadlineMs} ms waiting for ${label}`)), deadlineMs);
+    watcher.on("change", () => {
+      const value = read();
+      if (value !== undefined) finish(undefined, value);
+    });
+    watcher.on("error", (error) => finish(error));
+    const initial = read();
+    if (initial !== undefined) finish(undefined, initial);
+  });
+}
+
+function parentPid(pid) {
+  const text = execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" }).trim();
+  const parent = Number(text);
+  if (!Number.isInteger(parent) || parent <= 0) throw new Error(`no parent for pid ${pid}: ${JSON.stringify(text)}`);
+  return parent;
+}
+
+/**
+ * The session worker that hosts `childPid`: the ancestor of the child whose parent is this
+ * harness's own Hub. The complete chain child → … → worker → Hub is verified before any
+ * signal; a mismatch throws without signalling.
+ */
+function ownedWorkerForChild(childPid, hubPid) {
+  const chain = [childPid];
+  let pid = childPid;
+  for (let depth = 0; depth < 4; depth += 1) {
+    const parent = parentPid(pid);
+    chain.push(parent);
+    if (parent === hubPid) {
+      if (pid === childPid) throw new Error(`session child ${childPid} is a direct child of the Hub; no worker between them: ${chain.join(" -> ")}`);
+      return { workerPid: pid, chain };
+    }
+    if (parent === 1) break;
+    pid = parent;
+  }
+  throw new Error(`session child ${childPid} does not descend from harness Hub ${hubPid}: ${chain.join(" -> ")}`);
+}
+
+/**
+ * worker_lost end to end: Web attaches a dedicated session; the harness SIGKILLs exactly that
+ * session's worker (identified from the spawned child's own pid, through the parent chain to
+ * this harness's Hub). The Hub closes the route with reason worker_lost and closes the data
+ * channel (either first) and the entity moves to failed/worker_lost. Web must end with the
+ * crash notice and a "Crashed: worker lost" row whatever the order, and Remove must forget it.
+ */
+async function exerciseWorkerLost(page) {
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  const hubPid = hubProcess?.pid;
+  if (!hubPid || hubProcess.exitCode !== null) throw new Error("worker-lost lane requires the harness's running Hub");
+  const pidDirectory = await mkdtemp(join(tmpdir(), "botster-web-worker-lost-"));
+  const pidFile = join(pidDirectory, "child.pid");
+  const sessionId = `botster-web-worker-lost-${randomUUID()}`;
+  try {
+    const spawnResponse = await sendDaemonRequest(socketPath, {
+      type: "spawn",
+      session_id: sessionId,
+      command: `sh -c 'echo $$ > ${pidFile}; exec sleep 300'`
+    });
+    if (spawnResponse.error) throw new Error(`worker-lost spawn failed: ${JSON.stringify(spawnResponse.error)}`);
+    harnessSpawnedSessionIds.add(sessionId);
+    await waitForHarnessEvent(page, { kind: "hub_frame", family: "session", id: sessionId, lifecycle_class: "current" }, undefined, {
+      label: `worker-lost current session ${sessionId}`, deadlineMs: 45_000
+    });
+    await openHomeView(page);
+    await openSessionTerminal(page, sessionId);
+    await waitForTerminalSession(page, sessionId);
+    await waitForTerminalAttachState(page, "attached");
+
+    const childPid = Number(await waitForLineFile(pidFile, { label: "worker-lost session child pid", deadlineMs: 15_000 }));
+    if (!Number.isInteger(childPid) || childPid <= 0) throw new Error(`worker-lost child pid is not a pid: ${childPid}`);
+    const { workerPid, chain } = ownedWorkerForChild(childPid, hubPid);
+    const eventsBeforeKill = await page.evaluate(() => globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.events.length);
+    const crashToastText = `Session ${sessionId} crashed: its worker process was lost.`;
+    // The action toast closes after 5 s (ui-lifetime), so its wait starts before the kill.
+    const visibleCrashToast = waitForDom(page, () => page.evaluate((text) => {
+      const toast = globalThis.document.querySelector("ion-toast[data-testid='package-action-toast']");
+      if (!toast) return false;
+      const open = toast.isOpen === true || toast.hasAttribute("is-open");
+      return open && toast.message === text ? { message: toast.message, color: toast.color ?? null } : false;
+    }, crashToastText), { label: "worker-lost visible crash toast", deadlineMs: 45_000 });
+    visibleCrashToast.catch(() => undefined);
+    process.kill(workerPid, "SIGKILL");
+
+    const closeEvent = await waitForHarnessEvent(page, ({ id, since }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).find((entry) =>
+        entry.kind === "daemon_event" &&
+        entry.payload?.type === "terminal_subscription_closed" &&
+        entry.payload?.session_id === id
+      )?.payload ?? false, { id: sessionId, since: eventsBeforeKill }, { label: "worker-lost TerminalSubscriptionClosed", deadlineMs: 45_000 });
+    if (closeEvent.reason !== "worker_lost") throw new Error(`worker-lost close reason: ${JSON.stringify(closeEvent)}`);
+    await waitForHarnessEvent(page, { kind: "hub_frame", family: "session", id: sessionId, lifecycle: "failed" }, undefined, {
+      label: `worker-lost entity failed ${sessionId}`, deadlineMs: 45_000
+    });
+    let entity = await page.evaluate((id) =>
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.listEntities("session").find((record) => record.id === id), sessionId);
+    if (entity?.lifecycle !== "failed" || entity?.failure_reason !== "worker_lost") {
+      throw new Error(`worker-lost entity is not failed/worker_lost: ${JSON.stringify(entity)}`);
+    }
+    // Hub ruling (2026-09-27, the roll after 4a34386f): a worker_lost session projects
+    // lifecycle_class "ended"; only a startup-unadoptable stale row stays indeterminate.
+    await waitForHarnessEvent(page, { kind: "hub_frame", family: "session", id: sessionId, lifecycle_class: "ended" }, undefined, {
+      label: `worker-lost entity ended ${sessionId}`, deadlineMs: 15_000
+    }).catch(async (error) => {
+      const now = await page.evaluate((id) =>
+        globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.listEntities("session").find((record) => record.id === id) ?? null, sessionId);
+      throw new Error(`${error.message}; entity=${JSON.stringify(now)}`);
+    });
+    // Report what the Hub projected, read after the ended frame, never a literal.
+    entity = await page.evaluate((id) =>
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.listEntities("session").find((record) => record.id === id), sessionId);
+    // The final notice is the crash notice for this session, whatever arrived first.
+    await waitForHarnessEvent(page, ({ id }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) =>
+        entry.kind === "session_end_notice" && entry.payload?.sessionId === id && entry.payload?.kind === "crashed"
+      ), { id: sessionId }, { label: "worker-lost crash notice", deadlineMs: 15_000 });
+    const notices = await page.evaluate(({ id, since }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since)
+        .filter((entry) => entry.kind === "session_end_notice" && entry.payload?.sessionId === id)
+        .map((entry) => entry.payload), { id: sessionId, since: eventsBeforeKill });
+    if (notices.at(-1)?.kind !== "crashed") throw new Error(`worker-lost final notice is not crashed: ${JSON.stringify(notices)}`);
+    const toast = await visibleCrashToast;
+    if (toast.color !== "danger") throw new Error(`worker-lost crash toast color: ${JSON.stringify(toast)}`);
+    const arrivalOrder = await page.evaluate(({ id, since }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).flatMap((entry) => {
+        if (entry.kind === "daemon_event" && entry.payload?.type === "terminal_subscription_closed" && entry.payload?.session_id === id) return ["close_event"];
+        if (entry.kind === "webrtc_daemon_event_discarded" && entry.payload?.session_id === id) return ["close_event_discarded_stale"];
+        if (entry.kind === "hub_frame" && (entry.payload?.payload?.key?.id ?? entry.payload?.payload?.record?.id) === id && (entry.payload?.payload?.record?.lifecycle ?? entry.payload?.payload?.patch?.lifecycle) === "failed") return ["entity_failed"];
+        if (entry.kind === "session_end_notice" && entry.payload?.sessionId === id) return [`notice_${entry.payload.kind}`];
+        if (entry.kind === "webrtc_lifecycle" && /data-channel-closed/.test(String(entry.payload?.type ?? ""))) return [`lifecycle_${entry.payload.type}`];
+        return [];
+      }), { id: sessionId, since: eventsBeforeKill });
+    await waitForDom(page, page.getByTestId(HOST_CHROME.dashboardTestId), { label: "worker-lost released to the dashboard" });
+    const failureStatus = page.getByTestId("dashboard-ended-sessions")
+      .locator(`[data-testid='session-failure'][data-session-id='${sessionId}'][data-session-failure='crashed']`);
+    await waitForDom(page, failureStatus, { label: "worker-lost crashed row", deadlineMs: 15_000 }).catch(async (error) => {
+      const now = await page.evaluate((id) => ({
+        entity: globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.listEntities("session").find((record) => record.id === id) ?? null,
+        ended: globalThis.document.querySelector("[data-testid='dashboard-ended-sessions']")?.innerText ?? null,
+        url: globalThis.location.href
+      }), sessionId);
+      throw new Error(`${error.message}; ${JSON.stringify({ notices, arrivalOrder, ...now })}`);
+    });
+    const statusText = (await failureStatus.innerText()).trim();
+    if (statusText !== "Crashed: worker lost") throw new Error(`worker-lost row status: ${JSON.stringify(statusText)}`);
+
+    // Recovery: Remove forgets the crashed session; the entity stream removes its row.
+    const removeButton = page.getByRole("button", { name: `Remove session ${sessionId}` });
+    await waitForDom(page, { locator: removeButton, state: "actionable" }, { label: "worker-lost Remove before click" });
+    await removeButton.click();
+    await waitForHarnessEvent(page, { kind: "daemon_request", type: "remove_session" }, undefined, { label: "worker-lost remove_session request", deadlineMs: 15_000 });
+    await waitForHarnessEvent(page, { kind: "hub_frame", frameKind: "entity_remove", family: "session", id: sessionId }, undefined, {
+      label: `worker-lost session removed ${sessionId}`, deadlineMs: 45_000
+    });
+    await waitForDom(page, { locator: failureStatus, state: "detached" }, { label: "worker-lost crashed row removed", deadlineMs: 15_000 });
+    harnessSpawnedSessionIds.delete(sessionId);
+    return {
+      session_id: sessionId,
+      hub_pid: hubPid,
+      worker_pid: workerPid,
+      process_chain: chain,
+      close_event: closeEvent,
+      entity: {
+        lifecycle: entity?.lifecycle ?? null,
+        failure_reason: entity?.failure_reason ?? null,
+        lifecycle_class: entity?.lifecycle_class ?? null,
+        registry_state: entity?.registry_state ?? null
+      },
+      notices,
+      visible_toast: toast,
+      arrival_order: arrivalOrder,
+      row_status: statusText,
+      removed: true
+    };
+  } finally {
+    await rm(pidDirectory, { recursive: true, force: true });
+  }
+}
+
 async function proveQuarantineWire(page) {
   const proof = await page.evaluate(async () => {
     const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
@@ -7366,6 +7593,7 @@ async function proveNormalReaderAttachToFloodingSession(page) {
     });
     if (atAttach.closed) throw new Error(`the normal reader was closed before it attached: ${JSON.stringify(atAttach)}`);
     // Positive progress, not a quiet window: the route keeps delivering output without a close.
+    const windowStartedMs = Date.now();
     const progressed = await waitForHarnessEvent(
       page,
       readerState,
@@ -7378,16 +7606,25 @@ async function proveNormalReaderAttachToFloodingSession(page) {
         .filter((frame) => frame.kind !== "output")
         .map((frame) => ({ ...frame, event: undefined }))
     );
+    const windowMs = Date.now() - windowStartedMs;
     const recovery = normalReaderRecovery(frames);
     proof = {
       output_frames_at_attach: atAttach.output_frames,
       output_bytes_at_attach: atAttach.output_bytes,
       output_frames_after: progressed.output_frames,
       output_bytes_after: progressed.output_bytes,
+      progress_window_ms: windowMs,
+      hydrations: frames.filter((frame) => frame.kind === "snapshot_ready").length,
       ...recovery
     };
     if (recovery.unrecovered.length > 0 || recovery.foreign_frames > 0) {
       throw new Error(`normal-reader route recovery failed: ${JSON.stringify(proof)}`);
+    }
+    // A healthy reader keeps up with a flood: live runs on Core 549b3f6 showed no ROUTE_RESYNC
+    // at all. Repeated resync and re-hydration is the Core 85b3507 flood regression (TUI flood
+    // test, orchestrator 2026-09-27); one resync is tolerated, more fails.
+    if (recovery.route_resyncs > 1) {
+      throw new Error(`normal-reader flood re-hydrated repeatedly: ${JSON.stringify(proof)}`);
     }
   } finally {
     const cleanup = await closeProofStream(page, "normalReader").catch((error) => ({ error: String(error) }));

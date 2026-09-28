@@ -26,6 +26,7 @@ export function WorkbenchNotifications({
         duration={5000}
         position="bottom"
         onDidDismiss={onDismiss}
+        data-testid="package-action-toast"
       />
       <IonToast
         isOpen={Boolean(packageEventToast)}

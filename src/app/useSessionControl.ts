@@ -4,7 +4,7 @@ import { useCallback, useRef, useState } from "react";
 
 import { actionFailureDiagnostic, type ConnectionDiagnostic } from "../botster/connectionDiagnostics";
 import type { createBotsterWebClient } from "../botster/client";
-import { stopSessionAction } from "./sessionActions";
+import { removeSessionAction, stopSessionAction } from "./sessionActions";
 
 type RuntimeClient = ReturnType<typeof createBotsterWebClient>;
 
@@ -49,9 +49,46 @@ export function useSessionControl(options: {
     });
   }, [recordDiagnostic, runtimeClient, setPackageActionToast, updateLocalState]);
 
+  const [removingSessionIds, setRemovingSessionIds] = useState<ReadonlySet<string>>(() => new Set());
+  const removingSessionIdsRef = useRef(new Set<string>());
+
+  // Recovery for an ended session: the Hub forgets it and the entity stream removes its row.
+  const removeSession = useCallback((sessionId: string) => {
+    if (removingSessionIdsRef.current.has(sessionId)) return;
+
+    const action = removeSessionAction(sessionId);
+    removingSessionIdsRef.current.add(sessionId);
+    setRemovingSessionIds(new Set(removingSessionIdsRef.current));
+    updateLocalState({ "production.diagnostic_action_status": `Removing session ${sessionId}` });
+
+    void runtimeClient.actions.dispatch({ origin: "ui_node", action }).then((result) => {
+      recordDiagnostic(actionFailureDiagnostic(action, result));
+      setPackageActionToast({
+        message: result.accepted
+          ? `Removed session ${sessionId}`
+          : result.reason ?? `Botster could not remove session ${sessionId}.`,
+        color: result.accepted ? "success" : "danger"
+      });
+      updateLocalState({
+        "production.diagnostic_action_status": result.accepted
+          ? `Accepted ${action.id}`
+          : result.reason ?? `Rejected ${action.id}`
+      });
+    }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : `Botster could not remove session ${sessionId}.`;
+      setPackageActionToast({ message, color: "danger" });
+      updateLocalState({ "production.diagnostic_action_status": message });
+    }).finally(() => {
+      removingSessionIdsRef.current.delete(sessionId);
+      setRemovingSessionIds(new Set(removingSessionIdsRef.current));
+    });
+  }, [recordDiagnostic, runtimeClient, setPackageActionToast, updateLocalState]);
+
   return {
     stopSession,
-    stoppingSessionIds
+    stoppingSessionIds,
+    removeSession,
+    removingSessionIds
   };
 }
 

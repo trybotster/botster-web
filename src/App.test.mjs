@@ -3551,6 +3551,7 @@ const {
 } = requireRuntime("./botster/hubTransport.js");
 const {
   createHubTerminalDataPlane,
+  terminalCloseMessage,
   DETACH_REQUEST_BOUND_MS,
   MAX_INFLIGHT_INPUT_OPERATIONS,
   MAX_PENDING_TERMINAL_BYTES,
@@ -4673,6 +4674,11 @@ const bridge = {
           first_available_seq: 7
         }
       };
+    }
+    if (request.type === "remove_session") {
+      // The Hub forgets only a terminal session; otherwise it answers session_not_terminal.
+      if (request.session_id === "ended-removable") return { kind: "session_removed", error: null, diagnostics: [] };
+      return { kind: "error", error: { code: "session_not_terminal", request_id: "fake", operation: "remove_session", message: "session must be terminal before it can be removed" } };
     }
     if (request.type === "check_hub_update") {
       return {
@@ -9134,6 +9140,21 @@ assert.deepEqual(hubUpdateCurrentResult.result.diagnostics, [
   assert.equal(pluginLogPage({ ...firstPage.result.plugin_logs, first_available_seq: 1 }, undefined).evicted, undefined);
 }
 
+// Remove (crash recovery): the action maps to remove_session; session_removed is accepted, and
+// the Hub's session_not_terminal refusal is shown as the reason. Web adds no stricter gate.
+{
+  const removed = await realRuntime.actions.dispatch({ origin: "ui_node", action: { id: "botster.session.remove", target: "ended-removable", label: "Remove session" } });
+  assert.equal(removed.accepted, true);
+  assert.deepEqual(bridgeRequests.at(-1), { type: "remove_session", session_id: "ended-removable" });
+  assert.equal(removed.result.request_type, "remove_session");
+  const refusedRemove = await realRuntime.actions.dispatch({ origin: "ui_node", action: { id: "botster.session.remove", target: "still-running", label: "Remove session" } });
+  assert.equal(refusedRemove.accepted, false);
+  assert.equal(refusedRemove.reason, "session must be terminal before it can be removed");
+  assert.equal(refusedRemove.result.error_kind, "session_not_terminal");
+  const missingTarget = await realRuntime.actions.dispatch({ origin: "ui_node", action: { id: "botster.session.remove", label: "Remove session" } });
+  assert.equal(missingTarget.accepted, false);
+}
+
 authoritativeHubUpdate = {
   state: "available",
   current_version: "0.1.0",
@@ -9604,6 +9625,19 @@ const mappedFrames = daemonResponseFrames({
 }, 10);
 assert.equal(mappedFrames.some((frame) => frame.kind === "operator_error"), true);
 assert.equal(operatorErrorDiagnostic(mappedFrames.find((frame) => frame.kind === "operator_error")).title, "Hub operator error");
+// not_attached (Hub 4a34386f): typed, not the generic operator error. Defensive: Web's WebRTC
+// input path cannot receive it.
+assert.deepEqual(operatorErrorDiagnostic({
+  kind: "operator_error",
+  payload: { code: "not_attached", operation: "notify_session", request_id: "r", message: "the client is not attached" }
+}), {
+  id: "operator-error-notify_session",
+  title: "Terminal not attached",
+  detail: "The terminal was not attached, so the input or resize was not delivered.",
+  severity: "warning",
+  source: "action",
+  operation: "notify_session"
+});
 
 const spawnFailureDiagnosticMessage = "Spawn failed before terminal attach; the requested session already exists.";
 const spawnFailureFrames = daemonResponseFrames({
@@ -10071,13 +10105,51 @@ function fakeRouteBridge(sessionId, options = {}) {
           state.frames.push(copy);
           return Promise.resolve();
         },
-        abandon() {},
+        abandon() {
+          state.abandoned = (state.abandoned ?? 0) + 1;
+        },
         unsubscribe() {}
       };
     }
   };
   return state;
 }
+
+// Hub close reasons other than core_adapter_closed (worker_lost, host_adapter_closed, and any
+// unknown reason) end the current attachment: status failed with the reason, local delivery
+// abandoned without a Detach, and no reattach. A close for an older subscription or another
+// session never retires the current attachment.
+for (const reason of ["worker_lost", "host_adapter_closed", "future_reason"]) {
+  const sessionId = `close-reason-${reason}`;
+  const subscriptionId = `close-reason-subscription-${reason}`;
+  const generation = 3;
+  const wire = fakeRouteBridge(sessionId, { generation });
+  const plane = createHubTerminalDataPlane({ sessionId, subscriptionId, bridge: wire.bridge });
+  bindGhostsnpInstaller(plane);
+  const statuses = [];
+  plane.subscribeStatus((status) => statuses.push(status));
+  plane.subscribeOutput(() => undefined);
+  await waitForTestCondition(() => wire.streams.length === 1);
+  const route = wire.streams[0];
+  for (const frame of standardAttachFrames(subscriptionId, { generation })) await route.onEvent(frame);
+  const close = (overrides) => route.onEvent({
+    type: "terminal_subscription_closed", session_id: sessionId, subscription_id: subscriptionId, generation, reason, ...overrides
+  });
+  await close({ subscription_id: "older-subscription", generation: generation - 1 });
+  await close({ session_id: "another-session" });
+  await flushMicrotasks();
+  assert.equal(statuses.some((status) => status.state === "failed"), false, `${reason}: a stale close does not retire the attachment`);
+  assert.equal(wire.abandoned ?? 0, 0, `${reason}: a stale close does not abandon the stream`);
+  await close({});
+  await flushMicrotasks();
+  assert.deepEqual(statuses.at(-1), { state: "failed", message: terminalCloseMessage(reason), closeReason: reason }, reason);
+  assert.equal(wire.abandoned, 1, `${reason}: local delivery abandoned`);
+  assert.equal(wire.detachRequests.length, 0, `${reason}: no Detach for a generation the Hub ended`);
+  assert.equal(wire.streams.length, 1, `${reason}: no reattach`);
+  await plane.detach().catch(() => undefined);
+}
+assert.equal(terminalCloseMessage("worker_lost"), "The session crashed: its worker process was lost.");
+assert.equal(terminalCloseMessage("host_adapter_closed"), "The Hub closed the terminal (host_adapter_closed).");
 
 // The data plane sends input only after ATTACH_STATE attached, holds RESIZE until SNAPSHOT_FINISH
 // and then sends only the latest geometry, once, assigns increasing operation ids, keeps 32 operations in flight with
@@ -10977,8 +11049,20 @@ try {
     DashboardView,
     SessionListItem
   } = dashboardModule;
-  const { currentDashboardSessions, endedDashboardSessions } = await vite.ssrLoadModule("/src/app/dashboardSessions.ts");
-  const { stopSessionAction } = await vite.ssrLoadModule("/src/app/sessionActions.ts");
+  const { attentionDashboardSessions, currentDashboardSessions, endedDashboardSessions } = await vite.ssrLoadModule("/src/app/dashboardSessions.ts");
+  // Indeterminate rows get their own group; the grouping reads only the Hub class. Since Hub
+  // 90d4e737 a stale row whose worker was lost is "ended"; a stale row the Hub could not adopt at
+  // startup (failed "stale daemon session") stays "indeterminate".
+  assert.deepEqual(
+    attentionDashboardSessions([
+      { id: "stale-unadopted", lifecycle: "failed", failure_reason: "stale daemon session", registry_state: "stale", lifecycle_class: "indeterminate" },
+      { id: "stale-crashed", lifecycle: "failed", failure_reason: "worker_lost", registry_state: "stale", lifecycle_class: "ended" },
+      { id: "current", lifecycle: "running", lifecycle_class: "current" }
+    ]).map((session) => session.id),
+    ["stale-unadopted"]
+  );
+  const { removeSessionAction, stopSessionAction } = await vite.ssrLoadModule("/src/app/sessionActions.ts");
+  assert.deepEqual(removeSessionAction("s-1"), { id: "botster.session.remove", target: "s-1", label: "Remove session" });
   const {
     entitySubscriptionErrorFromFrame
   } = entitySubscriptionModule;
@@ -11087,9 +11171,9 @@ try {
     compareSpawnTargetRows
   } = spawnTargetsModule;
   const {
-    terminalDescriptorForSessionId,
-    terminalReleaseToast
+    terminalDescriptorForSessionId
   } = terminalChromeModule;
+  const { sessionEndNotice, upgradeSessionEndNotice } = await vite.ssrLoadModule("/src/app/sessionEndNotice.ts");
   const { WorkbenchNav } = await vite.ssrLoadModule("/src/app/workbench.tsx");
 
   assert.deepEqual(
@@ -11154,6 +11238,10 @@ try {
   assert.equal(sessionDisplayStatus(indeterminateTerminalSession), "indeterminate");
   assert.equal(sessionDisplayStatus(contradictoryTerminalSession), "indeterminate");
   assert.equal(sessionDisplayStatus({ id: "unknown-session", registry_state: "running" }), "Unknown status");
+  assert.equal(sessionDisplayStatus({ id: "crashed", lifecycle: "failed", failure_reason: "worker_lost", lifecycle_class: "ended" }), "Crashed: worker lost");
+  assert.equal(sessionDisplayStatus({ id: "failed", lifecycle: "failed", failure_reason: "spawn_failed", lifecycle_class: "ended" }), "Failed: spawn_failed");
+  assert.equal(sessionDisplayStatus({ id: "failed", lifecycle: "failed", lifecycle_class: "ended" }), "Failed");
+  assert.equal(sessionDisplayStatus({ id: "exited", lifecycle: "exited", lifecycle_class: "ended" }), "ended");
   assert.equal(isAttachableSession(runningTerminalSession), true);
   assert.equal(isAttachableSession(indeterminateTerminalSession), false);
   assert.equal(isAttachableSession(contradictoryTerminalSession), false);
@@ -11727,17 +11815,46 @@ try {
   });
   assert.equal(terminalDescriptorForSessionId(undefined), undefined);
   assert.deepEqual(
-    terminalReleaseToast("web-prod", { state: "failed", message: "Terminal stream attach failed." }),
-    { message: "Terminal stream attach failed.", color: "danger" }
+    sessionEndNotice("web-prod", { state: "failed", message: "Terminal stream attach failed." }),
+    { sessionId: "web-prod", kind: "failed", message: "Terminal stream attach failed.", color: "danger" }
   );
   assert.deepEqual(
-    terminalReleaseToast("web-prod"),
-    { message: "Session web-prod ended", color: "medium" }
+    sessionEndNotice("web-prod"),
+    { sessionId: "web-prod", kind: "ended", message: "Session web-prod ended", color: "medium" }
   );
   assert.deepEqual(
-    terminalReleaseToast("web-prod", { state: "exited", message: "Terminal process exited with 0." }),
-    { message: "Session web-prod ended", color: "medium" }
+    sessionEndNotice("web-prod", { state: "exited", message: "Terminal process exited with 0." }, { id: "web-prod", lifecycle: "exited", lifecycle_class: "ended" }),
+    { sessionId: "web-prod", kind: "ended", message: "Session web-prod ended", color: "medium" }
   );
+  // Crash feedback does not depend on arrival order. The Hub reports worker_lost on the control
+  // channel and closes the data channel on another path, and the entity moves to
+  // failed/worker_lost; any of the three can come first.
+  {
+    const crashed = { sessionId: "web-prod", kind: "crashed", message: "Session web-prod crashed: its worker process was lost.", color: "danger" };
+    const crashedEntity = { id: "web-prod", lifecycle: "failed", failure_reason: "worker_lost", lifecycle_class: "ended" };
+    const runningEntity = { id: "web-prod", lifecycle: "running", lifecycle_class: "current" };
+    // Order 1: the close event first (the entity still says running).
+    assert.deepEqual(sessionEndNotice("web-prod", { state: "failed", message: "x", closeReason: "worker_lost" }, runningEntity), crashed);
+    // Order 2: the entity first (released by the entity, no terminal status).
+    assert.deepEqual(sessionEndNotice("web-prod", undefined, crashedEntity), crashed);
+    // Order 3: the channel close first; the reattach fails before either crash signal.
+    const attachFailed = sessionEndNotice("web-prod", { state: "failed", message: "Terminal stream attach failed." }, runningEntity);
+    assert.equal(attachFailed.kind, "failed");
+    assert.equal(upgradeSessionEndNotice(attachFailed, "web-prod", runningEntity), attachFailed, "no crash yet: unchanged");
+    assert.deepEqual(upgradeSessionEndNotice(attachFailed, "web-prod", crashedEntity), crashed, "the later entity upgrades the notice");
+    // An ended notice upgrades the same way; a crash notice is never downgraded.
+    assert.deepEqual(upgradeSessionEndNotice(sessionEndNotice("web-prod"), "web-prod", crashedEntity), crashed);
+    assert.equal(upgradeSessionEndNotice(crashed, "web-prod", { id: "web-prod", lifecycle: "exited" }), crashed);
+    // Only the released session can upgrade its notice: an older session's crash does not
+    // replace a newer session's notice.
+    const newer = sessionEndNotice("web-newer");
+    assert.equal(upgradeSessionEndNotice(newer, "web-prod", crashedEntity), newer);
+    assert.equal(upgradeSessionEndNotice(undefined, "web-prod", crashedEntity), undefined);
+    // Other failures are failed, not crashed.
+    assert.deepEqual(sessionEndNotice("web-prod", undefined, { id: "web-prod", lifecycle: "failed", failure_reason: "spawn_failed" }), {
+      sessionId: "web-prod", kind: "failed", message: "Session web-prod failed: spawn_failed.", color: "danger"
+    });
+  }
   const sessionRouteMarkup = renderToStaticMarkup(
     createElement(
       SessionRouteView,
@@ -11904,6 +12021,60 @@ try {
     dashboardWithEndedMarkup.indexOf(`data-testid="${HOST_CHROME.endedSessionsTestId}"`)
   );
   assert.doesNotMatch(endedSectionMarkup, /<ion-item button="">/);
+  assert.equal(markupContainsTestId(endedSectionMarkup, "session-recovery"), false, "exited rows offer no recovery");
+  // A crashed (failed/worker_lost) or otherwise failed ended row says so and offers recovery:
+  // Remove (disabled while its remove is in flight) and New session.
+  const crashedDashboardMarkup = renderToStaticMarkup(
+    createElement(DashboardView, {
+      sessions: [],
+      endedSessions: [
+        { id: "crashed-1", session_uuid: "crashed-1", lifecycle: "failed", failure_reason: "worker_lost", lifecycle_class: "ended" },
+        { id: "failed-1", session_uuid: "failed-1", lifecycle: "failed", failure_reason: "spawn_failed", lifecycle_class: "ended" }
+      ],
+      sessionLoadStatus: "loaded",
+      stoppingSessionIds: new Set(),
+      removingSessionIds: new Set(["failed-1"]),
+      onOpenSession: () => {},
+      onStopSession: () => {},
+      onRemoveSession: () => {},
+      onNavigateToApps: () => {},
+      onNavigateToSpawnPoints: () => {}
+    })
+  );
+  assert.match(crashedDashboardMarkup, /data-session-id="crashed-1" data-session-failure="crashed">Crashed: worker lost</);
+  assert.match(crashedDashboardMarkup, /data-session-id="failed-1" data-session-failure="failed">Failed: spawn_failed</);
+  assert.match(crashedDashboardMarkup, /aria-label="Remove session crashed-1"[^>]*>Remove</);
+  assert.match(crashedDashboardMarkup, /disabled=""[^>]*aria-label="Remove session failed-1"[^>]*>Removing…</);
+  assert.equal((crashedDashboardMarkup.match(/data-testid="session-new"/g) ?? []).length, 2);
+  // A stale session the Hub could not adopt (indeterminate) is shown under Needs attention with
+  // its failure text and recovery; Remove is offered on every non-current row given the handler
+  // (the Hub refuses a session that is not terminal), New session only on failed rows.
+  const attentionMarkup = renderToStaticMarkup(
+    createElement(DashboardView, {
+      sessions: [],
+      attentionSessions: [
+        { id: "stale-unadopted", session_uuid: "stale-unadopted", lifecycle: "failed", failure_reason: "stale daemon session", registry_state: "stale", lifecycle_class: "indeterminate" },
+        { id: "stale-unknown", session_uuid: "stale-unknown", registry_state: "stale", lifecycle_class: "indeterminate" }
+      ],
+      endedSessions: [{ id: "exited-1", session_uuid: "exited-1", lifecycle: "exited", lifecycle_class: "ended" }],
+      sessionLoadStatus: "loaded",
+      stoppingSessionIds: new Set(),
+      onOpenSession: () => {},
+      onStopSession: () => {},
+      onRemoveSession: () => {},
+      onNavigateToApps: () => {},
+      onNavigateToSpawnPoints: () => {}
+    })
+  );
+  assert.equal(markupContainsTestId(attentionMarkup, "dashboard-attention-sessions"), true);
+  assert.match(attentionMarkup, />Needs attention</);
+  assert.match(attentionMarkup, /data-session-id="stale-unadopted" data-session-failure="failed">Failed: stale daemon session</);
+  assert.match(attentionMarkup, /<p>indeterminate<\/p>/);
+  for (const id of ["stale-unadopted", "stale-unknown", "exited-1"]) {
+    assert.match(attentionMarkup, new RegExp(`aria-label="Remove session ${id}"`));
+  }
+  assert.equal((attentionMarkup.match(/data-testid="session-new"/g) ?? []).length, 1, "New session only on the failed row");
+  assert.ok(attentionMarkup.indexOf("dashboard-attention-sessions") < attentionMarkup.indexOf("dashboard-ended-sessions"));
   const emptyDashboardMarkup = renderToStaticMarkup(
     createElement(DashboardView, {
       sessions: [],
@@ -18393,6 +18564,62 @@ function removeCssAtRules(source) {
     await act(async () => { root.unmount(); });
     if (rootEl.parentNode) rootEl.parentNode.removeChild(rootEl);
     encodedClient.disconnect();
+
+    // Production useSessionEndNotice: the frame listener installed for an earlier release stays
+    // installed when a newer session is released. A later crash frame for the OLDER session must
+    // not change the newer session's notice or toast; the newer session's own crash upgrades it.
+    {
+      const { SessionEndNoticeHarness } = await noticeVite.ssrLoadModule("/src/app/__fixtures__/sessionEndNoticeHarness.tsx");
+      const records = new Map();
+      const entities = {
+        get: (family, id) => (family === "session" ? records.get(id) : undefined),
+        list: (family) => (family === "session" ? [...records.values()] : [])
+      };
+      const frameHandlers = new Set();
+      const hub = {
+        onFrame(handler) {
+          frameHandlers.add(handler);
+          return () => frameHandlers.delete(handler);
+        }
+      };
+      const deliverFrame = async () => {
+        await act(async () => { for (const handler of [...frameHandlers]) handler({ kind: "entity_patch" }); });
+      };
+      const toasts = [];
+      let release;
+      const endRootEl = globalThis.document.createElement("div");
+      globalThis.document.body.appendChild(endRootEl);
+      const endRoot = createRoot(endRootEl);
+      await act(async () => {
+        endRoot.render(createElement(SessionEndNoticeHarness, {
+          entities,
+          hub,
+          showToast: (toast) => toasts.push(toast),
+          onRelease: (next) => { release = next; }
+        }));
+      });
+      assert.equal(frameHandlers.size, 1, "one listener for the life of the hook");
+      records.set("session-a", { id: "session-a", lifecycle: "running", lifecycle_class: "current" });
+      records.set("session-b", { id: "session-b", lifecycle: "running", lifecycle_class: "current" });
+      await act(async () => { release("session-a", { state: "failed", message: "Terminal stream attach failed." }); });
+      assert.deepEqual(toasts.at(-1), { message: "Terminal stream attach failed.", color: "danger" });
+      // B is released while A's release is still the one the listener was installed with.
+      await act(async () => { release("session-b"); });
+      assert.deepEqual(toasts.at(-1), { message: "Session session-b ended", color: "medium" });
+      const toastCount = toasts.length;
+      records.set("session-a", { id: "session-a", lifecycle: "failed", failure_reason: "worker_lost", lifecycle_class: "ended" });
+      await deliverFrame();
+      assert.equal(toasts.length, toastCount, "an older session's crash does not replace a newer session's notice");
+      records.set("session-b", { id: "session-b", lifecycle: "failed", failure_reason: "worker_lost", lifecycle_class: "ended" });
+      await deliverFrame();
+      assert.deepEqual(toasts.at(-1), { message: "Session session-b crashed: its worker process was lost.", color: "danger" });
+      const crashedCount = toasts.length;
+      await deliverFrame();
+      assert.equal(toasts.length, crashedCount, "a crash notice is shown once and never downgraded");
+      await act(async () => { endRoot.unmount(); });
+      assert.equal(frameHandlers.size, 0, "the listener is removed on unmount");
+      if (endRootEl.parentNode) endRootEl.parentNode.removeChild(endRootEl);
+    }
   } finally {
     await noticeVite.close();
     if (previousLocation === undefined) {

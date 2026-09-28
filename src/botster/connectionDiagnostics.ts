@@ -424,6 +424,20 @@ export function operatorErrorDiagnostic(frame: HubControlFrame): ConnectionDiagn
     return undefined;
   }
 
+  // Core refused terminal input, resize or a guarded write from a client with no active
+  // subscription: nothing reached the session. Web's WebRTC input path cannot receive this
+  // (Hub 4a34386f); only control and client API requests can, so it is typed defensively.
+  if (frame.payload.code === "not_attached") {
+    return {
+      id: `operator-error-${String(frame.payload.operation ?? "not_attached")}`,
+      title: "Terminal not attached",
+      detail: "The terminal was not attached, so the input or resize was not delivered.",
+      severity: "warning",
+      source: "action",
+      operation: typeof frame.payload.operation === "string" ? frame.payload.operation : undefined
+    };
+  }
+
   return {
     id: `operator-error-${String(frame.payload.operation ?? frame.payload.code ?? "hub")}`,
     title: "Hub operator error",
