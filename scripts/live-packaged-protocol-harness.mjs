@@ -43,6 +43,7 @@ import {
   callTerminalControl,
   ensurePackageEnabled as ensureHubPackageEnabled,
   installLiveHarnessPageHooks,
+  recentFocusChanges,
   listPackages,
   loadBinaryProvenance as loadCandidateBinaryProvenance,
   openDirectTerminalStream,
@@ -7804,7 +7805,9 @@ async function focusMountedTerminal(page) {
   await callTerminalControl(page, "focus");
   await waitForDom(page, { locator: page.locator(".terminal-view-container canvas").first(), state: "actionable" }, { label: "page.locator('.terminal-view-container canvas').first() before click" });
   await page.locator(".terminal-view-container canvas").first().click();
-  await waitForDom(page, () => page.evaluate(() => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement, undefined), { label: "focusMountedTerminal condition 1", deadlineMs: 5_000 });
+  await waitForDom(page, () => page.evaluate(() => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement, undefined), { label: "focusMountedTerminal condition 1", deadlineMs: 5_000 }).catch(async (error) => {
+    throw new Error(`mounted terminal did not focus the Restty textarea: ${error.message}; recent focus changes: ${JSON.stringify(await recentFocusChanges(page))}`);
+  });
 }
 
 async function proveMountedClipboardPaste(page) {

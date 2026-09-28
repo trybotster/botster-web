@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 import { harnessWaitSupportScript, waitForDom, waitForHarnessEvent } from "./harness-waits.mjs";
+import { focusChangeRecorderScript } from "./live-hub-lane.mjs";
 
 /**
  * Browser self-test of the two shared waits: each condition is false when the wait starts, the
@@ -59,6 +60,17 @@ try {
   assert.equal(count, 1);
   await assert.rejects(waitForDom(page, page.getByTestId("never"), { label: "never-dom", deadlineMs: 200 }), /never-dom/);
   await assert.rejects(waitForHarnessEvent(page, { kind: "never" }, undefined, { label: "never-event", deadlineMs: 200 }), /never-event/);
+  // The test-only focus probe names the element that took focus (focusout relatedTarget).
+  const focusPage = await browser.newPage();
+  await focusPage.addInitScript({ content: focusChangeRecorderScript });
+  await focusPage.goto("data:text/html,<body><textarea id=term></textarea><button data-testid=thief aria-label=Thief>x</button></body>");
+  await focusPage.focus("#term");
+  await focusPage.focus("[data-testid=thief]");
+  const focusLog = await focusPage.evaluate(() => globalThis.__BOTSTER_FOCUS_LOG__);
+  const lostFocus = focusLog.find((entry) => entry.type === "focusout" && entry.target === "textarea#term");
+  assert.equal(lostFocus?.related, "button[data-testid=thief][aria-label=Thief]", `focus probe: ${JSON.stringify(focusLog)}`);
+  assert.equal(focusLog.at(-1).type, "focusin");
+  assert.equal(focusLog.at(-1).target, "button[data-testid=thief][aria-label=Thief]");
   console.log("harness-waits self-test passed");
 } finally {
   await browser.close();

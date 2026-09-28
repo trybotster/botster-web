@@ -431,10 +431,51 @@ function gitHeadForCargoRoot(repoRoot) {
   }
 }
 
+/**
+ * Test-only focus probe: records focusin/focusout (capture phase, the real element through
+ * shadow roots) with the element that loses and the one that gains focus, in a bounded ring on
+ * globalThis.__BOTSTER_FOCUS_LOG__, so a lost-focus failure names what took the focus.
+ */
+function installFocusChangeRecorder() {
+  const log = [];
+  globalThis.__BOTSTER_FOCUS_LOG__ = log;
+  const describe = (element) => {
+    if (!element || element.nodeType !== 1) return element ? String(element.nodeName) : null;
+    const parts = [element.tagName.toLowerCase()];
+    if (element.id) parts.push(`#${element.id}`);
+    const testId = element.getAttribute("data-testid");
+    if (testId) parts.push(`[data-testid=${testId}]`);
+    const label = element.getAttribute("aria-label");
+    if (label) parts.push(`[aria-label=${label}]`);
+    if (typeof element.className === "string" && element.className) parts.push(`.${element.className.trim().split(/\s+/).slice(0, 3).join(".")}`);
+    return parts.join("");
+  };
+  const record = (event) => {
+    log.push({
+      type: event.type,
+      at_ms: Math.round(globalThis.performance.now()),
+      target: describe(event.composedPath?.()[0] ?? event.target),
+      related: describe(event.relatedTarget),
+      active: describe(globalThis.document.activeElement)
+    });
+    if (log.length > 50) log.shift();
+  };
+  globalThis.addEventListener("focusin", record, true);
+  globalThis.addEventListener("focusout", record, true);
+}
+
+export const focusChangeRecorderScript = `(${installFocusChangeRecorder.toString()})();`;
+
+/** The last focus changes the probe recorded, for a focus failure message. */
+export async function recentFocusChanges(page, count = 10) {
+  return page.evaluate((n) => (globalThis.__BOTSTER_FOCUS_LOG__ ?? []).slice(-n), count).catch(() => null);
+}
+
 export async function installLiveHarnessPageHooks(targetPage, { boundedTerminalObserver = false } = {}) {
   // The harness logs notify the page's own listeners on every push, so harness waits are
   // event-driven (scripts/harness-waits.mjs).
   await targetPage.addInitScript({ content: harnessWaitSupportScript });
+  await targetPage.addInitScript({ content: focusChangeRecorderScript });
   return targetPage.addInitScript(({ bounded }) => {
     const createBoundedObserver = () => {
       const outstanding = new Map();
@@ -847,8 +888,8 @@ export async function focusMountedTerminal(page) {
   await callTerminalControl(page, "focus");
   await waitForDom(page, { locator: page.locator(`.${HOST_CHROME.terminalContainerClass} canvas`).first(), state: "actionable" }, { label: "page.locator(`.${HOST_CHROME.terminalContainerClass} canvas`).first() before click" });
   await page.locator(`.${HOST_CHROME.terminalContainerClass} canvas`).first().click();
-  await waitForDom(page, () => page.evaluate(() => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement, undefined), { label: "focusMountedTerminal condition 1", deadlineMs: 5_000 }).catch((error) => {
-    throw new Error(`mounted terminal did not focus the Restty textarea: ${error.message}`);
+  await waitForDom(page, () => page.evaluate(() => globalThis.document.activeElement instanceof globalThis.HTMLTextAreaElement, undefined), { label: "focusMountedTerminal condition 1", deadlineMs: 5_000 }).catch(async (error) => {
+    throw new Error(`mounted terminal did not focus the Restty textarea: ${error.message}; recent focus changes: ${JSON.stringify(await recentFocusChanges(page))}`);
   });
 }
 
