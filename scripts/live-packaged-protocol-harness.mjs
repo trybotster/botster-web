@@ -340,6 +340,8 @@ try {
       throw new Error(`fixture plugin log record not read back: ${JSON.stringify(fixtureLogs)}`);
     }
     console.log(`plugin-logs fixture record ${JSON.stringify({ record: loadRecord, attempts: fixtureLogs.attempts })}`);
+    const pluginLogsView = await provePluginLogsView(page);
+    console.log(`plugin-logs view live proof ${JSON.stringify(pluginLogsView)}`);
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
     assertRequiredWorkspacesProof();
     await requestDaemonShutdown();
@@ -6706,6 +6708,78 @@ async function readPluginLogsThroughAction(page, packageName) {
     if (result.accepted === true || result.result?.retryable !== true) return { result, attempts };
   }
   throw new Error(`read_plugin_logs for ${packageName} stayed retryable: ${JSON.stringify(attempts)}`);
+}
+
+/**
+ * The plugin logs view in the real UI (Hub settings → the fixture's settings route): the load
+ * record, then "Load newer" after an emission (the same log_id: appended), then a disable and
+ * enable (a new log_id): "Load newer" resets the view to the new log only.
+ */
+async function provePluginLogsView(page) {
+  const socketPath = join(webrtcDataDir, "botster-hub.sock");
+  await openPackageSettings(page, packageEventsPackageName);
+  const section = page.getByTestId("plugin-logs");
+  const rows = section.locator("[data-testid='plugin-log-record']");
+  const rowWith = (text) => rows.filter({ hasText: text });
+  const loadNewer = section.getByTestId("plugin-logs-load-newer");
+  const clickLoadNewer = async (label) => {
+    await waitForDom(page, { locator: loadNewer, state: "actionable" }, { label: `${label}: Load newer before click` });
+    await loadNewer.click();
+  };
+  const rowFacts = () => rows.evaluateAll((nodes) => nodes.map((node) => ({
+    seq: Number(node.getAttribute("data-seq")),
+    level: node.getAttribute("data-level"),
+    generation: Number(node.getAttribute("data-generation")),
+    text: node.textContent
+  })));
+
+  await waitForDom(page, rowWith("package-notice-reaction loaded").first(), { label: "plugin logs view: load record", deadlineMs: 15_000 });
+  const initial = await rowFacts();
+  const loadFact = initial.find((row) => row.text.includes("package-notice-reaction loaded"));
+  if (loadFact?.level !== "info" || !(loadFact.generation >= 1) || !loadFact.text.includes("\"fixture\": \"package-notice-reaction\"")) {
+    throw new Error(`plugin logs view load record: ${JSON.stringify(initial)}`);
+  }
+
+  const notice = `logs-view-${randomUUID()}`;
+  const emitted = await sendDaemonRequest(socketPath, {
+    type: "plugin_surface_action",
+    package_name: packageEventsPackageName,
+    request: {
+      request_id: randomUUID(),
+      surface_id: packageEventsSurfaceId,
+      action_id: packageEventsMatchAction,
+      node_id: "package-notice-reaction-emit-match",
+      kind: "submit",
+      payload: { notice }
+    }
+  });
+  if (emitted.error) throw new Error(`plugin logs view emission failed: ${JSON.stringify(emitted.error)}`);
+  await clickLoadNewer("emission");
+  await waitForDom(page, rowWith(notice).first(), { label: "plugin logs view: emission record after Load newer", deadlineMs: 15_000 });
+  const afterEmit = await rowFacts();
+  if (afterEmit[0]?.text.includes(notice) !== true || afterEmit.length !== initial.length + 1) {
+    throw new Error(`plugin logs view append (same log_id): ${JSON.stringify(afterEmit)}`);
+  }
+
+  await runHubCommand(["packages", "disable", "--data-dir", webrtcDataDir, packageEventsPackageName]);
+  await runHubCommand(["packages", "enable", "--data-dir", webrtcDataDir, packageEventsPackageName]);
+  if (await section.count() !== 1) throw new Error("the plugin logs section unmounted across disable/enable, so the reset rule is not exercised");
+  await clickLoadNewer("new log");
+  await waitForDom(page, section.getByTestId("plugin-logs-restarted"), { label: "plugin logs view: restart notice after a new log_id", deadlineMs: 15_000 });
+  await waitForDom(page, async () => {
+    const facts = await rowFacts();
+    return facts.length === 1 && facts[0].seq === 1 && facts[0].text.includes("package-notice-reaction loaded");
+  }, { label: "plugin logs view: only the new log's load record", deadlineMs: 15_000 }).catch(async (error) => {
+    throw new Error(`${error.message}; rows=${JSON.stringify(await rowFacts())}`);
+  });
+  const afterReset = await rowFacts();
+  return {
+    initial_rows: initial.length,
+    load_generation: loadFact.generation,
+    appended_seq: afterEmit[0].seq,
+    after_reset: afterReset.map((row) => ({ seq: row.seq, generation: row.generation })),
+    restarted_notice: true
+  };
 }
 
 async function provePluginLogsWire(page) {

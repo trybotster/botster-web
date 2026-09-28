@@ -83,7 +83,7 @@ reads the generic entity store, including nested row context, while
 Bind-list identity has one materialization order. The direct item-template root
 retains its item-relative `$bind`; after that root becomes a nonblank literal,
 `bind_list_descendant_id` children call the runtime helper exported by
-`@trybotster/ui-contract@0.3.3`. Test assets come from `@trybotster/hub-test-support@0.1.49` (host protocol 12, conformance revision-52), vendored verbatim from Hub 6ca5a996 into `test-support/hub-test-support` as a `file:` dev dependency until Hub publishes it. Host DTOs come from the Hub-generated `daemon-protocol.ts` and Core terminal
+`@trybotster/ui-contract@0.3.3`. Test assets come from `@trybotster/hub-test-support@0.1.50` (host protocol 12, conformance revision-53), vendored verbatim from Hub c5af53a9 into `test-support/hub-test-support` as a `file:` dev dependency until Hub publishes it. Host DTOs come from the Hub-generated `daemon-protocol.ts` and Core terminal
 codecs, key tables, and feature tokens from the Core-generated `terminal-protocol.ts`, both
 copied verbatim into `src/botster/generated/`. Web never hand-maintains a protocol definition.
 Nested bind lists establish a new nearest-row context. Web never encodes,

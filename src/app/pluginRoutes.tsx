@@ -1,5 +1,6 @@
 /** Plugin surface and settings route pages. */
 
+import type { ReactNode } from "react";
 import { IonBadge, IonButton, IonItem, IonLabel, IonList } from "@ionic/react";
 
 import type { ActionBinding } from "../botster/actions";
@@ -92,6 +93,8 @@ export function PluginSurfaceRoutePage({
 interface PluginSettingsRoutePageProps {
   packageName: string;
   packageRecord?: Record<string, unknown>;
+  /** The plugin logs section, shown for a package whose classification is "plugin". */
+  pluginLogs?: ReactNode;
   diagnostic?: string;
   onAction: (action: ActionBinding) => void;
   onSurfaceAction?: (dispatch: UiNodeActionDispatch) => void;
@@ -116,7 +119,8 @@ export function PluginSettingsRoutePage({
   surfaceDiagnostic,
   entities,
   presentationState = {},
-  onDismissPresentation
+  onDismissPresentation,
+  pluginLogs
 }: PluginSettingsRoutePageProps) {
   return (
     <article className="workflow-section" aria-label="Extension settings" data-testid="plugin-settings-route">
@@ -137,6 +141,7 @@ export function PluginSettingsRoutePage({
             onAction={onAction}
             onOpenSurface={(surface) => onOpenSurface(packageName, surface)}
           />
+          {packageRecord.classification === "plugin" ? pluginLogs : null}
           {surfaceDiagnostic ? (
             <p className="entity-empty" data-testid="plugin-settings-surface-diagnostic">{surfaceDiagnostic}</p>
           ) : selectedSurface?.snapshot ? (

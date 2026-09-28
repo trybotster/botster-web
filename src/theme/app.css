@@ -1711,3 +1711,54 @@ ion-modal.uinode-dialog .uinode-form > ion-button {
 .session-status-failed {
   color: var(--ion-color-danger);
 }
+
+.plugin-logs .plugin-log-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plugin-log-record {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--app-border-subtle-color);
+}
+
+.plugin-log-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: var(--app-text-muted-color);
+  font-size: 13px;
+}
+
+.plugin-log-message {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.plugin-log-fields {
+  margin: 4px 0 0;
+  padding: 8px;
+  overflow-x: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.plugin-log-gap,
+.plugin-logs-restarted {
+  display: block;
+  margin: 8px 0 0;
+  color: var(--app-text-muted-color);
+  font-size: 13px;
+}
+
+.plugin-logs-refused {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--ion-color-danger);
+}

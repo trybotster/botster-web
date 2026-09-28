@@ -34,6 +34,7 @@ import type { SelectedPluginSurface } from "./app/pluginSurfaceState";
 import { SessionRouteView } from "./app/sessionRoute";
 import { compareSpawnTargetRows } from "./app/spawnTargets";
 import { useSessionEndNotice } from "./app/useSessionEndNotice";
+import { PluginLogsSection } from "./app/pluginLogsView";
 import { terminalDescriptorForSessionId } from "./app/terminalChrome";
 import { useAppNavigation } from "./app/useAppNavigation";
 import { useSessionEntityDetach } from "./app/useSessionEntityDetach";
@@ -389,6 +390,9 @@ export default function App() {
       ) : null}
       {activeView === "apps" ? (
         <AppsRouteView
+          renderPluginLogs={(packageName) => (
+            <PluginLogsSection key={packageName} runtimeClient={runtimeClient} packageName={packageName} />
+          )}
           routePluginSurface={routePluginSurface}
           routeSettingsPackageName={routeSettingsPackageName}
           packages={packages}

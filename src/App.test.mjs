@@ -2308,7 +2308,7 @@ assert.match(daemonUnixClientScript, /frame: "hello"/);
 assert.match(daemonUnixClientScript, /frame: "request", request_id: "1"/);
 assert.match(daemonUnixClientScript, /It discards valid event, entity, and terminal deliveries/);
 assert.match(generatedDaemonProtocol, /export const PROTOCOL = "botster-hub-daemon-v1";/);
-assert.match(generatedDaemonProtocol, /export const CONFORMANCE_FIXTURE_REVISION = 52;/);
+assert.match(generatedDaemonProtocol, /export const CONFORMANCE_FIXTURE_REVISION = 53;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_FRAME_LENGTH_PREFIX_BYTES = 4;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_CONTROL = 1;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_TERMINAL = 2;/);
@@ -2830,17 +2830,17 @@ assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 assert.equal(
   hubTestSupportMetadata.daemon_protocol.sha256,
-  "df105ffc7f8adc5a95f180e5834622207ea56b3f9c499ab5f8a1fe4485836936"
+  "94d0c90b340582cb1282a35a98b7032b633c8991789de472918b2e8bbab9da8a"
 );
 assert.equal(hubTestSupportMetadata.ui_contract.package_version, "0.3.3");
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.49");
-// Web consumes the verbatim 0.1.49 package from committed Hub 6ca5a996
+assert.equal(hubTestSupportMetadata.package_version, "0.1.50");
+// Web consumes the verbatim 0.1.50 package from committed Hub c5af53a9
 // from the tracked test-support directory through a file: dependency.
 assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "file:test-support/hub-test-support");
-assert.equal(hubTestSupportProvenance.revision, "6ca5a9961518b2c9cdce80f0e90effbda86b4264");
+assert.equal(hubTestSupportProvenance.revision, "c5af53a98d4a9f6fd3470440497275c15ccd80d2");
 assert.equal(hubTestSupportProvenance.package_version, hubTestSupportMetadata.package_version);
 assert.equal(hubTestSupportProvenance.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(vendoredHubTestSupportPackageJson.version, hubTestSupportMetadata.package_version);
@@ -2849,7 +2849,7 @@ assert.equal(vendoredHubTestSupportPackageJson.name, hubTestSupportMetadata.pack
 assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], undefined);
 assert.equal(packageJson.devDependencies["@trybotster/terminal-protocol"], undefined);
 assert.equal(hubTestSupportMetadata.protocol_version, 12);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 52);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 53);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${hubTestSupportMetadata.package_version}`,
@@ -2877,7 +2877,7 @@ assert.deepEqual(
     { kind: "surface", surface_id: "contract.settings" }
   ]
 );
-// The vendored daemon-protocol.ts is the Hub 6ca5a996 artifact recorded in PROVENANCE.json;
+// The vendored daemon-protocol.ts is the Hub c5af53a9 artifact recorded in PROVENANCE.json;
 // the vendored hub-test-support package from that Hub revision ships the same artifact.
 assert.match(generatedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
 assert.match(generatedDaemonProtocol, /interface DaemonPluginResourceCounters/);
@@ -3540,7 +3540,16 @@ const {
 } = requireRuntime("./app/packageEventNotices.js");
 const { createInMemoryEntityFrameStore } = requireRuntime("./botster/entities.js");
 const { hubQuarantines, quarantineKey, resolveQuarantineAction, resolveQuarantineActionId } = requireRuntime("./botster/hubQuarantines.js");
-const { pluginLogPage, readPluginLogsAction, readPluginLogsActionId, readPluginLogsRequestFromAction } = requireRuntime("./botster/pluginLogs.js");
+const {
+  applyPluginLogPage,
+  emptyPluginLogView,
+  nextPluginLogRead,
+  pluginLogPage,
+  pluginLogRefusalMessage,
+  readPluginLogsAction,
+  readPluginLogsActionId,
+  readPluginLogsRequestFromAction
+} = requireRuntime("./botster/pluginLogs.js");
 const { createHubRuntimeConfig, terminalDataPlaneLabel } = requireRuntime("./botster/hubRuntime.js");
 const { hostCompatibilityRequirement } = requireRuntime("./botster/protocolPlanes.js");
 const {
@@ -9140,6 +9149,47 @@ assert.deepEqual(hubUpdateCurrentResult.result.diagnostics, [
   assert.equal(pluginLogPage({ ...firstPage.result.plugin_logs, first_available_seq: 1 }, undefined).evicted, undefined);
 }
 
+// The plugin log view state machine: the cursor is bound to log_id (Hub revision 53).
+{
+  const rec = (seq, generation = 1, dropped_before = 0) => ({ seq, generation, at_ms: seq, level: "info", message: `m${seq}`, dropped_before });
+  const logs = (log_id, records, first_available_seq = records[0]?.seq ?? 1) => ({
+    package_name: "p", records, next_seq: (records.at(-1)?.seq ?? 0) + 1, first_available_seq, ...(log_id ? { log_id } : {})
+  });
+  assert.deepEqual(nextPluginLogRead(emptyPluginLogView, "open"), { afterSeq: 0, reset: false });
+  // First read: the page is the view; an eviction before seq 3 is shown.
+  let applied = applyPluginLogPage(emptyPluginLogView, logs("A", [rec(3), rec(4)], 3), { afterSeq: 0, reset: false });
+  assert.equal(applied.followUp, undefined);
+  assert.deepEqual(applied.view.evicted, [{ fromSeq: 1, toSeq: 2 }]);
+  assert.equal(applied.view.cursor, 4);
+  assert.equal(applied.view.restarted, false);
+  let view = applied.view;
+  assert.deepEqual(nextPluginLogRead(view, "newer"), { afterSeq: 4, reset: false });
+  // Same log_id: duplicates are ignored, a newer generation appends, an eviction gap within the log.
+  applied = applyPluginLogPage(view, logs("A", [rec(4), rec(7, 2, 5)], 7), { afterSeq: 4, reset: false });
+  assert.deepEqual(applied.view.records.map((r) => r.seq), [3, 4, 7]);
+  assert.deepEqual(applied.view.evicted, [{ fromSeq: 1, toSeq: 2 }, { fromSeq: 5, toSeq: 6 }]);
+  assert.equal(applied.view.records.at(-1).dropped_before, 5, "the rate-limit count stays on its record");
+  view = applied.view;
+  // A different log_id with seqs ABOVE the cursor: nothing merged, one reset read from 0.
+  applied = applyPluginLogPage(view, logs("B", [rec(8), rec(9)], 1), { afterSeq: 7, reset: false });
+  assert.equal(applied.view, view, "the mismatching page is discarded whole");
+  assert.deepEqual(applied.followUp, { afterSeq: 0, reset: true });
+  // present -> absent and absent -> present are identity changes too.
+  assert.deepEqual(applyPluginLogPage(view, logs(undefined, []), { afterSeq: 7, reset: false }).followUp, { afterSeq: 0, reset: true });
+  const absentView = applyPluginLogPage(emptyPluginLogView, logs(undefined, []), { afterSeq: 0, reset: false }).view;
+  assert.deepEqual(applyPluginLogPage(absentView, logs("C", [rec(1)]), { afterSeq: 0, reset: false }).followUp, { afterSeq: 0, reset: true });
+  // A reset read is authoritative for its own log_id: it replaces the view and never chains.
+  applied = applyPluginLogPage(view, logs("C", [rec(1), rec(2)]), { afterSeq: 0, reset: true });
+  assert.equal(applied.followUp, undefined);
+  assert.equal(applied.view.logId, "C");
+  assert.deepEqual(applied.view.records.map((r) => r.seq), [1, 2]);
+  assert.deepEqual(applied.view.evicted, []);
+  assert.equal(applied.view.restarted, true);
+  assert.equal(pluginLogRefusalMessage("plugin_logs_busy", "x"), "The plugin is writing a log record; try again.");
+  assert.equal(pluginLogRefusalMessage("plugin_logs_capacity", "x"), "The Hub could not fund a copy of this page; try again.");
+  assert.equal(pluginLogRefusalMessage(undefined, "other reason"), "other reason");
+}
+
 // Remove (crash recovery): the action maps to remove_session; session_removed is accepted, and
 // the Hub's session_not_terminal refusal is shown as the reason. Web adds no stricter gate.
 {
@@ -12075,6 +12125,60 @@ try {
   }
   assert.equal((attentionMarkup.match(/data-testid="session-new"/g) ?? []).length, 1, "New session only on the failed row");
   assert.ok(attentionMarkup.indexOf("dashboard-attention-sessions") < attentionMarkup.indexOf("dashboard-ended-sessions"));
+  // Plugin logs panel: newest first, level, generation with "earlier load", fields as pretty
+  // JSON (raw text when not JSON), both gap kinds, the restart notice, and refused + Retry.
+  {
+    const { PluginLogsPanel } = await vite.ssrLoadModule("/src/app/pluginLogsView.tsx");
+    const logRecord = (seq, generation, extra = {}) => ({ seq, generation, at_ms: 1_790_000_000_000, level: "info", message: `message ${seq}`, dropped_before: 0, ...extra });
+    const panelMarkup = renderToStaticMarkup(createElement(PluginLogsPanel, {
+      view: {
+        loaded: true,
+        logId: "log-A",
+        cursor: 7,
+        records: [
+          logRecord(3, 1, { fields_json: "{\"k\":1}" }),
+          logRecord(7, 2, { level: "error", dropped_before: 4, fields_json: "not json" })
+        ],
+        evicted: [{ fromSeq: 1, toSeq: 2 }],
+        restarted: true
+      },
+      status: { kind: "refused", message: "The plugin is writing a log record; try again.", retryable: true },
+      onLoadNewer: () => {},
+      onRetry: () => {}
+    }));
+    assert.equal(markupContainsTestId(panelMarkup, "plugin-logs"), true);
+    assert.ok(panelMarkup.indexOf('data-seq="7"') < panelMarkup.indexOf('data-seq="3"'), "newest first");
+    assert.match(panelMarkup, /data-seq="7" data-level="error" data-generation="2"/);
+    assert.match(panelMarkup, /Load 1 \(earlier load\)/);
+    assert.match(panelMarkup, /4 records were rate-limited before this one\./);
+    assert.match(panelMarkup, /Records 1–2 were evicted before they were read\./);
+    assert.match(panelMarkup, /&quot;k&quot;: 1/);
+    assert.match(panelMarkup, />not json</);
+    assert.equal(markupContainsTestId(panelMarkup, "plugin-logs-restarted"), true);
+    assert.match(panelMarkup, /The plugin is writing a log record; try again\./);
+    assert.equal(markupContainsTestId(panelMarkup, "plugin-logs-retry"), true);
+    const emptyPanel = renderToStaticMarkup(createElement(PluginLogsPanel, {
+      view: { loaded: true, logId: undefined, cursor: 0, records: [], evicted: [], restarted: false },
+      status: { kind: "idle" },
+      onLoadNewer: () => {},
+      onRetry: () => {}
+    }));
+    assert.match(emptyPanel, /No log records\./);
+    assert.equal(markupContainsTestId(emptyPanel, "plugin-logs-retry"), false);
+    // The settings route shows the section only for a plugin package.
+    const { PluginSettingsRoutePage } = await vite.ssrLoadModule("/src/app/pluginRoutes.tsx");
+    const routeMarkup = (classification) => renderToStaticMarkup(createElement(PluginSettingsRoutePage, {
+      packageName: "acme.logs",
+      packageRecord: { id: "acme.logs", title: "Acme", classification },
+      onAction: () => {},
+      onBack: () => {},
+      onOpenSurface: () => {},
+      entities: { list: () => [], get: () => undefined, subscribe: () => () => {} },
+      pluginLogs: createElement("div", { "data-testid": "plugin-logs-slot" })
+    }));
+    assert.equal(markupContainsTestId(routeMarkup("plugin"), "plugin-logs-slot"), true);
+    assert.equal(markupContainsTestId(routeMarkup("provider"), "plugin-logs-slot"), false);
+  }
   const emptyDashboardMarkup = renderToStaticMarkup(
     createElement(DashboardView, {
       sessions: [],
@@ -16844,7 +16948,7 @@ async function startPackageServerRuntime({
                 protocol: "botster-hub-daemon-v1",
                 protocol_version: 12,
                 features: ["webrtc_terminal_adapter"],
-                conformance_fixture_revision: 52
+                conformance_fixture_revision: 53
               }
             }
           });
@@ -17190,7 +17294,7 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
   });
 }
 
-/** Host-control v12 Hello ack fixture: protocol 12, conformance 52, terminal scheme 2. */
+/** Host-control v12 Hello ack fixture: protocol 12, conformance 53, terminal scheme 2. */
 function testHelloAckFixture() {
   return {
     protocol: "botster-hub-daemon-v1",
@@ -18625,6 +18729,151 @@ function removeCssAtRules(source) {
       await act(async () => { endRoot.unmount(); });
       assert.equal(frameHandlers.size, 0, "the listener is removed on unmount");
       if (endRootEl.parentNode) endRootEl.parentNode.removeChild(endRootEl);
+    }
+
+    // Production usePluginLogs: the cursor is bound to log_id. A page from another log (even
+    // with higher seqs) is discarded and ONE reset read from after_seq 0 replaces the view; a
+    // refused reset read retries from 0; busy and capacity refusals keep distinct messages; a
+    // response from an older epoch (package change, runtime change, unmount) never lands.
+    {
+      const { PluginLogsHarness } = await noticeVite.ssrLoadModule("/src/app/__fixtures__/pluginLogsHarness.tsx");
+      const scriptedRuntime = () => {
+        const requests = [];
+        return {
+          requests,
+          actions: {
+            dispatch(request) {
+              return new Promise((resolve) => requests.push({ action: request.action, resolve }));
+            }
+          }
+        };
+      };
+      const record = (seq, generation, message) => ({ seq, generation, at_ms: 1_790_000_000_000 + seq, level: "info", message, dropped_before: 0 });
+      const page = (log_id, records, first_available_seq = records[0]?.seq ?? 1) => ({
+        accepted: true,
+        result: {
+          request_type: "read_plugin_logs",
+          plugin_logs: { package_name: "acme.logs", records, next_seq: (records.at(-1)?.seq ?? 0) + 1, first_available_seq, ...(log_id ? { log_id } : {}) }
+        }
+      });
+      const refused = (error_kind, reason) => ({ accepted: false, reason, result: { request_type: "read_plugin_logs", error_kind, retryable: true } });
+      const afterSeqOf = (entry) => entry.action.params.after_seq;
+      let state;
+      const runtime = scriptedRuntime();
+      const logsRootEl = globalThis.document.createElement("div");
+      globalThis.document.body.appendChild(logsRootEl);
+      const logsRoot = createRoot(logsRootEl);
+      const mount = (runtimeClient, packageName = "acme.logs") => act(async () => {
+        // Production mounts one section per package (key = package name).
+        logsRoot.render(createElement(PluginLogsHarness, { key: packageName, runtimeClient, packageName, onState: (next) => { state = next; } }));
+      });
+      const settle = (entry, value) => act(async () => { entry.resolve(value); });
+      await mount(runtime);
+      assert.equal(runtime.requests.length, 1, "opening reads once");
+      assert.equal(afterSeqOf(runtime.requests[0]), 0);
+      await settle(runtime.requests[0], page("log-A", [record(1, 1, "a1"), record(2, 1, "a2")]));
+      assert.deepEqual(state.view.records.map((r) => r.seq), [1, 2]);
+      assert.equal(state.view.logId, "log-A");
+      assert.equal(state.status.kind, "idle");
+      // Same log, a newer VM generation (a reload): append, no reset.
+      await act(async () => { state.loadNewer(); });
+      assert.equal(afterSeqOf(runtime.requests[1]), 2);
+      await settle(runtime.requests[1], page("log-A", [record(3, 2, "a3 after reload")], 1));
+      assert.deepEqual(state.view.records.map((r) => r.seq), [1, 2, 3]);
+      assert.equal(state.view.restarted, false, "a new generation alone is not a new log");
+      // Another log whose seqs are ABOVE the cursor: discarded, then one reset read from 0.
+      await act(async () => { state.loadNewer(); });
+      assert.equal(afterSeqOf(runtime.requests[2]), 3);
+      await settle(runtime.requests[2], page("log-B", [record(4, 5, "b4"), record(5, 5, "b5")], 1));
+      assert.equal(runtime.requests.length, 4, "a different log_id asks for one reset read");
+      assert.equal(afterSeqOf(runtime.requests[3]), 0);
+      assert.deepEqual(state.view.records.map((r) => r.seq), [1, 2, 3], "the mismatching page is never merged");
+      // The reset read is refused (capacity): its own message, and Retry reads from 0 again.
+      await settle(runtime.requests[3], refused("plugin_logs_capacity", "copy not funded"));
+      assert.equal(state.status.kind, "refused");
+      assert.equal(state.status.message, "The Hub could not fund a copy of this page; try again.");
+      await act(async () => { state.retry(); });
+      assert.equal(afterSeqOf(runtime.requests[4]), 0, "retrying a refused reset read reads from 0");
+      // A second identity change during the reset read: the reset page is authoritative.
+      await settle(runtime.requests[4], page("log-C", [record(1, 6, "c1"), record(2, 6, "c2")]));
+      assert.equal(runtime.requests.length, 5, "no reset chain");
+      assert.equal(state.view.logId, "log-C");
+      assert.deepEqual(state.view.records.map((r) => r.message), ["c1", "c2"]);
+      assert.equal(state.view.restarted, true);
+      // Busy keeps its own message.
+      await act(async () => { state.loadNewer(); });
+      await settle(runtime.requests[5], refused("plugin_logs_busy", "busy"));
+      assert.equal(state.status.message, "The plugin is writing a log record; try again.");
+      // A read pending when the package changes never lands in the new view.
+      await act(async () => { state.retry(); });
+      const pendingBeforeSwitch = runtime.requests[6];
+      await mount(runtime, "acme.other");
+      assert.equal(afterSeqOf(runtime.requests[7]), 0, "a new package opens with a fresh read");
+      await settle(pendingBeforeSwitch, page("log-C", [record(3, 6, "late")]));
+      assert.equal(state.view.records.some((r) => r.message === "late"), false, "a stale package response is dropped");
+      // A runtime switch invalidates pending reads the same way.
+      const otherRuntime = scriptedRuntime();
+      const pendingBeforeRuntime = runtime.requests[7];
+      await mount(otherRuntime, "acme.other");
+      await settle(pendingBeforeRuntime, page("log-X", [record(1, 1, "stale runtime")]));
+      assert.equal(state.view.records.some((r) => r.message === "stale runtime"), false, "a stale runtime response is dropped");
+      await settle(otherRuntime.requests[0], page("log-D", [record(1, 1, "d1")]));
+      assert.equal(state.view.logId, "log-D");
+      // The package then has no log (log_id absent): a different identity, so one reset read.
+      await act(async () => { state.loadNewer(); });
+      assert.equal(afterSeqOf(otherRuntime.requests[1]), 1);
+      await settle(otherRuntime.requests[1], page(undefined, []));
+      assert.equal(afterSeqOf(otherRuntime.requests[2]), 0, "present to absent log_id resets");
+      await settle(otherRuntime.requests[2], page(undefined, []));
+      assert.equal(state.view.loaded, true);
+      assert.equal(state.view.logId, undefined, "an absent log_id is its own identity");
+      assert.equal(state.view.records.length, 0);
+      // Unmount: a pending response after unmount changes nothing.
+      await act(async () => { state.loadNewer(); });
+      const pendingAtUnmount = otherRuntime.requests[3];
+      const stateAtUnmount = state;
+      await act(async () => { logsRoot.unmount(); });
+      await settle(pendingAtUnmount, page("log-Y", [record(1, 1, "after unmount")]));
+      assert.equal(state, stateAtUnmount, "no render after unmount");
+      if (logsRootEl.parentNode) logsRootEl.parentNode.removeChild(logsRootEl);
+
+      // A LOADED view switching runtime (same package): nothing of runtime A's owner survives.
+      {
+        const switchRootEl = globalThis.document.createElement("div");
+        globalThis.document.body.appendChild(switchRootEl);
+        const switchRoot = createRoot(switchRootEl);
+        const mountSwitch = (runtimeClient) => act(async () => {
+          switchRoot.render(createElement(PluginLogsHarness, { key: "acme.switch", runtimeClient, packageName: "acme.switch", onState: (next) => { state = next; } }));
+        });
+        const runtimeA = scriptedRuntime();
+        const runtimeB = scriptedRuntime();
+        await mountSwitch(runtimeA);
+        await settle(runtimeA.requests[0], page("log-A", [record(1, 1, "a-one"), record(2, 1, "a-two")]));
+        assert.deepEqual(state.view.records.map((r) => r.message), ["a-one", "a-two"]);
+        await act(async () => { state.loadNewer(); });
+        const lateA = runtimeA.requests[1];
+        await mountSwitch(runtimeB);
+        assert.deepEqual(state.view.records, [], "runtime B never renders runtime A's rows");
+        assert.equal(state.view.loaded, false);
+        assert.equal(state.status.kind, "loading", "runtime B's open read is pending");
+        assert.equal(runtimeB.requests.length, 1);
+        assert.equal(afterSeqOf(runtimeB.requests[0]), 0, "runtime B's cursor starts empty");
+        await settle(runtimeB.requests[0], refused("plugin_logs_busy", "busy"));
+        assert.equal(state.status.kind, "refused");
+        assert.deepEqual(state.view.records, [], "a refusal in B keeps only B's (empty) records");
+        await settle(lateA, page("log-A", [record(3, 1, "a-late")]));
+        assert.equal(state.view.records.some((r) => r.message.startsWith("a-")), false, "runtime A's late completion is dropped");
+        assert.equal(state.status.kind, "refused", "the late A answer does not change B's status");
+        await act(async () => { state.retry(); });
+        assert.equal(runtimeB.requests.length, 2);
+        assert.equal(afterSeqOf(runtimeB.requests[1]), 0, "B's retry repeats B's own failed read");
+        assert.equal(runtimeA.requests.length, 2, "nothing more is sent to runtime A");
+        await settle(runtimeB.requests[1], page("log-B", [record(1, 1, "b-one")]));
+        assert.deepEqual(state.view.records.map((r) => r.message), ["b-one"]);
+        assert.equal(state.view.restarted, false, "B's first page is its own start, not a restart");
+        await act(async () => { switchRoot.unmount(); });
+        if (switchRootEl.parentNode) switchRootEl.parentNode.removeChild(switchRootEl);
+      }
     }
   } finally {
     await noticeVite.close();

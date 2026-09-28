@@ -11,7 +11,7 @@ const daemonCompatibilityRequirement = {
   protocol: daemonProtocol,
   protocol_version: 12,
   required_features: ["webrtc_terminal_adapter"],
-  minimum_conformance_fixture_revision: 52,
+  minimum_conformance_fixture_revision: 53,
   client_name: "botster-web-package-server"
 };
 const daemonUnixFraming = {

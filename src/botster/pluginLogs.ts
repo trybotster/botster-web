@@ -57,3 +57,90 @@ export function pluginLogPage(logs: DaemonPluginLogs, afterSeq: number | undefin
       .map((record) => ({ beforeSeq: record.seq, count: record.dropped_before }))
   };
 }
+
+/**
+ * What the plugin logs view holds for one package. The cursor belongs to exactly one log:
+ * `logId` (absent when the package has no log). Records are ascending by seq.
+ */
+export interface PluginLogView {
+  loaded: boolean;
+  logId: string | undefined;
+  cursor: number;
+  records: DaemonPluginLogRecord[];
+  evicted: Array<{ fromSeq: number; toSeq: number }>;
+  /** The view was replaced because the plugin's log started again (a new log_id). */
+  restarted: boolean;
+}
+
+/** One read the view asks for. A reset read (after_seq 0) is authoritative for its log_id. */
+export interface PluginLogRead {
+  afterSeq: number;
+  reset: boolean;
+}
+
+export const emptyPluginLogView: PluginLogView = {
+  loaded: false,
+  logId: undefined,
+  cursor: 0,
+  records: [],
+  evicted: [],
+  restarted: false
+};
+
+/** The read for opening the view (all retained records) or for "Load newer". */
+export function nextPluginLogRead(view: PluginLogView, kind: "open" | "newer"): PluginLogRead {
+  return kind === "open" || !view.loaded ? { afterSeq: 0, reset: false } : { afterSeq: view.cursor, reset: false };
+}
+
+function viewFromPage(logs: DaemonPluginLogs, restarted: boolean): PluginLogView {
+  const records = [...logs.records].sort((a, b) => a.seq - b.seq);
+  const lastSeq = records.at(-1)?.seq ?? 0;
+  return {
+    loaded: true,
+    logId: logs.log_id,
+    cursor: Math.max(lastSeq, logs.first_available_seq - 1),
+    records,
+    evicted: logs.first_available_seq > 1 ? [{ fromSeq: 1, toSeq: logs.first_available_seq - 1 }] : [],
+    restarted
+  };
+}
+
+/**
+ * Apply one page to the view. The cursor is bound to log_id (Hub client protocol, revision 53):
+ * - the first read, and a reset read, replace the view with the page (a reset read is
+ *   authoritative for its own log_id, so a reset never chains);
+ * - a page with the held log_id appends records after the cursor;
+ * - a page with a different log_id (present or absent) is discarded whole, because it can skip
+ *   the new log's lower seqs, and one reset read from after_seq 0 is requested.
+ * A new generation alone is not a new log: reloads keep the log_id.
+ */
+export function applyPluginLogPage(
+  view: PluginLogView,
+  logs: DaemonPluginLogs,
+  read: PluginLogRead
+): { view: PluginLogView; followUp?: PluginLogRead } {
+  if (read.reset) return { view: viewFromPage(logs, view.loaded) };
+  if (!view.loaded) return { view: viewFromPage(logs, false) };
+  if (logs.log_id !== view.logId) return { view, followUp: { afterSeq: 0, reset: true } };
+  const fresh = logs.records.filter((record) => record.seq > view.cursor).sort((a, b) => a.seq - b.seq);
+  const evicted = logs.first_available_seq > view.cursor + 1
+    ? [...view.evicted, { fromSeq: view.cursor + 1, toSeq: logs.first_available_seq - 1 }]
+    : view.evicted;
+  const lastSeq = fresh.at(-1)?.seq ?? view.cursor;
+  return {
+    view: {
+      ...view,
+      cursor: Math.max(lastSeq, logs.first_available_seq - 1, view.cursor),
+      records: [...view.records, ...fresh],
+      evicted,
+      restarted: false
+    }
+  };
+}
+
+/** Visible text for a refused read; busy and capacity are different conditions. */
+export function pluginLogRefusalMessage(errorKind: string | undefined, reason: string | undefined): string {
+  if (errorKind === "plugin_logs_busy") return "The plugin is writing a log record; try again.";
+  if (errorKind === "plugin_logs_capacity") return "The Hub could not fund a copy of this page; try again.";
+  return reason ?? "Plugin logs could not be read.";
+}

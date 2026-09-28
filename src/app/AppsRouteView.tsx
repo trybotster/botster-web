@@ -1,6 +1,7 @@
 /** Apps launcher, plugin surface route, and package settings route. */
 
 import { IonLabel, IonListHeader } from "@ionic/react";
+import type { ReactNode } from "react";
 
 import type { ActionBinding } from "../botster/actions";
 import type { EntityFrameStore, EntityRecord } from "../botster/entities";
@@ -43,6 +44,8 @@ export interface AppsRouteViewProps {
   openPackageSettings: (app: Record<string, unknown>) => void;
   openPackageSettingsSurface: (packageName: string, surface: PackageSurfaceRecord) => void;
   navigateToRoute: (route: AppRoute) => void;
+  /** The plugin logs section for a package's settings route. */
+  renderPluginLogs?: (packageName: string) => ReactNode;
   onAddPackage: () => void;
 }
 
@@ -72,6 +75,7 @@ export function AppsRouteView(props: AppsRouteViewProps) {
     openPackageSettings,
     openPackageSettingsSurface,
     navigateToRoute,
+    renderPluginLogs,
     onAddPackage
   } = props;
 
@@ -114,6 +118,7 @@ export function AppsRouteView(props: AppsRouteViewProps) {
         diagnostic={settingsPackageDiagnostic}
         packageName={routeSettingsPackageName}
         packageRecord={settingsPackage}
+        pluginLogs={renderPluginLogs?.(routeSettingsPackageName)}
         onAction={dispatchAction}
         onSurfaceAction={(dispatch) => {
           if (selectedPluginSurface?.packageName && selectedPluginSurface.surfaceId) {

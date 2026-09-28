@@ -79,6 +79,8 @@ local function emit_notice(subject, notice)
   if not emitted.ok then
     error("sample.notice emit refused: " .. tostring(emitted.error and emitted.error.kind))
   end
+  -- Protocol 12 plugin logs: one record per emission, read by the Web logs view proof.
+  botster.log.info({ message = "sample.notice emitted", fields = { notice = notice } })
   return token
 end
 
