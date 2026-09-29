@@ -3548,7 +3548,8 @@ const {
   pluginLogRefusalMessage,
   readPluginLogsAction,
   readPluginLogsActionId,
-  readPluginLogsRequestFromAction
+  readPluginLogsRequestFromAction,
+  retryablePluginLogErrorCodes
 } = requireRuntime("./botster/pluginLogs.js");
 const { createHubRuntimeConfig, terminalDataPlaneLabel } = requireRuntime("./botster/hubRuntime.js");
 const { hostCompatibilityRequirement } = requireRuntime("./botster/protocolPlanes.js");
@@ -4666,8 +4667,8 @@ const bridge = {
       return { kind: "quarantine_resolved", error: null };
     }
     if (request.type === "read_plugin_logs") {
-      if (request.package_name === "acme.busy") {
-        return { kind: "operator_error", error: { code: "plugin_logs_busy", request_id: "fake", operation: "read_plugin_logs", message: "plugin is writing a record" } };
+      if (request.package_name === "acme.capacity") {
+        return { kind: "operator_error", error: { code: "plugin_logs_capacity", request_id: "fake", operation: "read_plugin_logs", message: "copy not funded" } };
       }
       return {
         kind: "plugin_logs",
@@ -9114,7 +9115,7 @@ assert.deepEqual(hubUpdateCurrentResult.result.diagnostics, [
 }
 
 // Protocol 12 read_plugin_logs: the action sends the typed request (after_seq only when given),
-// accepts only a plugin_logs answer, carries the page, and marks plugin_logs_busy retryable.
+// accepts only a plugin_logs answer, carries the page, and marks plugin_logs_capacity retryable.
 // Web does not retry by itself.
 {
   assert.deepEqual(readPluginLogsAction("acme.logs"), { id: readPluginLogsActionId, label: "Read plugin logs", params: { package_name: "acme.logs" } });
@@ -9127,11 +9128,13 @@ assert.deepEqual(hubUpdateCurrentResult.result.diagnostics, [
   const nextPage = await realRuntime.actions.dispatch({ origin: "ui_node", action: readPluginLogsAction("acme.logs", 8) });
   assert.equal(nextPage.accepted, true);
   assert.deepEqual(bridgeRequests.at(-1), { type: "read_plugin_logs", package_name: "acme.logs", after_seq: 8 });
-  const busy = await realRuntime.actions.dispatch({ origin: "ui_node", action: readPluginLogsAction("acme.busy") });
-  assert.equal(busy.accepted, false);
-  assert.equal(busy.reason, "plugin is writing a record");
-  assert.equal(busy.result.error_kind, "plugin_logs_busy");
-  assert.equal(busy.result.retryable, true);
+  const capacity = await realRuntime.actions.dispatch({ origin: "ui_node", action: readPluginLogsAction("acme.capacity") });
+  assert.equal(capacity.accepted, false);
+  assert.equal(capacity.reason, "copy not funded");
+  assert.equal(capacity.result.error_kind, "plugin_logs_capacity");
+  assert.equal(capacity.result.retryable, true);
+  // The Hub no longer answers plugin_logs_busy, so it is not a retryable code.
+  assert.deepEqual([...retryablePluginLogErrorCodes], ["plugin_logs_capacity"]);
   const requestsBefore = bridgeRequests.length;
   for (const params of [{}, { package_name: "" }, { package_name: "acme.logs", after_seq: -1 }, { package_name: "acme.logs", after_seq: 1.5 }]) {
     assert.equal(readPluginLogsRequestFromAction({ id: readPluginLogsActionId, params }), undefined);
@@ -9185,7 +9188,7 @@ assert.deepEqual(hubUpdateCurrentResult.result.diagnostics, [
   assert.deepEqual(applied.view.records.map((r) => r.seq), [1, 2]);
   assert.deepEqual(applied.view.evicted, []);
   assert.equal(applied.view.restarted, true);
-  assert.equal(pluginLogRefusalMessage("plugin_logs_busy", "x"), "The plugin is writing a log record; try again.");
+  assert.equal(pluginLogRefusalMessage("plugin_logs_busy", "x"), "x", "a removed code shows the Hub's own reason");
   assert.equal(pluginLogRefusalMessage("plugin_logs_capacity", "x"), "The Hub could not fund a copy of this page; try again.");
   assert.equal(pluginLogRefusalMessage(undefined, "other reason"), "other reason");
 }
@@ -18733,7 +18736,7 @@ function removeCssAtRules(source) {
 
     // Production usePluginLogs: the cursor is bound to log_id. A page from another log (even
     // with higher seqs) is discarded and ONE reset read from after_seq 0 replaces the view; a
-    // refused reset read retries from 0; busy and capacity refusals keep distinct messages; a
+    // refused reset read retries from 0; a capacity refusal has its own message and any other refusal shows the Hub's reason; a
     // response from an older epoch (package change, runtime change, unmount) never lands.
     {
       const { PluginLogsHarness } = await noticeVite.ssrLoadModule("/src/app/__fixtures__/pluginLogsHarness.tsx");
@@ -18800,10 +18803,10 @@ function removeCssAtRules(source) {
       assert.equal(state.view.logId, "log-C");
       assert.deepEqual(state.view.records.map((r) => r.message), ["c1", "c2"]);
       assert.equal(state.view.restarted, true);
-      // Busy keeps its own message.
+      // Any other refusal shows the Hub's own reason.
       await act(async () => { state.loadNewer(); });
-      await settle(runtime.requests[5], refused("plugin_logs_busy", "busy"));
-      assert.equal(state.status.message, "The plugin is writing a log record; try again.");
+      await settle(runtime.requests[5], refused("plugin_logs_unavailable", "the Hub said no"));
+      assert.equal(state.status.message, "the Hub said no");
       // A read pending when the package changes never lands in the new view.
       await act(async () => { state.retry(); });
       const pendingBeforeSwitch = runtime.requests[6];
@@ -18858,7 +18861,7 @@ function removeCssAtRules(source) {
         assert.equal(state.status.kind, "loading", "runtime B's open read is pending");
         assert.equal(runtimeB.requests.length, 1);
         assert.equal(afterSeqOf(runtimeB.requests[0]), 0, "runtime B's cursor starts empty");
-        await settle(runtimeB.requests[0], refused("plugin_logs_busy", "busy"));
+        await settle(runtimeB.requests[0], refused("plugin_logs_capacity", "copy not funded"));
         assert.equal(state.status.kind, "refused");
         assert.deepEqual(state.view.records, [], "a refusal in B keeps only B's (empty) records");
         await settle(lateA, page("log-A", [record(3, 1, "a-late")]));

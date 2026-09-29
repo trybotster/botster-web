@@ -5,10 +5,11 @@ import type { DaemonPluginLogRecord, DaemonPluginLogs } from "./generated/daemon
 export const readPluginLogsActionId = "botster.package.read_plugin_logs";
 
 /**
- * The Hub refuses a read it cannot serve without waiting or unfunded memory with these
- * operator codes; the caller may read again. Web does not retry by itself.
+ * The Hub refuses a read it cannot fund a copy of with this operator code; the caller may read
+ * again. Web does not retry by itself. The Hub no longer answers plugin_logs_busy: a read waits
+ * for the log book's lock instead.
  */
-export const retryablePluginLogErrorCodes: ReadonlySet<string> = new Set(["plugin_logs_busy", "plugin_logs_capacity"]);
+export const retryablePluginLogErrorCodes: ReadonlySet<string> = new Set(["plugin_logs_capacity"]);
 
 export function readPluginLogsAction(packageName: string, afterSeq?: number): ActionBinding {
   return {
@@ -138,9 +139,8 @@ export function applyPluginLogPage(
   };
 }
 
-/** Visible text for a refused read; busy and capacity are different conditions. */
+/** Visible text for a refused read: capacity has its own text, any other refusal shows the Hub's reason. */
 export function pluginLogRefusalMessage(errorKind: string | undefined, reason: string | undefined): string {
-  if (errorKind === "plugin_logs_busy") return "The plugin is writing a log record; try again.";
   if (errorKind === "plugin_logs_capacity") return "The Hub could not fund a copy of this page; try again.";
   return reason ?? "Plugin logs could not be read.";
 }
