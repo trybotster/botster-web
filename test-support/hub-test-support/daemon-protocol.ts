@@ -5,9 +5,9 @@ import type { PackageNoticeReactionDescriptor, PackageSurfaceDescriptor, UiActio
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
-// Host-control protocol 13 constants. See botster-hub-client/src/lib.rs.
+// Host-control protocol 14 constants. See botster-hub-client/src/lib.rs.
 export const PROTOCOL = "botster-hub-daemon-v1";
-export const PROTOCOL_VERSION = 13;
+export const PROTOCOL_VERSION = 14;
 export const CONFORMANCE_FIXTURE_REVISION = 53;
 export const MAX_REQUEST_ID_BYTES = 20;
 export const MAX_OUTSTANDING_REQUESTS = 32;
@@ -150,10 +150,10 @@ export type DaemonRequest =
   | { type: "subscribe_events"; subscription_id: string; owner: string; name: string; subjects?: string[] }
   | { type: "unsubscribe_events"; subscription_id: string }
   | { type: "remove_session"; session_id: string }
-  | { type: "whoami"; caller_session_id: string | null }
-  | { type: "post_message"; caller_session_id: string | null; target_session_id: string; envelope_id: string | null; body: string }
-  | { type: "receive_messages"; caller_session_id: string; after: number | null; limit: number }
-  | { type: "ack_message"; caller_session_id: string; envelope_id: string }
+  | { type: "whoami" }
+  | { type: "post_message"; target_session_id: string; envelope_id: string | null; body: string }
+  | { type: "receive_messages"; after: number | null; limit: number }
+  | { type: "ack_message"; envelope_id: string }
   | { type: "notify_session"; session_id: string; data: string }
   | { type: "spawn"; session_id: string; command: string }
   | { type: "attach"; session_id: string; subscription_id: string }
@@ -493,9 +493,17 @@ export interface DaemonEnvelopeDelivery {
   status: string;
 }
 
+export interface DaemonEndpointRef {
+  kind: string;
+  hub_id: string | null;
+  session_id: string | null;
+  plugin_key: string | null;
+  raw: string | null;
+}
+
 export interface DaemonEnvelope {
   envelope_id: string;
-  source: string;
+  source: DaemonEndpointRef;
   content_type: string;
   body: string;
   created_at: number;
