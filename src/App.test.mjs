@@ -4691,6 +4691,10 @@ const bridge = {
       if (request.session_id === "ended-restartable") {
         return { kind: "spawned", error: null, sessions: [{ session_id: "ended-restartable" }], diagnostics: [] };
       }
+      // A protocol mismatch: an error-free answer of another kind is not a restart.
+      if (request.session_id === "wrong-kind-session") {
+        return { kind: "session_removed", error: null, diagnostics: [] };
+      }
       const refusal = {
         "running-session": ["restart_not_ended", "session is running, stopping or indeterminate"],
         "no-record-session": ["restart_record_unavailable", "no durable restart record for this session"],
@@ -9251,6 +9255,9 @@ assert.deepEqual(hubUpdateCurrentResult.result.diagnostics, [
     "client environment values are never kept: API_KEY",
     "the message that names the dropped keys reaches the user unchanged"
   );
+  const wrongKind = await realRuntime.actions.dispatch({ origin: "ui_node", action: { id: "botster.session.restart", target: "wrong-kind-session", label: "Restart session" } });
+  assert.equal(wrongKind.accepted, false, "an error-free answer that is not `spawned` is a protocol mismatch, not a restart");
+  assert.match(wrongKind.reason, /expected spawned, received session_removed/);
   const restartMissingTarget = await realRuntime.actions.dispatch({ origin: "ui_node", action: { id: "botster.session.restart", label: "Restart session" } });
   assert.equal(restartMissingTarget.accepted, false);
 }
@@ -11161,7 +11168,16 @@ try {
     ]).map((session) => session.id),
     ["stale-unadopted"]
   );
-  const { removeSessionAction, restartSessionAction, stopSessionAction } = await vite.ssrLoadModule("/src/app/sessionActions.ts");
+  const { removeSessionAction, restartSessionAction, sessionRestartSupported, stopSessionAction } = await vite.ssrLoadModule("/src/app/sessionActions.ts");
+  // Restart is offered only when the Hub advertises session_restart. It is strict: no status yet,
+  // a missing, malformed or empty feature list, or other features only, all mean unsupported.
+  assert.equal(sessionRestartSupported({ compatibility: { features: ["webrtc_terminal_adapter", "session_restart"] } }), true);
+  assert.equal(sessionRestartSupported(undefined), false, "no Hub status yet is not support");
+  assert.equal(sessionRestartSupported({}), false);
+  assert.equal(sessionRestartSupported({ compatibility: {} }), false);
+  assert.equal(sessionRestartSupported({ compatibility: { features: [] } }), false);
+  assert.equal(sessionRestartSupported({ compatibility: { features: "session_restart" } }), false, "a non-list is not support");
+  assert.equal(sessionRestartSupported({ compatibility: { features: ["webrtc_terminal_adapter", "session_type_entity_subscriptions"] } }), false);
   assert.deepEqual(removeSessionAction("s-1"), { id: "botster.session.remove", target: "s-1", label: "Remove session" });
   assert.deepEqual(restartSessionAction("s-1"), { id: "botster.session.restart", target: "s-1", label: "Restart session" });
   const {

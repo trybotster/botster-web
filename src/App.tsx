@@ -47,6 +47,7 @@ import { usePackageEventNotices } from "./app/usePackageEventNotices";
 import { useProductionHubConnection } from "./app/useProductionHubConnection";
 import { viewedSessionIdFromRoute } from "./app/packageEventNotices";
 import { useSessionTypeControl } from "./app/useSessionTypeControl";
+import { sessionRestartSupported } from "./app/sessionActions";
 import { useSessionControl } from "./app/useSessionControl";
 import { useSpawnControl } from "./app/useSpawnControl";
 import { WorkbenchDialogs } from "./app/WorkbenchDialogs";
@@ -385,7 +386,7 @@ export default function App() {
           removingSessionIds={sessionControl.removingSessionIds}
           onRemoveSession={sessionControl.removeSession}
           restartingSessionIds={sessionControl.restartingSessionIds}
-          onRestartSession={sessionControl.restartSession}
+          onRestartSession={sessionRestartSupported(hubStatus) ? sessionControl.restartSession : undefined}
           onNavigateToApps={() => navigateToView("apps")}
           onNavigateToSpawnPoints={() => navigateToHubSettings("spawn-points")}
         />
