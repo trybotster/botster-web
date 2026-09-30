@@ -168,9 +168,6 @@ const entityOptionsPackagePath = entityOptionsMode
   : undefined;
 const packageEventsMode = process.env.BOTSTER_LIVE_PACKAGE_EVENTS === "1";
 const workerLostMode = process.env.BOTSTER_LIVE_WORKER_LOST === "1";
-// The forced-gap lane. The Hub removed its client-queue test knob in protocol 9, so this lane
-// has no Hub control over the client event queue; see the README (live event_gap).
-const packageEventsGapMode = process.env.BOTSTER_LIVE_PACKAGE_EVENTS_GAP === "1";
 const packageEventsPackageName = "package-notice-reaction";
 const packageEventsPackagePath = packageEventsMode
   ? resolveRequiredPackagePath(
@@ -332,7 +329,7 @@ try {
     await waitForSessionStatus(page, "running");
     await openSessionTerminal(page, productionSessionId);
     await waitForTerminalSession(page, productionSessionId);
-    await exercisePackageEvents(page, { forceGap: packageEventsGapMode });
+    await exercisePackageEvents(page);
     const fixtureLogs = await readPluginLogsThroughAction(page, packageEventsPackageName);
     const loadRecord = (fixtureLogs.result.result?.plugin_logs?.records ?? []).find((record) => record.message === "package-notice-reaction loaded");
     const loadFields = loadRecord?.fields_json ? JSON.parse(loadRecord.fields_json) : null;
@@ -345,11 +342,7 @@ try {
     assertNoBrowserFailures({ consoleEvents, pageErrors, responseErrors });
     assertRequiredWorkspacesProof();
     await requestDaemonShutdown();
-    console.log(
-      packageEventsGapMode
-        ? "package-events forced-gap live proof passed (webrtc)"
-        : "package-events live proof passed (webrtc)"
-    );
+    console.log("package-events live proof passed (webrtc)");
     process.exit(0);
   }
   if (workerLostMode) {
@@ -1722,7 +1715,7 @@ async function latestSubscribeEvents(page) {
   );
 }
 
-async function exercisePackageEvents(page, { forceGap }) {
+async function exercisePackageEvents(page) {
   const hello = await page.evaluate(() =>
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).find((entry) => entry.kind === "daemon_hello")
   );
@@ -1917,36 +1910,6 @@ async function exercisePackageEvents(page, { forceGap }) {
     (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? []).length > 0, packageEventsItemFamily), { label: "exercisePackageEvents condition 5", deadlineMs: 15_000 }).catch((error) => {
     throw new Error(`durable notice item was not visible after emit: ${error.message}`);
   });
-
-  if (forceGap) {
-    const beforeResubscribe = await page.evaluate(
-      () => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).length
-    );
-    await openHomeView(page);
-    await waitForSessionStatus(page, "running");
-    await openSessionTerminal(page, productionSessionId);
-    await waitForTerminalSession(page, productionSessionId);
-    await waitForHarnessEvent(page, { kind: "daemon_request", type: "subscribe_events" }, undefined, { label: "package-events gap-lane resubscribe", deadlineMs: 45_000, sinceIndex: beforeResubscribe });
-    const beforeGap = await page.evaluate(() =>
-      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
-        (entry) => entry.kind === "daemon_event" && entry.payload?.type === "event_gap"
-      ).length
-    );
-    await emitPackageEventFixtureAction(page, packageEventsBurstAction, { count: 20 });
-    await waitForHarnessEvent(page, (prior) => (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).filter(
-        (entry) => entry.kind === "daemon_event" && (entry.payload?.type === "event_gap" || entry.type === "event_gap")
-      ).length > prior, beforeGap, { label: "exercisePackageEvents condition 6", deadlineMs: 15_000 }).catch(() => {
-      throw new Error("forced-gap lane observed no event_gap");
-    });
-    const afterItems = await page.evaluate((family) =>
-      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.listEntities?.(family) ?? [],
-      packageEventsItemFamily
-    );
-    if (afterItems.length === 0) {
-      throw new Error("forced-gap lane hid the durable notice item");
-    }
-    return;
-  }
 
   await openHomeView(page);
   await waitForSessionStatus(page, "running");

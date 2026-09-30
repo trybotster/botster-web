@@ -421,8 +421,7 @@ The package server binds an ephemeral loopback port by default. Set `BOTSTER_WEB
   own subscription (`package-event-gap` in `src/App.test.mjs`), transient notices ignore gap
   frames by design, and durable state recovers through the entity family (the package-events
   lane). The Hub proves `event_gap` end to end with a Unix client that stops reading. The
-  harness keeps the forced-gap branch (`BOTSTER_LIVE_PACKAGE_EVENTS=1
-  BOTSTER_LIVE_PACKAGE_EVENTS_GAP=1`); the `smoke:package-events:gap` script is retired.
+  harness no longer has a forced-gap branch and the `smoke:package-events:gap` script is gone.
 
 The timer guard (`npm test` runs `scripts/check-timer-markers.mjs`) fails on any
 timer call without a `// timer: <deadline|backoff|rate-limit|ui-lifetime|measurement-window|os-no-event> — <reason>`
