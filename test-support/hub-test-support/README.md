@@ -86,11 +86,11 @@ Use this exact package spec in npm-based client repos:
 }
 ```
 
-`@trybotster/hub-test-support@0.1.53` carries host-control protocol 15
+`@trybotster/hub-test-support@0.1.53` carries host-control protocol 14
 (`ClientFrame` / `ServerFrame` with `request_id` correlation, length-prefixed
 Unix containers, binary AES-GCM WebRTC terminal chunks) and authentic dual
 GHOSTSNP late-attach fixtures as Core scheme 2 terminal frames (conformance
-revision 53). History attach delivers `attach_state`, `modes`,
+revision 54). History attach delivers `attach_state`, `modes`,
 `snapshot_ready`, `snapshot_history` pages, `snapshot_finish`, `output`, and
 `process_exit`. No-history attach delivers `snapshot_ready` then the GHOSTSNP
 finish record as one `snapshot_history` page. Import-visible state matches
@@ -119,11 +119,14 @@ history. Neither is current binary-history contract authority.
 
 Protocol 11 adds the operator `resolve_quarantine` request (response kind
 `quarantine_resolved`), Status `quarantines` (repository session-type roots
-and packages, with `durable` and `loaded`), and the package event-plane
-counters in `observability`.
+and packages, with `durable` and `loaded`), and (removed later) the package
+event-plane counters in `observability`.
 
-Version 0.1.53 carries protocol version 15 / conformance revision 53. Revision
-53 adds the optional plugin logs `log_id`: a different `log_id` means a new
+Version 0.1.53 carries protocol version 14 / conformance revision 54. Revision
+54 adds the optional `session_restart` feature: the operator request
+`restart_session` and the optional `restartable` flag on `/session` entities;
+it is advertised and never required, so a client pinned at 53 still passes
+Hello. Revision 53 adds the optional plugin logs `log_id`: a different `log_id` means a new
 log, so reset the cursor to `after_seq` 0. It carries
 advertised optional `unix_terminal_adapter`,
 `terminal_subscription_closed`, `webrtc_terminal_adapter`,

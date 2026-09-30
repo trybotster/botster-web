@@ -5,10 +5,10 @@ import type { PackageNoticeReactionDescriptor, PackageSurfaceDescriptor, UiActio
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
-// Host-control protocol 15 constants. See botster-hub-client/src/lib.rs.
+// Host-control protocol 14 constants. See botster-hub-client/src/lib.rs.
 export const PROTOCOL = "botster-hub-daemon-v1";
-export const PROTOCOL_VERSION = 15;
-export const CONFORMANCE_FIXTURE_REVISION = 53;
+export const PROTOCOL_VERSION = 14;
+export const CONFORMANCE_FIXTURE_REVISION = 54;
 export const MAX_REQUEST_ID_BYTES = 20;
 export const MAX_OUTSTANDING_REQUESTS = 32;
 export const MAX_CONTROL_REQUEST_BYTES = 1048576;
@@ -966,7 +966,6 @@ export interface DaemonStatus {
   stale_sessions: string[];
   lifecycle_counters?: DaemonLifecycleCounters;
   live_attach_occupancy?: DaemonAttachOccupancy[];
-  observability?: DaemonObservabilityCounters;
   retention?: DaemonRetentionAccounting | null;
   quarantines?: DaemonQuarantine[];
   local_webrtc_terminal_records?: DaemonLocalWebrtcTerminalRecord[];
@@ -1077,72 +1076,6 @@ export interface DaemonLifecycleCounters {
   entity_delivery_failures: number;
   stalled_writes: number;
 }
-
-export interface DaemonObservabilityCounters {
-  event_shed_by_reason?: Record<string, number>;
-  event_admission_attempts: number;
-  event_delivery_attempts: number;
-  event_admission_latency?: DaemonLatencyHistogram;
-  event_delivery_latency?: DaemonLatencyHistogram;
-  event_handler_timed_out: number;
-  event_handler_failed: number;
-  event_handler_cancelled: number;
-  event_handler_backpressured: number;
-  event_handler_worker_stopped: number;
-  event_handler_completed_ok: number;
-  event_router_queue_age_expiries: number;
-  event_mailbox_queue_age_expiries: number;
-  event_mailbox_overflow_gaps: number;
-  event_gaps: number;
-  event_age_sample_failures: number;
-  last_owner_turn_us: number;
-  max_owner_turn_us: number;
-  last_ready_operation_wait_us: number;
-  max_ready_operation_wait_us: number;
-  stalled_write_timeouts: number;
-  queue_ages?: DaemonQueueAgeObservation[];
-  global_in_flight_bytes?: number;
-  event_replacements_stranded?: number;
-  event_deliveries_generation_unloaded?: number;
-  event_deliveries_package_unloaded?: number;
-  event_deliveries_handler_absent?: number;
-  event_stage_overlaps?: number;
-  events_stranded?: number;
-  package_quarantines_not_durable?: number;
-  retained_reservation_outstanding_staging_funding?: number;
-  retained_reservation_outstanding_entity_work?: number;
-}
-
-export interface DaemonLatencyHistogram {
-  buckets?: number[];
-  count: number;
-  sum_us: number;
-  max_us: number;
-}
-
-export interface DaemonQueueAgeObservation {
-  kind: DaemonQueueKind;
-  identity: string;
-  producer_generation?: number;
-  state: DaemonQueueAgeState;
-  oldest_age_us?: number;
-  queue_count?: number;
-  queue_bytes?: number;
-}
-
-export type DaemonQueueKind =
-  | "producer"
-  | "consumer"
-  | "client_mailbox"
-  | "unknown"
-  | (string & {});
-
-export type DaemonQueueAgeState =
-  | "usable"
-  | "empty"
-  | "indeterminate"
-  | "unknown"
-  | (string & {});
 
 export interface DaemonSession {
   session_id: string;

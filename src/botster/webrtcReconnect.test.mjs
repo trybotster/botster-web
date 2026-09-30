@@ -493,7 +493,7 @@ export async function runWebrtcReconnectTests(helpers) {
         frame: "hello_ack",
         ack: {
           protocol: "botster-hub-daemon-v1",
-          compatibility: { protocol: "botster-hub-daemon-v1", protocol_version: 15, features: [], conformance_fixture_revision: 53 },
+          compatibility: { protocol: "botster-hub-daemon-v1", protocol_version: 14, features: [], conformance_fixture_revision: 53 },
           terminal_compatibility: null,
           diagnostics: []
         }

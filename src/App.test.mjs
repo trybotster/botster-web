@@ -1960,7 +1960,7 @@ assert.doesNotMatch(realHubDaemonDto, /export type DaemonEvent\s*=/);
 assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client Rust serde DTOs/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "read_mode_flags"; session_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "read_snapshot_page"; session_id: string; capture_id: string; page: number \}/);
-assert.match(generatedDaemonProtocol, /export const PROTOCOL_VERSION = 15;/);
+assert.match(generatedDaemonProtocol, /export const PROTOCOL_VERSION = 14;/);
 assert.match(generatedDaemonProtocol, /export type ClientFrame =/);
 assert.match(generatedDaemonProtocol, /export type ServerFrame =/);
 assert.match(generatedDaemonProtocol, /\{ frame: "entity"; entity: DaemonEntityFrame \}/);
@@ -2308,7 +2308,7 @@ assert.match(daemonUnixClientScript, /frame: "hello"/);
 assert.match(daemonUnixClientScript, /frame: "request", request_id: "1"/);
 assert.match(daemonUnixClientScript, /It discards valid event, entity, and terminal deliveries/);
 assert.match(generatedDaemonProtocol, /export const PROTOCOL = "botster-hub-daemon-v1";/);
-assert.match(generatedDaemonProtocol, /export const CONFORMANCE_FIXTURE_REVISION = 53;/);
+assert.match(generatedDaemonProtocol, /export const CONFORMANCE_FIXTURE_REVISION = 54;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_FRAME_LENGTH_PREFIX_BYTES = 4;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_CONTROL = 1;/);
 assert.match(generatedDaemonProtocol, /export const UNIX_CONTAINER_TERMINAL = 2;/);
@@ -2325,10 +2325,16 @@ assert.equal(
   Number(localPackageServerScript.match(/protocol_version: (\d+),/)?.[1]),
   Number(generatedDaemonProtocol.match(/export const PROTOCOL_VERSION = (\d+);/)?.[1])
 );
-assert.equal(
-  Number(localPackageServerScript.match(/minimum_conformance_fixture_revision: (\d+),/)?.[1]),
-  Number(generatedDaemonProtocol.match(/export const CONFORMANCE_FIXTURE_REVISION = (\d+);/)?.[1])
-);
+// The conformance floor is deliberate, not tied to the generated revision: revision 54 only adds
+// the restart_session request fixture, which a Hub advertises as the optional session_restart
+// feature, so Web keeps accepting a Hub at revision 53 (the Hub's own test
+// a_client_built_at_fixture_53_passes_hello_against_a_revision_54_hub). The floor must never
+// exceed the generated revision, or the shipped server could not start against the Hub it targets.
+{
+  const conformanceFloor = Number(localPackageServerScript.match(/minimum_conformance_fixture_revision: (\d+),/)?.[1]);
+  assert.equal(conformanceFloor, 53);
+  assert.ok(conformanceFloor <= Number(generatedDaemonProtocol.match(/export const CONFORMANCE_FIXTURE_REVISION = (\d+);/)?.[1]));
+}
 assert.match(localPackageServerScript, /required_features: \["webrtc_terminal_adapter"\]/);
 assert.match(browserRuntimeSmokeScript, /proveMissingBootstrapDiagnostic/);
 assert.match(browserRuntimeSmokeScript, /Local WebRTC bootstrap failed/);
@@ -2830,17 +2836,17 @@ assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 assert.equal(
   hubTestSupportMetadata.daemon_protocol.sha256,
-  "4592a2a6f970cc6a99459a4f8b0eccb04c928781172b922785ae4292b43b2195"
+  "b9735bda9405726d08df11e33343aa3a8784496f76f84c8128248e7850adf8c3"
 );
 assert.equal(hubTestSupportMetadata.ui_contract.package_version, "0.3.3");
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
 assert.equal(hubTestSupportMetadata.package_version, "0.1.53");
-// Web consumes the verbatim 0.1.53 package from committed Hub 272868b1
+// Web consumes the verbatim 0.1.53 package from committed Hub 3ee22efe
 // from the tracked test-support directory through a file: dependency.
 assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "file:test-support/hub-test-support");
-assert.equal(hubTestSupportProvenance.revision, "272868b1b58275c00cca466b4422fbf096035641");
+assert.equal(hubTestSupportProvenance.revision, "3ee22efe742905c726230524bb271f42d82fd77b");
 assert.equal(hubTestSupportProvenance.package_version, hubTestSupportMetadata.package_version);
 assert.equal(hubTestSupportProvenance.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(vendoredHubTestSupportPackageJson.version, hubTestSupportMetadata.package_version);
@@ -2848,8 +2854,8 @@ assert.equal(vendoredHubTestSupportPackageJson.name, hubTestSupportMetadata.pack
 // Core terminal codecs come only from the vendored generated artifact; no npm terminal-protocol pin.
 assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], undefined);
 assert.equal(packageJson.devDependencies["@trybotster/terminal-protocol"], undefined);
-assert.equal(hubTestSupportMetadata.protocol_version, 15);
-assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 53);
+assert.equal(hubTestSupportMetadata.protocol_version, 14);
+assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 54);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
   `${hubTestSupportMetadata.package_name}@${hubTestSupportMetadata.package_version}`,
@@ -2877,7 +2883,7 @@ assert.deepEqual(
     { kind: "surface", surface_id: "contract.settings" }
   ]
 );
-// The vendored daemon-protocol.ts is the Hub 272868b1 artifact recorded in PROVENANCE.json;
+// The vendored daemon-protocol.ts is the Hub 3ee22efe artifact recorded in PROVENANCE.json;
 // the vendored hub-test-support package from that Hub revision ships the same artifact.
 assert.match(generatedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
 assert.match(generatedDaemonProtocol, /interface DaemonPluginResourceCounters/);
@@ -17063,7 +17069,7 @@ async function startPackageServerRuntime({
               protocol: "botster-hub-daemon-v1",
               compatibility: {
                 protocol: "botster-hub-daemon-v1",
-                protocol_version: 15,
+                protocol_version: 14,
                 features: ["webrtc_terminal_adapter"],
                 conformance_fixture_revision: 53
               }
@@ -17411,13 +17417,13 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
   });
 }
 
-/** Host-control v15 Hello ack fixture: protocol 15, conformance 53, terminal scheme 2. */
+/** Host-control v14 Hello ack fixture: protocol 14, conformance 53, terminal scheme 2. */
 function testHelloAckFixture() {
   return {
     protocol: "botster-hub-daemon-v1",
     compatibility: {
       protocol: "botster-hub-daemon-v1",
-      protocol_version: 15,
+      protocol_version: 14,
       features: [
         "sessions",
         "terminal_readback",
