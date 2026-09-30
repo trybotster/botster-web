@@ -46,7 +46,7 @@ function statusResponse(): DaemonResponse {
       lifecycle_state: "running",
       software: { product_id: "botster-hub", product_name: "Botster Hub", version: "0.1.0" },
       installation: { mode: "development", provenance: "development_build" },
-      compatibility: { protocol: "botster-hub-daemon-v1", protocol_version: 14, features: [], conformance_fixture_revision: 53 },
+      compatibility: { protocol: "botster-hub-daemon-v1", protocol_version: 15, features: [], conformance_fixture_revision: 53 },
       host_id: "smoke-host",
       host_display_name: "Smoke Hub",
       schema_version: 5,

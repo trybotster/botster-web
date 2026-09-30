@@ -384,6 +384,8 @@ export default function App() {
           onStopSession={sessionControl.stopSession}
           removingSessionIds={sessionControl.removingSessionIds}
           onRemoveSession={sessionControl.removeSession}
+          restartingSessionIds={sessionControl.restartingSessionIds}
+          onRestartSession={sessionControl.restartSession}
           onNavigateToApps={() => navigateToView("apps")}
           onNavigateToSpawnPoints={() => navigateToHubSettings("spawn-points")}
         />

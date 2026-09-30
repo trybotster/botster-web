@@ -9,9 +9,9 @@
     },
     "daemon-protocol.ts": {
       "owner": "botster-hub",
-      "revision": "a6f76fe8dd03488082657c1f7ab00a84cbb524ee",
+      "revision": "272868b1b58275c00cca466b4422fbf096035641",
       "source_path": "crates/botster-hub-client/generated/daemon-protocol.ts",
-      "sha256": "ec590d055ffeda6997edcc1987541e9cf15ca5f773bd066a44e7d4d518520d95"
+      "sha256": "4592a2a6f970cc6a99459a4f8b0eccb04c928781172b922785ae4292b43b2195"
     }
   }
 }

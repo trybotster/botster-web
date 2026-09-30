@@ -5,9 +5,9 @@ import type { PackageNoticeReactionDescriptor, PackageSurfaceDescriptor, UiActio
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
-// Host-control protocol 14 constants. See botster-hub-client/src/lib.rs.
+// Host-control protocol 15 constants. See botster-hub-client/src/lib.rs.
 export const PROTOCOL = "botster-hub-daemon-v1";
-export const PROTOCOL_VERSION = 14;
+export const PROTOCOL_VERSION = 15;
 export const CONFORMANCE_FIXTURE_REVISION = 53;
 export const MAX_REQUEST_ID_BYTES = 20;
 export const MAX_OUTSTANDING_REQUESTS = 32;
@@ -172,6 +172,7 @@ export type DaemonRequest =
   | { type: "delete_session_type"; source: DaemonSessionTypeMutationSource; session_type_id: string }
   | { type: "resolve_session_type"; session_type_id: string; request: DaemonSessionTypeRequest }
   | { type: "spawn_session_type"; session_type_id: string; session_id: string; request: DaemonSessionTypeRequest }
+  | { type: "restart_session"; session_id: string }
   | { type: "read_session_context"; session_id: string; context_id?: string | null; key?: string | null }
   | { type: "list_spawn_targets" }
   | { type: "show_spawn_target"; target_id: string }
@@ -1164,6 +1165,7 @@ export interface DaemonSessionEntity {
   traits?: string[];
   interaction?: string | null;
   session_type_lifecycle?: string | null;
+  restartable?: boolean;
 }
 
 export type DaemonEntityFrame =

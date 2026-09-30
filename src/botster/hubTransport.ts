@@ -1350,6 +1350,34 @@ async function dispatchDaemonAction(
     return;
   }
 
+  if (action.id === "botster.session.restart") {
+    const targetSessionId = action.target ?? "";
+    if (!targetSessionId) {
+      emit(actionResultFrame(request, false, "Session restart action is missing a session target"));
+      return;
+    }
+
+    const response = await bridge.request({
+      type: "restart_session",
+      session_id: targetSessionId
+    });
+    emitResponse(response);
+    // The Hub answers a restart with the same `spawned` response a spawn returns; any other kind
+    // without an error is a protocol mismatch, not a success.
+    const restarted = response.kind === "spawned" && !response.error;
+    emit(actionResultFrame(request, restarted, response.error?.message ?? (restarted
+      ? undefined
+      : `Restart session protocol error: expected spawned, received ${response.kind}.`), {
+      request_type: "restart_session",
+      kind: response.kind,
+      session_id: targetSessionId,
+      error_kind: response.error?.code,
+      retryable: response.error?.code === "restart_not_ready",
+      diagnostics: responseDiagnostics(response)
+    }));
+    return;
+  }
+
   if (action.id === "botster.session.remove") {
     const targetSessionId = action.target ?? "";
     if (!targetSessionId) {

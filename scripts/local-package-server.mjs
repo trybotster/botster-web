@@ -9,7 +9,7 @@ import { sendDaemonUnixRequest } from "./daemon-unix-client.mjs";
 const daemonProtocol = "botster-hub-daemon-v1";
 const daemonCompatibilityRequirement = {
   protocol: daemonProtocol,
-  protocol_version: 14,
+  protocol_version: 15,
   required_features: ["webrtc_terminal_adapter"],
   minimum_conformance_fixture_revision: 53,
   client_name: "botster-web-package-server"

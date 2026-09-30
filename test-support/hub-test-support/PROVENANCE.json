@@ -1,10 +1,10 @@
 {
   "description": "Verbatim copy of the generated @trybotster/hub-test-support package from the Hub repository, vendored as a local file: dev dependency until Hub publishes this version to npm. Never edit these files by hand; metadata.json records the sha256 of every generated asset.",
   "owner": "botster-hub",
-  "revision": "a6f76fe8dd03488082657c1f7ab00a84cbb524ee",
+  "revision": "272868b1b58275c00cca466b4422fbf096035641",
   "source_path": "packages/hub-test-support",
-  "package_version": "0.1.52",
-  "protocol_version": 14,
+  "package_version": "0.1.53",
+  "protocol_version": 15,
   "conformance_fixture_revision": 53,
   "export_method": "git show of committed files",
   "pins": {
@@ -13,9 +13,9 @@
   },
   "files": {
     "LICENSE": "7d416423b9031a167a2c7c0f26a4ecc090db68734a47cc8d61247a9688edadb3",
-    "README.md": "1d851650f8fb0adb6483c8b720e0fa2c24d125ed55e520bd957c07c4ed276b38",
-    "daemon-protocol.ts": "ec590d055ffeda6997edcc1987541e9cf15ca5f773bd066a44e7d4d518520d95",
-    "first-party-client-support-matrix.json": "3f6fdbc515a2cf1a59602fe3b82a354f40878ff695bae2eda2434a2eca4714be",
+    "README.md": "5c4fb6f84b1d6ebca711dfd567064065430951602af716042c4db8076de88f3d",
+    "daemon-protocol.ts": "4592a2a6f970cc6a99459a4f8b0eccb04c928781172b922785ae4292b43b2195",
+    "first-party-client-support-matrix.json": "627719de47d7aa985cc905d3f1fdab3c1be2fdc89b7239923639871b7807096c",
     "fixtures/plugin-contract-matrix/README.md": "d79752f858e3b6664b1bc2d455e0eaf1d913c9984ab28feb9b22c33c5cb7192b",
     "fixtures/plugin-contract-matrix/botster-package.json": "f208ee46043a33f60562c4a7a93a3c3f9b0a359639466df8f9c2b4ee8f56b5ae",
     "fixtures/plugin-contract-matrix/plugin.lua": "4bd47292c3ab96b65314b72dd5690abd97283a559719e5ed49dc388624bf2fe2",
@@ -23,11 +23,11 @@
     "index.js": "9bff41089306218e87a6ca11e9963ba73aa0b7b8db8d56193d9e94e30ec9e3ad",
     "late-attach-history-conformance-fixture.json": "e649c725dba8fc74b69da07353afde60166fb3829f990b042703b63c12a8c9ac",
     "local-webrtc-delivery-chunk-conformance-fixture.json": "d1c00ae85537c98488e7e3ca2e3d9459aaddae1e143ab7fccf739294bba7d476",
-    "metadata.json": "5974e3480a758f3810f0dde6b1ed753deca2b437a4e92745ac65e01a7a8c9bf1",
+    "metadata.json": "bc4c88b45ce6492e7983d5958ca20e1ec5be233f12977bf2983acd475fe4ca6f",
     "mode-flags-conformance-fixture.json": "fc99eb97e28447a51a27571bc5e87edcf8b25ca8da6ed534629b23eaef1060fa",
-    "package.json": "ba3fb34038b42bccb9fcbf31f9577b77785a07f4ff190e3e8f317ed677af5112",
-    "session-lifecycle-subscription-conformance-fixture.json": "379a875f9d8edff086511c04402fa5c4b7191d6f5bbf91020736cf517c941f64",
-    "session-plugin-binding-conformance-fixture.json": "496e279246b275a3a99022b383607a636db7b5c968049f64c05e8f23b1b91fed"
+    "package.json": "5429a61b91b227f0710772e39e8948dfe612a01153e684038c72aa8b2ed1423c",
+    "session-lifecycle-subscription-conformance-fixture.json": "07dc68904050af7288f1626aed26ae0e4da50907ee0f38599f752b566a9c5bea",
+    "session-plugin-binding-conformance-fixture.json": "7797c1a13b075e8f5bb381b76716d7d354b485f1600dc20f05b837b909bf88ac"
   },
   "omitted": [
     "scripts/",

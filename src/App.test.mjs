@@ -1960,7 +1960,7 @@ assert.doesNotMatch(realHubDaemonDto, /export type DaemonEvent\s*=/);
 assert.match(generatedDaemonProtocol, /Generated from crates\/botster-hub-client Rust serde DTOs/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "read_mode_flags"; session_id: string \}/);
 assert.match(generatedDaemonProtocol, /\| \{ type: "read_snapshot_page"; session_id: string; capture_id: string; page: number \}/);
-assert.match(generatedDaemonProtocol, /export const PROTOCOL_VERSION = 14;/);
+assert.match(generatedDaemonProtocol, /export const PROTOCOL_VERSION = 15;/);
 assert.match(generatedDaemonProtocol, /export type ClientFrame =/);
 assert.match(generatedDaemonProtocol, /export type ServerFrame =/);
 assert.match(generatedDaemonProtocol, /\{ frame: "entity"; entity: DaemonEntityFrame \}/);
@@ -2830,17 +2830,17 @@ assert.equal(packageManifest.name, "botster-web");
 assert.equal(packageManifest.version, packageJson.version);
 assert.equal(
   hubTestSupportMetadata.daemon_protocol.sha256,
-  "ec590d055ffeda6997edcc1987541e9cf15ca5f773bd066a44e7d4d518520d95"
+  "4592a2a6f970cc6a99459a4f8b0eccb04c928781172b922785ae4292b43b2195"
 );
 assert.equal(hubTestSupportMetadata.ui_contract.package_version, "0.3.3");
 assert.equal(hubTestSupportMetadata.ui_contract.package_name, "@trybotster/ui-contract");
 assert.equal(packageJson.dependencies["@trybotster/ui-contract"], "0.3.3");
 assert.equal(hubTestSupportMetadata.package_name, "@trybotster/hub-test-support");
-assert.equal(hubTestSupportMetadata.package_version, "0.1.52");
-// Web consumes the verbatim 0.1.52 package from committed Hub a6f76fe8
+assert.equal(hubTestSupportMetadata.package_version, "0.1.53");
+// Web consumes the verbatim 0.1.53 package from committed Hub 272868b1
 // from the tracked test-support directory through a file: dependency.
 assert.equal(packageJson.devDependencies[hubTestSupportMetadata.package_name], "file:test-support/hub-test-support");
-assert.equal(hubTestSupportProvenance.revision, "a6f76fe8dd03488082657c1f7ab00a84cbb524ee");
+assert.equal(hubTestSupportProvenance.revision, "272868b1b58275c00cca466b4422fbf096035641");
 assert.equal(hubTestSupportProvenance.package_version, hubTestSupportMetadata.package_version);
 assert.equal(hubTestSupportProvenance.conformance_fixture_revision, hubTestSupportMetadata.conformance_fixture_revision);
 assert.equal(vendoredHubTestSupportPackageJson.version, hubTestSupportMetadata.package_version);
@@ -2848,7 +2848,7 @@ assert.equal(vendoredHubTestSupportPackageJson.name, hubTestSupportMetadata.pack
 // Core terminal codecs come only from the vendored generated artifact; no npm terminal-protocol pin.
 assert.equal(packageJson.dependencies["@trybotster/terminal-protocol"], undefined);
 assert.equal(packageJson.devDependencies["@trybotster/terminal-protocol"], undefined);
-assert.equal(hubTestSupportMetadata.protocol_version, 14);
+assert.equal(hubTestSupportMetadata.protocol_version, 15);
 assert.equal(hubTestSupportMetadata.conformance_fixture_revision, 53);
 const documentedContractClaims = [
   `${hubTestSupportMetadata.ui_contract.package_name}@${packageJson.dependencies[hubTestSupportMetadata.ui_contract.package_name]}`,
@@ -2877,7 +2877,7 @@ assert.deepEqual(
     { kind: "surface", surface_id: "contract.settings" }
   ]
 );
-// The vendored daemon-protocol.ts is the Hub a6f76fe8 artifact recorded in PROVENANCE.json;
+// The vendored daemon-protocol.ts is the Hub 272868b1 artifact recorded in PROVENANCE.json;
 // the vendored hub-test-support package from that Hub revision ships the same artifact.
 assert.match(generatedDaemonProtocol, /plugin_resource_counters\?: DaemonPluginResourceCounters \| null/);
 assert.match(generatedDaemonProtocol, /interface DaemonPluginResourceCounters/);
@@ -4684,6 +4684,20 @@ const bridge = {
           first_available_seq: 7
         }
       };
+    }
+    if (request.type === "restart_session") {
+      // Protocol 15: success is the same `spawned` response a spawn returns; a refusal is an
+      // operator_error with one of the typed restart codes.
+      if (request.session_id === "ended-restartable") {
+        return { kind: "spawned", error: null, sessions: [{ session_id: "ended-restartable" }], diagnostics: [] };
+      }
+      const refusal = {
+        "running-session": ["restart_not_ended", "session is running, stopping or indeterminate"],
+        "no-record-session": ["restart_record_unavailable", "no durable restart record for this session"],
+        "env-session": ["restart_environment_not_retained", "client environment values are never kept: API_KEY"],
+        "busy-session": ["restart_not_ready", "the previous process group is still alive"]
+      }[request.session_id] ?? ["unknown_session", "no such session"];
+      return { kind: "operator_error", error: { code: refusal[0], request_id: "fake", operation: "restart_session", message: refusal[1] } };
     }
     if (request.type === "remove_session") {
       // The Hub forgets only a terminal session; otherwise it answers session_not_terminal.
@@ -9208,6 +9222,39 @@ assert.deepEqual(hubUpdateCurrentResult.result.diagnostics, [
   assert.equal(missingTarget.accepted, false);
 }
 
+// Restart (protocol 15): the action maps to restart_session with the target id; a `spawned`
+// response is accepted; every typed refusal is shown with the Hub's own message, and only
+// restart_not_ready is marked retryable. A response of another kind without an error is a protocol
+// mismatch, not a success. Web adds no gate of its own: the `restartable` flag decides only
+// whether the button is offered.
+{
+  const restarted = await realRuntime.actions.dispatch({ origin: "ui_node", action: { id: "botster.session.restart", target: "ended-restartable", label: "Restart session" } });
+  assert.equal(restarted.accepted, true);
+  assert.deepEqual(bridgeRequests.at(-1), { type: "restart_session", session_id: "ended-restartable" });
+  assert.equal(restarted.result.request_type, "restart_session");
+  assert.equal(restarted.result.session_id, "ended-restartable");
+  for (const [sessionId, code, retryable] of [
+    ["running-session", "restart_not_ended", false],
+    ["no-record-session", "restart_record_unavailable", false],
+    ["env-session", "restart_environment_not_retained", false],
+    ["busy-session", "restart_not_ready", true],
+    ["missing-session", "unknown_session", false]
+  ]) {
+    const refused = await realRuntime.actions.dispatch({ origin: "ui_node", action: { id: "botster.session.restart", target: sessionId, label: "Restart session" } });
+    assert.equal(refused.accepted, false, code);
+    assert.equal(refused.result.error_kind, code);
+    assert.equal(refused.result.retryable, retryable, `${code} retryable`);
+    assert.ok(refused.reason && refused.reason.length > 0, `${code} keeps the Hub's message`);
+  }
+  assert.equal(
+    (await realRuntime.actions.dispatch({ origin: "ui_node", action: { id: "botster.session.restart", target: "env-session", label: "Restart session" } })).reason,
+    "client environment values are never kept: API_KEY",
+    "the message that names the dropped keys reaches the user unchanged"
+  );
+  const restartMissingTarget = await realRuntime.actions.dispatch({ origin: "ui_node", action: { id: "botster.session.restart", label: "Restart session" } });
+  assert.equal(restartMissingTarget.accepted, false);
+}
+
 authoritativeHubUpdate = {
   state: "available",
   current_version: "0.1.0",
@@ -11114,8 +11161,9 @@ try {
     ]).map((session) => session.id),
     ["stale-unadopted"]
   );
-  const { removeSessionAction, stopSessionAction } = await vite.ssrLoadModule("/src/app/sessionActions.ts");
+  const { removeSessionAction, restartSessionAction, stopSessionAction } = await vite.ssrLoadModule("/src/app/sessionActions.ts");
   assert.deepEqual(removeSessionAction("s-1"), { id: "botster.session.remove", target: "s-1", label: "Remove session" });
+  assert.deepEqual(restartSessionAction("s-1"), { id: "botster.session.restart", target: "s-1", label: "Restart session" });
   const {
     entitySubscriptionErrorFromFrame
   } = entitySubscriptionModule;
@@ -12099,6 +12147,56 @@ try {
   assert.match(crashedDashboardMarkup, /aria-label="Remove session crashed-1"[^>]*>Remove</);
   assert.match(crashedDashboardMarkup, /disabled=""[^>]*aria-label="Remove session failed-1"[^>]*>Removing…</);
   assert.equal((crashedDashboardMarkup.match(/data-testid="session-new"/g) ?? []).length, 2);
+  // Restart is offered only on a row whose Hub entity says restartable === true, in the ended and
+  // the needs-attention groups alike; it is disabled with "Restarting…" while its restart is in
+  // flight (and Remove is disabled with it); a row with restartable false or absent has no button.
+  const restartDashboardMarkup = renderToStaticMarkup(
+    createElement(DashboardView, {
+      sessions: [],
+      endedSessions: [
+        { id: "restartable-1", session_uuid: "restartable-1", lifecycle: "exited", lifecycle_class: "ended", restartable: true },
+        { id: "restartable-2", session_uuid: "restartable-2", lifecycle: "exited", lifecycle_class: "ended", restartable: true },
+        { id: "not-restartable", session_uuid: "not-restartable", lifecycle: "exited", lifecycle_class: "ended", restartable: false },
+        { id: "no-flag", session_uuid: "no-flag", lifecycle: "exited", lifecycle_class: "ended" }
+      ],
+      attentionSessions: [
+        { id: "attention-restartable", session_uuid: "attention-restartable", registry_state: "stale", lifecycle_class: "indeterminate", restartable: true }
+      ],
+      sessionLoadStatus: "loaded",
+      stoppingSessionIds: new Set(),
+      restartingSessionIds: new Set(["restartable-2"]),
+      onOpenSession: () => {},
+      onStopSession: () => {},
+      onRemoveSession: () => {},
+      onRestartSession: () => {},
+      onNavigateToApps: () => {},
+      onNavigateToSpawnPoints: () => {}
+    })
+  );
+  assert.match(restartDashboardMarkup, /aria-label="Restart session restartable-1"[^>]*>Restart</);
+  assert.doesNotMatch(restartDashboardMarkup, /disabled=""[^>]*aria-label="Restart session restartable-1"/);
+  assert.match(restartDashboardMarkup, /disabled=""[^>]*aria-label="Restart session restartable-2"[^>]*>Restarting…</);
+  assert.match(restartDashboardMarkup, /disabled=""[^>]*aria-label="Remove session restartable-2"/, "Remove waits for the restart");
+  assert.doesNotMatch(restartDashboardMarkup, /aria-label="Restart session not-restartable"/);
+  assert.doesNotMatch(restartDashboardMarkup, /aria-label="Restart session no-flag"/);
+  assert.match(restartDashboardMarkup, /aria-label="Restart session attention-restartable"/, "a restartable row under Needs attention offers Restart too");
+  assert.equal((restartDashboardMarkup.match(/data-testid="session-restart"/g) ?? []).length, 3);
+  assert.match(restartDashboardMarkup, /aria-label="Remove session not-restartable"/, "Remove is unchanged on a row that cannot restart");
+  // Without a restart handler no Restart button renders even on a restartable row.
+  const noHandlerMarkup = renderToStaticMarkup(
+    createElement(DashboardView, {
+      sessions: [],
+      endedSessions: [{ id: "restartable-1", session_uuid: "restartable-1", lifecycle: "exited", lifecycle_class: "ended", restartable: true }],
+      sessionLoadStatus: "loaded",
+      stoppingSessionIds: new Set(),
+      onOpenSession: () => {},
+      onStopSession: () => {},
+      onRemoveSession: () => {},
+      onNavigateToApps: () => {},
+      onNavigateToSpawnPoints: () => {}
+    })
+  );
+  assert.doesNotMatch(noHandlerMarkup, /session-restart/);
   // A stale session the Hub could not adopt (indeterminate) is shown under Needs attention with
   // its failure text and recovery; Remove is offered on every non-current row given the handler
   // (the Hub refuses a session that is not terminal), New session only on failed rows.
@@ -16949,7 +17047,7 @@ async function startPackageServerRuntime({
               protocol: "botster-hub-daemon-v1",
               compatibility: {
                 protocol: "botster-hub-daemon-v1",
-                protocol_version: 14,
+                protocol_version: 15,
                 features: ["webrtc_terminal_adapter"],
                 conformance_fixture_revision: 53
               }
@@ -17297,13 +17395,13 @@ function createWebrtcTestClient(dataChannels, bootstrap, options = {}) {
   });
 }
 
-/** Host-control v14 Hello ack fixture: protocol 14, conformance 53, terminal scheme 2. */
+/** Host-control v15 Hello ack fixture: protocol 15, conformance 53, terminal scheme 2. */
 function testHelloAckFixture() {
   return {
     protocol: "botster-hub-daemon-v1",
     compatibility: {
       protocol: "botster-hub-daemon-v1",
-      protocol_version: 14,
+      protocol_version: 15,
       features: [
         "sessions",
         "terminal_readback",

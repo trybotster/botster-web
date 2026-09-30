@@ -13,26 +13,45 @@ import {
 import { SessionActionsMenu } from "./SessionActionsMenu";
 
 /**
- * Recovery for a session that is no longer current: forget it (the Hub refuses a session that
- * is not terminal, and the refusal is shown), and for a failed one, start a new session.
+ * Recovery for a session that is no longer current: restart it under the same id when the Hub
+ * says it can (`restartable`), forget it (the Hub refuses a session that is not terminal, and
+ * the refusal is shown), and for a failed one, start a new session.
  */
 function SessionRecovery({
   sessionTitle,
   removing,
+  restartable,
+  restarting,
   onRemove,
+  onRestart,
   onNewSession
 }: {
   sessionTitle: string;
   removing: boolean;
+  restartable: boolean;
+  restarting: boolean;
   onRemove: () => void;
+  onRestart?: () => void;
   onNewSession?: () => void;
 }) {
   return (
     <div className="session-recovery" slot="end" data-testid="session-recovery">
+      {restartable && onRestart ? (
+        <IonButton
+          fill="solid"
+          size="small"
+          disabled={restarting || removing}
+          aria-label={`Restart session ${sessionTitle}`}
+          data-testid="session-restart"
+          onClick={onRestart}
+        >
+          {restarting ? "Restarting…" : "Restart"}
+        </IonButton>
+      ) : null}
       <IonButton
         fill="outline"
         size="small"
-        disabled={removing}
+        disabled={removing || restarting}
         aria-label={`Remove session ${sessionTitle}`}
         data-testid="session-remove"
         onClick={onRemove}
@@ -55,7 +74,9 @@ export function SessionListItem({
   onStop,
   showActions = true,
   removing = false,
+  restarting = false,
   onRemove,
+  onRestart,
   onNewSession
 }: {
   session: Record<string, unknown>;
@@ -64,7 +85,9 @@ export function SessionListItem({
   onStop: (sessionId: string) => void;
   showActions?: boolean;
   removing?: boolean;
+  restarting?: boolean;
   onRemove?: (sessionId: string) => void;
+  onRestart?: (sessionId: string) => void;
   onNewSession?: () => void;
 }) {
   const sessionId = String(session.id);
@@ -97,7 +120,10 @@ export function SessionListItem({
         <SessionRecovery
           sessionTitle={sessionTitle}
           removing={removing}
+          restartable={session.restartable === true}
+          restarting={restarting}
           onRemove={() => onRemove(sessionId)}
+          onRestart={onRestart ? () => onRestart(sessionId) : undefined}
           onNewSession={failure ? onNewSession : undefined}
         />
       ) : null}
@@ -125,9 +151,11 @@ export function DashboardView({
   sessionLoadStatus,
   stoppingSessionIds,
   removingSessionIds = new Set<string>(),
+  restartingSessionIds = new Set<string>(),
   onOpenSession,
   onStopSession,
   onRemoveSession,
+  onRestartSession,
   onNavigateToApps,
   onNavigateToSpawnPoints
 }: {
@@ -137,9 +165,11 @@ export function DashboardView({
   sessionLoadStatus: HubEntityLoadStatus;
   stoppingSessionIds: ReadonlySet<string>;
   removingSessionIds?: ReadonlySet<string>;
+  restartingSessionIds?: ReadonlySet<string>;
   onOpenSession: (sessionId: string) => void;
   onStopSession: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string) => void;
+  onRestartSession?: (sessionId: string) => void;
   onNavigateToApps: () => void;
   onNavigateToSpawnPoints: () => void;
 }) {
@@ -205,9 +235,11 @@ export function DashboardView({
                 stopping={stoppingSessionIds.has(String(session.id))}
                 showActions={false}
                 removing={removingSessionIds.has(String(session.id))}
+                restarting={restartingSessionIds.has(String(session.id))}
                 onOpen={onOpenSession}
                 onStop={onStopSession}
                 onRemove={onRemoveSession}
+                onRestart={onRestartSession}
                 onNewSession={onNavigateToSpawnPoints}
               />
             ))}
@@ -234,9 +266,11 @@ export function DashboardView({
                 stopping={stoppingSessionIds.has(String(session.id))}
                 showActions={false}
                 removing={removingSessionIds.has(String(session.id))}
+                restarting={restartingSessionIds.has(String(session.id))}
                 onOpen={onOpenSession}
                 onStop={onStopSession}
                 onRemove={onRemoveSession}
+                onRestart={onRestartSession}
                 onNewSession={onNavigateToSpawnPoints}
               />
             ))}
